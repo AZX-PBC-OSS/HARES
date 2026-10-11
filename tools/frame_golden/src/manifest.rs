@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use chrono::FixedOffset;
 use serde::Deserialize;
 
 use crate::error::{FrameGoldenError, FrameGoldenResult};
@@ -84,12 +85,56 @@ impl<'de> Deserialize<'de> for ManifestSelection {
     }
 }
 
+/// The manifest's `[fleet]` table's alignment, as the manifest spells it:
+/// a fixed UTC offset (`"+00:00"`, `"-07:00"`) is the engine's
+/// `Alignment::Instant`, the offset the homes reduce and label on; the
+/// spelling `"local_clock"` is the engine's `Alignment::LocalClock`. Any
+/// other spelling is rejected at parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestAlignment {
+    Instant(FixedOffset),
+    LocalClock,
+}
+
+impl ManifestAlignment {
+    /// The engine's alignment the spelling states.
+    #[must_use]
+    pub fn alignment(self) -> hares_fleet::Alignment {
+        match self {
+            ManifestAlignment::Instant(offset) => hares_fleet::Alignment::Instant(offset),
+            ManifestAlignment::LocalClock => hares_fleet::Alignment::LocalClock,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ManifestAlignment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        if text.eq_ignore_ascii_case("local_clock") {
+            return Ok(ManifestAlignment::LocalClock);
+        }
+        text.parse::<FixedOffset>()
+            .map(ManifestAlignment::Instant)
+            .map_err(|err| {
+                serde::de::Error::custom(format!(
+                    "unknown alignment {text:?}: the accepted spellings are a fixed UTC \
+                 offset (for example \"+00:00\" or \"-07:00\") or \"local_clock\": {err}"
+                ))
+            })
+    }
+}
+
 /// The manifest's required `[fleet]` table for the fleet kinds: the fleet
 /// report's request, as the engine spells it. The frequency is a
 /// `hares_io::Frequency` verbatim (`"hourly"`, `{ minutes = 15 }`, and so
 /// on); the selection is the `verbosity-N` spelling; the optional
 /// `health_policy` is a `hares_io::HealthPolicy` verbatim, the default
-/// empty policy left implicit.
+/// empty policy left implicit; the optional `alignment` is the fleet's
+/// declared time alignment, absent meaning no declared alignment (the
+/// engine's own meaning).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FleetReportSpec {
@@ -100,6 +145,10 @@ pub struct FleetReportSpec {
     /// The fleet's health policy, applied to every home's run.
     #[serde(default)]
     pub health_policy: Option<hares_io::HealthPolicy>,
+    /// The fleet's declared time alignment; absent means no declared
+    /// alignment.
+    #[serde(default)]
+    pub alignment: Option<ManifestAlignment>,
 }
 
 impl FleetReportSpec {

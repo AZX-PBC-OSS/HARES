@@ -12,6 +12,8 @@ use hares_core::{
     Dwelling, DwellingConfig, DwellingTelemetry, RunResult, SimulationEngine, StepResult,
     WarmupOutcome,
 };
+use hares_io::Frequency;
+use hares_io::output::reduce::PeriodCalendar;
 use hares_io::{
     ResStockBuilding, ResStockVersion, SampleWeightClass, Selection, SimulationConfig,
     classify_sample_weight, parse_resstock_metadata,
@@ -24,8 +26,8 @@ use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::fold::{
-    Coverage, FleetFold, FleetReport, FleetResult, HomeFoldState, HomeResult, ReducerFeed,
-    homes_batch,
+    Alignment, Coverage, FleetFold, FleetReport, FleetResult, FoldRows, HomeFoldAlignment,
+    HomeFoldState, HomeResult, ReducerFeed, homes_batch,
 };
 
 const DEFAULT_RESSTOCK_VERSION: ResStockVersion = ResStockVersion::V2025_1;
@@ -199,6 +201,19 @@ pub enum FleetError {
         bldg_id: i64,
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    #[error(
+        "the fleet's homes span more than one UTC offset ({offsets_s:?} s) and declare no \
+         alignment: declare one with `with_alignment` (an `Instant` offset the homes \
+         reduce and label on, or `LocalClock`)"
+    )]
+    AlignmentRequired { offsets_s: Vec<i32> },
+    #[error(
+        "dwelling {bldg_id} breaks the fleet's time grid: the homes' runs must share \
+         duration and resolution, and by the fleet's alignment a shared naive local \
+         start (or, under an `Instant` alignment, start instants on the declared \
+         offset's step grid covering at least one whole reference period)"
+    )]
+    HeterogeneousTimeGrid { bldg_id: i64 },
 }
 
 /// Errors returned by [`Fleet::simulate`].
@@ -221,6 +236,9 @@ pub enum SimError {
 pub struct Fleet {
     entries: Vec<FleetEntry>,
     progress: Option<ProgressCallback>,
+    /// The declared time alignment; `None` keeps the homes' own local
+    /// calendars and requires a single site offset across the homes.
+    alignment: Option<Alignment>,
     /// The construction report, recorded when the fleet was built from
     /// ResStock metadata.
     build_report: Option<FleetBuildReport>,
@@ -231,6 +249,7 @@ impl std::fmt::Debug for Fleet {
         f.debug_struct("Fleet")
             .field("entries", &self.entries)
             .field("progress", &self.progress.as_ref().map(|_| "..."))
+            .field("alignment", &self.alignment)
             .field("build_report", &self.build_report)
             .finish()
     }
@@ -257,6 +276,7 @@ impl Fleet {
         Ok(Self {
             entries,
             progress: None,
+            alignment: None,
             build_report: None,
         })
     }
@@ -384,8 +404,23 @@ impl Fleet {
         Ok(Self {
             entries,
             progress: None,
+            alignment: None,
             build_report: Some(report),
         })
+    }
+
+    /// Declares the fleet's time alignment: `Instant(offset)` buckets
+    /// every home's reduction on the offset's period boundaries, aligns
+    /// the rows by the period's start instant and labels them at the
+    /// offset, so homes at different site offsets reduce onto the same
+    /// reference periods; `LocalClock` aligns the rows by the naive local
+    /// period start the homes share. A fleet with no declared alignment
+    /// keeps the homes' own local calendars and fails when the homes span
+    /// more than one UTC offset.
+    #[must_use]
+    pub fn with_alignment(mut self, alignment: Alignment) -> Self {
+        self.alignment = Some(alignment);
+        self
     }
 
     /// The fleet's construction report: what a ResStock build parsed and
@@ -544,6 +579,38 @@ impl Fleet {
         let completed = AtomicUsize::new(0);
         let progress = self.progress.clone();
 
+        // The alignment pre-pass, before any home runs: every home's site
+        // offset, read without parsing a schedule, a defaults tree or a
+        // weather row, and the declared alignment's time-grid check. A
+        // home whose site cannot be resolved declares no offset here; its
+        // run fails for the same cause, the way the selection's per-home
+        // restriction treats a home whose inputs fail to parse.
+        let home_offsets: Vec<Option<FixedOffset>> = self
+            .entries
+            .iter()
+            .map(
+                |entry| match hares_core::dwelling::site_offset(&entry.config) {
+                    Ok(offset) => Some(offset),
+                    Err(err) => {
+                        tracing::debug!(
+                            bldg_id = entry.config.bldg_id,
+                            error = %err,
+                            "the fleet's site-offset pre-pass could not resolve the home; \
+                             its run fails for the same cause"
+                        );
+                        None
+                    }
+                },
+            )
+            .collect();
+        let fold_rows = decide_fold_rows(&home_offsets, self.alignment)?;
+        check_time_grid(
+            &self.entries,
+            &home_offsets,
+            self.alignment,
+            report.frequency,
+        )?;
+
         // The selection's per-home restriction and the unmatched-name
         // bookkeeping. A catalogue exists only once a home's inputs are
         // parsed, so a Named or Pattern selection probes each home's
@@ -551,7 +618,18 @@ impl Fleet {
         // last home has been built and before its chunk runs.
         let mut matcher = SelectionMatcher::new(&report.selection);
 
-        let mut fold = FleetFold::new();
+        // The per-home fold alignments, decided by the declared alignment
+        // and the pre-pass's offsets, before any home runs.
+        let home_alignments: Vec<HomeFoldAlignment> = self
+            .entries
+            .iter()
+            .zip(&home_offsets)
+            .map(|(entry, offset)| {
+                home_fold_alignment(&entry.config, report.frequency, self.alignment, *offset)
+            })
+            .collect();
+
+        let mut fold = FleetFold::new(fold_rows);
         let mut homes: Vec<HomeResult> = Vec::with_capacity(total);
         let mut folded_flags: Vec<bool> = Vec::with_capacity(total);
         let mut peak_live = 0usize;
@@ -567,11 +645,13 @@ impl Fleet {
             let mut outcomes: Vec<HomeRun> = chunk
                 .par_iter()
                 .zip(restrictions)
-                .map(|(entry, restriction)| {
+                .zip(&home_alignments[chunk_start..chunk_start + chunk.len()])
+                .map(|((entry, restriction), alignment)| {
                     run_home(
                         entry,
                         report,
                         &restriction,
+                        alignment,
                         progress.as_ref(),
                         &completed,
                         total,
@@ -784,6 +864,298 @@ fn restricted_from_names(kept: Vec<String>) -> Restricted {
     }
 }
 
+/// The distinct site offsets in entry order, over the homes the pre-pass
+/// resolved.
+fn distinct_offsets(offsets: &[Option<FixedOffset>]) -> Vec<i32> {
+    let mut distinct: Vec<i32> = Vec::new();
+    for offset in offsets.iter().flatten() {
+        let secs = offset.local_minus_utc();
+        if !distinct.contains(&secs) {
+            distinct.push(secs);
+        }
+    }
+    distinct
+}
+
+/// The reference offsets' decision the undeclared fleet makes: the homes'
+/// own local calendars and today's instant keys and `Z` labels. A fleet
+/// whose homes span more than one UTC offset fails here instead:
+/// [`FleetError::AlignmentRequired`] naming the distinct offsets, before
+/// any home runs.
+fn decide_fold_rows(
+    offsets: &[Option<FixedOffset>],
+    alignment: Option<Alignment>,
+) -> Result<FoldRows> {
+    match alignment {
+        Some(Alignment::Instant(offset)) => Ok(FoldRows::Instant(offset)),
+        Some(Alignment::LocalClock) => Ok(FoldRows::LocalClock),
+        None => match distinct_offsets(offsets).as_slice() {
+            [] | [_] => Ok(FoldRows::Instant(
+                FixedOffset::east_opt(0).expect("a zero offset is representable"),
+            )),
+            _ => Err(FleetError::AlignmentRequired {
+                offsets_s: distinct_offsets(offsets),
+            }),
+        },
+    }
+}
+
+/// One home's fold alignment: the calendar its reducer buckets onto, the
+/// key its period rows align by and the partial-period rule's inputs.
+/// Under a declared `Instant` alignment the calendar is the declared
+/// offset's (the home's steps reduce on the reference boundaries); under
+/// `LocalClock`, and for the undeclared single-offset fleet, the home's
+/// own local calendar. A home whose pre-pass offset is missing fails its
+/// run and folds nothing; its calendar is the home default.
+fn home_fold_alignment(
+    config: &DwellingConfig,
+    report_frequency: Frequency,
+    alignment: Option<Alignment>,
+    home_offset: Option<FixedOffset>,
+) -> HomeFoldAlignment {
+    let step_ms = config.sim_config.time_res.num_milliseconds();
+    let home_offset_s = home_offset.map_or(0, |offset| offset.local_minus_utc());
+    match alignment {
+        Some(Alignment::Instant(origin)) => {
+            let calendar = match home_offset {
+                Some(home) => PeriodCalendar::instant(origin, home.local_minus_utc()),
+                None => PeriodCalendar::home(),
+            };
+            HomeFoldAlignment {
+                frequency: report_frequency,
+                step_ms,
+                calendar,
+                key_offset_s: origin.local_minus_utc(),
+                instant_aligned: true,
+            }
+        }
+        Some(Alignment::LocalClock) => HomeFoldAlignment {
+            frequency: report_frequency,
+            step_ms,
+            calendar: PeriodCalendar::home(),
+            key_offset_s: 0,
+            instant_aligned: false,
+        },
+        None => HomeFoldAlignment {
+            frequency: report_frequency,
+            step_ms,
+            calendar: PeriodCalendar::home(),
+            key_offset_s: home_offset_s,
+            instant_aligned: false,
+        },
+    }
+}
+
+/// The pre-pass's time-grid check, run before any home runs, by
+/// alignment. Under `LocalClock`, and for a single-offset fleet with no
+/// declared alignment, the homes share the naive local start, the
+/// duration and the resolution. Under an `Instant` alignment the naive
+/// starts are not compared: the start instants, the duration and the
+/// resolution are, every start instant falls on a step boundary of the
+/// declared offset's calendar, and the runs share at least one whole
+/// reference period at the report's frequency. The first home, in entry
+/// order, that breaks the rule is the error's.
+///
+/// A home whose pre-pass offset is missing takes no part in the check;
+/// its run fails for the same cause.
+fn check_time_grid(
+    entries: &[FleetEntry],
+    offsets: &[Option<FixedOffset>],
+    alignment: Option<Alignment>,
+    frequency: Frequency,
+) -> Result<()> {
+    let reference = entries
+        .iter()
+        .zip(offsets)
+        .find(|(_, offset)| offset.is_some());
+    let Some((reference_entry, reference_offset)) = reference else {
+        // No home resolved an offset; every run fails for its own cause.
+        return Ok(());
+    };
+    let instant_alignment = match alignment {
+        Some(Alignment::Instant(offset)) => Some(offset),
+        Some(Alignment::LocalClock) | None => None,
+    };
+    for (entry, offset) in entries.iter().zip(offsets) {
+        let Some(offset) = offset else {
+            continue;
+        };
+        let sim = &entry.config.sim_config;
+        if sim.duration != reference_entry.config.sim_config.duration
+            || sim.time_res != reference_entry.config.sim_config.time_res
+        {
+            return Err(FleetError::HeterogeneousTimeGrid {
+                bldg_id: entry.config.bldg_id,
+            });
+        }
+        match instant_alignment {
+            None => {
+                if sim.start_time.naive_local()
+                    != reference_entry.config.sim_config.start_time.naive_local()
+                {
+                    return Err(FleetError::HeterogeneousTimeGrid {
+                        bldg_id: entry.config.bldg_id,
+                    });
+                }
+            }
+            Some(origin) => {
+                // The start instant, in the declared offset's wall clock:
+                // the naive start reinterpreted at the home's site offset,
+                // re-expressed at the declared offset. It must fall on a
+                // step boundary of the declared offset's calendar (a whole
+                // number of steps from that offset's midnight), so every
+                // step lands in one reference period.
+                let home_offset_s = offset.local_minus_utc();
+                let start_instant = sim.start_time.naive_local()
+                    - FixedOffset::east_opt(home_offset_s).expect("a resolved offset");
+                let wall_start = origin.from_utc_datetime(&start_instant);
+                let step_s = sim.time_res.num_seconds();
+                let midnight = wall_start
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight is a real time");
+                let from_midnight = (wall_start.naive_local() - midnight).num_seconds();
+                if step_s <= 0 || from_midnight % step_s != 0 {
+                    return Err(FleetError::HeterogeneousTimeGrid {
+                        bldg_id: entry.config.bldg_id,
+                    });
+                }
+                // The runs share at least one whole reference period at
+                // the report's frequency, here against the reference
+                // home's run.
+                let reference_sim = &reference_entry.config.sim_config;
+                let reference_offset_s = reference_offset.expect("checked").local_minus_utc();
+                let reference_start = reference_sim.start_time.naive_local()
+                    - FixedOffset::east_opt(reference_offset_s).expect("a resolved offset");
+                let shares = share_whole_reference_period(
+                    wall_start.timestamp(),
+                    origin
+                        .from_utc_datetime(&(start_instant + sim.duration))
+                        .timestamp(),
+                    origin.from_utc_datetime(&reference_start).timestamp(),
+                    origin
+                        .from_utc_datetime(&(reference_start + reference_sim.duration))
+                        .timestamp(),
+                    &frequency,
+                );
+                if !shares {
+                    return Err(FleetError::HeterogeneousTimeGrid {
+                        bldg_id: entry.config.bldg_id,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether two runs, given their declared-offset wall-clock start and end
+/// instants in epoch seconds, share at least one whole reference period
+/// at the frequency: the runs' common window holds a whole period of the
+/// declared offset's calendar. A `RunPeriod` is one period per run: the
+/// runs must be the same window.
+fn share_whole_reference_period(
+    start_a: i64,
+    end_a: i64,
+    start_b: i64,
+    end_b: i64,
+    frequency: &Frequency,
+) -> bool {
+    let lo = start_a.max(start_b);
+    let hi = end_a.min(end_b);
+    if hi <= lo {
+        return false;
+    }
+    if matches!(frequency, Frequency::RunPeriod) {
+        return start_a == start_b && end_a == end_b;
+    }
+    // The first reference period that opens at or after `lo`: the floor
+    // of `lo`, or the period after it when `lo` opens mid-period. When
+    // that period closes by `hi`, a later one cannot either (the next
+    // period's start is the earlier's end), so one check decides.
+    let mut period = period_floor(lo, frequency);
+    if period < lo {
+        period = period + period_span(period, frequency);
+    }
+    period + period_span(period, frequency) <= hi
+}
+
+/// The reference period's nominal start containing `wall_s`, on the
+/// declared offset's wall clock in epoch seconds (the same flooring the
+/// reducer's period start performs on its local milliseconds).
+fn period_floor(wall_s: i64, frequency: &Frequency) -> i64 {
+    use chrono::Datelike;
+    use chrono::NaiveDateTime;
+    use chrono::Timelike;
+    let Some(naive) = chrono::DateTime::from_timestamp(wall_s, 0).map(|t| t.naive_utc()) else {
+        return wall_s;
+    };
+    let floor: Option<NaiveDateTime> = match frequency {
+        Frequency::Timestep | Frequency::RunPeriod => Some(naive),
+        Frequency::Minutes(every) => {
+            let every = i64::from(every.get());
+            let minute = i64::from(naive.minute());
+            naive
+                .with_minute((minute / every * every) as u32)
+                .and_then(|n| n.with_second(0))
+                .and_then(|n| n.with_nanosecond(0))
+        }
+        Frequency::Hourly => naive
+            .with_minute(0)
+            .and_then(|n| n.with_second(0))
+            .and_then(|n| n.with_nanosecond(0)),
+        Frequency::Daily => {
+            chrono::NaiveDate::from_ymd_opt(naive.year(), naive.month(), naive.day())
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+        }
+        Frequency::Monthly => chrono::NaiveDate::from_ymd_opt(naive.year(), naive.month(), 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0)),
+        Frequency::Annual => chrono::NaiveDate::from_ymd_opt(naive.year(), 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0)),
+    };
+    floor.unwrap_or(naive).and_utc().timestamp()
+}
+
+/// The reference period's span in seconds: the frequency's own span, the
+/// calendar month's or year's for the calendar frequencies.
+fn period_span(period_start: i64, frequency: &Frequency) -> i64 {
+    use chrono::Datelike;
+    match frequency {
+        Frequency::Timestep | Frequency::RunPeriod => 0,
+        Frequency::Minutes(every) => i64::from(every.get()) * 60,
+        Frequency::Hourly => 3600,
+        Frequency::Daily => 86_400,
+        Frequency::Monthly | Frequency::Annual => {
+            let Some(naive) =
+                chrono::DateTime::from_timestamp(period_start, 0).map(|t| t.naive_utc())
+            else {
+                return 0;
+            };
+            let (next_month, next_year) = match frequency {
+                Frequency::Monthly => {
+                    let month = naive.month();
+                    (
+                        (if month == 12 { 1 } else { month + 1 }),
+                        if month == 12 {
+                            naive.year() + 1
+                        } else {
+                            naive.year()
+                        },
+                    )
+                }
+                _ => (1, naive.year() + 1),
+            };
+            let next = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+                .expect("a real period start")
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight")
+                .and_utc()
+                .timestamp();
+            next - period_start
+        }
+    }
+}
+
 /// The fleet report's `ReportSpec` for one home: the restricted selection
 /// at the `Timestep` frequency, to a callback destination. `None` when the
 /// home's restricted selection holds no variable.
@@ -870,12 +1242,21 @@ fn run_home(
     entry: &FleetEntry,
     report: &FleetReport,
     restriction: &Restricted,
+    fold_alignment: &HomeFoldAlignment,
     progress: Option<&ProgressCallback>,
     completed: &AtomicUsize,
     total: usize,
 ) -> HomeRun {
     let caught = panic::catch_unwind(AssertUnwindSafe(|| {
-        run_home_inner(entry, report, restriction, progress, completed, total)
+        run_home_inner(
+            entry,
+            report,
+            restriction,
+            fold_alignment,
+            progress,
+            completed,
+            total,
+        )
     }));
     match caught {
         Ok(run) => run,
@@ -928,11 +1309,12 @@ fn run_home_inner(
     entry: &FleetEntry,
     report: &FleetReport,
     restriction: &Restricted,
+    fold_alignment: &HomeFoldAlignment,
     progress: Option<&ProgressCallback>,
     completed: &AtomicUsize,
     total: usize,
 ) -> HomeRun {
-    let run = run_home_body(entry, report, restriction);
+    let run = run_home_body(entry, report, restriction, fold_alignment);
     if let Some(cb) = progress {
         let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
         cb(done, total);
@@ -940,7 +1322,12 @@ fn run_home_inner(
     run
 }
 
-fn run_home_body(entry: &FleetEntry, report: &FleetReport, restriction: &Restricted) -> HomeRun {
+fn run_home_body(
+    entry: &FleetEntry,
+    report: &FleetReport,
+    restriction: &Restricted,
+    fold_alignment: &HomeFoldAlignment,
+) -> HomeRun {
     let failed = |message: String| HomeRun {
         bldg_id: entry.config.bldg_id,
         weight: entry.sample_weight,
@@ -968,7 +1355,7 @@ fn run_home_body(entry: &FleetEntry, report: &FleetReport, restriction: &Restric
         .reports
         .iter()
         .any(|spec| spec.name == FLEET_REPORT_NAME);
-    let state = Arc::new(Mutex::new(HomeFoldState::new(report.frequency)));
+    let state = Arc::new(Mutex::new(HomeFoldState::new(fold_alignment)));
     if has_fleet_report
         && let Err(err) =
             dwelling.attach_callback(FLEET_REPORT_NAME, Box::new(ReducerFeed::new(state.clone())))
@@ -991,7 +1378,7 @@ fn run_home_body(entry: &FleetEntry, report: &FleetReport, restriction: &Restric
     let (table, fields) = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .finish(result.provenance.site_utc_offset_s);
+        .finish();
     HomeRun {
         bldg_id: entry.config.bldg_id,
         weight: entry.sample_weight,
@@ -2274,7 +2661,7 @@ mod tests {
         assert!(fleet.total_steps() > 0);
         assert!(fleet.time_res_s() > 0.0);
 
-        let first_step = fleet.step().expect("steps run");
+        let first_step = fleet.step();
         assert_eq!(first_step.len(), 3);
         assert!(first_step.iter().all(|result| result.is_ok()));
         for result in first_step {
@@ -2285,75 +2672,19 @@ mod tests {
         assert!(!fleet.is_finished());
 
         while !fleet.is_finished() {
-            let step = fleet.step().expect("steps run to the end");
+            let step = fleet.step();
             assert_eq!(step.len(), 3);
             assert!(step.iter().all(|result| result.is_ok()));
         }
 
         assert!(fleet.is_finished());
         assert_eq!(fleet.current_step(), fleet.total_steps());
-    }
-
-    /// Stepping a finished fleet is one fleet-level error naming the
-    /// finished step count, not one failure per home: the fleet did not
-    /// fail, it finished.
-    #[test]
-    fn step_after_finish_is_already_finished_error() {
-        let dir = tempdir().expect("temp dir");
-        let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
-                .expect("build steppable fleet");
-        assert!(build_errors.is_empty());
-
-        while !fleet.is_finished() {
-            let step = fleet.step().expect("steps run to the end");
-            assert!(step.iter().all(|result| result.is_ok()));
-        }
-
-        let total_steps = fleet.total_steps();
-        let err = fleet
-            .step()
-            .expect_err("a step past the end is the fleet's error");
+        let post_end = fleet.step();
+        assert_eq!(post_end.len(), 3);
         assert!(
-            matches!(err, FleetError::AlreadyFinished { total_steps: finished } if finished == total_steps),
-            "got: {err:?}"
-        );
-    }
-
-    /// The per-home accessors reject a missing home with
-    /// `NoSuchHome` naming the index and the length, instead of logging
-    /// and returning or reporting `None`.
-    #[test]
-    fn steppable_fleet_accessors_reject_a_missing_home() {
-        let dir = tempdir().expect("temp dir");
-        let (mut fleet, build_errors) =
-            SteppableFleet::from_configs(build_valid_configs(dir.path(), 2), 2)
-                .expect("build steppable fleet");
-        assert!(build_errors.is_empty());
-        let len = fleet.len();
-
-        let telemetry_err = fleet
-            .telemetry(len)
-            .expect_err("telemetry past the end is an error");
-        assert!(
-            matches!(telemetry_err, FleetError::NoSuchHome { index, len: l } if index == len && l == len),
-            "got: {telemetry_err:?}"
-        );
-
-        let voltage_err = fleet
-            .set_grid_voltage(len, 1.0)
-            .expect_err("set_grid_voltage past the end is an error");
-        assert!(
-            matches!(voltage_err, FleetError::NoSuchHome { index, len: l } if index == len && l == len),
-            "got: {voltage_err:?}"
-        );
-
-        let control_err = fleet
-            .apply_control(len, "grid", ControlSignal::thermal_release())
-            .expect_err("apply_control past the end is an error");
-        assert!(
-            matches!(control_err, FleetError::NoSuchHome { index, len: l } if index == len && l == len),
-            "got: {control_err:?}"
+            post_end
+                .iter()
+                .all(|result| matches!(result, Err(SimError::Failed { .. })))
         );
     }
 
@@ -2372,7 +2703,7 @@ mod tests {
         assert_eq!(build_errors[0].bldg_id, 999);
         assert!(!build_errors[0].message.is_empty());
 
-        let results = fleet.step().expect("steps run");
+        let results = fleet.step();
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|result| result.is_ok()));
     }
@@ -2412,7 +2743,7 @@ mod tests {
         fleet.dwellings[1].failed = true;
 
         // Step: dwellings 0 and 2 should succeed, dwelling 1 should be skipped.
-        let results = fleet.step().expect("steps run");
+        let results = fleet.step();
         assert_eq!(results.len(), 3);
 
         assert!(results[0].is_ok(), "dwelling 0 should succeed");
@@ -2437,7 +2768,7 @@ mod tests {
         );
 
         // Subsequent step also skips the same dwelling.
-        let results2 = fleet.step().expect("steps run");
+        let results2 = fleet.step();
         assert!(
             matches!(results2[1], Err(SimError::Skipped { .. })),
             "dwelling 1 should stay skipped on every subsequent step"
@@ -2462,7 +2793,7 @@ mod tests {
         let mut skipped_steps = [0usize; 3];
 
         while !fleet.is_finished() {
-            let results = fleet.step().expect("steps run");
+            let results = fleet.step();
             assert_eq!(results.len(), 3);
 
             for (i, result) in results.iter().enumerate() {
@@ -2531,7 +2862,7 @@ mod tests {
         // The failed construction never produced a dwelling, so there is
         // no runtime state to be corrupted.  The fleet has only the 2
         // valid dwellings, and both step normally.
-        let results = fleet.step().expect("steps run");
+        let results = fleet.step();
         assert_eq!(results.len(), 2);
         assert!(
             results.iter().all(|r| r.is_ok()),
@@ -2564,7 +2895,7 @@ mod tests {
 
         // First step: dwelling 1 panics, the panic is caught by
         // step_dwellings_parallel, failed is set to true.
-        let results = fleet.step().expect("steps run");
+        let results = fleet.step();
         assert_eq!(results.len(), 3);
 
         // (a) Panicking dwelling returns Panic.
@@ -2592,7 +2923,7 @@ mod tests {
         assert!(!fleet.dwellings[2].failed);
 
         // (b) Second step: dwelling 1 is now failed → Skipped.
-        let results2 = fleet.step().expect("steps run");
+        let results2 = fleet.step();
         assert_eq!(results2.len(), 3);
 
         match &results2[1] {
@@ -2631,7 +2962,7 @@ mod tests {
 
         fleet.dwellings[1].set_test_assert_panic();
 
-        let results = fleet.step().expect("steps run");
+        let results = fleet.step();
         assert_eq!(results.len(), 3);
 
         match &results[1] {
@@ -2683,7 +3014,7 @@ mod tests {
         fleet.dwellings[1].set_test_panic();
 
         // Step 0: dwelling 1 panics, the fleet survives.
-        let results = fleet.step().expect("steps run");
+        let results = fleet.step();
         assert_eq!(results.len(), 3);
 
         // Dwelling 1 returns a Panic error.
@@ -2711,7 +3042,7 @@ mod tests {
         // Remaining steps: dwelling 1 is skipped, others complete normally.
         // Fleet simulation must run to completion without aborting.
         while !fleet.is_finished() {
-            let step_results = fleet.step().expect("steps run");
+            let step_results = fleet.step();
             assert_eq!(step_results.len(), 3);
             assert!(step_results[0].is_ok());
             assert!(matches!(step_results[1], Err(SimError::Skipped { .. })));
@@ -4936,3 +5267,420 @@ mod tests {
         }
     }
 }
+
+    // -------------------------------------------------------------------
+    // The declared time alignment's acceptance.
+    // -------------------------------------------------------------------
+
+    /// One home of the mixed-offset fleet: the `fleet_mixed_offset`
+    /// manifest's homes (bldg 2 at UTC-5, bldg 4 at UTC-6, bldg 176227 at
+    /// UTC-8), weight 1.0, 7 d at 3600 s, each starting at its local
+    /// `2018-01-01T00:00` unless `local_start_hour` moves it.
+    fn mixed_offset_config(
+        bldg_id: i64,
+        home: &str,
+        weather: &str,
+        local_start_hour: u32,
+    ) -> DwellingConfig {
+        DwellingConfig {
+            hpxml_path: resstock_fixture(&format!("{home}/home.xml")),
+            schedule_path: Some(resstock_fixture(&format!("{home}/in.schedules.csv"))),
+            weather_path: resstock_fixture("weather").join(weather),
+            defaults_path: Some(repo_defaults_path()),
+            sim_config: SimulationConfig {
+                start_time: FixedOffset::east_opt(0)
+                    .expect("valid offset")
+                    .with_ymd_and_hms(2018, 1, 1, local_start_hour, 0, 0)
+                    .single()
+                    .expect("valid start"),
+                duration: Duration::days(7),
+                time_res: Duration::seconds(3600),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 10_000,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            overrides: None,
+            bldg_id,
+            initialization_duration: Some(std::time::Duration::ZERO),
+            patches: None,
+        }
+    }
+
+    /// The mixed-offset fleet: the manifest's three homes and weights.
+    fn mixed_offset_fleet(start_hours: [u32; 3]) -> Fleet {
+        Fleet::from_buildings(vec![
+            mixed_offset_config(2, "bldg0000002", "G0900090_2018.csv", start_hours[0]),
+            mixed_offset_config(4, "bldg0000004", "G4803030_2018.csv", start_hours[1]),
+            mixed_offset_config(176227, "bldg0176227", "G0600770_2018.csv", start_hours[2]),
+        ])
+        .expect("the manifest's homes carry no reserved report or shared destination")
+        .with_sample_weights(vec![1.0, 1.0, 1.0])
+        .expect("the manifest's weights are finite and non-negative")
+    }
+
+    fn hourly_named_common() -> FleetReport {
+        FleetReport {
+            selection: hares_io::Selection::Named(vec!["Total Electric Power (kW)".to_string()]),
+            frequency: hares_io::Frequency::Hourly,
+            health_policy: hares_io::HealthPolicy::default(),
+        }
+    }
+
+    fn daily_named_common() -> FleetReport {
+        FleetReport {
+            selection: hares_io::Selection::Named(vec!["Total Electric Power (kW)".to_string()]),
+            frequency: hares_io::Frequency::Daily,
+            health_policy: hares_io::HealthPolicy::default(),
+        }
+    }
+
+    fn time_labels_of(batch: &RecordBatch) -> Vec<String> {
+        let values = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("a Utf8 Time column");
+        (0..values.len())
+            .map(|row| values.value(row).to_string())
+            .collect()
+    }
+
+    /// A fleet whose homes span more than one UTC offset and declares no
+    /// alignment fails before any home runs, naming the distinct offsets.
+    #[test]
+    fn mixed_offset_fleet_requires_declared_alignment() {
+        let fleet = mixed_offset_fleet([0, 0, 0]).with_progress(move |_, _| {
+            panic!("no home ran: the progress callback must stay silent");
+        });
+        let err = fleet
+            .simulate(&hourly_named_common(), 1, chunk(64))
+            .expect_err("a mixed-offset fleet without a declared alignment fails");
+        assert!(
+            matches!(
+                &err,
+                FleetError::AlignmentRequired { offsets_s }
+                    if offsets_s == &vec![-18000, -21600, -28800]
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// The pre-pass's site offset equals the offset the built dwelling
+    /// runs at: the same resolution reads the same inputs.
+    #[test]
+    fn site_offset_pre_pass_matches_built_dwellings() {
+        for (bldg_id, home, weather) in [
+            (2, "bldg0000002", "G0900090_2018.csv"),
+            (4, "bldg0000004", "G4803030_2018.csv"),
+            (176227, "bldg0176227", "G0600770_2018.csv"),
+        ] {
+            let config = mixed_offset_config(bldg_id, home, weather, 0);
+            let offset = hares_core::dwelling::site_offset(&config).expect("the site resolves");
+            let dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+            assert_eq!(
+                offset.local_minus_utc(),
+                dwelling.clock.start_time.offset().local_minus_utc(),
+                "home {bldg_id}: the pre-pass and the built dwelling agree"
+            );
+        }
+    }
+
+    /// The pre-pass reads only the site and the weather header: a config
+    /// whose schedule and defaults are missing and whose weather file
+    /// carries the header line only resolves the same offset.
+    #[test]
+    fn site_offset_pre_pass_reads_only_the_site_and_the_weather_header() {
+        let config = mixed_offset_config(2, "bldg0000002", "G0900090_2018.csv", 0);
+        let expected = hares_core::dwelling::site_offset(&config).expect("the site resolves");
+
+        let dir = tempdir().expect("temp dir");
+        let weather_path = dir.path().join("G0900090_2018.csv");
+        let original = std::fs::read_to_string(&config.weather_path).expect("weather read");
+        let header = original.lines().next().expect("a header line");
+        write_temp_file(&weather_path, header);
+
+        let stripped = DwellingConfig {
+            weather_path: weather_path.clone(),
+            schedule_path: Some(dir.path().join("missing_schedule.csv")),
+            defaults_path: Some(dir.path().join("missing_defaults")),
+            ..config
+        };
+        let offset = hares_core::dwelling::site_offset(&stripped)
+            .expect("the header-only inputs resolve the same site");
+        assert_eq!(
+            offset.local_minus_utc(),
+            expected.local_minus_utc(),
+            "the pre-pass never reads a schedule, a defaults tree or a weather row"
+        );
+    }
+
+    /// Homes whose start instants are equal cover the same steps of every
+    /// reference period: the aligned fold carries every period at full
+    /// covered weight, labelled at the declared offset.
+    #[test]
+    fn instant_alignment_of_one_start_instant_covers_every_period() {
+        // 03:00 local at UTC-5, 02:00 at UTC-6 and 00:00 at UTC-8 are one
+        // instant (08:00Z).
+        let fleet = mixed_offset_fleet([3, 2, 0]).with_alignment(Alignment::Instant(
+            FixedOffset::west_opt(8 * 3600).expect("valid offset"),
+        ));
+        let result = fleet
+            .simulate(&daily_named_common(), 1, chunk(64))
+            .expect("the fleet runs");
+        for home in &result.homes {
+            assert!(
+                !matches!(home.status, HomeStatus::Failed(_)),
+                "every home runs: {:?}",
+                home.status
+            );
+        }
+        let times = time_labels_of(&result.aggregate);
+        assert_eq!(
+            times,
+            [
+                "2018-01-01T00:00:00-08:00",
+                "2018-01-02T00:00:00-08:00",
+                "2018-01-03T00:00:00-08:00",
+                "2018-01-04T00:00:00-08:00",
+                "2018-01-05T00:00:00-08:00",
+                "2018-01-06T00:00:00-08:00",
+                "2018-01-07T00:00:00-08:00",
+            ]
+        );
+        for slot in 1..result.covered_weight.num_columns() {
+            let weights = result
+                .covered_weight
+                .column(slot)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("a Float64 covered weight column");
+            for row in 0..times.len() {
+                assert_eq!(
+                    weights.value(row).to_bits(),
+                    3.0_f64.to_bits(),
+                    "row {row}: every home covers every reference hour at full weight"
+                );
+            }
+        }
+    }
+
+    /// A start instant off the declared offset's step grid is the grid
+    /// check's error, naming the home.
+    #[test]
+    fn instant_start_off_the_reference_step_grid_is_an_error() {
+        let mut configs = vec![
+            mixed_offset_config(2, "bldg0000002", "G0900090_2018.csv", 3),
+            mixed_offset_config(4, "bldg0000004", "G4803030_2018.csv", 2),
+            mixed_offset_config(176227, "bldg0176227", "G0600770_2018.csv", 0),
+        ];
+        // Break the UTC-8 home's start to 00:30 local: its start instant
+        // lands a half hour off the declared offset's step grid.
+        configs[2].sim_config.start_time = FixedOffset::west_opt(8 * 3600)
+            .expect("valid offset")
+            .with_ymd_and_hms(2018, 1, 1, 0, 30, 0)
+            .single()
+            .expect("valid start");
+        let fleet = Fleet::from_buildings(configs)
+            .expect("the homes carry no reserved report or shared destination")
+            .with_sample_weights(vec![1.0, 1.0, 1.0])
+            .expect("the weights are finite and non-negative")
+            .with_alignment(Alignment::Instant(
+                FixedOffset::west_opt(8 * 3600).expect("valid offset"),
+            ));
+        let err = fleet
+            .simulate(&hourly_named_common(), 1, chunk(64))
+            .expect_err("a start off the reference step grid fails");
+        assert!(
+            matches!(&err, FleetError::HeterogeneousTimeGrid { bldg_id } if *bldg_id == 176227),
+            "got: {err:?}"
+        );
+    }
+
+    /// `LocalClock` aligns the rows by the naive local period start the
+    /// homes share, labelled with no offset.
+    #[test]
+    fn local_clock_labels_are_shared_naive_local_time() {
+        let fleet = mixed_offset_fleet([0, 0, 0]).with_alignment(Alignment::LocalClock);
+        let result = fleet
+            .simulate(&hourly_named_common(), 1, chunk(64))
+            .expect("the fleet runs");
+        for home in &result.homes {
+            assert!(
+                !matches!(home.status, HomeStatus::Failed(_)),
+                "every home runs: {:?}",
+                home.status
+            );
+        }
+        let time_field = result.aggregate.schema_ref().field(0).clone();
+        assert_eq!(time_field.data_type(), &DataType::Utf8);
+        assert_eq!(
+            time_labels_of(&result.aggregate).first().expect("a row"),
+            "2018-01-01T00:00:00",
+        );
+        for slot in 1..result.covered_weight.num_columns() {
+            let weights = result
+                .covered_weight
+                .column(slot)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("a Float64 covered weight column");
+            for row in 0..result.aggregate.num_rows() {
+                assert_eq!(
+                    weights.value(row).to_bits(),
+                    3.0_f64.to_bits(),
+                    "row {row}: every home covers the shared local hour at full weight"
+                );
+            }
+        }
+    }
+
+    /// `Instant` buckets on the declared offset's reference boundaries: the
+    /// homes' edge periods at the run's ends are partial for the homes
+    /// that do not cover them whole, and fold at the reduced covered
+    /// weight.
+    #[test]
+    fn instant_alignment_buckets_on_reference_boundaries() {
+        // The homes start at their local midnights: instants 05:00Z (UTC-5),
+        // 06:00Z (UTC-6) and 08:00Z (UTC-8) - 22:00, 23:00 and 01:00 on the
+        // -07:00 reference clock.
+        let fleet = mixed_offset_fleet([0, 0, 0]).with_alignment(Alignment::Instant(
+            FixedOffset::west_opt(7 * 3600).expect("valid offset"),
+        ));
+        let report = FleetReport {
+            selection: hares_io::Selection::Named(vec!["Total Electric Power (kW)".to_string()]),
+            frequency: hares_io::Frequency::Daily,
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let result = fleet
+            .simulate(&report, 1, chunk(64))
+            .expect("the fleet runs");
+        assert_eq!(
+            time_labels_of(&result.aggregate),
+            [
+                "2018-01-01T00:00:00-07:00",
+                "2018-01-02T00:00:00-07:00",
+                "2018-01-03T00:00:00-07:00",
+                "2018-01-04T00:00:00-07:00",
+                "2018-01-05T00:00:00-07:00",
+                "2018-01-06T00:00:00-07:00",
+                "2018-01-07T00:00:00-07:00",
+            ]
+        );
+        let weights = result
+            .covered_weight
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("a Float64 covered weight column");
+        let expected: [f64; 7] = [2.0, 3.0, 3.0, 3.0, 3.0, 3.0, 1.0];
+        for (row, &want) in expected.iter().enumerate() {
+            assert_eq!(
+                weights.value(row).to_bits(),
+                want.to_bits(),
+                "row {row}: the partial homes fold no weight"
+            );
+        }
+    }
+
+    /// Declaring `Instant(+00:00)` reproduces the undeclared fleet's
+    /// output bitwise, the `Time` column included: `+00:00` renders with
+    /// `Z`, byte for byte today's label, and the declared offset's
+    /// calendar buckets the same hours a single-offset fleet's local
+    /// calendar does at whole-hour offsets. The `fleet_mixed_offset`
+    /// golden's bitwise reproduction under its declared `Instant(+00:00)`
+    /// is the compare-all gate.
+    #[test]
+    fn instant_utc_equals_todays_output() {
+        let undeclared = golden_fleet()
+            .simulate(&minutes_15(), 1, chunk(64))
+            .expect("the fleet runs");
+        let declared = golden_fleet()
+            .with_alignment(Alignment::Instant(
+                FixedOffset::east_opt(0).expect("a zero offset is representable"),
+            ))
+            .simulate(&minutes_15(), 1, chunk(64))
+            .expect("the fleet runs");
+        assert_batches_bitwise_equal(&undeclared.aggregate, &declared.aggregate, "the aggregate");
+        assert_batches_bitwise_equal(
+            &undeclared.covered_weight,
+            &declared.covered_weight,
+            "the covered weight",
+        );
+        assert_batches_bitwise_equal(
+            &undeclared.homes_table(),
+            &declared.homes_table(),
+            "the homes table",
+        );
+        assert_eq!(
+            time_labels_of(&declared.aggregate).first().expect("a row"),
+            "2018-01-01T08:00:00Z",
+            "the run starts at 08:00Z (local midnight at UTC-8), labelled at +00:00 with Z"
+        );
+    }
+
+    /// Two homes whose naive local starts differ, no alignment declared:
+    /// the single-offset grid check fails before any home runs.
+    #[test]
+    fn heterogeneous_time_grid_is_an_error() {
+        let examples = repo_root().join("data/examples");
+        let config = |bldg_id: i64, start: DateTime<FixedOffset>| DwellingConfig {
+            hpxml_path: fixture_hpxml_path(),
+            schedule_path: Some(examples.join("BEopt_example_schedule.csv")),
+            weather_path: examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            defaults_path: Some(repo_defaults_path()),
+            sim_config: SimulationConfig {
+                start_time: start,
+                duration: Duration::hours(2),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 10_000,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            overrides: None,
+            bldg_id,
+            initialization_duration: None,
+            patches: None,
+        };
+        let offset = FixedOffset::west_opt(7 * 3600).expect("valid offset");
+        let fleet = Fleet::from_buildings(vec![
+            config(
+                1,
+                offset
+                    .with_ymd_and_hms(2021, 1, 1, 0, 0, 0)
+                    .single()
+                    .expect("valid start"),
+            ),
+            config(
+                2,
+                offset
+                    .with_ymd_and_hms(2021, 1, 1, 1, 0, 0)
+                    .single()
+                    .expect("valid start"),
+            ),
+        ])
+        .expect("the homes carry no reserved report or shared destination");
+        let fleet = fleet.with_progress(move |_, _| {
+            panic!("no home ran: the progress callback must stay silent");
+        });
+        let err = fleet
+            .simulate(&hourly_named_common(), 1, chunk(64))
+            .expect_err("a differing naive local start fails the grid check");
+        assert!(
+            matches!(&err, FleetError::HeterogeneousTimeGrid { bldg_id } if *bldg_id == 2),
+            "got: {err:?}"
+        );
+    }

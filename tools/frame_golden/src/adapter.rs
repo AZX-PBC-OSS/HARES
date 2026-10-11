@@ -276,7 +276,9 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         .collect();
     // The manifest states each home's weight and the fleet's report
     // request ([fleet]); both rule sets are checked when the manifest
-    // parses, so the adapter hands them to the fleet untouched.
+    // parses, so the adapter hands them to the fleet untouched. The
+    // declared time alignment, when the manifest states one, rides with
+    // it.
     let weights: Vec<f64> = req
         .manifest
         .home
@@ -286,21 +288,21 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
                 .expect("a fleet home carries a weight: the manifest validator rejects a fleet home without one")
         })
         .collect();
-    let fleet = Fleet::from_buildings(configs)
-        .map_err(|err| FrameGoldenError::Engine(err.to_string()))?
-        .with_sample_weights(weights)
-        .map_err(|err| FrameGoldenError::Engine(err.to_string()))?;
-    let construct = construct_start.elapsed();
-
     // The capture's thread count is pinned, not ambient: one thread, and
     // the fold's chunk barrier at the Python default (64), which for the
     // fixtures' home counts is one chunk: the collect shape.
-    let fleet_spec = req
-        .manifest
-        .fleet
-        .as_ref()
-        .expect("a fleet manifest carries a [fleet] table: the manifest validator rejects one without one")
-        .fleet_report();
+    let fleet_spec = req.manifest.fleet.as_ref().expect(
+        "a fleet manifest carries a [fleet] table: the manifest validator rejects one without one",
+    );
+    let mut fleet = Fleet::from_buildings(configs)
+        .map_err(|err| FrameGoldenError::Engine(err.to_string()))?
+        .with_sample_weights(weights)
+        .map_err(|err| FrameGoldenError::Engine(err.to_string()))?;
+    if let Some(alignment) = fleet_spec.alignment {
+        fleet = fleet.with_alignment(alignment.alignment());
+    }
+    let construct = construct_start.elapsed();
+    let fleet_spec = fleet_spec.fleet_report();
     let simulate_start = Instant::now();
     let result = fleet
         .simulate(&fleet_spec, 1, NonZeroUsize::new(64).expect("64"))
@@ -373,6 +375,10 @@ fn run_resstock_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
     // The capture's thread count is pinned, not ambient: one thread, the
     // fold's chunk barrier at the Python default (64).
     let fleet_spec = spec.fleet_report();
+    let mut fleet = fleet;
+    if let Some(alignment) = spec.alignment {
+        fleet = fleet.with_alignment(alignment.alignment());
+    }
     let simulate_start = Instant::now();
     let result = fleet
         .simulate(&fleet_spec, 1, NonZeroUsize::new(64).expect("64"))

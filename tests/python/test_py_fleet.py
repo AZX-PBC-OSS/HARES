@@ -605,3 +605,64 @@ def test_zero_ok_weight_raises_with_every_home(tmp_path: Path) -> None:
     assert homes["status"].to_list() == ["degraded", "degraded"]
     for reason in homes["reason"].to_list():
         assert "unread_load" in reason
+
+
+def _mixed_offset_configs() -> list[DwellingConfig]:
+    """The mixed-offset golden's homes: UTC-5, UTC-6 and UTC-8."""
+    return [
+        DwellingConfig(
+            hpxml=str(ROOT / "tests/fixtures/resstock/2025.1" / home / "home.xml"),
+            schedule=str(ROOT / "tests/fixtures/resstock/2025.1" / home / "in.schedules.csv"),
+            weather=str(
+                ROOT / "tests/fixtures/resstock/2025.1/weather" / weather
+            ),
+            config=SimulationConfig(
+                start_time="2018-01-01T00:00:00", duration=86400, time_res=3600
+            ),
+            defaults_path=str(HARES_DEFAULTS),
+            bldg_id=i + 1,
+        )
+        for i, (home, weather) in enumerate(
+            [
+                ("bldg0000002", "G0900090_2018.csv"),
+                ("bldg0000004", "G4803030_2018.csv"),
+                ("bldg0176227", "G0600770_2018.csv"),
+            ]
+        )
+    ]
+
+
+@pytest.mark.slow
+def test_mixed_offset_fleet_requires_a_declared_alignment() -> None:
+    """A fleet whose homes span UTC offsets fails without a declared
+    alignment, naming the distinct offsets, and runs with one declared."""
+    from hares import Alignment
+
+    mixed = PyFleet.from_buildings(_mixed_offset_configs())
+    with pytest.raises(ValueError, match=r"-18000"):
+        mixed.simulate(_hourly_report())
+
+    aligned = PyFleet.from_buildings(
+        _mixed_offset_configs(), alignment=Alignment.instant("+00:00")
+    )
+    results = aligned.simulate(_hourly_report())
+    assert results.n_succeeded == 3
+
+
+@pytest.mark.slow
+def test_local_clock_alignment_runs_the_mixed_offset_fleet() -> None:
+    """The LocalClock alignment runs a fleet whose homes span UTC offsets:
+    every home reduces on its own local calendar and the rows align by the
+    shared naive local period start, labelled with no offset."""
+    from hares import Alignment, FleetReport, Frequency, Selection
+
+    fleet = PyFleet.from_buildings(
+        _mixed_offset_configs(), alignment=Alignment.local_clock()
+    )
+    report = FleetReport(
+        Selection.named(["Total Electric Power (kW)"]), Frequency.hourly()
+    )
+    results = fleet.simulate(report)
+    assert results.n_succeeded == 3
+    assert results.aggregate.height == 24
+    assert results.aggregate["Time"][0] == "2018-01-01T00:00:00"

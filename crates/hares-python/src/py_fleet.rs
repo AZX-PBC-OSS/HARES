@@ -143,11 +143,12 @@ pub struct PyFleet {
 #[pymethods]
 impl PyFleet {
     #[classmethod]
-    #[pyo3(signature = (configs, sample_weights=None))]
+    #[pyo3(signature = (configs, sample_weights=None, *, alignment=None))]
     pub fn from_buildings(
         _cls: &Bound<'_, PyType>,
         configs: Vec<PyDwellingConfig>,
         sample_weights: Option<Vec<f64>>,
+        alignment: Option<PyAlignment>,
     ) -> PyResult<Self> {
         if configs.is_empty() {
             return Err(PyValueError::new_err(
@@ -170,6 +171,10 @@ impl PyFleet {
         } else {
             fleet
         };
+        let fleet = match alignment {
+            Some(alignment) => fleet.with_alignment(alignment.0),
+            None => fleet,
+        };
 
         Ok(Self { fleet })
     }
@@ -185,7 +190,7 @@ impl PyFleet {
     /// Unresolved weather only warns and leaves the dwelling an empty
     /// weather path for now; a later row tightens this to an error.
     #[classmethod]
-    #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, duration_s=None, defaults_path=None, **unexpected))]
+    #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, duration_s=None, defaults_path=None, *, alignment=None, **unexpected))]
     #[allow(clippy::too_many_arguments)]
     pub fn from_resstock(
         _cls: &Bound<'_, PyType>,
@@ -196,6 +201,7 @@ impl PyFleet {
         resstock_version: Option<Bound<'_, PyAny>>,
         duration_s: Option<i64>,
         defaults_path: Option<String>,
+        alignment: Option<PyAlignment>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         check_unexpected_kwargs("from_resstock", unexpected)?;
@@ -234,6 +240,10 @@ impl PyFleet {
             defaults_path.as_deref().map(Path::new),
         )
         .map_err(to_py_err)?;
+        let fleet = match alignment {
+            Some(alignment) => fleet.with_alignment(alignment.0),
+            None => fleet,
+        };
 
         Ok(Self { fleet })
     }
@@ -434,6 +444,43 @@ fn steppable_error_to_py_err(err: hares_fleet::FleetError) -> PyErr {
             HaresSimulationError::new_err(err.to_string())
         }
         other => PyValueError::new_err(other.to_string()),
+    }
+}
+
+/// The fleet's declared time alignment: the calendar the homes'
+/// reductions bucket onto and the rows the fleet's products align by.
+/// `Alignment.instant("-07:00")` buckets every home on the offset's
+/// period boundaries and labels the rows at the offset;
+/// `Alignment.local_clock()` aligns the rows by the naive local period
+/// start the homes share. A fleet with no declared alignment keeps the
+/// homes' own local calendars and fails when the homes span more than
+/// one UTC offset.
+#[pyclass(name = "Alignment", from_py_object)]
+#[derive(Debug, Clone, Copy)]
+pub struct PyAlignment(pub hares_fleet::Alignment);
+
+#[pymethods]
+impl PyAlignment {
+    #[classmethod]
+    pub fn instant(_cls: &Bound<'_, PyType>, offset: &str) -> PyResult<Self> {
+        let offset = offset.parse::<chrono::FixedOffset>().map_err(|err| {
+            PyValueError::new_err(format!("invalid UTC offset {offset:?}: {err}"))
+        })?;
+        Ok(Self(hares_fleet::Alignment::Instant(offset)))
+    }
+
+    #[classmethod]
+    pub fn local_clock(_cls: &Bound<'_, PyType>) -> Self {
+        Self(hares_fleet::Alignment::LocalClock)
+    }
+
+    pub fn __repr__(&self) -> String {
+        match self.0 {
+            hares_fleet::Alignment::Instant(offset) => {
+                format!("Alignment.instant({})", offset)
+            }
+            hares_fleet::Alignment::LocalClock => "Alignment.local_clock()".to_string(),
+        }
     }
 }
 

@@ -336,8 +336,8 @@ fn restore_mid_hour_matches_uninterrupted_hourly_report() {
                 enum_codes: None,
             })
             .collect();
-        let mut reducer =
-            PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules).expect("reducer");
+        let mut reducer = PeriodReducer::new(Frequency::Hourly, PeriodCalendar::default(), rules)
+            .expect("reducer");
         let mut rows: Vec<(i64, u32, Vec<u64>, Vec<u32>)> = Vec::new();
         for batch in report.batches() {
             let ts = batch

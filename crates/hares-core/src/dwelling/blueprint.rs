@@ -126,18 +126,7 @@ impl DwellingBlueprint {
         // a pre-rounding guard would let an offset inside ±24 h whose
         // seconds round to exactly ±86 400 through to the type's own
         // rejection.
-        let offset_hours = site_location.utc_offset_h;
-        let offset_secs = offset_hours * 3600.0;
-        let secs = offset_secs.round() as i32;
-        if !offset_secs.is_finite() || secs.abs() >= 86_400 {
-            return Err(HaresError::Dwelling(format!(
-                "site UTC offset {offset_hours} h is not a finite offset within \
-                 ±24 h; the site's offset is a physical input and no UTC \
-                 fallback may stand in for it"
-            )));
-        }
-        let tz_offset = FixedOffset::east_opt(secs)
-            .expect("the offset was checked finite and within ±24 h after rounding");
+        let tz_offset = checked_offset(site_location.utc_offset_h)?;
         // A FixedOffset has no gaps or repeated hours, so a naive-local wall
         // time converts to exactly one instant at that offset: the
         // infallible construction (naive UTC + offset).
@@ -264,4 +253,50 @@ impl DwellingBlueprint {
     pub fn build(self) -> Result<super::Dwelling, HaresError> {
         super::build_from_blueprint(self)
     }
+}
+
+/// The site's UTC offset hours as a `FixedOffset`, the checked conversion
+/// the blueprint reinterprets the naive start at: the offset is a physical
+/// site input, so an offset the fixed-offset type cannot represent, or a
+/// non-finite one (whose float→int cast would round to zero and silently
+/// become UTC), is an error naming the value. The representability check
+/// reads the rounded whole seconds, the value `FixedOffset::east_opt`
+/// consumes: a pre-rounding guard would let an offset inside ±24 h whose
+/// seconds round to exactly ±86 400 through to the type's own rejection.
+/// The fleet's alignment pre-pass runs the same conversion, so the pre-pass
+/// and the built dwelling cannot disagree except through their inputs.
+pub(crate) fn checked_offset(offset_hours: f64) -> Result<FixedOffset, HaresError> {
+    let offset_secs = offset_hours * 3600.0;
+    let secs = offset_secs.round() as i32;
+    if !offset_secs.is_finite() || secs.abs() >= 86_400 {
+        return Err(HaresError::Dwelling(format!(
+            "site UTC offset {offset_hours} h is not a finite offset within \
+             ±24 h; the site's offset is a physical input and no UTC \
+             fallback may stand in for it"
+        )));
+    }
+    // A FixedOffset has no gaps or repeated hours; the value was checked
+    // finite and within ±24 h after rounding.
+    Ok(FixedOffset::east_opt(secs).expect("valid site offset"))
+}
+
+/// Reads a home's site UTC offset the way the built dwelling resolves it:
+/// the HPXML document's `Site` and the weather file's header (the same
+/// read-only-header functions the full parsers call, with no schedule, no
+/// defaults tree and no weather row read) and the config's site-location
+/// override through `resolve_site_location`, the offset hours converted
+/// with the blueprint's checked conversion. The fleet's alignment pre-pass
+/// reads every home's offset through this before the first home runs.
+///
+/// # Errors
+///
+/// [`HaresError`] when the site or the weather header cannot be read, or
+/// the resolved offset is not a finite offset within ±24 h.
+pub fn site_offset(config: &DwellingConfig) -> Result<FixedOffset, HaresError> {
+    let site = hares_io::hpxml::read_site(&config.hpxml_path)
+        .map_err(|err| HaresError::Io(format!("HPXML site read failed: {err}")))?;
+    let weather_meta = hares_io::read_weather_meta(&config.weather_path)
+        .map_err(|err| HaresError::Io(format!("weather header read failed: {err}")))?;
+    let location = resolve_site_location(&site, &weather_meta, &config.sim_config.site_location);
+    checked_offset(location.utc_offset_h)
 }

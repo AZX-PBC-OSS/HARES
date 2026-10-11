@@ -140,6 +140,40 @@ fn next_line(
         })
 }
 
+/// Reads a weather file's header metadata with no data row read: the
+/// format's own header (EPW's LOCATION line, the PSM3 field names and
+/// values, the TMY3 station header), the same header functions the full
+/// parsers call. A ResStock CSV has no embedded location, so its metadata
+/// is the no-location placeholder its full parser starts from. The
+/// fleet's alignment pre-pass reads a home's weather metadata through
+/// this, before any home is parsed; the site-location resolution reads
+/// only the location fields, which every header carries.
+///
+/// # Errors
+///
+/// [`WeatherError`] when the format is not supported, the file is
+/// unreadable, or the header is malformed.
+pub fn read_weather_meta(path: impl AsRef<Path>) -> Result<WeatherMeta, WeatherError> {
+    let path = path.as_ref();
+    match detect_weather_format(path)? {
+        WeatherFormat::Epw => crate::epw::read_meta(path),
+        WeatherFormat::Psm3 => crate::psm3::read_meta(path),
+        WeatherFormat::Tmy3 => crate::tmy3::read_meta(path),
+        WeatherFormat::ResStockCsv => Ok(WeatherMeta {
+            location: String::new(),
+            latitude: 0.0,
+            longitude: 0.0,
+            timezone_offset_h: 0.0,
+            elevation_m: 0.0,
+            wf_allows_leap_years: true,
+            source_step_secs: 3600,
+            midpoint_offset_secs: 1800,
+            has_embedded_location: false,
+            station_wmo: None,
+        }),
+    }
+}
+
 /// Parse a weather file, auto-detecting the format from its extension and header.
 ///
 /// Supported formats:

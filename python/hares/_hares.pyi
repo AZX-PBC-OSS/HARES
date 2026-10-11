@@ -2726,6 +2726,8 @@ class Fleet:
         cls,
         configs: list[DwellingConfig],
         sample_weights: list[float] | None = ...,
+        *,
+        alignment: Alignment | None = ...,
     ) -> Fleet: ...
     @classmethod
     def from_resstock(
@@ -2737,6 +2739,8 @@ class Fleet:
         resstock_version: ResStockVersion | str | None = ...,
         duration_s: int | None = ...,
         defaults_path: str | None = ...,
+        *,
+        alignment: Alignment | None = ...,
     ) -> Fleet: ...
     def simulate(
         self,
@@ -2748,6 +2752,17 @@ class Fleet:
         progress: Callable[[int, int], None] | None = ...,
     ) -> FleetResult: ...
     def __len__(self) -> int: ...
+    def __repr__(self) -> str: ...
+
+class Alignment:
+    """The fleet's declared time alignment: ``instant(offset)`` buckets
+    every home on the offset's period boundaries and labels the rows at
+    the offset; ``local_clock()`` aligns the rows by the naive local
+    period start the homes share."""
+    @classmethod
+    def instant(cls, offset: str) -> Alignment: ...
+    @classmethod
+    def local_clock(cls) -> Alignment: ...
     def __repr__(self) -> str: ...
 
 class Coverage:

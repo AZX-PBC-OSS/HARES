@@ -1,6 +1,8 @@
 //! HPXML building envelope and geometry parsing.
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
@@ -621,7 +623,13 @@ pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
     parse_building_from_node(&root)
 }
 
-pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> {
+/// Extracts one HPXML document's `Building/BuildingDetails/BuildingSummary/Site`:
+/// the elevation, the site type, the shielding, the latitude, the longitude
+/// and the `TimeZone/UTCOffset`, with the document-level fallbacks the
+/// element's fields read. `parse_building_from_node` runs it as part of the
+/// building parse, and `read_site` runs it alone, so both read the site the
+/// same way.
+fn extract_site(root: &XmlNode) -> Result<Site, HpxmlError> {
     let details = root
         .path(&["Building", "BuildingDetails"])
         .ok_or_else(|| HpxmlError::Parse("missing Building/BuildingDetails".into()))?;
@@ -674,6 +682,40 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         .and_then(XmlNode::text_as_f64);
     let utc_offset_fallback = find_descendant_f64(root, "UTCOffset", ValueKind::Raw)?;
     let utc_offset_h = utc_offset_primary.or(utc_offset_fallback);
+
+    Ok(Site {
+        elevation_m,
+        site_type,
+        shielding_of_home,
+        latitude_deg,
+        longitude_deg,
+        utc_offset_h,
+    })
+}
+
+/// Reads one HPXML document's `Site` alone: the elevation, the latitude,
+/// the longitude and the `TimeZone/UTCOffset` the site-location resolution
+/// reads, with no `Building` built. The fleet's alignment pre-pass reads a
+/// home's site offset through this, before any home is parsed.
+pub fn read_site(path: &Path) -> Result<Site, HpxmlError> {
+    let xml = fs::read_to_string(path).map_err(|source| HpxmlError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let root = parse_xml_document(&xml)?;
+    extract_site(&root)
+}
+
+pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> {
+    let details = root
+        .path(&["Building", "BuildingDetails"])
+        .ok_or_else(|| HpxmlError::Parse("missing Building/BuildingDetails".into()))?;
+
+    let summary = details
+        .child("BuildingSummary")
+        .ok_or_else(|| HpxmlError::Parse("missing BuildingSummary".into()))?;
+
+    let site = extract_site(root)?;
 
     let conditioned_floor_area_m2 = parse_value_with_units(
         summary.path(&["BuildingConstruction", "ConditionedFloorArea"]),
@@ -1290,14 +1332,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     }
 
     Ok(Building {
-        site: Site {
-            elevation_m,
-            site_type,
-            shielding_of_home,
-            latitude_deg,
-            longitude_deg,
-            utc_offset_h,
-        },
+        site,
         zones: zones_vec,
         boundaries,
         windows,

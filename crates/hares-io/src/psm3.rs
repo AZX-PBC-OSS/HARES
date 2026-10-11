@@ -50,21 +50,36 @@ pub fn parse_psm3(path: impl AsRef<Path>) -> Result<WeatherTimeSeries, WeatherEr
     parse_psm3_str(&contents)
 }
 
-fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
-    let mut lines = contents.lines();
+/// Reads a PSM3 file's header metadata with no data row read: lines 1 and
+/// 2 (the field names and values), the same header the full parser builds
+/// its metadata from, for a caller that needs only the site's location
+/// (the fleet's alignment pre-pass). The timestep the data rows would
+/// detect carries the format's hourly default; the site-location
+/// resolution reads none of it.
+pub(crate) fn read_meta(path: &Path) -> Result<WeatherMeta, WeatherError> {
+    let names_line = crate::epw::read_first_line(path)?;
+    let file = fs::File::open(path).map_err(|source| WeatherError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let values_line = std::io::BufRead::lines(std::io::BufReader::new(file))
+        .nth(1)
+        .transpose()
+        .map_err(|source| WeatherError::Io {
+            path: path.display().to_string(),
+            source,
+        })?
+        .ok_or_else(|| WeatherError::Parse("missing PSM3 field values header (line 2)".into()))?;
+    parse_header_meta(&names_line, &values_line)
+}
 
-    // --- Line 1: field names ---
-    let names_line = lines
-        .next()
-        .ok_or_else(|| WeatherError::Parse("missing PSM3 field names header (line 1)".into()))?;
+/// Parses the PSM3 header's two lines (field names, field values) into the
+/// metadata they carry: the same lines, lookups and defaults the full
+/// parser runs.
+fn parse_header_meta(names_line: &str, values_line: &str) -> Result<WeatherMeta, WeatherError> {
     // Strip UTF-8 BOM if present (Windows/Excel exports may prepend \xEF\xBB\xBF).
     let names_line = names_line.trim_start_matches('\u{FEFF}');
     let field_names: Vec<&str> = names_line.split(',').map(str::trim).collect();
-
-    // --- Line 2: field values ---
-    let values_line = lines
-        .next()
-        .ok_or_else(|| WeatherError::Parse("missing PSM3 field values header (line 2)".into()))?;
     let field_values: Vec<&str> = values_line.split(',').collect();
 
     if field_names.len() != field_values.len() {
@@ -100,6 +115,33 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         .map(str::trim)
         .filter(|c| !c.is_empty() && *c != "-")
         .map_or_else(|| "PSM3".to_string(), str::to_string);
+
+    Ok(WeatherMeta {
+        location,
+        latitude,
+        longitude,
+        timezone_offset_h,
+        elevation_m,
+        wf_allows_leap_years: true,
+        source_step_secs: 3600,
+        midpoint_offset_secs: 0,
+        has_embedded_location: true,
+        station_wmo: None,
+    })
+}
+
+fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
+    let mut lines = contents.lines();
+
+    // --- Line 1: field names ---
+    let names_line = lines
+        .next()
+        .ok_or_else(|| WeatherError::Parse("missing PSM3 field names header (line 1)".into()))?;
+    // --- Line 2: field values ---
+    let values_line = lines
+        .next()
+        .ok_or_else(|| WeatherError::Parse("missing PSM3 field values header (line 2)".into()))?;
+    let meta = parse_header_meta(names_line, values_line)?;
 
     // --- Line 3: column names ---
     let header_line = lines
@@ -299,16 +341,8 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     let liquid_precip_m = vec![0.0; n];
 
     let meta = WeatherMeta {
-        location,
-        latitude,
-        longitude,
-        timezone_offset_h,
-        elevation_m,
-        wf_allows_leap_years: true,
         source_step_secs: step_secs,
-        midpoint_offset_secs: 0,
-        has_embedded_location: true,
-        station_wmo: None,
+        ..meta
     };
 
     Ok(WeatherTimeSeries {

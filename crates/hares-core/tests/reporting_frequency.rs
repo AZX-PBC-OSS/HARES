@@ -165,7 +165,8 @@ fn reduce_batches(
     batches: &[RecordBatch],
     rules: Vec<TimeRule>,
 ) -> Vec<Collected> {
-    let mut reducer = PeriodReducer::new(frequency, PeriodCalendar, rules).expect("reducer builds");
+    let mut reducer =
+        PeriodReducer::new(frequency, PeriodCalendar::default(), rules).expect("reducer builds");
     let mut rows = Vec::new();
     for batch in batches {
         reducer
@@ -483,9 +484,10 @@ fn batch_fed_reducer_equals_row_fed_reducer() {
     let rules = rules_for(&schema, &dwelling.catalogue());
 
     let mut row_fed =
-        PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules.clone()).expect("builds");
+        PeriodReducer::new(Frequency::Hourly, PeriodCalendar::default(), rules.clone())
+            .expect("builds");
     let mut batch_fed =
-        PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules).expect("builds");
+        PeriodReducer::new(Frequency::Hourly, PeriodCalendar::default(), rules).expect("builds");
     let mut row_rows = Vec::new();
     let mut batch_rows = Vec::new();
 

@@ -99,4 +99,5 @@ pub use unavailable_periods::{
 pub use weather::{WeatherField, WeatherMeta, WeatherTimeSeries};
 pub use weather::{
     WeatherFormat, parse_weather, parse_weather_with_elevation, parse_weather_with_location,
+    read_weather_meta,
 };

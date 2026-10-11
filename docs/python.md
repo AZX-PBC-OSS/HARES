@@ -408,6 +408,9 @@ replacement.
   `GasBoiler`, `IndirectTank`, `TanklessWaterHeater`; the exceptions
   `HaresConfigError`, `HaresEquipmentError`, `HaresSimulationError`;
   the callback info class `BatchInfo`.
+- Added: `Alignment` (with `instant`, `local_clock`) and the
+  `alignment=` keyword on `Fleet.from_buildings` and
+  `Fleet.from_resstock`: the fleet's declared time alignment.
 
 ## Troubleshooting
 

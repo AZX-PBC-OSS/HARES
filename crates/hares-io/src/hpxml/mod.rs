@@ -28,7 +28,7 @@ use validation::{ValidationError, validate_building_ranges, validate_hpxml_schem
 
 pub use building::{
     Boundary, BoundaryType, Building, DuctLocation, DuctSystem, DuctType, MaterialLayer,
-    MultipleConditionedZones, ShieldingOfHome, Site, SiteType, Window, Zone, ZoneType,
+    MultipleConditionedZones, ShieldingOfHome, Site, SiteType, Window, Zone, ZoneType, read_site,
 };
 pub use data_patches::HpxmlDataPatches;
 pub(crate) use equipment::build_spec;

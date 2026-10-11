@@ -372,8 +372,8 @@ fn hourly_table(batches: &[RecordBatch], catalogue: &Catalogue) -> Vec<RecordBat
             TimeRule::from_variable(def)
         })
         .collect();
-    let mut reducer =
-        PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules).expect("reducer builds");
+    let mut reducer = PeriodReducer::new(Frequency::Hourly, PeriodCalendar::default(), rules)
+        .expect("reducer builds");
     let mut rows: Vec<(i64, Vec<f64>)> = Vec::new();
     let mut emit = |row: hares_io::output::reduce::PeriodRow<'_>| {
         rows.push((row.start_local_ms, row.values.to_vec()));

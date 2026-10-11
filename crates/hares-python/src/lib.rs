@@ -40,7 +40,7 @@ use py_equipment::{
     PyBattery, PyCoreOutput, PyEquipment, PyEquipmentDescriptor, PyEv, PyProtocolBridge, PyPv,
     PyPvSoilingConfig, PyTelemetryField,
 };
-use py_fleet::{PyCoverage, PyFleet, PyFleetReport, PyFleetResult, PySteppableFleet};
+use py_fleet::{PyAlignment, PyCoverage, PyFleet, PyFleetReport, PyFleetResult, PySteppableFleet};
 use py_metrics::{
     PyEfficiencyMetrics, PyEnvelopeComponentLoadsKwh, PyGasEnergyMetrics, PyGridInteractionMetrics,
     PyPeakPowerKw, PyRollingPeakKw, PyRunMetrics, PyTotalEnergyKwh,
@@ -65,6 +65,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySelection>()?;
     m.add_class::<PyFrequency>()?;
     m.add_class::<PyDestination>()?;
+    m.add_class::<PyAlignment>()?;
     m.add_class::<PyControlSignal>()?;
     m.add_class::<PyTelemetry>()?;
     m.add_class::<PyCoreOutput>()?;

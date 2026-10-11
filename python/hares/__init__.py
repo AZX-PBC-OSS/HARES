@@ -9,6 +9,7 @@ from ._hares import SteppableFleet
 from ._hares import FleetReport
 from ._hares import FleetResult
 from ._hares import Coverage
+from ._hares import Alignment
 from ._hares import SimulationConfig
 from ._hares import HealthPolicy
 from ._hares import SiteLocationOverride
@@ -161,6 +162,7 @@ __all__ = [
     "FleetReport",
     "FleetResult",
     "Coverage",
+    "Alignment",
     "SimulationConfig",
     "HealthPolicy",
     "SiteLocationOverride",

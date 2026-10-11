@@ -477,6 +477,33 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
     })
 }
 
+/// Reads an EPW file's header metadata with no data row read: the same
+/// LOCATION header the full parser builds its metadata from, for a caller
+/// that needs only the site's location (the fleet's alignment pre-pass).
+/// The row-derived fields the header does not carry are the format's
+/// hourly defaults; the site-location resolution reads none of them.
+pub(crate) fn read_meta(path: &Path) -> Result<WeatherMeta, WeatherError> {
+    let first_line = read_first_line(path)?;
+    parse_location_header(&first_line)
+}
+
+/// Reads the file's first line, the only IO a header-only metadata read
+/// performs.
+pub(crate) fn read_first_line(path: &Path) -> Result<String, WeatherError> {
+    let file = fs::File::open(path).map_err(|source| WeatherError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    std::io::BufRead::lines(std::io::BufReader::new(file))
+        .next()
+        .transpose()
+        .map_err(|source| WeatherError::Io {
+            path: path.display().to_string(),
+            source,
+        })?
+        .ok_or_else(|| WeatherError::Parse("empty weather file".to_string()))
+}
+
 /// Parse the EPW HOLIDAYS/DAYLIGHT SAVINGS header (line 5).
 ///
 /// Extracts field A1 (`Leap Year Observed`) which controls whether Feb 29

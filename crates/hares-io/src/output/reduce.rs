@@ -26,11 +26,54 @@ use thiserror::Error;
 use super::catalogue::VariableDef;
 use super::report::Frequency;
 
-/// The local calendar a reduction buckets onto: the home's own site offset
-/// today. The period-origin offset a fleet's `Alignment::Instant` needs
-/// arrives with the fleet's calendar entry, which extends this struct.
+/// The calendar a reduction buckets onto. The default buckets the fed
+/// wall clock itself: the rows are fed at the site offset they are
+/// stamped at (a home's own local calendar, the home's site offset
+/// today). A fleet's declared `Instant` alignment sets an origin offset:
+/// each fed step's instant (its fed wall clock minus `home_offset_s`) is
+/// re-expressed at `origin_offset_s` and bucketed on that offset's period
+/// boundaries, so homes at different site offsets reduce onto the same
+/// reference periods. A home's own reports keep the default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PeriodCalendar;
+pub struct PeriodCalendar {
+    /// The UTC offset in seconds of the calendar the reduction buckets
+    /// onto, when the reduction shifts the fed wall clock onto it; `None`
+    /// buckets the fed wall clock itself.
+    pub origin_offset_s: Option<i32>,
+    /// The UTC offset in seconds the fed wall clock is stamped at: the
+    /// home's own site offset. Read only when `origin_offset_s` is set.
+    pub home_offset_s: i32,
+}
+
+impl PeriodCalendar {
+    /// The fed wall clock's own calendar: the home's site offset, the
+    /// calendar a home's own reports reduce on.
+    #[must_use]
+    pub fn home() -> Self {
+        Self::default()
+    }
+
+    /// The declared offset's calendar: every fed step's instant (its fed
+    /// wall clock minus `home_offset_s`) is re-expressed at `origin` and
+    /// bucketed on `origin`'s period boundaries.
+    #[must_use]
+    pub fn instant(origin: chrono::FixedOffset, home_offset_s: i32) -> Self {
+        Self {
+            origin_offset_s: Some(origin.local_minus_utc()),
+            home_offset_s,
+        }
+    }
+
+    /// The fed wall clock's milliseconds re-expressed on the bucketing
+    /// calendar: a shift by the two offsets' difference when an origin is
+    /// declared, the fed value itself otherwise.
+    fn bucket_at(self, local_ms: i64) -> i64 {
+        match self.origin_offset_s {
+            None => local_ms,
+            Some(origin_s) => local_ms + i64::from(origin_s - self.home_offset_s) * 1_000,
+        }
+    }
+}
 
 /// The over-time reduction rule of one variable, from its
 /// [`VariableDef::aggregation`]. `enum_codes` is the label count of an
@@ -214,6 +257,9 @@ impl RuleState {
 #[derive(Debug)]
 pub struct PeriodReducer {
     frequency: Frequency,
+    /// The calendar the reduction buckets onto: the fed wall clock's own
+    /// calendar, or a declared offset's.
+    calendar: PeriodCalendar,
     rules: Vec<RuleState>,
     /// The open period's nominal start, naive local milliseconds. The first
     /// fed row opens the run period's single period; every later row joins
@@ -241,7 +287,6 @@ impl PeriodReducer {
         calendar: PeriodCalendar,
         rules: Vec<TimeRule>,
     ) -> Result<Self, ReduceError> {
-        let _ = calendar;
         match frequency {
             Frequency::Timestep => return Err(ReduceError::Timestep),
             Frequency::Minutes(n) if 60 % n.get() != 0 => {
@@ -257,6 +302,7 @@ impl PeriodReducer {
         }
         Ok(Self {
             frequency,
+            calendar,
             rules: rules.iter().map(RuleState::new).collect(),
             open_start_ms: None,
             step_count: 0,
@@ -389,9 +435,11 @@ impl PeriodReducer {
 
     /// Advances the period bookkeeping for a row fed at `local_ms`: closes
     /// the open period and opens the row's period when the row falls past
-    /// it, then counts the step.
+    /// it, then counts the step. The row's wall clock is re-expressed on
+    /// the calendar's bucketing clock first: the fed value itself, or the
+    /// declared offset's wall clock when the calendar declares an origin.
     fn advance(&mut self, local_ms: i64, emit: &mut dyn FnMut(PeriodRow<'_>)) {
-        let start = self.period_start(local_ms);
+        let start = self.period_start(self.calendar.bucket_at(local_ms));
         if self.open_start_ms != Some(start) {
             self.close(emit);
             self.open_start_ms = Some(start);
@@ -592,8 +640,8 @@ mod tests {
     }
 
     fn reduce_day(frequency: Frequency, step_ms: i64, valid: &[bool; 4]) -> Vec<Collected> {
-        let mut reducer =
-            PeriodReducer::new(frequency, PeriodCalendar, day_rules()).expect("reducer builds");
+        let mut reducer = PeriodReducer::new(frequency, PeriodCalendar::default(), day_rules())
+            .expect("reducer builds");
         let mut rows = Vec::new();
         for (local_ms, values) in synthetic_day(step_ms) {
             reducer
@@ -714,7 +762,7 @@ mod tests {
         // the first hour carries 2 steps, the last 1, every hour between 4.
         let mut reducer = PeriodReducer::new(
             Frequency::Hourly,
-            PeriodCalendar,
+            PeriodCalendar::default(),
             vec![rule(Aggregation::Sum)],
         )
         .expect("reducer builds");
@@ -777,9 +825,12 @@ mod tests {
             ),
         ];
         for (frequency, labels) in cases {
-            let mut reducer =
-                PeriodReducer::new(frequency, PeriodCalendar, vec![rule(Aggregation::Sum)])
-                    .expect("reducer builds");
+            let mut reducer = PeriodReducer::new(
+                frequency,
+                PeriodCalendar::default(),
+                vec![rule(Aggregation::Sum)],
+            )
+            .expect("reducer builds");
             let mut rows = Vec::new();
             for (i, &local_ms) in times.iter().enumerate() {
                 reducer
@@ -823,7 +874,7 @@ mod tests {
     fn null_cells_excluded_with_valid_count() {
         let mut reducer = PeriodReducer::new(
             Frequency::Hourly,
-            PeriodCalendar,
+            PeriodCalendar::default(),
             vec![
                 rule(Aggregation::Sum),
                 rule(Aggregation::Mean),
@@ -894,8 +945,9 @@ mod tests {
 
     #[test]
     fn run_period_report_has_one_row() {
-        let mut reducer = PeriodReducer::new(Frequency::RunPeriod, PeriodCalendar, day_rules())
-            .expect("reducer builds");
+        let mut reducer =
+            PeriodReducer::new(Frequency::RunPeriod, PeriodCalendar::default(), day_rules())
+                .expect("reducer builds");
         let mut rows = Vec::new();
         for (local_ms, values) in synthetic_day(STEP_MS) {
             reducer
@@ -919,7 +971,8 @@ mod tests {
 
         // An empty feed finishes to no rows at all.
         let reducer =
-            PeriodReducer::new(Frequency::RunPeriod, PeriodCalendar, day_rules()).expect("builds");
+            PeriodReducer::new(Frequency::RunPeriod, PeriodCalendar::default(), day_rules())
+                .expect("builds");
         let mut rows = Vec::new();
         collect(reducer, &mut rows);
         assert!(rows.is_empty());
@@ -940,9 +993,10 @@ mod tests {
 
         let rules = vec![rule(Aggregation::Sum), rule(Aggregation::Mean)];
         let mut row_fed =
-            PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules.clone()).expect("builds");
-        let mut batch_fed =
-            PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules).expect("builds");
+            PeriodReducer::new(Frequency::Hourly, PeriodCalendar::default(), rules.clone())
+                .expect("builds");
+        let mut batch_fed = PeriodReducer::new(Frequency::Hourly, PeriodCalendar::default(), rules)
+            .expect("builds");
         let mut row_rows = Vec::new();
         let mut batch_rows = Vec::new();
 
@@ -980,7 +1034,7 @@ mod tests {
     fn push_row_refuses_a_length_mismatch_like_the_batch_feed() {
         let mut reducer = PeriodReducer::new(
             Frequency::Hourly,
-            PeriodCalendar,
+            PeriodCalendar::default(),
             vec![rule(Aggregation::Sum)],
         )
         .expect("reducer builds");
@@ -1035,7 +1089,8 @@ mod tests {
         // Fewer columns than the rules read.
         let short = batch_with_columns(&times, &[]);
         let mut reducer =
-            PeriodReducer::new(Frequency::Hourly, PeriodCalendar, rules.clone()).expect("builds");
+            PeriodReducer::new(Frequency::Hourly, PeriodCalendar::default(), rules.clone())
+                .expect("builds");
         let mut rows = Vec::new();
         let err = reducer
             .push_batch(&short, &mut sink(&mut rows))
@@ -1099,12 +1154,12 @@ mod tests {
 
     #[test]
     fn timestep_and_bad_minutes_are_reducer_errors() {
-        let err = PeriodReducer::new(Frequency::Timestep, PeriodCalendar, vec![])
+        let err = PeriodReducer::new(Frequency::Timestep, PeriodCalendar::default(), vec![])
             .expect_err("the Timestep frequency takes no reduction");
         assert!(matches!(err, ReduceError::Timestep), "got: {err:?}");
 
         for n in [7_u32, 90] {
-            let err = PeriodReducer::new(minutes(n), PeriodCalendar, vec![])
+            let err = PeriodReducer::new(minutes(n), PeriodCalendar::default(), vec![])
                 .expect_err("minutes that do not divide the hour are refused");
             assert!(
                 matches!(err, ReduceError::MinutesNotDividingHour(value) if value == n),
@@ -1114,7 +1169,7 @@ mod tests {
 
         let err = PeriodReducer::new(
             Frequency::Hourly,
-            PeriodCalendar,
+            PeriodCalendar::default(),
             vec![TimeRule {
                 aggregation: Aggregation::Mode,
                 enum_codes: None,
@@ -1128,9 +1183,12 @@ mod tests {
     fn periods_start_on_the_local_clock_at_a_half_hour_offset() {
         let site = offset_half_hour_east();
         let base = local_ms_at(site, 2023, 1, 1, 0, 7);
-        let mut reducer =
-            PeriodReducer::new(minutes(15), PeriodCalendar, vec![rule(Aggregation::Sum)])
-                .expect("reducer builds");
+        let mut reducer = PeriodReducer::new(
+            minutes(15),
+            PeriodCalendar::default(),
+            vec![rule(Aggregation::Sum)],
+        )
+        .expect("reducer builds");
         let mut rows = Vec::new();
         for i in 0..4 {
             reducer
@@ -1164,7 +1222,7 @@ mod tests {
         // two past local midnight fall on Jan 2.
         let mut reducer = PeriodReducer::new(
             Frequency::Hourly,
-            PeriodCalendar,
+            PeriodCalendar::default(),
             vec![rule(Aggregation::Sum)],
         )
         .expect("reducer builds");
@@ -1188,7 +1246,7 @@ mod tests {
 
         let mut reducer = PeriodReducer::new(
             Frequency::Daily,
-            PeriodCalendar,
+            PeriodCalendar::default(),
             vec![rule(Aggregation::Sum)],
         )
         .expect("reducer builds");
@@ -1254,7 +1312,7 @@ mod tests {
 
         let mut reducer = PeriodReducer::new(
             Frequency::Hourly,
-            PeriodCalendar,
+            PeriodCalendar::default(),
             vec![rule(Aggregation::Sum)],
         )
         .expect("reducer builds");
@@ -1307,7 +1365,7 @@ mod tests {
 
         let mut reducer = PeriodReducer::new(
             Frequency::Hourly,
-            PeriodCalendar,
+            PeriodCalendar::default(),
             vec![rule(Aggregation::Sum)],
         )
         .expect("reducer builds");

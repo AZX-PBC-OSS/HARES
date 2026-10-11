@@ -259,6 +259,16 @@ fn parse_station_header(line: &str) -> Result<WeatherMeta, WeatherError> {
     })
 }
 
+/// Reads a TMY3 file's header metadata with no data row read: the same
+/// station header the full parser builds its metadata from, for a caller
+/// that needs only the site's location (the fleet's alignment pre-pass).
+/// The row-derived fields the header does not carry are the format's
+/// hourly defaults; the site-location resolution reads none of them.
+pub(crate) fn read_meta(path: &std::path::Path) -> Result<WeatherMeta, WeatherError> {
+    let meta_line = crate::epw::read_first_line(path)?;
+    parse_station_header(&meta_line)
+}
+
 /// Column index mapping for TMY3 data fields.
 struct Tmy3ColumnMap {
     /// Date field index (MM/DD/YYYY).

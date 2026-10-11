@@ -16,6 +16,7 @@ pub use warnings::{WarningLog, WarningLogSnapshot};
 pub use premise_zip::PremiseZip;
 
 pub use blueprint::DwellingBlueprint;
+pub use blueprint::site_offset;
 pub use conversions::{building_to_boundary_inputs, building_to_zone_inputs, stage_rank};
 
 /// The repo's shipped `defaults/` tree, the one directory test and synthetic

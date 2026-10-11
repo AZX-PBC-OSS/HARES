@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use arrow::array::{Array, Float64Builder, StringArray, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, SecondsFormat};
+use chrono::{DateTime, FixedOffset, SecondsFormat, TimeZone};
 use hares_io::Frequency;
 use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
 use hares_io::output::reduce::{PeriodCalendar, PeriodReducer, PeriodRow, ReduceError, TimeRule};
@@ -24,6 +24,36 @@ use hares_io::{Selection, classify_sample_weight};
 use hares_types::Aggregation;
 
 use crate::fleet::{FleetError, HomeStatus};
+
+/// The fleet's declared time alignment: the calendar the homes'
+/// reductions bucket onto and the rows the fold aligns by. The decision's
+/// reference zone is a fixed UTC offset, because HARES output time is
+/// naive local standard time with no daylight saving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Alignment {
+    /// Rows align by the period's start instant: every home's reduction
+    /// buckets on the declared offset's period boundaries, whatever its
+    /// own site offset, and the labels render at the declared offset.
+    Instant(FixedOffset),
+    /// Rows align by the naive local period start: every home reduces on
+    /// its own local calendar and the labels carry no offset.
+    LocalClock,
+}
+
+/// The aggregate's row alignment: the keys the buckets are filed under
+/// and the labels they render as. The fleet's declared alignment decides,
+/// or, undeclared, the homes' shared site offset keeps today's instant
+/// keys and UTC `Z` labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FoldRows {
+    /// Buckets keyed by the period's start instant; labels render the
+    /// instant at the offset (`Z` for `+00:00`, byte for byte today's
+    /// undeclared label).
+    Instant(FixedOffset),
+    /// Buckets keyed by the naive local period start; labels carry no
+    /// offset, because the homes share no offset.
+    LocalClock,
+}
 
 /// The fleet's report request: the variable selection, the reporting
 /// frequency the fold reduces onto, and the fleet's
@@ -226,6 +256,8 @@ struct Cell {
 /// The running aggregate the fold streams home results into.
 #[derive(Debug)]
 pub(crate) struct FleetFold {
+    /// The row alignment the buckets render as.
+    rows: FoldRows,
     /// The folded variables' fields: the union of the folding homes'
     /// report schemas, in order of first appearance in entry order.
     columns: Vec<Field>,
@@ -241,13 +273,16 @@ pub(crate) struct FleetFold {
 
 impl Default for FleetFold {
     fn default() -> Self {
-        Self::new()
+        Self::new(FoldRows::Instant(
+            FixedOffset::east_opt(0).expect("a zero offset is representable"),
+        ))
     }
 }
 
 impl FleetFold {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(rows: FoldRows) -> Self {
         Self {
+            rows,
             columns: Vec::new(),
             rules: Vec::new(),
             cells: BTreeMap::new(),
@@ -360,14 +395,25 @@ impl FleetFold {
             .collect();
 
         for &bucket in &self.intersection {
-            let Some(instant) = DateTime::from_timestamp(bucket, 0) else {
-                continue;
-            };
-            timestamps.append_value(
-                instant
-                    .fixed_offset()
-                    .to_rfc3339_opts(SecondsFormat::Secs, true),
-            );
+            match self.rows {
+                FoldRows::Instant(offset) => {
+                    let Some(instant) = DateTime::from_timestamp(bucket, 0) else {
+                        continue;
+                    };
+                    timestamps.append_value(
+                        offset
+                            .from_utc_datetime(&instant.naive_utc())
+                            .to_rfc3339_opts(SecondsFormat::Secs, true),
+                    );
+                }
+                FoldRows::LocalClock => {
+                    let Some(instant) = DateTime::from_timestamp(bucket, 0) else {
+                        continue;
+                    };
+                    timestamps
+                        .append_value(instant.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string());
+                }
+            }
             let cells = self.cells.get(&bucket).map_or(&[][..], Vec::as_slice);
             for (slot, builder) in builders.iter_mut().enumerate() {
                 let Some(cell) = cells.get(slot).copied() else {
@@ -414,11 +460,13 @@ fn empty_table() -> RecordBatch {
 }
 
 /// One reduced period the home's reducer emitted: the naive local
-/// wall-clock start, the reduced value per rule and the valid step count
-/// per rule.
+/// wall-clock start (the calendar's own clock: the home's, or a declared
+/// alignment's), the step count that fell in the period, the reduced
+/// value per rule and the valid step count per rule.
 #[derive(Debug, Clone)]
 pub(crate) struct PeriodRowData {
     pub start_local_ms: i64,
+    pub step_count: u32,
     pub values: Vec<f64>,
     pub valid_steps: Vec<u32>,
 }
@@ -427,6 +475,7 @@ impl PeriodRowData {
     fn from_row(row: &PeriodRow<'_>) -> Self {
         Self {
             start_local_ms: row.start_local_ms,
+            step_count: row.step_count,
             values: row.values.to_vec(),
             valid_steps: row.valid_steps.to_vec(),
         }
@@ -449,6 +498,23 @@ impl PeriodRowData {
 #[derive(Debug)]
 pub(crate) struct HomeFoldState {
     frequency: Frequency,
+    /// The home's step span in milliseconds: the partial-period rule's
+    /// step.
+    step_ms: i64,
+    /// The offset in seconds subtracted from the reduced period's naive
+    /// local start to key the fold's rows: the declared alignment's
+    /// offset under `Instant` (the row's wall clock is the declared
+    /// offset's), the home's own site offset under the undeclared
+    /// single-offset default, zero under `LocalClock` (the naive local
+    /// start itself).
+    key_offset_s: i32,
+    /// Whether the fleet declared an `Instant` alignment: a reduced
+    /// period whose step count is below the period's full step count is
+    /// null for the home, so an edge period some homes cover only in part
+    /// carries a reduced covered weight.
+    instant_aligned: bool,
+    /// The period calendar the home's reducer buckets onto.
+    calendar: PeriodCalendar,
     /// The reducer, built from the first batch's schema (the report's
     /// columns and their units).
     reducer: Option<PeriodReducer>,
@@ -461,9 +527,13 @@ pub(crate) struct HomeFoldState {
 }
 
 impl HomeFoldState {
-    pub(crate) fn new(frequency: Frequency) -> Self {
+    pub(crate) fn new(alignment: &HomeFoldAlignment) -> Self {
         Self {
-            frequency,
+            frequency: alignment.frequency,
+            step_ms: alignment.step_ms,
+            key_offset_s: alignment.key_offset_s,
+            instant_aligned: alignment.instant_aligned,
+            calendar: alignment.calendar,
             reducer: None,
             rules: None,
             fields: None,
@@ -472,19 +542,17 @@ impl HomeFoldState {
     }
 
     /// Closes the home's reducer: the last partial period emits, and the
-    /// reduced table is keyed by the period start's instant (today's
-    /// epoch key: the naive local period start read as UTC seconds, minus
-    /// the home's `hares:utc_offset_s`).
-    pub(crate) fn finish(
-        &mut self,
-        utc_offset_s: i32,
-    ) -> (BTreeMap<i64, Vec<Option<f64>>>, Vec<Field>) {
+    /// reduced table is keyed by the alignment the fleet declared: the
+    /// period's start instant (today's epoch key) or the naive local
+    /// period start.
+    pub(crate) fn finish(&mut self) -> (BTreeMap<i64, Vec<Option<f64>>>, Vec<Field>) {
         if let Some(reducer) = self.reducer.take() {
             reducer.finish(&mut |row| self.rows.push(PeriodRowData::from_row(&row)));
         }
         let fields = self.fields.clone().unwrap_or_default();
         let mut table = BTreeMap::new();
-        for row in self.rows.drain(..) {
+        let rows = std::mem::take(&mut self.rows);
+        for row in rows {
             let naive_secs = DateTime::from_timestamp_millis(row.start_local_ms)
                 .unwrap_or_else(|| {
                     panic!(
@@ -495,10 +563,70 @@ impl HomeFoldState {
                 .naive_utc()
                 .and_utc()
                 .timestamp();
-            table.insert(naive_secs - i64::from(utc_offset_s), row.values());
+            let values = if self.instant_aligned && self.period_is_partial(&row) {
+                vec![None; row.values.len()]
+            } else {
+                row.values()
+            };
+            table.insert(naive_secs - i64::from(self.key_offset_s), values);
         }
         (table, fields)
     }
+
+    /// Whether the home covers the period only in part: its step count,
+    /// at the step the run ran, spans less than the period's full span on
+    /// the calendar the reduction bucketed onto. A `RunPeriod` is never
+    /// partial: the period is the run.
+    fn period_is_partial(&self, row: &PeriodRowData) -> bool {
+        let full_span_ms = match self.frequency {
+            Frequency::Timestep | Frequency::RunPeriod => return false,
+            Frequency::Minutes(every) => i64::from(every.get()) * 60_000,
+            Frequency::Hourly => 3_600_000,
+            Frequency::Daily => 86_400_000,
+            Frequency::Monthly | Frequency::Annual => {
+                let Some(time) = DateTime::from_timestamp_millis(row.start_local_ms) else {
+                    return false;
+                };
+                let naive = time.naive_utc();
+                use chrono::Datelike;
+                let (start_year, start_month, next_year, next_month) = match self.frequency {
+                    Frequency::Monthly => {
+                        let month = naive.month();
+                        let next_month = if month == 12 { 1 } else { month + 1 };
+                        let next_year = if month == 12 {
+                            naive.year() + 1
+                        } else {
+                            naive.year()
+                        };
+                        (naive.year(), month, next_year, next_month)
+                    }
+                    _ => (naive.year(), 1, naive.year() + 1, 1),
+                };
+                let midnight = |year: i32, month: u32| {
+                    chrono::NaiveDate::from_ymd_opt(year, month, 1)
+                        .expect("a real period start")
+                        .and_hms_opt(0, 0, 0)
+                        .expect("midnight")
+                };
+                (midnight(next_year, next_month) - midnight(start_year, start_month))
+                    .num_milliseconds()
+            }
+        };
+        i64::from(row.step_count) * self.step_ms < full_span_ms
+    }
+}
+
+/// One home's fold alignment: the frequency and step the reduction and
+/// the partial-period rule read, the period calendar the home's reducer
+/// buckets onto, the offset in seconds the reduced rows are keyed by and
+/// whether the fleet declared an `Instant` alignment.
+#[derive(Debug, Clone)]
+pub(crate) struct HomeFoldAlignment {
+    pub frequency: Frequency,
+    pub step_ms: i64,
+    pub calendar: PeriodCalendar,
+    pub key_offset_s: i32,
+    pub instant_aligned: bool,
 }
 
 /// The batch callback the fleet attaches to every home's `fleet` report:
@@ -544,7 +672,8 @@ impl BatchCallback for ReducerFeed {
                 .iter()
                 .map(|field| field_fleet_rules(field).0)
                 .collect();
-            let reducer = PeriodReducer::new(state.frequency, PeriodCalendar, rules.clone())
+            let calendar = state.calendar;
+            let reducer = PeriodReducer::new(state.frequency, calendar, rules.clone())
                 .map_err(|err| CallbackError::new(err.to_string()))?;
             state.rules = Some(rules);
             state.reducer = Some(reducer);
@@ -677,6 +806,12 @@ mod tests {
         (0..values.len())
             .map(|row| values.value(row).to_string())
             .collect()
+    }
+
+    fn default_fold() -> FleetFold {
+        FleetFold::new(FoldRows::Instant(
+            FixedOffset::east_opt(0).expect("a zero offset is representable"),
+        ))
     }
 
     #[test]
@@ -822,7 +957,7 @@ mod tests {
             (0.5, row(Some(10.0), Some(0.5))),
         ];
 
-        let mut fold = FleetFold::new();
+        let mut fold = default_fold();
         for (index, (weight, values)) in homes.iter().enumerate() {
             let mut table = BTreeMap::new();
             table.insert(key, values.clone());
@@ -907,7 +1042,7 @@ mod tests {
 
         // The unbounded reference: every table folded from one collected
         // set, in entry order.
-        let mut unbounded = FleetFold::new();
+        let mut unbounded = default_fold();
         for (index, table) in tables.iter().enumerate() {
             unbounded
                 .fold_home(index, weights[index], &fields, table)
@@ -917,7 +1052,7 @@ mod tests {
 
         // The bounded fold: one home's table folded and dropped at a
         // time, chunks of one.
-        let mut bounded = FleetFold::new();
+        let mut bounded = default_fold();
         for (index, table) in tables.iter().enumerate() {
             bounded
                 .fold_home(index, weights[index], &fields, table)
@@ -957,7 +1092,7 @@ mod tests {
         let mut home_b = BTreeMap::new();
         home_b.insert(key, row(None, Some(30.0)));
 
-        let mut fold = FleetFold::new();
+        let mut fold = default_fold();
         fold.fold_home(0, 1.0, &fields, &home_a)
             .expect("valid weight");
         fold.fold_home(1, 2.0, &fields, &home_b)
@@ -989,7 +1124,7 @@ mod tests {
         // that reaches the variable carries a null there.
         let mut home_c = BTreeMap::new();
         home_c.insert(key, row(None, None));
-        let mut fold = FleetFold::new();
+        let mut fold = default_fold();
         fold.fold_home(0, 3.0, &fields, &home_c)
             .expect("valid weight");
         let (aggregate, covered_weight, _) = fold.finish();
@@ -1020,7 +1155,7 @@ mod tests {
         let mut home_b = BTreeMap::new();
         home_b.insert(key, row(Some(2.0), Some(21.0)));
 
-        let mut fold = FleetFold::new();
+        let mut fold = default_fold();
         fold.fold_home(0, 1.0, &two_fields(), &home_a)
             .expect("valid weight");
         fold.fold_home(1, 1.0, &different, &home_b)
@@ -1085,7 +1220,7 @@ mod tests {
         let mut home_b = BTreeMap::new();
         home_b.insert(900_i64, row(Some(2.0), Some(21.0)));
 
-        let mut fold = FleetFold::new();
+        let mut fold = default_fold();
         fold.fold_home(0, 1.0, &fields, &home_a)
             .expect("valid weight");
         fold.fold_home(1, 1.0, &fields, &home_b)
@@ -1106,7 +1241,7 @@ mod tests {
         let mut home = BTreeMap::new();
         home.insert(0_i64, row(Some(1.0), Some(20.0)));
 
-        let mut fold = FleetFold::new();
+        let mut fold = default_fold();
         let err = fold
             .fold_home(7, f64::NAN, &fields, &home)
             .expect_err("a NaN weight is rejected");
@@ -1125,7 +1260,7 @@ mod tests {
         home_a.insert(0_i64, row(Some(1.0), Some(20.0)));
         let empty: BTreeMap<i64, Vec<Option<f64>>> = BTreeMap::new();
 
-        let mut fold = FleetFold::new();
+        let mut fold = default_fold();
         fold.fold_home(0, 1.0, &fields, &empty)
             .expect("valid weight");
         fold.fold_home(1, 2.0, &fields, &home_a)
