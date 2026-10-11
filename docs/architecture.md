@@ -605,7 +605,7 @@ graph TD
     subgraph "Single Dwelling"
         PD -->|"from_hpxml()"| Init["Parse HPXML + EPW + Schedule"]
         Init --> DW["Dwelling"]
-        PD -->|"simulate()"| Full["Full horizon → DataFrame"]
+        PD -->|"simulate()"| Full["Full horizon → RunResult"]
         PD -->|"step()"| Step["Single timestep → Dict"]
         PD -->|"apply_control()"| Ctrl["Queue ControlSignal"]
     end
@@ -623,7 +623,7 @@ graph TD
 | Method | Description |
 |--------|-------------|
 | `PyDwelling.from_hpxml(hpxml, schedule, weather, **kwargs)` | Construct dwelling from file paths |
-| `PyDwelling.simulate()` | Run full simulation horizon, return Polars DataFrame |
+| `PyDwelling.simulate()` | Run full simulation horizon, return the run's `RunResult` (read the frame off `result.reports[i].table()`) |
 | `PyDwelling.step()` | Advance one timestep, return telemetry dict |
 | `PyDwelling.apply_control(name, signal)` | Queue control signal for next step |
 | `PyFleet.from_resstock(metadata, buildings_dir, weather_dir)` | Load building portfolio |

@@ -528,7 +528,9 @@ def _run_simulation(
                     "source": "manual",
                 }
 
-            hares_df = dw.simulate()
+            # simulate() returns the run's RunResult; the results panel
+            # reads the frame off the memory report's table().
+            hares_df = dw.simulate().reports[0].table()
 
         ochre_df = None
         if do_ochre:

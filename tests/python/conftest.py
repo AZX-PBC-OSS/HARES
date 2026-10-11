@@ -123,10 +123,10 @@ def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool 
 
 def reports_for(verbosity: int = 0, csv_path: str | None = None) -> list[ReportSpec]:
     """The report requests for a test run: a ``verbosity`` memory report
-    (its batches are the frame ``results()`` and ``metrics()`` read), plus
-    a csv file destination when a test reads the file. Reports live only
-    where a test declares them: nothing is recorded that no report
-    requests."""
+    (its batches are the frame a finished run's ``RunResult`` reports
+    carry, read through ``ReportResult.table()``), plus a csv file
+    destination when a test reads the file. Reports live only where a test
+    declares them: nothing is recorded that no report requests."""
     from hares import Destination, ReportSpec, Selection
 
     reports: list[ReportSpec] = []
@@ -182,12 +182,13 @@ def make_dwelling(
 
     The sim config states every field the tests' frames read: the
     ``verbosity`` memory report keeps the recorder's batches in memory,
-    which ``results()`` and ``metrics()`` read for the full schema;
-    ``csv_path`` adds a csv file destination when a test reads the file.
-    ``metrics`` requests the run metrics the tests read (pass
-    ``metrics=False`` for a run that must carry none). Nothing in the
-    engine defaults a report on: nothing is recorded that no report
-    requests, and no metrics are computed that were not requested.
+    which the finished run's ``RunResult`` carries and a report's
+    ``table()`` reads for the full schema; ``csv_path`` adds a csv file
+    destination when a test reads the file. ``metrics`` requests the run
+    metrics the tests read (pass ``metrics=False`` for a run that must
+    carry none). Nothing in the engine defaults a report on: nothing is
+    recorded that no report requests, and no metrics are computed that
+    were not requested.
     """
     from hares import Dwelling, SimulationConfig
 

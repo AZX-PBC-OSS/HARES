@@ -945,8 +945,10 @@ class TestDerSimulationExplorer:
         ev = EV("EV", capacity_kwh=75.0, max_charging_kw=7.68)
         dw.add_ev(ev)
 
-        # Run simulation
-        df = dw.simulate()
+        # Run simulation: the return value is the run's RunResult; the
+        # frame comes from the memory report's delivered batches.
+        result = dw.simulate()
+        df = result.reports[0].table()
         assert isinstance(df, pl.DataFrame)
 
         cols = df.columns
