@@ -44,6 +44,7 @@ fn cz2a_config(
                 destination: Destination::Memory,
             }],
             diagnostics: false,
+            metrics: false,
             output_chunk_size: 96,
             setpoint_deadband_c: None,
             master_seed: 0,
