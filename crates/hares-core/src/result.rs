@@ -232,9 +232,10 @@ pub struct Provenance {
 pub struct RunResult {
     /// One result per configured report, in `reports` order.
     pub reports: Vec<ReportResult>,
-    /// The run's metrics; `None` when the run declared no report (metrics
-    /// are computed from the reports' flushed batches until the metrics
-    /// entry decouples them).
+    /// The run's metrics; `None` when the run did not request them
+    /// (`SimulationConfig.metrics`): without the request no metrics input
+    /// plan is built and no accumulator is fed, so there is nothing to
+    /// finalize.
     pub metrics: Option<RunMetrics>,
     /// The run's health totals, recorded unconditionally in every build.
     pub health: RunHealth,

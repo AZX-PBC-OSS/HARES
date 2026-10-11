@@ -39,7 +39,8 @@ impl PyRunResult {
             .collect()
     }
 
-    /// The run's metrics; `None` when the run declared no report.
+    /// The run's metrics; `None` when the run did not request them
+    /// (`SimulationConfig.metrics`).
     #[getter]
     fn metrics(&self) -> Option<PyRunMetrics> {
         self.inner.metrics.as_ref().map(|metrics| PyRunMetrics {
