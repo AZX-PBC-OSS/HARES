@@ -31,15 +31,22 @@ def _frame_report(verbosity: int) -> list[ReportSpec]:
     return [ReportSpec("frame", Selection.verbosity(verbosity), Destination.memory())]
 
 
-def _base_config(verbosity: int = 0, metrics: bool = True, **extra: Any) -> SimulationConfig:
+def _base_config(
+    verbosity: int = 0,
+    metrics: bool = True,
+    start_time: str = "2019-01-01T00:00:00",
+    duration: int = 3600,
+    time_res: int = 60,
+    **extra: Any,
+) -> SimulationConfig:
     # The verbosity memory report retains the batches metrics() reads;
     # nothing is recorded that no report requests. The tests read metrics,
     # so they request them (pass metrics=False for a run that carries
     # none).
     return SimulationConfig(
-        start_time="2019-01-01T00:00:00",
-        duration=3600,
-        time_res=60,
+        start_time=start_time,
+        duration=duration,
+        time_res=time_res,
         reports=_frame_report(verbosity),
         metrics=metrics,
         **extra,

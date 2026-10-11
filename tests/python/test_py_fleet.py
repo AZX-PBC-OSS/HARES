@@ -478,7 +478,7 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, verbosity=1)
+    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, reports=[ReportSpec("frame", Selection.verbosity(1), Destination.memory())])
 
     # The battery dwelling declares the control it tests: `Manual`, the
     # idle battery the column-mismatch scenario was built on.
