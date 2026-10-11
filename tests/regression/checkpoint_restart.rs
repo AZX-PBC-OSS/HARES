@@ -34,7 +34,7 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     helpers::write_schedule_csv(&schedule_path);
     helpers::write_weather_epw(&weather_path);
 
-    let config = helpers::build_dwelling_config(
+    let mut config = helpers::build_dwelling_config(
         scratch.path(),
         1,
         schedule_path.clone(),
@@ -42,6 +42,13 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
         Duration::minutes(TOTAL_STEPS),
         42,
     );
+    // A file-destination report refuses a checkpoint restore (no file
+    // state travels in a checkpoint), so the resume scenarios run on the
+    // memory report; the step digests below are what they compare.
+    config
+        .sim_config
+        .reports
+        .retain(|report| report.name != "file");
 
     let mut failures = Vec::new();
 
@@ -375,7 +382,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     helpers::write_schedule_csv(&schedule_path);
     helpers::write_weather_epw(&weather_path);
 
-    let config = helpers::build_dwelling_config(
+    let mut config = helpers::build_dwelling_config(
         scratch.path(),
         1,
         schedule_path.clone(),
@@ -383,6 +390,13 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         chrono::Duration::minutes(10),
         42,
     );
+    // A file-destination report refuses a checkpoint restore (no file
+    // state travels in a checkpoint), so the resume scenario runs on the
+    // memory report.
+    config
+        .sim_config
+        .reports
+        .retain(|report| report.name != "file");
 
     let mut failures = Vec::new();
 

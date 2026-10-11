@@ -11,6 +11,25 @@
 //! warning after the run record is full.
 
 use hares_types::Warning;
+use serde::{Deserialize, Serialize};
+
+/// The warning log's full mutable state, as a checkpoint section: both
+/// bounded buffers and their dropped counts. A restored run's warning
+/// record continues the interrupted run's: the run record is the finished
+/// run's `RunResult.warnings`, the pending drain the caller's next
+/// [`WarningLog::take`].
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WarningLogSnapshot {
+    /// The run record's kept warnings, in push order.
+    pub run_record: Vec<Warning>,
+    /// Warnings dropped past the run record's capacity.
+    pub run_record_dropped: u64,
+    /// The pending drain's kept warnings, in push order.
+    pub pending: Vec<Warning>,
+    /// Warnings dropped past the pending drain's capacity since the last
+    /// take.
+    pub pending_dropped: u64,
+}
 
 /// Bounded FIFO warning store: the run record keeps the first
 /// [`Self::CAPACITY`] warnings of the run, the pending drain the first
@@ -121,6 +140,31 @@ impl WarningLog {
             self.pending_dropped = 0;
         }
         out
+    }
+
+    /// The log's full mutable state as a checkpoint section; the
+    /// counterpart of [`Self::restore`]. The step stamp in force is
+    /// transient (a step-scoped bracket), so it does not travel.
+    #[must_use]
+    pub fn snapshot(&self) -> WarningLogSnapshot {
+        WarningLogSnapshot {
+            run_record: self.run_record.clone(),
+            run_record_dropped: self.run_record_dropped,
+            pending: self.pending.clone(),
+            pending_dropped: self.pending_dropped,
+        }
+    }
+
+    /// Replaces both buffers and their dropped counts with the snapshot's:
+    /// a restored run's warning record continues the interrupted run's,
+    /// the record the finished run reports and the caller's next drain
+    /// alike.
+    pub fn restore(&mut self, snapshot: WarningLogSnapshot) {
+        self.run_record = snapshot.run_record;
+        self.run_record_dropped = snapshot.run_record_dropped;
+        self.pending = snapshot.pending;
+        self.pending_dropped = snapshot.pending_dropped;
+        self.now = None;
     }
 }
 

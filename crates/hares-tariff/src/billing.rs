@@ -4,7 +4,10 @@ use chrono::{DateTime, Datelike, Duration, TimeZone};
 use chrono_tz::Tz;
 use hares_types::{BillingCycle, HaresError, season_contains_month};
 
-use crate::snapshot::{BillingStateSnapshot, DemandWindowSnapshot, datetime_from_string};
+use crate::snapshot::{
+    BillingPeriodSummarySnapshot, BillingStateSnapshot, DemandWindowSnapshot, LocalInstant,
+    SnapshotError,
+};
 use crate::types::{RatchetConfig, TieredBlock};
 
 struct DemandWindow {
@@ -453,9 +456,9 @@ impl BillingState {
     /// counterpart of [`BillingState::from_snapshot`].
     pub(crate) fn snapshot(&self) -> BillingStateSnapshot {
         BillingStateSnapshot {
-            period_start: self.period_start.to_rfc3339(),
-            period_end: self.period_end.to_rfc3339(),
-            active_since: self.active_since.to_rfc3339(),
+            period_start: LocalInstant::new(&self.period_start),
+            period_end: LocalInstant::new(&self.period_end),
+            active_since: LocalInstant::new(&self.active_since),
             cumulative_import_kwh: self.cumulative_import_kwh,
             cumulative_export_kwh: self.cumulative_export_kwh,
             cumulative_energy_cost_usd: self.cumulative_energy_cost_usd,
@@ -479,18 +482,18 @@ impl BillingState {
     }
 
     /// Rebuilds a billing state from its snapshot. `tz` is the evaluator's
-    /// time zone; the snapshot's timestamps parse into it. `num_tou_periods`
-    /// is the live period name table's length: the per-period peak vectors
-    /// must match it, or the snapshot was written against a different
-    /// tariff and is rejected.
+    /// time zone; the snapshot's bounds resolve in it as local instants.
+    /// `num_tou_periods` is the live period name table's length: the
+    /// per-period peak vectors must match it, or the snapshot was written
+    /// against a different tariff and is rejected.
     pub(crate) fn from_snapshot(
         snapshot: BillingStateSnapshot,
         tz: Tz,
         num_tou_periods: usize,
     ) -> Result<Self, HaresError> {
-        let period_start = datetime_from_string(tz, "period_start", &snapshot.period_start)?;
-        let period_end = datetime_from_string(tz, "period_end", &snapshot.period_end)?;
-        let active_since = datetime_from_string(tz, "active_since", &snapshot.active_since)?;
+        let period_start = snapshot.period_start.resolve(tz)?;
+        let period_end = snapshot.period_end.resolve(tz)?;
+        let active_since = snapshot.active_since.resolve(tz)?;
         if snapshot.period_peak_demand_kw.len() != num_tou_periods
             || snapshot.prior_period_peaks.len() != num_tou_periods
         {
@@ -647,6 +650,64 @@ impl BillingPeriodSummary {
             total_import_kwh,
             total_export_kwh,
         }
+    }
+
+    /// The closed period's summary as a checkpoint section; the
+    /// counterpart of [`BillingPeriodSummary::from_snapshot`].
+    #[must_use]
+    pub fn snapshot(&self) -> BillingPeriodSummarySnapshot {
+        BillingPeriodSummarySnapshot {
+            zone: self.period_start.timezone().name().to_string(),
+            period_start: LocalInstant::new(&self.period_start),
+            period_end: LocalInstant::new(&self.period_end),
+            energy_charge_usd: self.energy_charge_usd,
+            demand_charge_usd: self.demand_charge_usd,
+            fixed_charge_usd: self.fixed_charge_usd,
+            export_credit_usd: self.export_credit_usd,
+            net_bill_usd: self.net_bill_usd,
+            peak_demand_kw: self.peak_demand_kw,
+            total_import_kwh: self.total_import_kwh,
+            total_export_kwh: self.total_export_kwh,
+        }
+    }
+
+    /// Rebuilds a closed period's summary from its checkpoint section.
+    ///
+    /// The snapshot's zone must be `tz`, the zone of the evaluator the
+    /// summary restores beside: a summary written in another zone is
+    /// [`SnapshotError::ZoneMismatch`], a zone name that parses to no IANA
+    /// zone [`SnapshotError::UnknownZone`], and a bound whose wall clock
+    /// the zone skips [`SnapshotError::UnresolvedLocalInstant`].
+    ///
+    /// # Errors
+    ///
+    /// The three snapshot errors above.
+    pub fn from_snapshot(
+        snapshot: BillingPeriodSummarySnapshot,
+        tz: Tz,
+    ) -> Result<Self, SnapshotError> {
+        let zone: Tz = snapshot
+            .zone
+            .parse()
+            .map_err(|_| SnapshotError::UnknownZone(snapshot.zone.clone()))?;
+        if zone.name() != tz.name() {
+            return Err(SnapshotError::ZoneMismatch {
+                snapshot_zone: zone.name().to_string(),
+                live_zone: tz.name().to_string(),
+            });
+        }
+        Ok(Self {
+            period_start: snapshot.period_start.resolve(tz)?,
+            period_end: snapshot.period_end.resolve(tz)?,
+            energy_charge_usd: snapshot.energy_charge_usd,
+            demand_charge_usd: snapshot.demand_charge_usd,
+            fixed_charge_usd: snapshot.fixed_charge_usd,
+            export_credit_usd: snapshot.export_credit_usd,
+            net_bill_usd: snapshot.net_bill_usd,
+            peak_demand_kw: snapshot.peak_demand_kw,
+            total_import_kwh: snapshot.total_import_kwh,
+            total_export_kwh: snapshot.total_export_kwh,
+        })
     }
 }
 

@@ -17,6 +17,7 @@ use arrow::datatypes::Schema;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::callback::CallbackAttachment;
@@ -56,6 +57,11 @@ pub enum OutputError {
     HardLinkUnavailable { target: PathBuf },
     #[error("callback for report '{report}' failed: {message}")]
     Callback { report: String, message: String },
+    /// A rows snapshot did not fit the recorder it restores into: the
+    /// values' width does not match the schema, the buffered tail exceeds
+    /// the rows, or the batch count disagrees with the flushed shape.
+    #[error("report rows snapshot: {0}")]
+    Snapshot(String),
 }
 
 /// Whether a `hard_link` failure means this filesystem cannot complete a
@@ -82,6 +88,172 @@ enum Backend {
 /// running processes, so a reused pid must not reconstruct a stale
 /// partial name.
 static PARTIAL_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A recorder's row stream, as a checkpoint section: every row's
+/// timestamp and values in row order, the trailing rows that were still
+/// buffered when the checkpoint was taken, and the batch count (the
+/// batch index a resumed run's callback deliveries continue from).
+///
+/// The rows carry the recorder's whole output state: a fresh recorder
+/// restored from the snapshot holds the written run's batches bitwise,
+/// the batches rebuilt from the rows deterministically (the flushes ran
+/// at the chunk boundaries, so the batch boundaries follow from the row
+/// stream and the chunk size).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReportRowsSnapshot {
+    /// Every row's timestamps, in row order (the naive local wall-clock
+    /// milliseconds the Time field carries).
+    pub timestamps: Vec<i64>,
+    /// Every row's values, row-major: `timestamps.len()` rows of one
+    /// entry per value column, in the schema's order.
+    pub values: Vec<f64>,
+    /// The trailing rows that were still buffered (not yet flushed) when
+    /// the checkpoint was taken.
+    pub buffered_rows: usize,
+    /// Batches the recorder had built (and delivered) so far.
+    pub batches_built: u64,
+}
+
+impl StreamingRecorder {
+    /// The recorder's row stream as a checkpoint section; the counterpart
+    /// of [`Self::restore_rows`].
+    #[must_use]
+    pub fn rows_snapshot(&self) -> ReportRowsSnapshot {
+        let width = self.value_bufs.len();
+        let buffered = self.timestamp_buf.len();
+        let mut timestamps = Vec::with_capacity(self.total_rows);
+        let mut values = Vec::with_capacity(self.total_rows * width);
+        // The flushed batches' rows first, in flush order: the batches'
+        // schema is the recorder's own.
+        for batch in &self.flushed_batches {
+            let ts = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("the recorder's batches carry the Time column");
+            let columns: Vec<&Float64Array> = batch
+                .columns()
+                .iter()
+                .skip(1)
+                .map(|c| {
+                    c.as_any()
+                        .downcast_ref::<Float64Array>()
+                        .expect("the recorder's batches carry f64 value columns")
+                })
+                .collect();
+            for r in 0..batch.num_rows() {
+                timestamps.push(ts.value(r));
+                for column in &columns {
+                    values.push(column.value(r));
+                }
+            }
+        }
+        // Then the buffered rows.
+        for r in 0..buffered {
+            timestamps.push(self.timestamp_buf[r]);
+            for buf in &self.value_bufs {
+                values.push(buf[r]);
+            }
+        }
+        ReportRowsSnapshot {
+            timestamps,
+            values,
+            buffered_rows: buffered,
+            batches_built: self.batches_built,
+        }
+    }
+
+    /// Restores the recorder's row stream from its checkpoint section:
+    /// the flushed batches rebuild from the rows (the flushes ran at the
+    /// chunk boundaries, the section's buffered tail marks the boundary),
+    /// and the counters take the snapshot's. The attached callback, if
+    /// any, sees none of the restored rows: the run that wrote the
+    /// checkpoint delivered them from its own recorder; the restored
+    /// counters keep the resumed run's deliveries continuing the
+    /// original's index.
+    ///
+    /// # Errors
+    ///
+    /// [`OutputError::Snapshot`] when the section does not fit this
+    /// recorder: a values width off the schema's column count, a buffered
+    /// tail beyond the rows, or a batch count that disagrees with the
+    /// flushed shape.
+    pub fn restore_rows(&mut self, snapshot: &ReportRowsSnapshot) -> Result<(), OutputError> {
+        let width = self.value_bufs.len();
+        let rows = snapshot.timestamps.len();
+        if snapshot.values.len() != rows * width {
+            return Err(OutputError::Snapshot(format!(
+                "the rows carry {} values for {} rows of {} columns",
+                snapshot.values.len(),
+                rows,
+                width
+            )));
+        }
+        if snapshot.buffered_rows > rows {
+            return Err(OutputError::Snapshot(format!(
+                "the buffered tail ({}) exceeds the rows ({rows})",
+                snapshot.buffered_rows
+            )));
+        }
+        let flushed = rows - snapshot.buffered_rows;
+        let expected_batches = if flushed == 0 {
+            0
+        } else {
+            u64::try_from(flushed.div_ceil(self.chunk_size)).expect("row count fits u64")
+        };
+        if snapshot.batches_built != expected_batches {
+            return Err(OutputError::Snapshot(format!(
+                "the section names {} built batches but its rows rebuild {}",
+                snapshot.batches_built, expected_batches
+            )));
+        }
+
+        let row_at = |r: usize| -> (i64, &[f64]) {
+            (
+                snapshot.timestamps[r],
+                &snapshot.values[r * width..(r + 1) * width],
+            )
+        };
+
+        // The flushed prefix rebuilds as batches of the chunk size, the
+        // final one possibly short when the written run closed its output
+        // before the checkpoint.
+        self.flushed_batches.clear();
+        let mut start = 0;
+        while start < flushed {
+            let end = (start + self.chunk_size).min(flushed);
+            let mut columns: Vec<Arc<dyn arrow::array::Array>> = Vec::with_capacity(width + 1);
+            columns.push(Arc::new(TimestampMillisecondArray::from(
+                snapshot.timestamps[start..end].to_vec(),
+            )));
+            for c in 0..width {
+                let column: Vec<f64> = (start..end)
+                    .map(|r| snapshot.values[r * width + c])
+                    .collect();
+                columns.push(Arc::new(Float64Array::from(column)));
+            }
+            let batch = RecordBatch::try_new(Arc::clone(&self.schema), columns)?;
+            self.flushed_batches.push(batch);
+            start = end;
+        }
+
+        // The buffered tail lands back in the buffers.
+        self.timestamp_buf.clear();
+        for buf in &mut self.value_bufs {
+            buf.clear();
+        }
+        for r in flushed..rows {
+            let (timestamp, values) = row_at(r);
+            self.timestamp_buf.push(timestamp);
+            for (buf, &value) in self.value_bufs.iter_mut().zip(values) {
+                buf.push(value);
+            }
+        }
+        self.total_rows = rows;
+        self.batches_built = snapshot.batches_built;
+        Ok(())
+    }
+}
 
 /// One report's streaming recorder: buffers rows, flushes batches to the
 /// report's destination.
@@ -530,6 +702,7 @@ mod tests {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     use super::*;
+    use crate::output::callback::{BatchCallback, BatchContext, CallbackError, TIMESTEP_REPORT};
 
     fn test_schema() -> Schema {
         Schema::new(vec![
@@ -1013,6 +1186,134 @@ mod tests {
         assert_ne!(
             first.partial_path, second.partial_path,
             "two recorder creations in one process produce distinct partial names"
+        );
+    }
+
+    fn memory_recorder(schema: &Schema, chunk: usize) -> StreamingRecorder {
+        StreamingRecorder::new(schema.clone(), chunk, Destination::Memory).unwrap()
+    }
+
+    fn rows_of(batches: &[RecordBatch]) -> Vec<(i64, Vec<u64>)> {
+        let mut out = Vec::new();
+        for batch in batches {
+            let ts = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("timestamp column");
+            let values: Vec<&Float64Array> = batch
+                .columns()
+                .iter()
+                .skip(1)
+                .map(|c| {
+                    c.as_any()
+                        .downcast_ref::<Float64Array>()
+                        .expect("f64 column")
+                })
+                .collect();
+            for r in 0..batch.num_rows() {
+                out.push((
+                    ts.value(r),
+                    values.iter().map(|c| c.value(r).to_bits()).collect(),
+                ));
+            }
+        }
+        out
+    }
+
+    /// A recorder's rows snapshot restores a fresh recorder to the same
+    /// state: the flushed batches bitwise (values, timestamps, order), the
+    /// buffered tail, and the counters.
+    #[test]
+    fn recorder_rows_snapshot_restores_flushed_batches_and_buffers_bitwise() {
+        let schema = test_schema();
+        let mut original = memory_recorder(&schema, 4);
+        for i in 0..9_i64 {
+            original
+                .push_row(1_000 * i, &[i as f64 * 1.5, i as f64 * -0.25])
+                .unwrap();
+        }
+        // 9 rows at chunk 4: two full flushes, one buffered row.
+        assert_eq!(original.buffered_rows(), 1);
+        assert_eq!(original.batches_built(), 2);
+
+        let snapshot = original.rows_snapshot();
+        let json = serde_json::to_string(&snapshot).expect("serialize the snapshot");
+        let decoded: ReportRowsSnapshot = serde_json::from_str(&json).expect("decode");
+
+        let mut restored = memory_recorder(&schema, 4);
+        restored.restore_rows(&decoded).expect("restore");
+        assert_eq!(restored.total_rows(), 9);
+        assert_eq!(restored.buffered_rows(), 1);
+        assert_eq!(restored.batches_built(), 2);
+        let before = rows_of(original.flushed_batches());
+        let after = rows_of(restored.flushed_batches());
+        assert_eq!(
+            before, after,
+            "the flushed batches are bitwise the original's"
+        );
+
+        // And the restored recorder keeps recording exactly as the
+        // original: the next flush builds the third batch.
+        original.push_row(9_000, &[13.5, -2.25]).unwrap();
+        restored.push_row(9_000, &[13.5, -2.25]).unwrap();
+        assert_eq!(
+            original.flushed_batches().len(),
+            restored.flushed_batches().len()
+        );
+        let a = rows_of(original.flushed_batches());
+        let b = rows_of(restored.flushed_batches());
+        assert_eq!(a, b, "the post-restore batches continue bitwise");
+    }
+
+    /// A restored recorder's next callback delivery carries the batch
+    /// index the interrupted run reached, so a resumed run's callback
+    /// stream continues the original's.
+    #[test]
+    fn restored_recorder_continues_the_callback_index() {
+        use std::sync::atomic::AtomicU64;
+
+        struct Counting(std::sync::Arc<AtomicU64>);
+        impl BatchCallback for Counting {
+            fn on_batch(
+                &mut self,
+                ctx: &BatchContext<'_>,
+                _batch: &RecordBatch,
+            ) -> Result<(), CallbackError> {
+                self.0.store(ctx.batch_index, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let schema = test_schema();
+        let mut original = memory_recorder(&schema, 4);
+        let seen = std::sync::Arc::new(AtomicU64::new(0));
+        original.attach_callback(CallbackAttachment::new(
+            TIMESTEP_REPORT,
+            1,
+            Box::new(Counting(std::sync::Arc::clone(&seen))),
+        ));
+        for i in 0..9_i64 {
+            original.push_row(1_000 * i, &[i as f64, 0.0]).unwrap();
+        }
+        // Two deliveries: indices 0 and 1.
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+
+        let snapshot = original.rows_snapshot();
+        let mut restored = memory_recorder(&schema, 4);
+        restored.restore_rows(&snapshot).expect("restore");
+        restored.attach_callback(CallbackAttachment::new(
+            TIMESTEP_REPORT,
+            1,
+            Box::new(Counting(std::sync::Arc::clone(&seen))),
+        ));
+        // The next flush delivers with the continued index 2.
+        restored.push_row(9_000, &[9.0, 0.0]).unwrap();
+        restored.flush().unwrap();
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            2,
+            "the restored recorder's deliveries continue the interrupted run's index"
         );
     }
 }

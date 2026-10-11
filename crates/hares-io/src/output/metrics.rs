@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use arrow::array::{Array, Float64Array, RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::DataType;
 use chrono::{DateTime, Datelike, Duration};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use hares_physics::constants::HOURS_PER_YEAR;
@@ -52,6 +53,8 @@ const EPSILON: f64 = 1e-9;
 /// [`MetricsCalculator::new`] and [`metrics_from_table`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MetricsError {
+    #[error("metrics snapshot mismatch: {0}")]
+    Snapshot(String),
     #[error("time_res_secs must be greater than zero")]
     InvalidTimeResolution,
     #[error("required metrics column missing: {0}")]
@@ -77,7 +80,7 @@ pub enum MetricsError {
 }
 
 /// Total accumulated electric energy over the simulation period.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TotalEnergyKwh {
     /// Net electric energy at the meter — gross consumption minus gross PV
     /// generation (kWh). Positive = import, negative = export. The identity
@@ -99,7 +102,7 @@ pub struct TotalEnergyKwh {
 }
 
 /// Rolling-window peak demand metrics at standard demand intervals.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RollingPeakKw {
     /// Peak 15-minute average demand (kW).
     pub peak_15min_kw: f64,
@@ -110,7 +113,7 @@ pub struct RollingPeakKw {
 }
 
 /// Peak power metrics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PeakPowerKw {
     /// Peak instantaneous power by end-use key.
     pub per_end_use: BTreeMap<String, f64>,
@@ -119,7 +122,7 @@ pub struct PeakPowerKw {
 }
 
 /// Grid interaction demand metrics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GridInteractionMetrics {
     /// Maximum grid import (positive draw) over the run.
     pub peak_import_kw: f64,
@@ -128,7 +131,7 @@ pub struct GridInteractionMetrics {
 }
 
 /// Gas energy metrics, available when a gas power column is present.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GasEnergyMetrics {
     /// Total annual gas energy in therms.
     pub total_therms: f64,
@@ -149,7 +152,7 @@ pub struct GasEnergyMetrics {
 /// column rather than in any of these fields. The exception is
 /// [`Self::interior_lwr_kwh`], a gross exchange metric that is documented inline
 /// and must not be summed into a net balance.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct EnvelopeComponentLoadsKwh {
     /// Window transmitted + absorbed-inward solar gain.
     pub window_solar_kwh: f64,
@@ -190,7 +193,7 @@ pub struct EnvelopeComponentLoadsKwh {
 }
 
 /// Per-equipment efficiency metrics.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct EfficiencyMetrics {
     /// HVAC heating COP: total thermal output / total electrical input.
     /// `None` if no heating occurred.
@@ -207,7 +210,7 @@ pub struct EfficiencyMetrics {
 }
 
 /// Whether the simulation period covers a full calendar year.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SimulationCoverage {
     /// Full non-leap calendar year (8760 h).
     FullYear,
@@ -220,7 +223,7 @@ pub enum SimulationCoverage {
 }
 
 /// Whether the simulation metrics are fully reliable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Reliability {
     /// All power timesteps were finite — no accumulators were poisoned.
     Reliable,
@@ -239,7 +242,7 @@ impl Reliability {
 }
 
 /// Final simulation metrics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SimulationMetrics {
     pub total_energy_kwh: TotalEnergyKwh,
     pub peak_power_kw: PeakPowerKw,
@@ -271,7 +274,7 @@ pub struct SimulationMetrics {
 /// Extended metrics returned by [`MetricsCalculator::finish`], including gas tracking.
 ///
 /// Derefs to [`SimulationMetrics`] for backward-compatible field access.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FullSimulationMetrics {
     /// Core simulation metrics.
     pub metrics: SimulationMetrics,
@@ -390,6 +393,41 @@ impl RollingPeakBuffer {
             peak_15min_kw: self.peak_15min_kw.max(0.0),
             peak_30min_kw: self.peak_30min_kw.max(0.0),
             peak_60min_kw: self.peak_60min_kw.max(0.0),
+        }
+    }
+
+    /// The buffer's full mutable state: the ring's contents and position,
+    /// the counts and the running peaks.
+    fn snapshot(&self) -> MetricsRollingPeakSnapshot {
+        MetricsRollingPeakSnapshot {
+            buffer: self.buffer.clone(),
+            head: self.head,
+            count: self.count,
+            peak_15min_kw: self.peak_15min_kw,
+            peak_30min_kw: self.peak_30min_kw,
+            peak_60min_kw: self.peak_60min_kw,
+        }
+    }
+
+    /// Restores the buffer's mutable state from its snapshot. The window
+    /// sizes are the receiver's own (derived from the time resolution),
+    /// and the snapshot's ring must have been built at the same
+    /// resolution: the plan comparison ahead of the restore pins the
+    /// calculator's identity, and a same-plan rebuild sizes the ring
+    /// identically.
+    fn restore(&mut self, snapshot: MetricsRollingPeakSnapshot) {
+        debug_assert_eq!(
+            snapshot.buffer.len(),
+            self.buffer.len(),
+            "a restored rolling peak buffer holds its resolution's ring"
+        );
+        if snapshot.buffer.len() == self.buffer.len() {
+            self.buffer.copy_from_slice(&snapshot.buffer);
+            self.head = snapshot.head % self.buffer.len().max(1);
+            self.count = snapshot.count.min(self.buffer.len());
+            self.peak_15min_kw = snapshot.peak_15min_kw;
+            self.peak_30min_kw = snapshot.peak_30min_kw;
+            self.peak_60min_kw = snapshot.peak_60min_kw;
         }
     }
 }
@@ -551,6 +589,160 @@ impl MetricsInputPlan {
             end_use_equipment_counts: compute_equipment_counts_from_names(available),
         })
     }
+
+    /// The input plan's resolved slots, as the checkpoint section's plan
+    /// half; the counterpart a restore compares the rebuilt plan against.
+    #[must_use]
+    pub fn snapshot(&self) -> MetricsPlanSnapshot {
+        MetricsPlanSnapshot {
+            total_electric_power_slot: self.total_electric_power_slot,
+            total_gas_power_slot: self.total_gas_power_slot,
+            grid_power_slot: self.grid_power_slot,
+            pv_power_slot: self.pv_power_slot,
+            end_use_columns: self.end_use_columns.clone(),
+            setpoints: self
+                .setpoints
+                .as_ref()
+                .map(|setpoints| MetricsSetpointSnapshot {
+                    heating_setpoint_slot: setpoints.heating_setpoint_slot,
+                    cooling_setpoint_slot: setpoints.cooling_setpoint_slot,
+                    zone_temperature_slots: setpoints.zone_temperature_slots.clone(),
+                    deadband: match &setpoints.deadband {
+                        DeadbandSource::Constant(value) => {
+                            MetricsDeadbandSnapshot::Constant(*value)
+                        }
+                        DeadbandSource::Column(slot) => MetricsDeadbandSnapshot::Column(*slot),
+                    },
+                }),
+            hvac_capacity_pairs: self.hvac_capacity_pairs.clone(),
+            window_solar_w_slot: self.window_solar_w_slot,
+            infiltration_w_slot: self.infiltration_w_slot,
+            interior_lwr_w_slot: self.interior_lwr_w_slot,
+            internal_gains_w_slot: self.internal_gains_w_slot,
+            opaque_conduction_w_slot: self.opaque_conduction_w_slot,
+            window_conduction_w_slot: self.window_conduction_w_slot,
+            internal_mass_w_slot: self.internal_mass_w_slot,
+            forced_ventilation_w_slot: self.forced_ventilation_w_slot,
+            natural_ventilation_w_slot: self.natural_ventilation_w_slot,
+            duct_loss_w_slot: self.duct_loss_w_slot,
+            hvac_heating_delivered_w_slot: self.hvac_heating_delivered_w_slot,
+            hvac_cooling_delivered_w_slot: self.hvac_cooling_delivered_w_slot,
+            hvac_heating_kw_slot: self.hvac_heating_kw_slot,
+            hvac_cooling_kw_slot: self.hvac_cooling_kw_slot,
+            battery_kw_slot: self.battery_kw_slot,
+        }
+    }
+}
+
+/// The metrics input plan's resolved slots, as a checkpoint section: the
+/// plan a resumed run rebuilds must resolve exactly this, or the
+/// checkpoint's accumulators were fed from a different producer surface
+/// and its totals would mix two schemas' columns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsPlanSnapshot {
+    pub total_electric_power_slot: usize,
+    pub total_gas_power_slot: Option<usize>,
+    pub grid_power_slot: usize,
+    pub pv_power_slot: Option<usize>,
+    pub end_use_columns: Vec<(String, usize)>,
+    pub setpoints: Option<MetricsSetpointSnapshot>,
+    pub hvac_capacity_pairs: Vec<(usize, usize)>,
+    pub window_solar_w_slot: Option<usize>,
+    pub infiltration_w_slot: Option<usize>,
+    pub interior_lwr_w_slot: Option<usize>,
+    pub internal_gains_w_slot: Option<usize>,
+    pub opaque_conduction_w_slot: Option<usize>,
+    pub window_conduction_w_slot: Option<usize>,
+    pub internal_mass_w_slot: Option<usize>,
+    pub forced_ventilation_w_slot: Option<usize>,
+    pub natural_ventilation_w_slot: Option<usize>,
+    pub duct_loss_w_slot: Option<usize>,
+    pub hvac_heating_delivered_w_slot: Option<usize>,
+    pub hvac_cooling_delivered_w_slot: Option<usize>,
+    pub hvac_heating_kw_slot: Option<usize>,
+    pub hvac_cooling_kw_slot: Option<usize>,
+    pub battery_kw_slot: Option<usize>,
+}
+
+/// The setpoint inputs' resolved slots, as part of [`MetricsPlanSnapshot`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsSetpointSnapshot {
+    pub heating_setpoint_slot: usize,
+    pub cooling_setpoint_slot: usize,
+    pub zone_temperature_slots: Vec<usize>,
+    pub deadband: MetricsDeadbandSnapshot,
+}
+
+/// The deadband's source, as part of [`MetricsSetpointSnapshot`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum MetricsDeadbandSnapshot {
+    Constant(f64),
+    Column(usize),
+}
+
+/// The metrics accumulator's mutable state, exact at the checkpoint step:
+/// the section a checkpoint restores so a resumed run's metrics finalize
+/// to the continuous run's, every float on bits.
+///
+/// A non-finite peak value is the one state the JSON cannot carry: the
+/// calculator's `peak_by_end_use` holds a `NEG_INFINITY` sentinel for
+/// every end use that has read no finite power yet, so peaks travel as
+/// `Option<f64>` with `None` for a non-finite value (the sentinel; no
+/// other non-finite can sit there, and a non-finite accumulator elsewhere
+/// fails the run).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsAccumulatorsSnapshot {
+    pub total_electric_energy_kwh: f64,
+    pub total_gas_energy_therms: f64,
+    pub total_consumption_kwh: f64,
+    pub total_pv_generation_kwh_abs: f64,
+    pub peak_import_kw: f64,
+    pub peak_export_kw: f64,
+    pub energy_by_end_use: BTreeMap<String, f64>,
+    pub peak_by_end_use: BTreeMap<String, Option<f64>>,
+    pub comfort_step_count: f64,
+    pub unmet_step_count: f64,
+    pub rolling_peak: MetricsRollingPeakSnapshot,
+    pub envelope_window_solar_wh: f64,
+    pub envelope_opaque_conduction_wh: f64,
+    pub envelope_window_conduction_wh: f64,
+    pub envelope_internal_mass_wh: f64,
+    pub envelope_interior_lwr_wh: f64,
+    pub envelope_infiltration_wh: f64,
+    pub envelope_ventilation_wh: f64,
+    pub envelope_hvac_heating_wh: f64,
+    pub envelope_hvac_cooling_wh: f64,
+    pub envelope_internal_gains_wh: f64,
+    pub envelope_duct_loss_wh: f64,
+    pub hvac_heating_electric_wh: f64,
+    pub hvac_cooling_electric_wh: f64,
+    pub battery_energy_in_kwh: f64,
+    pub battery_energy_out_kwh: f64,
+    pub total_row_count: u64,
+    pub setpoint_missing_row_count: u64,
+    pub nan_step_count: u64,
+}
+
+/// The rolling peak buffer's ring state, as part of
+/// [`MetricsAccumulatorsSnapshot`]. The window sizes are derived from the
+/// time resolution the fresh calculator is built with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsRollingPeakSnapshot {
+    pub buffer: Vec<f64>,
+    pub head: usize,
+    pub count: usize,
+    pub peak_15min_kw: f64,
+    pub peak_30min_kw: f64,
+    pub peak_60min_kw: f64,
+}
+
+/// The run metrics' checkpoint section: the input plan's resolved slots
+/// and the accumulator state, present exactly when the run requested
+/// metrics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsSnapshot {
+    pub plan: MetricsPlanSnapshot,
+    pub accumulators: MetricsAccumulatorsSnapshot,
 }
 
 /// Streaming post-processing calculator fed one row per step.
@@ -716,6 +908,114 @@ impl MetricsCalculator {
     #[must_use]
     pub fn rows_fed(&self) -> u64 {
         self.total_row_count
+    }
+
+    /// The accumulator's full mutable state, exact at the current step,
+    /// with the input plan's resolved slots: the run metrics' checkpoint
+    /// section. The counterpart of [`Self::apply_snapshot`].
+    #[must_use]
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        MetricsSnapshot {
+            plan: self.plan.snapshot(),
+            accumulators: MetricsAccumulatorsSnapshot {
+                total_electric_energy_kwh: self.total_electric_energy_kwh,
+                total_gas_energy_therms: self.total_gas_energy_therms,
+                total_consumption_kwh: self.total_consumption_kwh,
+                total_pv_generation_kwh_abs: self.total_pv_generation_kwh_abs,
+                peak_import_kw: self.peak_import_kw,
+                peak_export_kw: self.peak_export_kw,
+                energy_by_end_use: self.energy_by_end_use.clone(),
+                peak_by_end_use: self
+                    .peak_by_end_use
+                    .iter()
+                    .map(|(name, peak)| (name.clone(), peak_finite(*peak)))
+                    .collect(),
+                comfort_step_count: self.comfort_step_count,
+                unmet_step_count: self.unmet_step_count,
+                rolling_peak: self.rolling_peak.snapshot(),
+                envelope_window_solar_wh: self.envelope_window_solar_wh,
+                envelope_opaque_conduction_wh: self.envelope_opaque_conduction_wh,
+                envelope_window_conduction_wh: self.envelope_window_conduction_wh,
+                envelope_internal_mass_wh: self.envelope_internal_mass_wh,
+                envelope_interior_lwr_wh: self.envelope_interior_lwr_wh,
+                envelope_infiltration_wh: self.envelope_infiltration_wh,
+                envelope_ventilation_wh: self.envelope_ventilation_wh,
+                envelope_hvac_heating_wh: self.envelope_hvac_heating_wh,
+                envelope_hvac_cooling_wh: self.envelope_hvac_cooling_wh,
+                envelope_internal_gains_wh: self.envelope_internal_gains_wh,
+                envelope_duct_loss_wh: self.envelope_duct_loss_wh,
+                hvac_heating_electric_wh: self.hvac_heating_electric_wh,
+                hvac_cooling_electric_wh: self.hvac_cooling_electric_wh,
+                battery_energy_in_kwh: self.battery_energy_in_kwh,
+                battery_energy_out_kwh: self.battery_energy_out_kwh,
+                total_row_count: self.total_row_count,
+                setpoint_missing_row_count: self.setpoint_missing_row_count,
+                nan_step_count: self.nan_step_count,
+            },
+        }
+    }
+
+    /// Restores the accumulator's mutable state from its checkpoint
+    /// section: the fresh calculator this run built keeps its own plan,
+    /// config and time resolution, and the checkpoint's plan must resolve
+    /// exactly the same slots — a mismatch means the checkpoint was fed
+    /// from a different producer surface, and the refusal names it.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::Snapshot`] when the checkpoint's input plan differs
+    /// from this run's.
+    pub fn apply_snapshot(&mut self, snapshot: &MetricsSnapshot) -> Result<(), MetricsError> {
+        if snapshot.plan != self.plan.snapshot() {
+            return Err(MetricsError::Snapshot(
+                "the checkpoint's metrics input plan does not resolve the same \
+                 producer slots this run's does"
+                    .to_string(),
+            ));
+        }
+        let restored = &snapshot.accumulators;
+        self.total_electric_energy_kwh = restored.total_electric_energy_kwh;
+        self.total_gas_energy_therms = restored.total_gas_energy_therms;
+        self.total_consumption_kwh = restored.total_consumption_kwh;
+        self.total_pv_generation_kwh_abs = restored.total_pv_generation_kwh_abs;
+        self.peak_import_kw = restored.peak_import_kw;
+        self.peak_export_kw = restored.peak_export_kw;
+        self.energy_by_end_use = restored.energy_by_end_use.clone();
+        self.peak_by_end_use = restored
+            .peak_by_end_use
+            .iter()
+            .map(|(name, peak)| (name.clone(), peak_non_finite_or(*peak)))
+            .collect();
+        self.comfort_step_count = restored.comfort_step_count;
+        self.unmet_step_count = restored.unmet_step_count;
+        self.rolling_peak.restore(restored.rolling_peak.clone());
+        self.envelope_window_solar_wh = restored.envelope_window_solar_wh;
+        self.envelope_opaque_conduction_wh = restored.envelope_opaque_conduction_wh;
+        self.envelope_window_conduction_wh = restored.envelope_window_conduction_wh;
+        self.envelope_internal_mass_wh = restored.envelope_internal_mass_wh;
+        self.envelope_interior_lwr_wh = restored.envelope_interior_lwr_wh;
+        self.envelope_infiltration_wh = restored.envelope_infiltration_wh;
+        self.envelope_ventilation_wh = restored.envelope_ventilation_wh;
+        self.envelope_hvac_heating_wh = restored.envelope_hvac_heating_wh;
+        self.envelope_hvac_cooling_wh = restored.envelope_hvac_cooling_wh;
+        self.envelope_internal_gains_wh = restored.envelope_internal_gains_wh;
+        self.envelope_duct_loss_wh = restored.envelope_duct_loss_wh;
+        self.hvac_heating_electric_wh = restored.hvac_heating_electric_wh;
+        self.hvac_cooling_electric_wh = restored.hvac_cooling_electric_wh;
+        self.battery_energy_in_kwh = restored.battery_energy_in_kwh;
+        self.battery_energy_out_kwh = restored.battery_energy_out_kwh;
+        self.total_row_count = restored.total_row_count;
+        self.setpoint_missing_row_count = restored.setpoint_missing_row_count;
+        self.nan_step_count = restored.nan_step_count;
+        Ok(())
+    }
+
+    /// The input plan's resolved slots, without the accumulator state: the
+    /// half a restore validates against the checkpoint's section before
+    /// any state changes.
+    #[must_use]
+    pub fn plan_snapshot(&self) -> MetricsPlanSnapshot {
+        self.plan.snapshot()
     }
 
     /// Read the total electric power slot's value, returning `Some` for
@@ -1674,6 +1974,19 @@ const HVAC_CAPACITY_REL_TOL: f64 = 1e-6;
 fn value_at_slot(row: &[f64], slot: usize) -> Option<f64> {
     let v = row[slot];
     v.is_finite().then_some(v)
+}
+
+/// A peak value as its snapshot form: `None` for a non-finite value (the
+/// `NEG_INFINITY` sentinel an end use holds before its first finite
+/// reading), `Some` for a finite one.
+fn peak_finite(peak: f64) -> Option<f64> {
+    peak.is_finite().then_some(peak)
+}
+
+/// The peak value a snapshot's form restores to: the `NEG_INFINITY`
+/// sentinel back from `None`, the finite value from `Some`.
+fn peak_non_finite_or(peak: Option<f64>) -> f64 {
+    peak.unwrap_or(f64::NEG_INFINITY)
 }
 
 #[cfg(test)]
@@ -3488,6 +3801,137 @@ mod tests {
             (metrics.combined_total_energy_kwh() - expected).abs() < 1e-6,
             "combined should be {expected}, got {}",
             metrics.combined_total_energy_kwh()
+        );
+    }
+
+    /// A metrics accumulator snapshot applied to a fresh calculator
+    /// continues the run bitwise: the fresh calculator feeds the same
+    /// post-snapshot rows as the original and both finish to metrics every
+    /// float of which carries the same bits.
+    #[test]
+    fn metrics_snapshot_restores_a_continuing_calculator_bitwise() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            TOTAL_GAS_POWER_THERMS,
+            "HVAC Heating End Use Electric Power (kW)",
+            "Temperature - Indoor (C)",
+        ]);
+        let config = test_config(None);
+        let mut continuous = calc_for(&schema, 900, &config);
+        let mut interrupted = calc_for(&schema, 900, &config);
+
+        let pre = build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![1.5, 2.5, 3.5, 0.25]),
+            (TOTAL_GAS_POWER_THERMS, vec![0.5, 0.5, 0.75, 0.0]),
+            (
+                "HVAC Heating End Use Electric Power (kW)",
+                vec![0.8, 1.2, 0.0, 0.0],
+            ),
+            ("Temperature - Indoor (C)", vec![21.0, 22.5, 19.0, 23.0]),
+        ]);
+        accumulate(&mut continuous, &pre).expect("feed");
+        accumulate(&mut interrupted, &pre).expect("feed");
+
+        // The checkpoint: the snapshot crosses JSON, the checkpoint's own
+        // encoding.
+        let snapshot = continuous.snapshot();
+        let json = serde_json::to_string(&snapshot).expect("serialize the snapshot");
+        let decoded: MetricsSnapshot = serde_json::from_str(&json).expect("decode the snapshot");
+        interrupted
+            .apply_snapshot(&decoded)
+            .expect("the snapshot applies");
+
+        let post = build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![4.5, 5.5, 0.5, 2.05]),
+            (TOTAL_GAS_POWER_THERMS, vec![1.25, 0.0, 0.0, 0.5]),
+            (
+                "HVAC Heating End Use Electric Power (kW)",
+                vec![1.4, 1.6, 0.0, 0.2],
+            ),
+            ("Temperature - Indoor (C)", vec![20.0, 21.5, 22.0, 20.5]),
+        ]);
+        accumulate(&mut continuous, &post).expect("feed");
+        accumulate(&mut interrupted, &post).expect("feed");
+
+        let a = continuous.finish().expect("finish");
+        let b = interrupted.finish().expect("finish");
+        let bits = |m: &FullSimulationMetrics| {
+            serde_json::to_string(m).expect("the metrics encode (equal bits, equal bytes)")
+        };
+        assert_eq!(
+            bits(&a),
+            bits(&b),
+            "the resumed accumulator's metrics are bitwise the continuous run's"
+        );
+    }
+
+    /// A snapshot whose input plan was built against a different producer
+    /// surface is refused, naming the section.
+    #[test]
+    fn metrics_snapshot_rejects_a_foreign_plan() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config(None);
+        let mut calc = calc_for(&schema, 900, &config);
+        accumulate(
+            &mut calc,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![2.0])]),
+        )
+        .unwrap();
+        let snapshot = calc.snapshot();
+
+        let wide = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating End Use Electric Power (kW)",
+        ]);
+        let mut other = calc_for(&wide, 900, &config);
+        let err = other
+            .apply_snapshot(&snapshot)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("metrics snapshot") && err.contains("input plan"),
+            "the refusal names the metrics section and its plan: {err}"
+        );
+    }
+
+    /// The rolling peak's window state (the ring buffer's position and
+    /// contents, the running peaks) restores, so a resumed run's 15/30/60
+    /// minute peaks are the continuous run's.
+    #[test]
+    fn metrics_snapshot_carries_the_rolling_peak_window() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config(None);
+        // 900 s steps: the 15-minute window holds 4 readings.
+        let mut continuous = calc_for(&schema, 900, &config);
+        let mut resumed = calc_for(&schema, 900, &config);
+
+        let pre = build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![3.0, 4.0, 5.0])]);
+        accumulate(&mut continuous, &pre).unwrap();
+        accumulate(&mut resumed, &pre).unwrap();
+
+        resumed
+            .apply_snapshot(&continuous.snapshot())
+            .expect("the snapshot applies");
+
+        let post = build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0, 1.0, 2.0])]);
+        accumulate(&mut continuous, &post).unwrap();
+        accumulate(&mut resumed, &post).unwrap();
+
+        let a = continuous.finish().unwrap().metrics.peak_power_kw;
+        let b = resumed.finish().unwrap().metrics.peak_power_kw;
+        assert_eq!(
+            a.rolling.peak_15min_kw.to_bits(),
+            b.rolling.peak_15min_kw.to_bits(),
+            "the 15-minute rolling peak is bitwise the continuous run's"
+        );
+        assert_eq!(
+            a.rolling.peak_30min_kw.to_bits(),
+            b.rolling.peak_30min_kw.to_bits()
+        );
+        assert_eq!(
+            a.rolling.peak_60min_kw.to_bits(),
+            b.rolling.peak_60min_kw.to_bits()
         );
     }
 }

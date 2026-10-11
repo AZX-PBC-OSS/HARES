@@ -39,15 +39,17 @@ pub use columns::{
     parse_end_use_electric_power_column, parse_end_use_electric_power_column_key,
 };
 pub use metrics::{
-    EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,
-    MetricsInputPlan, SimulationMetrics, metrics_from_table,
+    EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics,
+    MetricsAccumulatorsSnapshot, MetricsCalculator, MetricsDeadbandSnapshot, MetricsInputPlan,
+    MetricsPlanSnapshot, MetricsRollingPeakSnapshot, MetricsSetpointSnapshot, MetricsSnapshot,
+    SimulationMetrics, metrics_from_table,
 };
 pub use reduce::{PeriodCalendar, PeriodReducer, PeriodRow, ReduceError, TimeRule};
 pub use report::{
     Destination, Frequency, ReportSpec, RowPlan, RowPlanError, SchemaSurface, Selection,
     VariableSurface, resolve_selection,
 };
-pub use writer::{OutputError, StreamingRecorder};
+pub use writer::{OutputError, ReportRowsSnapshot, StreamingRecorder};
 
 /// Summary returned by [`StreamingRecorder::finish`].
 #[derive(Debug, Clone)]

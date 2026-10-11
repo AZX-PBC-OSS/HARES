@@ -9,12 +9,14 @@
 use std::fmt;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 /// One warning a run reports.
 ///
 /// A producer sets `step_index: None`; the dwelling stamps the step index of
 /// a warning it drains after a step. `source` names the producer (for
 /// example the equipment name, `"hpxml"`, `"schedule"` or `"tariff"`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Warning {
     /// Simulation step the warning was raised in, when the dwelling drained
     /// it after a step; `None` for construction-time warnings.

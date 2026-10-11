@@ -7,8 +7,7 @@ use crate::billing::{
     compute_tiered_energy_cost, containing_period_start,
 };
 use crate::snapshot::{
-    TARIFF_SNAPSHOT_SCHEMA_VERSION, TariffSnapshot, datetime_from_string, datetime_to_string,
-    parse_zone,
+    LocalInstant, SnapshotError, TARIFF_SNAPSHOT_SCHEMA_VERSION, TariffSnapshot,
 };
 use crate::types::{ElectricTariff, ExportMode};
 
@@ -928,7 +927,7 @@ impl TariffEvaluator {
             schema_version: TARIFF_SNAPSHOT_SCHEMA_VERSION,
             tariff: self.tariff.clone(),
             timezone: self.simulation_start.timezone().name().to_string(),
-            simulation_start: datetime_to_string(self.simulation_start),
+            simulation_start: LocalInstant::new(&self.simulation_start),
             interval_seconds: self.interval_seconds,
             total_steps: self.price_array.len(),
             step_index: self.step_index,
@@ -949,19 +948,25 @@ impl TariffEvaluator {
     ///
     /// # Errors
     ///
-    /// A snapshot schema version mismatch, an unparseable zone or timestamp,
-    /// a tariff that fails validation, or peak vectors whose length does not
+    /// [`SnapshotError::Version`] for a foreign snapshot schema version,
+    /// [`SnapshotError::UnknownZone`] for a zone name that parses to no
+    /// IANA zone, [`SnapshotError::UnresolvedLocalInstant`] for a bound's
+    /// wall clock the zone skips, [`SnapshotError::Decode`] for bytes that
+    /// are not the snapshot's schema, and [`SnapshotError::Tariff`] for a
+    /// tariff that fails validation or peak vectors whose length does not
     /// match the tariff's TOU period count.
-    pub fn from_snapshot(snapshot: &TariffSnapshot) -> Result<Self, HaresError> {
+    pub fn from_snapshot(snapshot: &TariffSnapshot) -> Result<Self, SnapshotError> {
         if snapshot.schema_version != TARIFF_SNAPSHOT_SCHEMA_VERSION {
-            return Err(HaresError::Tariff(format!(
-                "tariff snapshot version mismatch: snapshot={}, expected={}",
-                snapshot.schema_version, TARIFF_SNAPSHOT_SCHEMA_VERSION
-            )));
+            return Err(SnapshotError::Version {
+                snapshot: snapshot.schema_version,
+                expected: TARIFF_SNAPSHOT_SCHEMA_VERSION,
+            });
         }
-        let tz = parse_zone(&snapshot.timezone)?;
-        let simulation_start =
-            datetime_from_string(tz, "simulation_start", &snapshot.simulation_start)?;
+        let tz: Tz = snapshot
+            .timezone
+            .parse()
+            .map_err(|_| SnapshotError::UnknownZone(snapshot.timezone.clone()))?;
+        let simulation_start = snapshot.simulation_start.resolve(tz)?;
         let simulation_end = simulation_start
             + Duration::seconds(snapshot.total_steps as i64 * snapshot.interval_seconds as i64);
         let mut evaluator = TariffEvaluator::new(
@@ -971,8 +976,8 @@ impl TariffEvaluator {
             snapshot.interval_seconds,
         )?;
         if !snapshot.finished && snapshot.step_index >= evaluator.price_array.len() {
-            return Err(HaresError::Tariff(format!(
-                "tariff snapshot step_index {} out of bounds for {} steps",
+            return Err(SnapshotError::Decode(format!(
+                "step_index {} out of bounds for {} steps",
                 snapshot.step_index,
                 evaluator.price_array.len()
             )));

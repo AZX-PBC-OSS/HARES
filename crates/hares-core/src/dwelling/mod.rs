@@ -11,7 +11,7 @@ mod solver_builder;
 mod synthetic;
 mod warnings;
 
-pub use warnings::WarningLog;
+pub use warnings::{WarningLog, WarningLogSnapshot};
 
 pub use premise_zip::PremiseZip;
 
@@ -15859,6 +15859,337 @@ occupancy = 0.0
             .expect_err("the restored run ends at the same step");
     }
 
+    // ── Checkpoints carry billing, metrics, reports, health and warnings ──
+
+    /// A bestest dwelling carrying one flaky test equipment whose step
+    /// outcomes are `outcomes`.
+    fn flaky_bestest(outcomes: &[bool]) -> Dwelling {
+        let mut dwelling = bestest_dwelling();
+        replace_equipment_for_test(
+            &mut dwelling,
+            vec![Box::new(
+                FlakyPortEquipment::new("Flaky", 300.0, outcomes).with_id(1003),
+            )],
+        );
+        dwelling
+    }
+
+    /// A restored run's health counters continue the interrupted run's: a
+    /// rollback on one step before the checkpoint and one after report 2.
+    #[test]
+    fn restore_resumes_health_counters() {
+        // A tolerated step failure returns Ok and counts one rollback;
+        // the budget ends the run only on consecutive failures.
+        let mut continuous = flaky_bestest(&[false, true, false]);
+        let mut interrupted = flaky_bestest(&[false, true, false]);
+        continuous
+            .run_timestep(false)
+            .expect("the failed step tolerates");
+        interrupted
+            .run_timestep(false)
+            .expect("the failed step tolerates");
+        assert_eq!(interrupted.health().port_rollbacks, 1);
+        continuous
+            .run_timestep(false)
+            .expect("the second step succeeds");
+        interrupted
+            .run_timestep(false)
+            .expect("the second step succeeds");
+        let checkpoint = interrupted.save_checkpoint().expect("checkpoint");
+
+        let mut resumed = flaky_bestest(&[false, true, false]);
+        resumed.load_checkpoint(checkpoint).expect("restore");
+        resumed
+            .run_timestep(false)
+            .expect("the failed step tolerates");
+        continuous
+            .run_timestep(false)
+            .expect("the failed step tolerates");
+
+        assert_eq!(
+            resumed.health().port_rollbacks,
+            2,
+            "one rollback before the checkpoint and one after restore"
+        );
+        assert_eq!(
+            continuous.health().port_rollbacks,
+            2,
+            "the uninterrupted run reports the same two"
+        );
+    }
+
+    /// A test actor that sends an out-of-bounds control signal on the
+    /// steps the dwelling's clock has reached in `bad_at`: one rejection
+    /// and one warning per such step.
+    struct SignallingActor {
+        name: String,
+        bad_at: Vec<u64>,
+        bad_calls: u64,
+    }
+
+    impl crate::Actor for SignallingActor {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
+        }
+
+        fn decide(&mut self, _env: &hares_types::EnvironmentState, out: &mut Vec<DispatchRequest>) {
+            if self.bad_at.contains(&self.bad_calls) {
+                out.push(DispatchRequest {
+                    target: DispatchTarget::ByName(std::sync::Arc::from("Load")),
+                    signal: ControlSignal::SOCTarget {
+                        target_soc: 1.5,
+                        min_soc: None,
+                        max_soc: None,
+                    },
+                    priority: PriorityTier::Schedule,
+                });
+            }
+            self.bad_calls += 1;
+        }
+    }
+
+    #[test]
+    fn restore_resumes_warnings() {
+        // The continuous run warns on steps 2 and 4; the interrupted run
+        // warns on step 2, checkpoints after 3, and the resumed run warns
+        // on the post-restore step. Every run drains per step (the gym's
+        // pattern), so the pending buffer is empty at the checkpoint.
+        let build = |bad_at: &[u64]| {
+            let mut dwelling = bestest_dwelling();
+            let mut eq = TestEquipment::new(
+                "Load",
+                ControlCapabilities::POWER_SETPOINT | ControlCapabilities::SOC_TARGET,
+            );
+            eq.init(&EquipmentConfig::default(), &dwelling.latest_env)
+                .expect("init Load");
+            replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
+            dwelling
+                .add_actor(Box::new(SignallingActor {
+                    name: "Signaller".to_string(),
+                    bad_at: bad_at.to_vec(),
+                    bad_calls: 0,
+                }))
+                .expect("add the actor");
+            dwelling
+        };
+        let run_with_drains = |dwelling: &mut Dwelling, steps: u64| -> Vec<Warning> {
+            let mut drained = Vec::new();
+            for _ in 0..steps {
+                dwelling.run_timestep(false).expect("step");
+                drained.extend(dwelling.take_warnings());
+            }
+            drained
+        };
+
+        let mut continuous = build(&[1, 3]);
+        run_with_drains(&mut continuous, 4);
+        let continuous_result = continuous.finish().expect("the continuous run finishes");
+
+        let mut interrupted = build(&[1]);
+        run_with_drains(&mut interrupted, 3);
+        let checkpoint = interrupted.save_checkpoint().expect("checkpoint");
+
+        let mut resumed = build(&[0]);
+        resumed.load_checkpoint(checkpoint).expect("restore");
+        // The drain right after the restore: the pre-checkpoint warning is
+        // in the run record, not the pending drain, so the drain returns
+        // nothing until the post-restore step warns.
+        assert!(
+            resumed.take_warnings().is_empty(),
+            "the restore carries no undrained warning"
+        );
+        run_with_drains(&mut resumed, 1);
+        let resumed_result = resumed.finish().expect("the resumed run finishes");
+
+        assert_eq!(
+            continuous_result.warnings, resumed_result.warnings,
+            "the resumed run's warning record equals the uninterrupted run's"
+        );
+        assert_eq!(
+            continuous_result.warnings_dropped, resumed_result.warnings_dropped,
+            "the dropped counts agree"
+        );
+        assert!(
+            !continuous_result.warnings.is_empty(),
+            "the run's out-of-bounds signals warned"
+        );
+        let warned_steps: std::collections::HashSet<_> = continuous_result
+            .warnings
+            .iter()
+            .filter_map(|warning| warning.step_index)
+            .collect();
+        assert_eq!(
+            warned_steps.len(),
+            2,
+            "the record holds one step's warning before the checkpoint and one after, however many entries a rejection emits"
+        );
+    }
+
+    /// A run stepped past a checkpoint, restored to it, holds the
+    /// checkpoint step's memory rows: the rows recorded after the
+    /// checkpoint are discarded.
+    #[test]
+    fn restore_truncates_memory_results_to_checkpoint_step() {
+        let memory_reports = || {
+            vec![hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(2),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Memory,
+            }]
+        };
+        let mut past = bestest_with_reports(memory_reports());
+        let mut twin = bestest_with_reports(memory_reports());
+        for _ in 0..5 {
+            past.step().expect("step");
+            twin.step().expect("step");
+        }
+        let checkpoint = twin.save_checkpoint().expect("checkpoint at step 5");
+        for _ in 0..5 {
+            past.step().expect("step");
+        }
+        assert_eq!(past.recorded_rows(), Some(10));
+
+        past.load_checkpoint(checkpoint).expect("restore");
+        assert_eq!(
+            past.recorded_rows(),
+            Some(5),
+            "the memory rows after the checkpoint step are discarded"
+        );
+        assert_eq!(
+            past.recorders[0].buffered_rows(),
+            5,
+            "the five rows before the checkpoint step remain, buffered as they were"
+        );
+        let batch_rows: usize = past.recorders[0]
+            .flushed_batches()
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum();
+        assert_eq!(batch_rows, 0, "no batch was flushed below the chunk size");
+    }
+
+    /// A bestest dwelling carrying one report per `specs`.
+    fn bestest_with_reports(specs: Vec<hares_io::ReportSpec>) -> Dwelling {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+        Dwelling::from_toml_config_with_reports(&base_path, Some(specs)).expect("build bestest")
+    }
+
+    /// A checkpoint whose run wrote a file report is refused by a
+    /// restoring dwelling that writes one, naming the report, and the
+    /// refused restore changes nothing: the run steps on with its own rows.
+    #[test]
+    fn restore_with_file_destination_is_a_typed_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let csv_reports = || {
+            vec![hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(2),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Csv {
+                    path: tmp.path().join("frame.csv"),
+                    overwrite: true,
+                },
+            }]
+        };
+        let mut source = bestest_with_reports(csv_reports());
+        for _ in 0..3 {
+            source.run_timestep(false).expect("step");
+        }
+        let checkpoint = source.save_checkpoint().expect("checkpoint saves");
+
+        let mut restoring = bestest_with_reports(csv_reports());
+        restoring.run_timestep(false).expect("step");
+        let rows_before = restoring.recorded_rows();
+
+        let err = restoring
+            .load_checkpoint(checkpoint)
+            .expect_err("a file-destination report refuses the restore");
+        assert!(
+            err.to_string().contains("frame"),
+            "the refusal names the report: {err}"
+        );
+        assert_eq!(
+            restoring.recorded_rows(),
+            rows_before,
+            "the refused restore changes no recorded row"
+        );
+        restoring.run_timestep(false).expect("the run steps on");
+    }
+
+    /// A cz4a dwelling with `metrics` as requested, one verbosity-2
+    /// memory report.
+    fn cz4a_with_metrics(metrics: bool) -> Dwelling {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let home = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
+        let sim_toml = format!(
+            r#"
+start_time = "2023-01-25T00:00:00-07:00"
+duration = 86400
+time_res = 900
+metrics = {metrics}
+
+[[reports]]
+name = "frame"
+selection = {{ verbosity = 2 }}
+destination = "memory"
+"#
+        );
+        Dwelling::from_config(DwellingConfig {
+            hpxml_path: home.join("building.xml"),
+            schedule_path: Some(home.join("schedule.csv")),
+            weather_path: home.join("weather.epw"),
+            sim_config: hares_io::SimulationConfig::from_toml(&sim_toml)
+                .expect("sim config parses"),
+            defaults_path: Some(root.join("defaults")),
+            overrides: None,
+            bldg_id: 1,
+            initialization_duration: None,
+            patches: None,
+        })
+        .expect("dwelling builds")
+    }
+
+    /// A metrics section restores only into a run that requested metrics,
+    /// and a run that requested them refuses a checkpoint without one:
+    /// either mismatch is a typed error naming the section.
+    #[test]
+    fn restore_metrics_section_into_run_without_metrics_is_a_typed_error() {
+        let mut requested = cz4a_with_metrics(true);
+        requested.run_timestep(false).expect("step");
+        let checkpoint = requested.save_checkpoint().expect("checkpoint");
+
+        let mut without = cz4a_with_metrics(false);
+        without.run_timestep(false).expect("step");
+        let err = without
+            .load_checkpoint(checkpoint)
+            .expect_err("the section refuses a run without the request");
+        assert!(
+            err.to_string().contains("metrics"),
+            "the refusal names the section: {err}"
+        );
+
+        // The reverse: a run that requested metrics refuses a checkpoint
+        // without the section.
+        let mut plain = cz4a_with_metrics(false);
+        plain.run_timestep(false).expect("step");
+        let plain_checkpoint = plain.save_checkpoint().expect("checkpoint");
+        let mut with = cz4a_with_metrics(true);
+        with.run_timestep(false).expect("step");
+        let err = with
+            .load_checkpoint(plain_checkpoint)
+            .expect_err("a run with the request refuses a checkpoint without it");
+        assert!(
+            err.to_string().contains("metrics"),
+            "the refusal names the section: {err}"
+        );
+    }
+
     #[test]
     fn a_successful_step_resets_the_failure_streak() {
         let mut dwelling = dwelling_with(FlakyPortEquipment::new(
@@ -17697,19 +18028,18 @@ latent_gain_fraction = 0.08
             );
         }
 
-        // The billing summaries from the checkpoint on are bitwise the
-        // continuous run's; the resumed run lacks only the January bill the
-        // continuous run closed before the checkpoint.
-        let closed_before_checkpoint = 1;
+        // The billing summaries are bitwise the continuous run's, the
+        // January bill the checkpoint carried included: the summaries
+        // travel in their own section.
         let continuous_bills = continuous.billing_summaries();
         let resumed_bills = resumed.billing_summaries();
         assert_eq!(
             resumed_bills.len(),
-            continuous_bills.len() - closed_before_checkpoint,
-            "the resumed run closes the same periods from the checkpoint on"
+            continuous_bills.len(),
+            "the resumed run holds the closed bills and closes the same periods"
         );
         for (i, bill) in resumed_bills.iter().enumerate() {
-            assert_billing_bitwise_equal(bill, &continuous_bills[closed_before_checkpoint + i]);
+            assert_billing_bitwise_equal(bill, &continuous_bills[i]);
         }
     }
 
@@ -17772,19 +18102,24 @@ latent_gain_fraction = 0.08
 
         // The February bill is bitwise the continuous run's: its demand
         // charges ratchet against January's restored peaks, built from the
-        // restored window's averages.
+        // restored window's averages. The January bill itself rides the
+        // checkpoint's summaries section.
         let continuous_bills = continuous.billing_summaries();
         let resumed_bills = resumed.billing_summaries();
         assert_eq!(
             resumed_bills.len(),
-            continuous_bills.len() - 1,
-            "the resumed run closes February, the continuous run January and February"
+            continuous_bills.len(),
+            "the resumed run holds January and closes February, the continuous run's summaries"
         );
-        let continuous_february = continuous_bills.last().expect("February closed");
-        let resumed_february = resumed_bills.last().expect("February closed");
-        assert_billing_bitwise_equal(resumed_february, continuous_february);
+        for (continuous_bill, resumed_bill) in continuous_bills.iter().zip(resumed_bills) {
+            assert_billing_bitwise_equal(resumed_bill, continuous_bill);
+        }
         assert!(
-            resumed_february.demand_charge_usd > 0.0,
+            resumed_bills
+                .last()
+                .expect("February closed")
+                .demand_charge_usd
+                > 0.0,
             "the February demand charge is nonzero: the restored window and ratchet state are load-bearing"
         );
     }

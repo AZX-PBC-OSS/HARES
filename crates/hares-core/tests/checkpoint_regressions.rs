@@ -775,8 +775,10 @@ fn assert_resume_equals_continuous(
     resumed.simulate().expect("resumed run");
     let resumed_frame = recorded_frame(&resumed);
 
-    let tail = continuous_frame.slice(k, RESUME_TOTAL_STEPS - k);
-    assert_frames_bitwise_equal(&tail, &resumed_frame);
+    // The checkpoint carries the memory rows, so the resumed run's frame
+    // is the continuous run's whole frame: the pre-checkpoint rows
+    // continue, and the bitwise comparison runs over all of them.
+    assert_frames_bitwise_equal(&continuous_frame, &resumed_frame);
 }
 
 /// The gas boiler's fluid-domain first-publish marker survives a checkpoint

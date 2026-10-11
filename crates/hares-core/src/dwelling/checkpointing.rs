@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 
+use chrono_tz::Tz;
 use hares_envelope::FluidSolver;
+use hares_io::{Destination, MetricsCalculator};
 use hares_types::{EnvironmentState, HaresError, ZoneId};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -11,9 +13,10 @@ use rand_chacha::ChaCha8Rng;
 use super::Dwelling;
 use crate::checkpoint::{
     ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
+    ReportSection,
 };
 use crate::rng::{EV_DRIVER_STREAM_COUNT, RNG_STREAM_EV_DRIVER_BASE};
-use hares_tariff::{TariffEvaluator, TariffSnapshot};
+use hares_tariff::{BillingPeriodSummary, TariffEvaluator, TariffSnapshot};
 
 type Result<T> = std::result::Result<T, HaresError>;
 
@@ -102,6 +105,26 @@ impl Dwelling {
                 Some(evaluator) => Some(evaluator.snapshot_state().to_blob()?),
                 None => None,
             },
+            billing_summaries: self
+                .billing_summaries
+                .iter()
+                .map(BillingPeriodSummary::snapshot)
+                .collect(),
+            metrics: self
+                .metrics_calculator
+                .as_ref()
+                .map(MetricsCalculator::snapshot),
+            reports: self
+                .recorders
+                .iter()
+                .zip(self.reports.iter())
+                .map(|(recorder, spec)| ReportSection {
+                    name: spec.name.clone(),
+                    rows: recorder.rows_snapshot(),
+                })
+                .collect(),
+            health: self.health.clone(),
+            warnings: self.warnings.snapshot(),
         })
     }
 
@@ -122,22 +145,33 @@ impl Dwelling {
     /// result recorded before the restore.
     pub fn load_checkpoint(&mut self, cp: DwellingCheckpoint) -> Result<()> {
         self.validate_building_state(&cp)?;
+        // The run-surface sections validate against this dwelling before
+        // anything changes: a report the dwelling cannot resume, a
+        // section without its live counterpart (or the reverse), a metrics
+        // plan that resolves differently, or a summary in a foreign zone
+        // is a typed error leaving the dwelling as it was. The tariff
+        // snapshot decodes here too; the evaluator rebuild below reuses it.
+        let (tariff_snapshot, evaluator_tz) = self.validate_run_sections(&cp)?;
         let equipment_states = self.matched_equipment_states(&cp)?;
         let equipment_blobs: Vec<&[u8]> = equipment_states
             .iter()
             .map(|state| state.blob.as_slice())
             .collect();
         let actor_blobs = self.matched_actor_blobs(&cp)?;
-        // The tariff evaluator rebuilds from its snapshot blob before
+        // The tariff evaluator rebuilds from its decoded snapshot before
         // anything mutates, so a snapshot that fails to restore leaves the
         // dwelling as it was.
-        let tariff_evaluator = match &cp.tariff_state {
-            Some(blob) => {
-                let snapshot = TariffSnapshot::from_blob(blob)?;
-                Some(TariffEvaluator::from_snapshot(&snapshot)?)
-            }
-            None => None,
-        };
+        let tariff_evaluator = tariff_snapshot
+            .as_ref()
+            .map(TariffEvaluator::from_snapshot)
+            .transpose()?;
+        // The closed periods' summaries resolve in the restored tariff's
+        // zone before anything changes.
+        let billing_summaries = cp
+            .billing_summaries
+            .iter()
+            .map(|summary| BillingPeriodSummary::from_snapshot(summary.clone(), evaluator_tz))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         let last_step_env = self.last_step_environment(cp.timestep_index)?;
         self.load_component_states(&equipment_blobs, &actor_blobs, |dwelling| {
             dwelling.check_ev_driver_cursor(cp.next_ev_driver_stream)
@@ -166,6 +200,30 @@ impl Dwelling {
         // tariff: it resets the clock to step 0 and the segment attaches its
         // own tariff as assembly does.
         self.tariff_evaluator = tariff_evaluator;
+        self.billing_summaries = billing_summaries;
+        // The metrics accumulator's state restores exactly: the fresh
+        // calculator this run built keeps its own plan and config, and the
+        // checkpoint's accumulators overwrite its (zeroed) state, so the
+        // resumed run's finish() is the continuous run's. The plan was
+        // validated equal before anything changed.
+        if let (Some(calculator), Some(snapshot)) =
+            (self.metrics_calculator.as_mut(), cp.metrics.as_ref())
+        {
+            calculator
+                .apply_snapshot(snapshot)
+                .map_err(|err| HaresError::InvalidState(format!("metrics restore: {err}")))?;
+        }
+        // The reports' row streams restore: every `Memory` report holds the
+        // written run's rows, the dwelling's own rows past the checkpoint
+        // step discarded with them, so the resumed run's frame is the
+        // continuous run's.
+        for (recorder, section) in self.recorders.iter_mut().zip(&cp.reports) {
+            recorder.restore_rows(&section.rows).map_err(|err| {
+                HaresError::Io(format!("report '{}' restore: {err}", section.name))
+            })?;
+        }
+        self.health = cp.health;
+        self.warnings.restore(cp.warnings.clone());
 
         // Populate latest_env.equipment_core and equipment_telemetry from the
         // restored equipment state so that actors read correct SOC, power flows,
@@ -234,6 +292,117 @@ impl Dwelling {
         self.environment
             .update_in_place(&mut env, &last_step_clock)?;
         Ok(Some(env))
+    }
+
+    /// The run-surface sections' validation, before anything changes: the
+    /// reports' destinations and names, the row streams' fit, the metrics
+    /// section's presence and plan, and the billing summaries' presence
+    /// against the tariff section.
+    ///
+    /// Returns the decoded tariff snapshot (the evaluator rebuild reuses
+    /// it) and the zone its bounds resolve in (the closed summaries'
+    /// restore zone); the zone is unused when the checkpoint carries no
+    /// tariff and no summaries.
+    fn validate_run_sections(
+        &self,
+        cp: &DwellingCheckpoint,
+    ) -> Result<(Option<TariffSnapshot>, Tz)> {
+        // A file or callback destination report cannot resume: the written
+        // run's rows stream into a partial file (or a caller's callback)
+        // no checkpoint carries, so a resumed run's file would hold only
+        // the post-resume rows. The refusal names the report.
+        for spec in &self.reports {
+            if !matches!(spec.destination, Destination::Memory) {
+                return Err(HaresError::Io(format!(
+                    "checkpoint restore: report '{}' writes to a file or callback \
+                     destination, and a checkpoint carries no file state: restore \
+                     into a dwelling whose reports are memory reports",
+                    spec.name
+                )));
+            }
+        }
+        // The sections' names must match this dwelling's reports, in order.
+        let checkpoint_names: Vec<&str> = cp.reports.iter().map(|s| s.name.as_str()).collect();
+        let dwelling_names: Vec<&str> = self.reports.iter().map(|s| s.name.as_str()).collect();
+        if checkpoint_names != dwelling_names {
+            return Err(HaresError::Io(format!(
+                "checkpoint restore: the reports changed between save and restore: \
+                 the checkpoint carries sections for {checkpoint_names:?}, the dwelling \
+                 configures {dwelling_names:?}"
+            )));
+        }
+        // The row streams must fit this dwelling's recorders.
+        for (section, recorder) in cp.reports.iter().zip(&self.recorders) {
+            let width = recorder.schema().fields().len().saturating_sub(1);
+            let rows = section.rows.timestamps.len();
+            if section.rows.values.len() != rows * width {
+                return Err(HaresError::Io(format!(
+                    "checkpoint restore: report '{}' carries {} values for {} rows of \
+                     {} columns",
+                    section.name,
+                    section.rows.values.len(),
+                    rows,
+                    width
+                )));
+            }
+            if section.rows.buffered_rows > rows {
+                return Err(HaresError::Io(format!(
+                    "checkpoint restore: report '{}' buffers {} rows beyond its {}",
+                    section.name, section.rows.buffered_rows, rows
+                )));
+            }
+        }
+        // The metrics section's presence must match the request, and its
+        // plan must resolve the same slots the fresh calculator's does.
+        match (&cp.metrics, &self.metrics_calculator) {
+            (Some(snapshot), Some(calculator)) => {
+                if snapshot.plan != calculator.plan_snapshot() {
+                    return Err(HaresError::InvalidState(
+                        "checkpoint restore: the metrics section's input plan does not \
+                         resolve the same producer slots this run's does"
+                            .to_string(),
+                    ));
+                }
+            }
+            (Some(_), None) => {
+                return Err(HaresError::InvalidState(
+                    "checkpoint restore: the checkpoint carries a metrics section but \
+                     this run did not request metrics"
+                        .to_string(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(HaresError::InvalidState(
+                    "checkpoint restore: this run requested metrics but the checkpoint \
+                     carries no metrics section"
+                        .to_string(),
+                ));
+            }
+            (None, None) => {}
+        }
+        // The closed summaries' bounds resolve in the tariff's zone, so a
+        // summaries section without a tariff section has no zone to
+        // resolve in.
+        if !cp.billing_summaries.is_empty() && cp.tariff_state.is_none() {
+            return Err(HaresError::Io(
+                "checkpoint restore: the checkpoint carries billing summaries without a \
+                 tariff state: the summaries' bounds resolve in the tariff's zone"
+                    .to_string(),
+            ));
+        }
+        match &cp.tariff_state {
+            Some(blob) => {
+                let snapshot = TariffSnapshot::from_blob(blob)?;
+                let tz: Tz = snapshot.timezone.parse().map_err(|_| {
+                    HaresError::Tariff(format!(
+                        "tariff snapshot: unknown time zone '{}'",
+                        snapshot.timezone
+                    ))
+                })?;
+                Ok((Some(snapshot), tz))
+            }
+            None => Ok((None, chrono_tz::Tz::UTC)),
+        }
     }
 
     /// Checks the format version and the building physics part of `cp`
