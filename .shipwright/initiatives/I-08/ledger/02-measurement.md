@@ -2728,3 +2728,45 @@ is the cost RT-4 names for every input: `06-runtime-memory.md` RT-4's
 input plumbing rework, parsed handles shared between the pre-pass and
 the built dwellings, owns the fix; until it lands this record bounds
 the pre-pass at well under a millisecond per home on these fixtures.
+### The result tables' conversion: IPC versus the Arrow PyCapsule export, 2026-10-11
+
+Row 55 (PY-1), on branch `row/r55-py1` cut from `5a9c4ac8`; the "before"
+numbers run on a worktree of `5a9c4ac8` with its own release extension
+(`uv run maturin develop --release`), the "after" numbers on the branch's,
+the same script both sides, minimum of the repeats. Load average at write
+time 14.12 on 28 cores (the host is otherwise busy; both sides ran minutes
+apart under the same ambient load).
+
+Conversion time of the `full_year_hourly` report's frame (8 760 rows, 36
+columns, verbosity 2, metrics off), one report read, minimum of 5:
+
+- before (IPC: `FileWriter` bytes through `BytesIO`, `polars.read_ipc`):
+  0.318 ms
+- after (capsule: pyo3-arrow's `PyTable` over the report's batches,
+  `polars.DataFrame(table)`): 0.056 ms rechunked, 0.047 ms with
+  `rechunk=False`; the `arrow()` export itself 0.0024 ms on the first
+  (rechunking and caching) call and 0.0005 ms on later calls, which share
+  the cached batch's buffers; 5.7x lower on the frame read. The entry's
+  context figures (about 6.5 ms IPC, about 2.7 ms capsule rechunked) were
+  measured on a slower host against a denser frame; the ratio's direction
+  is the row's point, the IPC serialize-and-parse round trip is gone and
+  the buffers are shared.
+
+The batch callback's delivery over a building-year run at 900 s steps
+(876 batches at `output_chunk_size` 40, cz4a_ashp_hpwh, verbosity 2,
+metrics off), end to end, plain run versus a run with a no-op callback
+attached, minimum of 7 alternating pairs:
+
+- before (the frame delivered through the IPC conversion): +0.129 ms per
+  batch (plain 1.256 s, callback 1.370 s)
+- after (the frame delivered through the capsule): +0.057 ms per batch
+  (plain 1.134 s, callback 1.184 s)
+
+The r40 record's per-batch figures (about 0.1 ms per batch end to end at
+verbosity 2, about 0.8 ms per batch from the review's instrumentation) and
+this before pair agree on the base; after the row the end-to-end delta
+halved and what remains is the delivery machinery (the GIL re-acquisition,
+the info object, the callable dispatch), the frame build itself now the
+capsule read. The plain wall's own run-to-run spread on this host (about
+10 percent, 0.93 s to 1.26 s across rounds) bounds the end-to-end method;
+the full-year frame pair above is the conversion's direct measure.

@@ -156,11 +156,11 @@ def test_results_column_dtypes(simulated_df):
 
 
 def test_fleet_aggregate_returns_dataframe(fleet):
-    """Verify FleetResult.aggregate returns polars DataFrame."""
+    """Verify FleetResult.aggregate.table() returns polars DataFrame."""
     from hares import FleetReport, Frequency
 
     results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
-    df = results.aggregate
+    df = results.aggregate.table()
 
     assert isinstance(df, pl.DataFrame)
 
@@ -175,7 +175,7 @@ def test_fleet_aggregate_shape(fleet):
     from hares import FleetReport, Frequency
 
     results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
-    df = results.aggregate
+    df = results.aggregate.table()
 
     assert df.shape == (24, 6), (
         f"Aggregate DataFrame shape {df.shape} != (24, 6); columns: {df.columns}"
@@ -187,17 +187,17 @@ def test_fleet_aggregate_has_time_column(fleet):
     from hares import FleetReport, Frequency
 
     results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
-    df = results.aggregate
+    df = results.aggregate.table()
 
     assert "Time" in df.columns, "Aggregate DataFrame should have Time column"
 
 
 def test_fleet_homes_returns_dataframe(fleet):
-    """Verify FleetResult.homes returns polars DataFrame."""
+    """Verify FleetResult.homes.table() returns polars DataFrame."""
     from hares import FleetReport, Frequency
 
     results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
-    df = results.homes
+    df = results.homes.table()
 
     assert isinstance(df, pl.DataFrame)
 
@@ -213,7 +213,7 @@ def test_fleet_homes_schema(fleet):
     from hares import FleetReport, Frequency
 
     results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
-    df = results.homes
+    df = results.homes.table()
 
     expected_columns = [
         "bldg_id",
@@ -241,7 +241,7 @@ def test_fleet_homes_row_count(fleet):
     from hares import FleetReport, Frequency
 
     results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
-    df = results.homes
+    df = results.homes.table()
 
     assert df.shape == (1, 8), f"Homes DataFrame shape {df.shape} != (1, 8)"
     row = df.row(0, named=True)
@@ -251,7 +251,7 @@ def test_fleet_homes_row_count(fleet):
     assert row["status"] != "failed", "the fixture building runs"
     assert row["periods_folded"] == 24, "the home folded every hourly period"
 
-    aggregate = results.aggregate
+    aggregate = results.aggregate.table()
     electric_kw = aggregate["Total Electric Power (kW)"]
     assert row["total_energy_kwh"] == pytest.approx(
         float(electric_kw.sum()), rel=1e-12

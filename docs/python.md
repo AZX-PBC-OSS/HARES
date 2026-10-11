@@ -335,9 +335,12 @@ a name, a selection (`Selection.verbosity(n)`, `.named([...])`,
 `.pattern(glob)`, `.diagnostics()`), a frequency (`Frequency.timestep()`)
 and a destination (`Destination.memory()`, `.parquet(path, overwrite=False)`,
 `.csv(path, overwrite=False)`). A `Memory` destination retains the run's
-batches and its `ReportResult.table()` returns the frame; a file
-destination's result is the published path (its `table()` raises, naming
-the report and its destination); a run with no report carries no metrics.
+batches and its `ReportResult.table()` returns the frame; `arrow()`
+exposes the same batches through the Arrow PyCapsule interface, the
+buffers shared, so any Arrow consumer reads them zero-copy; a file
+destination's result is the published path (its `table()` and `arrow()`
+raise, naming the report and its destination); a run with no report
+carries no metrics.
 
 Each column's Arrow type is the report's schema's type for that column,
 with units and enum labels read from the catalogue (polars drops Arrow
@@ -374,6 +377,15 @@ replacement.
   `weight_ok`, `weight_flagged`, `weight_failed`), and the
   `Frequency` constructors `minutes`, `hourly`, `daily`, `monthly`,
   `annual` and `run_period`.
+- Added: `ReportResult.arrow()` and `FleetTable` (a fleet result's
+  `aggregate`, `covered_weight` and `homes` are now `FleetTable`
+  objects): each exports its table through the Arrow PyCapsule interface,
+  `arrow()` returning the stream object every Arrow consumer (polars,
+  pyarrow, pandas through pyarrow) imports zero-copy, the underlying
+  buffers shared; `table()` reads it as the polars frame as before, and
+  both take `rechunk: bool = True` (a report's batches concatenated once
+  on the first rechunked export, then shared; a fleet table is one
+  batch).
 - Removed: `FleetResults` with `per_dwelling_metrics`,
   `aggregate_timeseries` and `failures`: read `FleetResult.homes` (a
   failed home is a `homes` row with status `failed` and its reason),

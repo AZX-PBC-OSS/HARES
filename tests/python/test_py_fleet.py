@@ -377,7 +377,7 @@ def test_simulate_minutes_15_report(tmp_path: Path) -> None:
     results = fleet.simulate(_minutes_15_report())
     assert results.n_succeeded == 1
     # One hour at 60 s reduces onto four quarter hours.
-    assert results.aggregate.height == 4
+    assert results.aggregate.table().height == 4
 
 
 @pytest.mark.slow
@@ -386,7 +386,7 @@ def test_simulate_hourly_report(tmp_path: Path) -> None:
     fleet = _build_simulatable_fleet(tmp_path, 1)
     results = fleet.simulate(_hourly_report())
     assert results.n_succeeded == 1
-    assert results.aggregate.height == 1
+    assert results.aggregate.table().height == 1
 
 
 @pytest.mark.slow
@@ -395,7 +395,7 @@ def test_no_failed_homes_on_success(tmp_path: Path) -> None:
     fleet = _build_simulatable_fleet(tmp_path, 1)
     results = fleet.simulate(_minutes_15_report())
     assert results.n_failed == 0
-    assert results.homes["status"].to_list() != ["failed"]
+    assert results.homes.table()["status"].to_list() != ["failed"]
 
 
 @pytest.mark.slow
@@ -482,14 +482,11 @@ def test_simulate_fault_tolerant_lists_failed_homes(tmp_path: Path) -> None:
     results = fleet.simulate(_hourly_report())
     assert results.n_succeeded == 1
     assert results.n_failed == 1
-    statuses = dict(
-        zip(results.homes["bldg_id"].to_list(), results.homes["status"].to_list())
-    )
+    homes = results.homes.table()
+    statuses = dict(zip(homes["bldg_id"].to_list(), homes["status"].to_list()))
     assert statuses[1] != "failed"
     assert statuses[2] == "failed"
-    reasons = dict(
-        zip(results.homes["bldg_id"].to_list(), results.homes["reason"].to_list())
-    )
+    reasons = dict(zip(homes["bldg_id"].to_list(), homes["reason"].to_list()))
     assert reasons[2], "the failed home's reason is its message"
 
 
@@ -539,7 +536,10 @@ def test_heterogeneous_equipment_aggregates_the_union_of_columns() -> None:
         f"Expected both dwellings to succeed, got n_succeeded={results.n_succeeded}"
     )
     statuses = dict(
-        zip(results.homes["bldg_id"].to_list(), results.homes["status"].to_list())
+        zip(
+            results.homes.table()["bldg_id"].to_list(),
+            results.homes.table()["status"].to_list(),
+        )
     )
     assert statuses[1] == "ok", f"home 1 must be ok, got {statuses[1]}"
     assert statuses[2] == "ok", f"home 2 must be ok, got {statuses[2]}"
@@ -547,10 +547,10 @@ def test_heterogeneous_equipment_aggregates_the_union_of_columns() -> None:
     # The aggregate is the union of the homes' columns: non-empty, and
     # wider than either home's own set. The covered weight behind it is
     # the two homes' weights in every shared cell.
-    assert results.aggregate.height == 1
-    assert results.covered_weight.height == 1
-    assert results.aggregate.width > 1
-    assert results.covered_weight.width == results.aggregate.width
+    assert results.aggregate.table().height == 1
+    assert results.covered_weight.table().height == 1
+    assert results.aggregate.table().width > 1
+    assert results.covered_weight.table().width == results.aggregate.table().width
 
 
 def _schedule_with_unread_column(dest: Path) -> Path:
@@ -664,5 +664,5 @@ def test_local_clock_alignment_runs_the_mixed_offset_fleet() -> None:
     )
     results = fleet.simulate(report)
     assert results.n_succeeded == 3
-    assert results.aggregate.height == 24
-    assert results.aggregate["Time"][0] == "2018-01-01T00:00:00"
+    assert results.aggregate.table().height == 24
+    assert results.aggregate.table()["Time"][0] == "2018-01-01T00:00:00"

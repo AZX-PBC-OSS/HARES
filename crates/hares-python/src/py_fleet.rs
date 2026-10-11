@@ -6,15 +6,17 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use arrow::record_batch::RecordBatch;
 use hares_fleet::{Coverage, Fleet, FleetReport, FleetResult};
 use hares_io::ResStockVersion as IoResStockVersion;
 use pyo3::Python;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyType};
+use pyo3_arrow::PyTable;
 use tracing::warn;
 
-use crate::conversions::{naive_chrono_to_py_datetime, record_batches_to_polars_df};
+use crate::conversions::naive_chrono_to_py_datetime;
 use crate::py_config::{MAX_CHRONO_SECONDS, PyDwellingConfig, PyHealthPolicy};
 use crate::py_control::PyControlSignal;
 use crate::py_dwelling::HaresSimulationError;
@@ -323,6 +325,38 @@ impl PyFleet {
     }
 }
 
+/// One fleet result table: the aggregate, the covered weight behind it
+/// or the homes table, as the run delivered it.
+#[pyclass(frozen, name = "FleetTable")]
+pub struct PyFleetTable {
+    batch: RecordBatch,
+}
+
+#[pymethods]
+impl PyFleetTable {
+    /// The table as an Arrow stream: pyo3-arrow's `Table` class, whose
+    /// repeatable `__arrow_c_stream__` any Arrow consumer (polars,
+    /// pyarrow, pandas through pyarrow) imports with the table's buffers
+    /// shared, no IPC serialize-and-parse round trip. The fleet's tables
+    /// are one batch, so `rechunk` changes nothing: either way the stream
+    /// carries the batch's own buffers.
+    #[pyo3(signature = (rechunk = true))]
+    pub fn arrow(&self, rechunk: bool) -> PyResult<PyTable> {
+        let _ = rechunk;
+        crate::conversions::batches_to_py_table(vec![self.batch.clone()])
+    }
+
+    /// The table as a polars `DataFrame`, read from the `arrow()` export's
+    /// stream.
+    #[pyo3(signature = (rechunk = true))]
+    pub fn table<'py>(&self, py: Python<'py>, rechunk: bool) -> PyResult<Bound<'py, PyAny>> {
+        let table = Py::new(py, self.arrow(rechunk)?)?;
+        let polars = py.import("polars")?;
+        let df = polars.getattr("DataFrame")?.call1((table,))?;
+        Ok(df)
+    }
+}
+
 /// The fleet's result: the aggregate, the covered weight behind it, the
 /// homes table and the coverage weights.
 #[pyclass(name = "FleetResult")]
@@ -332,20 +366,29 @@ pub struct PyFleetResult {
 
 #[pymethods]
 impl PyFleetResult {
+    /// The weighted fleet timeseries as the run delivered it.
     #[getter]
-    pub fn aggregate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        record_batches_to_polars_df(py, std::slice::from_ref(&self.result.aggregate))
+    pub fn aggregate(&self) -> PyFleetTable {
+        PyFleetTable {
+            batch: self.result.aggregate.clone(),
+        }
     }
 
+    /// The weight behind each aggregate cell.
     #[getter]
-    pub fn covered_weight(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        record_batches_to_polars_df(py, std::slice::from_ref(&self.result.covered_weight))
+    pub fn covered_weight(&self) -> PyFleetTable {
+        PyFleetTable {
+            batch: self.result.covered_weight.clone(),
+        }
     }
 
+    /// One row per home, in entry order, with the run metrics' columns
+    /// when any home requested them.
     #[getter]
-    pub fn homes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let homes = self.result.homes_table();
-        record_batches_to_polars_df(py, std::slice::from_ref(&homes))
+    pub fn homes(&self) -> PyFleetTable {
+        PyFleetTable {
+            batch: self.result.homes_table(),
+        }
     }
 
     #[getter]
@@ -419,9 +462,12 @@ fn fleet_error_to_py_err(py: Python<'_>, err: hares_fleet::fleet::FleetError) ->
     match &err {
         hares_fleet::fleet::FleetError::NoCoveredWeight { homes, .. } => {
             let message = err.to_string();
-            let table = record_batches_to_polars_df(py, std::slice::from_ref(homes))?;
+            let table = crate::conversions::batches_to_py_table(vec![homes.clone()])?;
+            let py_table = Py::new(py, table)?;
+            let polars = py.import("polars")?;
+            let df = polars.getattr("DataFrame")?.call1((py_table,))?;
             let py_err = HaresSimulationError::new_err(message);
-            py_err.value(py).setattr("homes", table)?;
+            py_err.value(py).setattr("homes", df)?;
             Ok(py_err)
         }
         _ => Ok(to_py_err(err)),
@@ -716,7 +762,22 @@ impl PySteppableFleet {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::num::NonZeroUsize;
+    use std::path::PathBuf;
+    use std::time::Duration as StdDuration;
+
+    use hares_core::DwellingConfig;
+    use hares_io::{Frequency, Selection};
+    use pyo3::Python;
+    use pyo3::exceptions::PyIndexError;
+    use pyo3::types::PyTypeMethods;
+    use pyo3::types::{PyAnyMethods, PyCapsule};
+    use pyo3_arrow::PyTable;
+
+    use super::PyFleetResult;
+    use super::normalize_thread_count;
+    use super::steppable_error_to_py_err;
+    use crate::py_dwelling::HaresSimulationError;
 
     #[test]
     fn thread_normalization_matches_contract() {
@@ -767,6 +828,98 @@ mod tests {
                 message.contains("the snapshot error"),
                 "the message names the snapshot error: {message}"
             );
+        });
+    }
+
+    /// The `fleet_same_offset_300s` manifest's homes, run at `Hourly`:
+    /// the fleet the capsule export's acceptance test reads.
+    fn fleet_same_offset_homes_hourly() -> hares_fleet::FleetResult {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = frame_golden::GoldenManifest::load(
+            &root.join("tests/fixtures/golden/fleet_same_offset_300s.toml"),
+        )
+        .expect("the manifest loads");
+        let sim = manifest
+            .simulation_config()
+            .expect("the manifest's sim config");
+        let configs: Vec<DwellingConfig> = manifest
+            .home
+            .iter()
+            .map(|home| DwellingConfig {
+                hpxml_path: frame_golden::manifest::repo_path(&root, &home.hpxml),
+                schedule_path: Some(frame_golden::manifest::repo_path(&root, &home.schedule)),
+                weather_path: frame_golden::manifest::repo_path(&root, &home.weather),
+                defaults_path: Some(root.join(&manifest.defaults)),
+                sim_config: sim.clone(),
+                overrides: Some(home.overrides.clone()),
+                bldg_id: home.bldg_id,
+                initialization_duration: if home.initialization_duration_s == 0 {
+                    None
+                } else {
+                    Some(StdDuration::from_secs(home.initialization_duration_s))
+                },
+                patches: None,
+            })
+            .collect();
+        let weights: Vec<f64> = manifest
+            .home
+            .iter()
+            .map(|home| home.weight.expect("a fleet home carries a weight"))
+            .collect();
+        let fleet = hares_fleet::Fleet::from_buildings(configs)
+            .expect("the fleet builds")
+            .with_sample_weights(weights)
+            .expect("the weights apply");
+        let report = hares_fleet::FleetReport {
+            selection: Selection::Verbosity(2),
+            frequency: Frequency::Hourly,
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        fleet
+            .simulate(&report, 1, NonZeroUsize::new(64).expect("64"))
+            .expect("the fleet runs")
+    }
+
+    /// The three fleet tables export through `__arrow_c_stream__` and
+    /// equal, imported back through pyo3-arrow's `from_arrow_pycapsule`,
+    /// the fleet result's batches, floats by bit pattern.
+    #[test]
+    fn fleet_tables_export_through_capsule() {
+        let result = fleet_same_offset_homes_hourly();
+        let aggregate = result.aggregate.clone();
+        let covered_weight = result.covered_weight.clone();
+        let homes = result.homes_table();
+
+        Python::attach(|py| {
+            let wrapper = pyo3::Py::new(py, PyFleetResult { result }).expect("the wrapper wraps");
+            let bound = wrapper.bind(py);
+            let tables = [
+                ("aggregate", aggregate),
+                ("covered_weight", covered_weight),
+                ("homes", homes),
+            ];
+            for (name, batch) in tables {
+                let table = match name {
+                    "aggregate" => bound.borrow().aggregate(),
+                    "covered_weight" => bound.borrow().covered_weight(),
+                    _ => bound.borrow().homes(),
+                };
+                let py_table = table.arrow(true).expect("the table exports");
+                let obj = pyo3::Py::new(py, py_table).expect("the table wraps");
+                let capsule = obj
+                    .bind(py)
+                    .call_method1("__arrow_c_stream__", (py.None(),))
+                    .expect("the table exposes __arrow_c_stream__");
+                let capsule = capsule
+                    .cast::<PyCapsule>()
+                    .expect("the stream is a capsule");
+                let imported = PyTable::from_arrow_pycapsule(capsule).expect("the capsule imports");
+                crate::conversions::assert_batches_bitwise_equal(
+                    name,
+                    &[batch],
+                    imported.batches(),
+                );
+            }
         });
     }
 }

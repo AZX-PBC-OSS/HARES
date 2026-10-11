@@ -3,8 +3,12 @@
 //! pyclasses over the Rust types `Dwelling::finish()` produces.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 
+use arrow::compute::concat_batches;
+use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
+use pyo3_arrow::PyTable;
 
 use hares_core::{
     EquipmentProvenance as RustEquipmentProvenance, Provenance as RustProvenance, ReportOutput,
@@ -35,6 +39,7 @@ impl PyRunResult {
             .iter()
             .map(|report| PyReportResult {
                 inner: report.clone(),
+                rechunked: OnceLock::new(),
             })
             .collect()
     }
@@ -101,6 +106,10 @@ impl PyRunResult {
 #[pyclass(frozen, name = "ReportResult")]
 pub struct PyReportResult {
     inner: RustReportResult,
+    /// The report's batches concatenated once, on the first
+    /// `rechunk=True` export: every later export shares that batch's
+    /// buffers and copies nothing.
+    rechunked: OnceLock<RecordBatch>,
 }
 
 #[pymethods]
@@ -111,26 +120,67 @@ impl PyReportResult {
         self.inner.name.clone()
     }
 
-    /// The report's frame: the retained batches as a polars `DataFrame`.
-    /// A file or callback report raises `HaresSimulationError` naming the
-    /// report and its destination.
-    pub fn table<'py>(&self, py: pyo3::Python<'py>) -> PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
-        match &self.inner.output {
-            ReportOutput::Memory(batches) => {
-                let df = crate::conversions::record_batches_to_polars_df(py, batches)?;
-                Ok(df.into_bound(py))
+    /// The report's table as an Arrow stream: pyo3-arrow's `Table` class,
+    /// whose repeatable `__arrow_c_stream__` any Arrow consumer (polars,
+    /// pyarrow, pandas through pyarrow) imports with the report's buffers
+    /// shared, no IPC serialize-and-parse round trip. With `rechunk=True`
+    /// (the default) the report's batches are concatenated once, on the
+    /// first export, and the one batch's buffers are shared by every
+    /// later export; with `rechunk=False` the stream carries one chunk
+    /// per built batch. A file or callback report holds no batches: its
+    /// `arrow()` raises `HaresSimulationError` naming the report and its
+    /// destination, never an empty table.
+    #[pyo3(signature = (rechunk = true))]
+    pub fn arrow(&self, rechunk: bool) -> PyResult<PyTable> {
+        let batches = match &self.inner.output {
+            ReportOutput::Memory(batches) => batches,
+            ReportOutput::File(path) => {
+                return Err(HaresSimulationError::new_err(format!(
+                    "report '{}' writes to a file destination: the file is the report's \
+                     result (its path getter names it, '{}'); a table() needs a Memory report",
+                    self.inner.name,
+                    path.display()
+                )));
             }
-            ReportOutput::File(_) => Err(HaresSimulationError::new_err(format!(
-                "report '{}' writes to a file destination: the file is the report's \
-                 result (its path getter names it); a table() needs a Memory report",
-                self.inner.name
-            ))),
-            ReportOutput::Callback => Err(HaresSimulationError::new_err(format!(
-                "report '{}' delivers to the batch callback: nothing is retained; \
-                 a table() needs a Memory report",
-                self.inner.name
-            ))),
+            ReportOutput::Callback => {
+                return Err(HaresSimulationError::new_err(format!(
+                    "report '{}' delivers to the batch callback: nothing is retained \
+                     ({} batches delivered); a table() needs a Memory report",
+                    self.inner.name, self.inner.batches_delivered
+                )));
+            }
+        };
+        if rechunk {
+            if let Some(batch) = self.rechunked.get() {
+                return crate::conversions::batches_to_py_table(vec![batch.clone()]);
+            }
+            if let Some(first) = batches.first() {
+                let batch = concat_batches(&first.schema(), batches).map_err(|err| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "report '{}': the retained batches could not be concatenated: {}",
+                        self.inner.name, err
+                    ))
+                })?;
+                let _ = self.rechunked.set(batch.clone());
+                return crate::conversions::batches_to_py_table(vec![batch]);
+            }
         }
+        crate::conversions::batches_to_py_table(batches.clone())
+    }
+
+    /// The report's frame: the `arrow()` export read as a polars
+    /// `DataFrame`. A file or callback report raises
+    /// `HaresSimulationError` naming the report and its destination.
+    #[pyo3(signature = (rechunk = true))]
+    pub fn table<'py>(
+        &self,
+        py: pyo3::Python<'py>,
+        rechunk: bool,
+    ) -> PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+        let table = pyo3::Py::new(py, self.arrow(rechunk)?)?;
+        let polars = py.import("polars")?;
+        let df = polars.getattr("DataFrame")?.call1((table,))?;
+        Ok(df)
     }
 
     /// The published file path; `None` for a memory or callback report.
@@ -490,5 +540,214 @@ impl PyEquipmentProvenance {
             self.inner.zone.map(|z| z.0),
             self.inner.zone_type,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    use arrow::record_batch::RecordBatch;
+    use hares_core::{Dwelling, DwellingConfig, SimulationEngine};
+    use pyo3::Python;
+    use pyo3::types::{PyAnyMethods, PyCapsule};
+    use pyo3_arrow::PyTable;
+
+    use super::PyReportResult;
+
+    /// The `full_year_hourly` manifest's run, its report retained in
+    /// memory: the run the capsule export's acceptance tests read.
+    fn full_year_hourly_report() -> hares_core::ReportResult {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = frame_golden::GoldenManifest::load(
+            &root.join("tests/fixtures/golden/full_year_hourly.toml"),
+        )
+        .expect("the manifest loads");
+        let sim = manifest
+            .simulation_config()
+            .expect("the manifest's sim config");
+        let home = &manifest.home[0];
+        let config = DwellingConfig {
+            hpxml_path: frame_golden::manifest::repo_path(&root, &home.hpxml),
+            schedule_path: Some(frame_golden::manifest::repo_path(&root, &home.schedule)),
+            weather_path: frame_golden::manifest::repo_path(&root, &home.weather),
+            defaults_path: Some(root.join(&manifest.defaults)),
+            sim_config: sim.clone(),
+            overrides: Some(home.overrides.clone()),
+            bldg_id: home.bldg_id,
+            initialization_duration: if home.initialization_duration_s == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_secs(
+                    home.initialization_duration_s,
+                ))
+            },
+            patches: None,
+        };
+        let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+        let result = SimulationEngine::new()
+            .run_dwelling(&mut dwelling, &sim)
+            .expect("the run finishes");
+        result
+            .reports
+            .iter()
+            .find(|report| report.name == "frame")
+            .expect("the manifest's memory report")
+            .clone()
+    }
+
+    /// The table exported through `__arrow_c_stream__` and imported back
+    /// through pyo3-arrow's `from_arrow_pycapsule` equals the report's
+    /// batches column by column, floats by bit pattern.
+    #[test]
+    fn capsule_export_is_bitwise_identical() {
+        let report = full_year_hourly_report();
+        let expected: Vec<RecordBatch> = report.batches().to_vec();
+        Python::attach(|py| {
+            let wrapper = pyo3::Py::new(
+                py,
+                PyReportResult {
+                    inner: report,
+                    rechunked: OnceLock::new(),
+                },
+            )
+            .expect("the wrapper constructs");
+            let table = wrapper
+                .bind(py)
+                .borrow()
+                .arrow(true)
+                .expect("the report exports");
+            let table = pyo3::Py::new(py, table).expect("the table wraps");
+            let capsule = table
+                .bind(py)
+                .call_method1("__arrow_c_stream__", (py.None(),))
+                .expect("the table exposes __arrow_c_stream__");
+            let capsule = capsule
+                .cast::<PyCapsule>()
+                .expect("the stream is a capsule");
+            let imported = PyTable::from_arrow_pycapsule(capsule).expect("the capsule imports");
+            crate::conversions::assert_batches_bitwise_equal(
+                "the capsule import",
+                &expected,
+                imported.batches(),
+            );
+        });
+    }
+
+    /// Two `arrow()` calls on one `ReportResult` share the rechunked
+    /// batch: every column buffer's data pointer is equal, nothing is
+    /// recopied.
+    #[test]
+    fn second_export_does_not_recopy() {
+        let report = full_year_hourly_report();
+        Python::attach(|py| {
+            let wrapper = pyo3::Py::new(
+                py,
+                PyReportResult {
+                    inner: report,
+                    rechunked: OnceLock::new(),
+                },
+            )
+            .expect("the wrapper constructs");
+            let bound = wrapper.bind(py);
+            let first = bound.borrow().arrow(true).expect("the first export");
+            let second = bound.borrow().arrow(true).expect("the second export");
+
+            let buffer_ptrs = |table: &PyTable| -> Vec<usize> {
+                let mut ptrs = Vec::new();
+                for batch in table.batches() {
+                    for column in batch.columns() {
+                        let data = column.to_data();
+                        for buffer in data.buffers() {
+                            ptrs.push(buffer.as_ptr() as usize);
+                        }
+                    }
+                }
+                ptrs
+            };
+            assert!(
+                !buffer_ptrs(&first).is_empty(),
+                "the first export has buffers"
+            );
+            assert_eq!(
+                buffer_ptrs(&first),
+                buffer_ptrs(&second),
+                "the second export shares the first one's buffers"
+            );
+        });
+    }
+
+    /// A rechunk=False export keeps one chunk per built batch while the
+    /// rechunked export holds one batch, every value in order.
+    #[test]
+    fn rechunk_false_keeps_batch_boundaries_rust() {
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "Time",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batches: Vec<RecordBatch> = [3_usize, 3, 2]
+            .iter()
+            .enumerate()
+            .map(|(index, rows)| {
+                let base = (index * 3) as i64;
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondArray::from(
+                            (0..*rows as i64)
+                                .map(|step| base + step)
+                                .collect::<Vec<_>>(),
+                        )),
+                        Arc::new(Float64Array::from(
+                            (0..*rows as i64)
+                                .map(|step| (base + step) as f64)
+                                .collect::<Vec<_>>(),
+                        )),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+        let report = hares_core::ReportResult {
+            name: "rechunk".to_string(),
+            output: hares_core::ReportOutput::Memory(batches.clone()),
+            frequency: hares_io::Frequency::Timestep,
+            rows: 8,
+            batches_delivered: 3,
+        };
+        Python::attach(|py| {
+            let wrapper = pyo3::Py::new(
+                py,
+                PyReportResult {
+                    inner: report,
+                    rechunked: OnceLock::new(),
+                },
+            )
+            .expect("the wrapper constructs");
+            let bound = wrapper.bind(py);
+            let rechunked = bound.borrow().arrow(true).expect("the rechunked export");
+            assert_eq!(rechunked.batches().len(), 1, "rechunk=True holds one batch");
+            let unchunked = bound.borrow().arrow(false).expect("the unchunked export");
+            assert_eq!(
+                unchunked.batches().len(),
+                3,
+                "rechunk=False keeps one chunk per built batch"
+            );
+            let expected = arrow::compute::concat_batches(&schema, &batches).unwrap();
+            crate::conversions::assert_batches_bitwise_equal(
+                "the rechunked batch",
+                &[expected],
+                rechunked.batches(),
+            );
+        });
     }
 }

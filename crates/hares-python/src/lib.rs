@@ -96,6 +96,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySteppableFleet>()?;
     m.add_class::<PyFleetReport>()?;
     m.add_class::<PyFleetResult>()?;
+    m.add_class::<py_fleet::PyFleetTable>()?;
     m.add_class::<PyCoverage>()?;
     m.add_class::<PyActor>()?;
     m.add_class::<PyDispatchRequest>()?;

@@ -239,6 +239,102 @@ def test_simulation_plan_reads_run_result() -> None:
     assert planned.height == 24, "6 h at 900 s is 24 rows"
 
 
+def test_table_matches_arrow_export() -> None:
+    """table() equals polars.DataFrame(arrow()) and has the report's
+    schema: the frame is read through the Arrow PyCapsule interface the
+    arrow() export exposes, its buffers shared, no IPC round trip."""
+    import polars as pl
+
+    dw = build(result_config())
+    result = dw.simulate()
+    report = result.reports[0]
+
+    table = report.arrow()
+    assert hasattr(table, "__arrow_c_stream__"), "arrow() exposes the capsule interface"
+    frame = report.table()
+    imported = pl.DataFrame(table)
+    assert frame.equals(imported), "table() is the arrow() export's frame"
+
+    assert list(imported.schema.keys()) == frame.columns, (
+        "the frame carries the report's columns"
+    )
+    assert imported.schema["Time"] == pl.Datetime("ms"), (
+        "Time is the report's millisecond timestamp"
+    )
+    for name in frame.columns:
+        if name != "Time":
+            assert imported.schema[name] == pl.Float64, f"{name} is a Float64 column"
+
+
+def test_report_can_be_exported_twice() -> None:
+    """A report's arrow() export is repeatable: every call yields a stream
+    that reads back to the same frame, and table() after both agrees."""
+    import polars as pl
+
+    dw = build(result_config())
+    result = dw.simulate()
+    report = result.reports[0]
+
+    first = pl.DataFrame(report.arrow())
+    second = pl.DataFrame(report.arrow())
+    assert first.equals(second), "both exports read back to the same frame"
+    assert report.table(rechunk=False).equals(first), "table() after both exports agrees"
+
+
+def test_rechunk_false_keeps_batch_boundaries() -> None:
+    """arrow(rechunk=False) has one chunk per built batch (96 rows at
+    output_chunk_size=40: batches of 40, 40 and 16); arrow(rechunk=True)
+    holds one batch."""
+    import polars as pl
+
+    dw = build(result_config())
+    result = dw.simulate()
+    report = result.reports[0]
+
+    unchunked = pl.DataFrame(report.arrow(rechunk=False))
+    assert unchunked.height == 96
+    assert unchunked.n_chunks() == 3, "one chunk per built batch"
+    rechunked = pl.DataFrame(report.arrow(rechunk=True))
+    assert rechunked.height == 96
+    assert rechunked.n_chunks() == 1, "one rechunked batch"
+    assert unchunked.equals(rechunked), "both reads hold the same rows"
+
+
+def test_file_report_export_raises_naming_destination(tmp_path) -> None:
+    """arrow() and table() on a file report raise HaresSimulationError
+    naming the report and its destination (the file's path), never an
+    empty table."""
+    import re
+
+    from hares import Destination, ReportSpec, Selection, SimulationConfig
+    from hares._hares import HaresSimulationError
+
+    target = tmp_path / "run.parquet"
+    dw = build(
+        SimulationConfig(
+            start_time="2023-01-01T00:00:00-07:00",
+            duration=86400,
+            time_res=900,
+            reports=[
+                ReportSpec(
+                    "parquet_file",
+                    Selection.verbosity(2),
+                    Destination.parquet(str(target)),
+                )
+            ],
+        )
+    )
+    result = dw.simulate()
+
+    report = result.reports[0]
+    assert report.name == "parquet_file"
+    escaped = re.escape(str(target))
+    with pytest.raises(HaresSimulationError, match=escaped):
+        report.arrow()
+    with pytest.raises(HaresSimulationError, match=escaped):
+        report.table()
+
+
 def test_file_report_table_raises_naming_destination(tmp_path) -> None:
     """table() on a file report raises HaresSimulationError naming the
     report and its destination."""

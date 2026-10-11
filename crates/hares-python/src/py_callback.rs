@@ -20,8 +20,6 @@ use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
 use hares_types::panic_hook::panic_payload_to_string;
 use pyo3::prelude::*;
 
-use crate::conversions::record_batches_to_polars_df;
-
 /// The message a dwelling accessor raises when a batch callback calls
 /// back into the dwelling: the delivery thread already holds the
 /// dwelling's mutex and the GIL across the call, so a re-entrant accessor
@@ -116,7 +114,11 @@ impl BatchCallback for PyBatchCallback {
                     },
                 )
                 .map_err(|err| format!("the batch info object could not be built: {err}"))?;
-                let frame = record_batches_to_polars_df(py, std::slice::from_ref(&batch))
+                let table = crate::conversions::batches_to_py_table(vec![batch])
+                    .map_err(|err| format!("the batch frame could not be built: {err}"))?;
+                let table = Py::new(py, table)
+                    .map_err(|err| format!("the batch frame could not be built: {err}"))?;
+                let frame = crate::conversions::py_table_to_polars_df(py, table.bind(py))
                     .map_err(|err| format!("the batch frame could not be built: {err}"))?;
                 self.callable
                     .call1(py, (info, frame))

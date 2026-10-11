@@ -18,7 +18,7 @@ import datetime
 from typing import Any
 
 import numpy as np
-from typing_extensions import NotRequired, TypedDict
+from typing_extensions import NotRequired, Protocol, TypedDict
 
 class StepResult(TypedDict, extra_items=float):
     """Result from ``Dwelling.step()``.
@@ -111,3 +111,18 @@ class StepInfo(TypedDict):
     initial_observation_mask: np.ndarray | None
     warning_count: float
     warnings: NotRequired[list[str]]
+
+class ArrowStreamExportable(Protocol):
+    """Any object exporting its data as an Arrow stream.
+
+    The Arrow PyCapsule interface: the engine's result tables (a report's
+    ``arrow()`` export, a fleet table's) implement it, and every Arrow
+    consumer (polars, pyarrow, pandas through pyarrow) imports the stream
+    with the underlying buffers shared, zero-copy.
+    """
+
+    def __arrow_c_stream__(
+        self, requested_schema: object | None = None
+    ) -> object:
+        """The object's data as a capsule holding an Arrow C stream."""
+        ...
