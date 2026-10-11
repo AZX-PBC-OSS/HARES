@@ -2811,10 +2811,10 @@ Python surface of this commit, with `reports=[]` in place of
 
 **State:** committed `7aa5c509` (branch `row/r43-or6-py9`, cut from
 `7e95e974`, one commit). The lifecycle as built: `Dwelling::finish()`
-is the one finalisation for every run — the billing close, the post-hoc
+is the one finalisation for every run (the billing close, the post-hoc
 diagnostics, the recorders' flush, close and publish (the final partial
 batch included), the run metrics, the health record, the warning record
-and the provenance — and `simulate()` is step-to-horizon then that same
+and the provenance), and `simulate()` is step-to-horizon then that same
 `finish()`. `finish()` is idempotent and returns the first call's
 `Arc`; a step past the finished run and a finish before the first step
 are typed errors.
@@ -2833,7 +2833,7 @@ OR-5 `RunHealth`, recorded in every build); the warning record and
 `warnings_dropped`; and the `Provenance` (the validated config with the
 master seed in effect, `bldg_id`, `site_utc_offset_s`, and one
 `EquipmentProvenance` per equipment: the instance name, zone mapping,
-zone type, OCV source and the equipment's own provenance lines — the
+zone type, OCV source and the equipment's own provenance lines, the
 diagnostics preamble OR-4 dropped, now carried on the result where the
 diagnostics row's consumers read it, pinned by
 `provenance_carries_equipment_zone_mapping`).
@@ -2893,6 +2893,66 @@ warnings` clean; `cargo nextest run --all-features -j 4` 7674/7674;
 passed, 0 failed, 0 skipped; pyright 0 errors; the goldens bitwise in
 both profiles (`frame_golden compare-all` 7 manifests identical on the
 default build, `full_year_900s_dst` identical on the dst build).
+
+**State (review fixes, 2026-10-10):** the independent review's findings
+fixed on this branch, on top of `ca09e624`: `155937f6` (a checkpoint
+restore clears the finished run's latch: `load_checkpoint` and
+`restore_building_state` reset `run_result` with the rest of the run's
+state, so a finished dwelling that loads a mid-run checkpoint steps
+again and its `finish()` finalises the restored run; both restores
+pinned, RED at `ca09e624` with the step refused as a typed finished
+error, GREEN at `155937f6`); `230fe6eb` (the wrappers' results pinned:
+`DwellingGymEnv.run_result`, `VecDwellingGymEnv.run_results` and the
+HELICS wrapper's `run_result` each read in a test, the latched run's
+`finish()` raise semantics pinned in `callback.rs`, and the HELICS
+`run()` guard: a federation termination before the first step leaves
+the run unstepped and unfinished, `run_result` `None`, where the
+unguarded loop called `finish()` on a run with nothing stepped and let
+its typed error escape `run()`); `9188f6dd` and `cb47e358` (the
+fleet's `extract_rows` reads the run's timestep-frequency `Memory`
+report explicitly instead of folding every report's retained batches
+on a field-name-only guard, so two `Memory` reports with identical
+schemas at different frequencies no longer concatenate into
+double-counted rows: a run with none contributes nothing, two that
+qualify are a `FleetError::AmbiguousTimestepReport` naming the dwelling
+and both reports; pinned both ways); `157089f4` (the writing rule's
+cleanup: the em dashes the three commits' added lines carried are
+reworded out of the source texts). The full block re-run at the fix
+tip: fmt clean; clippy `--workspace --all-targets --all-features -D
+warnings` clean; `cargo nextest run --all-features -j 4` 7678/7678 (1
+skipped, the catalogue generator's deliberate ignore), `cargo nextest
+run -F dst -j 4` 7611/7611 (same skip); pyright 0 errors; the goldens
+bitwise in both profiles (7 manifests identical on the default build,
+`full_year_900s_dst` identical on the dst build).
+
+**State (the unfiltered comparison):** the review's demand, run both
+ways at `pytest -m ''` (the canonical addopts filter the suites
+normally run under drops the `slow` and `ochre` marks; unfiltered they
+run). At the parent `7e95e974` (scratch worktree): 3 failed, 1645
+passed, 4 xfailed, 4 errors in 183.73 s. At the fix tip: 3 failed,
+1660 passed, 4 xfailed, 4 errors in 194.93 s. The residue sets are
+identical, test for test, so the row and its fixes add no unfiltered
+residue; the +15 passes are the rows' own new tests. The residue, all
+four groups pre-existing at the parent and none this row's regression:
+`test_ochre_parity.py::test_parity_24h_records` (the 24 h xfail
+reasons' measured record is stale against the vendored OCHRE run),
+`test_py_fleet.py::test_heterogeneous_equipment_column_mismatch_emits_warning`
+(the test's `SimulationConfig(verbosity=1)` is the removed keyword),
+`test_py_metrics.py::TestMetrics::test_pv_equipped_dwelling_metrics_show_consumption_net_split`
+(the test's `_base_config(start_time=...)` collides with the helper's
+own `start_time`), and the four `test_thermal_trace.py` setup errors
+(the fixture requests `Selection.verbosity(9)`; the report surface
+validates 0-8).
+
+**State (the record's own note):** `7aa5c509`'s commit message carries
+the entry id (`OR-4`) the writing rule keeps out of messages. Amend is
+blocked by the branch's published review, so the history stays as
+written and this note is the record: the message's body, not the code,
+carries the id, and the added source lines are clean of ids and dashes
+at the fix tip (the scan of the three commits' added lines as they
+stand in the tree: zero dashes in every file including this ledger's
+own State paragraphs; zero ids outside this ledger's own
+cross-references, which are its filing system).
 
 ## OR-7: `Time` becomes an Arrow `Timestamp`
 

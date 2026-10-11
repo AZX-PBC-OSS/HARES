@@ -808,7 +808,7 @@ changes" line names has a manifest under `tests/fixtures/golden/`);
 **State:** committed `46455aef` (branch `row/r43-or6-py9`, directly
 after OR-6, one commit). The surface as built: frozen pyclasses over
 the Rust types, registered on the module, exported from `hares`,
-stubbed in `_hares.pyi` — `RunResult` (`reports`, `metrics`, `health`,
+stubbed in `_hares.pyi`: `RunResult` (`reports`, `metrics`, `health`,
 `warnings`, `warnings_dropped`, `provenance`), `ReportResult` (`name`,
 `table()` over the retained batches through the existing IPC
 conversion, `path`, `batches_delivered`, `rows`, `frequency`; `table()`
@@ -861,17 +861,39 @@ changes section pre-dates this row and keeps its standing lines.
 
 The RED, proven differentially at the OR-6 commit (the extension built
 there, the acceptance tests run against it): seven of the ten fail on
-the missing surface — `python_stepped_finish_equals_simulate`,
+the missing surface (`python_stepped_finish_equals_simulate`,
 `health_readable_with_no_reports_requested`,
 `health_counts_clamped_gym_actions`,
 `file_report_table_raises_naming_destination`,
 `simulation_plan_reads_run_result`, and the two stub/doc pins
 (`stub_changes_are_listed` on the missing changes section,
-`test_docs_results_examples` on the missing Results section) — while
+`test_docs_results_examples` on the missing Results section)), while
 `billing_summaries_survive_finish` (the summaries pre-date the row),
 `stubs_cover_every_binding` (trivially: no unstubbed class exists
 either way) and `numeric_changes_name_existing_goldens` pass; GREEN:
 all ten pass with the row (1559 Python tests total).
+
+**State (review fixes, 2026-10-10):** the review's Python-surface
+findings fixed on this branch: `e1c6b1df` (the one `simulate()` caller
+still reading a frame off the return value migrated:
+`test_pv_battery_ev_end_to_end` reads
+`result.reports[0].table()` like its siblings and passes unfiltered;
+the notebook's results panel, `docs/python.md`'s usage example (now
+declaring the report it reads), `docs/architecture.md`'s method table
+and diagram, and the conftest docstrings name the `RunResult` surface
+instead of the deleted `results()`/`metrics()`; the doc example tests
+re-run green); `230fe6eb` (the wrapper exposures pinned:
+`DwellingGymEnv.run_result`, `VecDwellingGymEnv.run_results` and
+`HELICSDwelling.run_result` each read in a test (``None`` before the
+truncating step, the finished result after, cleared on ``reset()``);
+the failed-batch `finish()` raise semantics documented in the docs'
+Results section: a run latched at a failed batch callback or a spent
+failure budget stays ended and its `finish()` raises the latched
+error); and with it the HELICS guard (a termination before the first
+step never finalises). Gates at the fix tip: pytest canonical 1563
+passed, 0 failed, 0 skipped (1559 at the row plus the four new pins);
+pyright 0 errors. The full gates and the unfiltered residue
+comparison are recorded in OR-6's State.
 
 Gates at the commit: fmt clean; clippy `--workspace --all-targets
 --all-features -D warnings` clean; `cargo nextest run --all-features
