@@ -3980,6 +3980,60 @@ need a run live in `crates/hares-core/tests/metrics_from_table.rs`.
 
 **Dependencies:** OR-8.
 
+**State:** committed `67444762` (branch `row/r49-or15`, worktree of
+`16b3c993`, one commit).
+
+The table feed, as built. The accumulator is the run's own: the metrics
+calculator's coverage year and the input plan's thermostat deadband
+became direct inputs (`for_coverage_year` and `build_from_names`; the
+run's constructors delegate with the config's start time and the
+config's field), so one implementation is consumed two ways. The table
+feed resolves the table's columns through the catalogue (a column whose
+Arrow type contradicts its declaration is an error naming it), gates on
+a Timestep table before anything accumulates (consecutive `Time` values
+exactly `time_res` apart, across the batch boundaries too, and no
+`Step Count` column: a reduced table passed with the step resolution is
+an error naming the first offending pair of `Time` values or that
+column, not wrong metrics), refuses an empty table, refuses batches
+that do not share one schema, reads the coverage year from the first
+`Time` value and the deadband from the argument, feeds every row in
+table order through `accumulate_row` and finalises with the
+calculator's own `finish()`. A metrics input variable absent from the
+table leaves the metric it feeds `None`, by the same rule as in-run
+(the shared plan builder's optional slots; the total electric power
+column stays required, and the missing-aggregate drift check runs the
+same). A null in a value column routes through the non-finite guard as
+a skipped value; the engine's own tables carry no nulls.
+
+The entry's `RunMetrics` return type is the result surface's: the
+calculator finalises to `FullSimulationMetrics` and `RunMetrics::from`
+carries it (the flattened type lives in `hares-core`, one crate up, so
+`hares-io` returns the calculator's own type).
+
+The differential: the leap-year fixture over 24 h with `metrics = true`
+and a `Verbosity(8)` memory report; the table feed's metrics compared
+with `RunResult.metrics` field for field, every f64 by bit pattern.
+`metrics_from_table_matches_in_run_metrics` over the retained batches
+and `metrics_from_parquet_file_matches_in_run_metrics` through the
+published parquet read back: identical on bits.
+`metrics_from_table_rejects_type_mismatch`,
+`metrics_from_table_rejects_non_timestep_table` (the same run's table
+reduced to hour periods through the reducer, and a `Step Count`
+column), and the empty-table pin, name their causes. RED first: the
+test file does not compile against the parent (the function missing),
+and the tests land green with the row.
+
+The Python binding waits for the rows that give it the Python catalogue
+and the Arrow stream import (the entry's binding rule): nothing in
+Python changes here.
+
+Gates: fmt clean; clippy `--workspace --all-targets --all-features
+-D warnings` clean; nextest `--workspace --all-features -j 4` 7928
+passed (1 skipped: the ignored kind-pin generator) and `-F dst -j 4`
+7858 passed; the unfiltered pytest (`-m ""`) 1672 passed, 6 xfailed,
+0 skipped, the skip census clean; pyright 0 errors; the goldens bitwise
+(compare-all 7 manifests identical, `full_year_900s_dst` identical).
+
 ## OR-16: replay export
 
 **Kind:** initiative work (`dl-i08-architecture.new_capability`: "replay
