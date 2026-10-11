@@ -182,6 +182,7 @@ class _FakeDwelling:
         self._equip_socs = [0.5] * n_equipment
         self._equip_modes = [1.0] * n_equipment
         self._equip_names = [f"Equip_{i}" for i in range(n_equipment)]
+        self._finish_result: Any = None
 
     def timesteps(self) -> Iterator[datetime]:
         return iter(self._times)
@@ -195,7 +196,8 @@ class _FakeDwelling:
 
     def finish(self) -> None:
         self._log.append(("finish", self._step_count))
-        return None
+        self._finish_result = SimpleNamespace(kind="run_result")
+        return self._finish_result
 
     def telemetry(self) -> Any:
         idx = max(self._step_count - 1, 0)
@@ -429,6 +431,11 @@ def test_helics_dwelling_run_loop_relative_time_and_routing(monkeypatch: pytest.
     reactive_pub = fed.publications["reactive_power_kvar"]
     assert power_pub.published == [3.0, 4.0]
     assert reactive_pub.published == [0.5, 0.6]
+
+    # The run's end finalises the dwelling: the wrapper's run_result reads
+    # the finished RunResult the dwelling's finish() returned.
+    assert ("finish", 2) in fake_helics.log
+    assert orchestrator.run_result is dwelling._finish_result
 
     assert fed.disconnected is True
 
@@ -667,6 +674,10 @@ def test_helics_dwelling_federation_termination_sentinel_exits_without_stepping(
     assert orchestrator._federation_terminated is True
     # Dwelling must NOT have stepped after receiving the sentinel
     assert dwelling._step_count == 0
+    # Nothing stepped, so nothing finalises: finish() is never called and
+    # the wrapper's run_result stays None.
+    assert ("finish", 0) not in fake_helics.log
+    assert orchestrator.run_result is None
     # No publish must have occurred for the terminated step
     fed = fake_helics.last_fed
     assert fed is not None
@@ -706,6 +717,66 @@ def test_helics_dwelling_federation_termination_sentinel_during_multi_rate_grant
     assert len(pub.published) == 2
     assert pub.published[0] == 3.0  # unchanged state, republished
     assert pub.published[1] == 3.0
+    assert term_fed.disconnected is True
+
+
+def test_helics_dwelling_federation_termination_after_steps_finishes_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions()
+
+    # Step 1 runs to its exit time, then the termination sentinel arrives
+    # for step 2: one step ran, so the wrapper finalises that run and
+    # run_result reads the finished result.
+    term_fed = _MultiGrantFederate(
+        fed_name="house_1",
+        fedinfo=fake_helics.last_fedinfo,
+        log=fake_helics.log,
+        grant_sequence=[60.0, fake_helics.HELICS_TIME_MAXTIME],
+    )
+    orchestrator._fed = term_fed
+
+    orchestrator.run()
+
+    assert orchestrator._federation_terminated is True
+    assert dwelling._step_count == 1
+    assert ("finish", 1) in fake_helics.log
+    assert orchestrator.run_result is dwelling._finish_result
+    assert term_fed.disconnected is True
+
+
+def test_helics_dwelling_federation_termination_before_the_first_step_never_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions()
+
+    # The sentinel at the very first request: the dwelling has stepped
+    # nothing, so the wrapper must not call finish() (the dwelling refuses
+    # a finish before the first step) and run_result stays None.
+    term_fed = _MultiGrantFederate(
+        fed_name="house_1",
+        fedinfo=fake_helics.last_fedinfo,
+        log=fake_helics.log,
+        grant_sequence=[fake_helics.HELICS_TIME_MAXTIME],
+    )
+    orchestrator._fed = term_fed
+
+    orchestrator.run()
+
+    assert orchestrator._federation_terminated is True
+    assert dwelling._step_count == 0
+    assert orchestrator.run_result is None
+    assert not any(entry[0] == "finish" for entry in fake_helics.log)
     assert term_fed.disconnected is True
 
 

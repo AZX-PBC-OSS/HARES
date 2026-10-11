@@ -531,4 +531,24 @@ fn a_callback_error_at_close_latches_the_run_ended() {
         2,
         "the callback saw only the batches before the close"
     );
+
+    // The failed-batch raise semantics: the latched run's finish() raises
+    // the latched error too. It never returns a result: there is no
+    // finished run to return, and the close's failure is the cause.
+    let finished = run.finish().expect_err("a latched run's finish() raises");
+    match &finished {
+        hares_types::HaresError::Callback { report, message } => {
+            assert_eq!(report, REPORT);
+            assert!(
+                message.contains("the store is full"),
+                "finish()'s error must carry the latched cause, got: {message}"
+            );
+        }
+        other => panic!("expected a callback error, got: {other:?}"),
+    }
+    assert_eq!(
+        sink.lock().expect("sink lock").len(),
+        2,
+        "the latched finish() re-delivers nothing"
+    );
 }

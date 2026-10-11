@@ -609,8 +609,12 @@ class HELICSDwelling:
                 self._publish_results()
             # The stepping loop's end finalises the dwelling's run: the
             # finished RunResult carries the reports the run published (the
-            # final partial batch included).
-            self._run_result = self._dwelling.finish()
+            # final partial batch included). A federation termination before
+            # the first step leaves a run that has stepped nothing: there is
+            # nothing to finalise and finish() refuses it, so ``run_result``
+            # stays ``None``.
+            if self._step_index > 0:
+                self._run_result = self._dwelling.finish()
             # Signal completion to the HELICS federation. A federate that has
             # no further time steps must inform the broker so it can coordinate
             # clean shutdown. Without this handshake other federates may stall
@@ -640,8 +644,10 @@ class HELICSDwelling:
 
     @property
     def run_result(self) -> Any:
-        """The finished run's ``RunResult`` (``None`` until ``run()`` has
-        stepped the horizon to its end)."""
+        """The finished run's ``RunResult``: set when ``run()`` finalised a
+        run that stepped at least once (the horizon's end, or a federation
+        termination after steps ran); ``None`` while the dwelling has
+        stepped nothing to finalise."""
         return self._run_result
 
     def _enter_executing_mode(self) -> None:

@@ -1821,3 +1821,97 @@ def test_python_action_bounds_match_the_engine():
         assert engine == python, f"{field}: engine {engine}, python {python}"
     for name in ("HEAT_C", "Mystery_Field"):
         assert field_bounds(name) == rust_field_bounds(name), name
+
+
+_REPORTED_CONFIG = GymDwellingConfig(
+    hpxml=HPXML,
+    schedule=SCHEDULE,
+    weather=WEATHER,
+    defaults_path=str(HARES_DEFAULTS),
+    sim_config=SimulationConfig(
+        start_time="2019-01-01T00:00:00",
+        duration=600,
+        time_res=60,
+        reports=[ReportSpec("frame", Selection.verbosity(1), Destination.memory())],
+    ),
+)
+
+
+def test_gym_env_exposes_the_finished_run_result():
+    """The truncating step finalises the run and ``run_result`` reads the
+    finished ``RunResult``: ``None`` before it, the report surface after,
+    cleared on ``reset()``."""
+    env = DwellingGymEnv(
+        config=_REPORTED_CONFIG,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+    assert env.run_result is None, "no result before the truncating step"
+
+    for _ in range(4):
+        env.step(np.array([21.0], dtype=np.float64))
+    assert env.run_result is None, "no result while the episode runs"
+
+    obs, reward, terminated, truncated, info = env.step(
+        np.array([21.0], dtype=np.float64)
+    )
+    assert truncated is True, "the fifth step truncates the episode"
+    result = env.run_result
+    assert result is not None, "the truncating step finalises the run"
+    assert [report.name for report in result.reports] == ["frame"]
+    assert result.reports[0].rows == 5, "the report holds the episode's five steps"
+    assert result.health.clamped_actions == 0
+
+    env.reset(seed=0)
+    assert env.run_result is None, "reset() clears the finished result"
+
+
+def test_vec_gym_exposes_each_dwelling_run_result():
+    """``run_results`` reads each dwelling's finished ``RunResult`` off the
+    vectorised wrapper: ``None`` per env before truncation, the report
+    surface after, cleared on ``reset()``."""
+    env = VecDwellingGymEnv(
+        dwellings=[_make_dwelling_for_reports(seed=i) for i in range(2)],
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+    assert all(result is None for result in env.run_results)
+
+    for _ in range(4):
+        env.step(np.full((2, 1), 21.0, dtype=np.float64))
+    assert all(result is None for result in env.run_results)
+
+    obs, rewards, dones, truncs, infos = env.step(
+        np.full((2, 1), 21.0, dtype=np.float64)
+    )
+    assert truncs.tolist() == [True, True], "the fifth step truncates both"
+    for result in env.run_results:
+        assert result is not None, "the truncating step finalises each run"
+        assert [report.name for report in result.reports] == ["frame"]
+        assert result.reports[0].rows == 5
+
+    env.reset(seed=0)
+    assert all(result is None for result in env.run_results), "reset() clears"
+
+
+def _make_dwelling_for_reports(seed: int = 0) -> PyDwelling:
+    config = SimulationConfig(
+        start_time="2019-01-01T00:00:00",
+        duration=600,
+        time_res=60,
+        master_seed=seed,
+        reports=[ReportSpec("frame", Selection.verbosity(1), Destination.memory())],
+    )
+    return PyDwelling.from_hpxml(
+        hpxml=HPXML,
+        schedule=SCHEDULE,
+        weather=WEATHER,
+        defaults_path=str(HARES_DEFAULTS),
+        config=config,
+    )
