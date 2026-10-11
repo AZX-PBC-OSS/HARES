@@ -426,6 +426,14 @@ impl StreamingRecorder {
         &self.destination
     }
 
+    /// Whether a batch callback is attached: a `Callback` destination
+    /// recorder without one has nowhere to deliver its batches, and the
+    /// freeze refuses the run rather than dropping them.
+    #[must_use]
+    pub fn has_attachment(&self) -> bool {
+        self.callback.is_some()
+    }
+
     /// Attaches a batch callback: every built batch is handed to it in
     /// flush order, with the context naming the report, the building and
     /// the batch index. A later attach replaces the earlier one.

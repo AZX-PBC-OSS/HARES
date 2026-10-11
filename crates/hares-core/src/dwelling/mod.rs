@@ -5486,6 +5486,30 @@ impl Dwelling {
                 "simulation already reached configured end".to_string(),
             ));
         }
+        // The run's start (the production run's first step, warm-up
+        // excluded): a callback-destination report with no callback
+        // attached has nowhere to deliver its batches, and a run refuses
+        // rather than record rows nothing reads. Attachments cannot arrive
+        // later (attaching after rows are recorded is refused), so the
+        // check at the first step is the last word; the refusal is latched
+        // the way a callback error at a flush is.
+        if self.clock.current_step() == 0 && !self.is_warming_up {
+            for (report, recorder) in self.reports.iter().zip(&self.recorders) {
+                if matches!(report.destination, hares_io::Destination::Callback)
+                    && !recorder.has_attachment()
+                {
+                    let err = HaresError::Callback {
+                        report: report.name.clone(),
+                        message: "the report's destination is the callback, and no \
+                                  callback is attached: attach one before the run \
+                                  starts"
+                            .to_string(),
+                    };
+                    self.terminal_error = Some(err.clone());
+                    return Err(err);
+                }
+            }
+        }
 
         // One phase clock per step: read at entry, closed at each phase
         // boundary below, finished at return. The phases partition the step

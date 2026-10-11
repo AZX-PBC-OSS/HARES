@@ -373,6 +373,36 @@ fn attach_without_output_recording_is_refused() {
     }
 }
 
+/// A callback-destination report with no callback attached fails the run
+/// at the first step, naming the report: the batches would go nowhere,
+/// and the run refuses instead of recording rows nothing reads.
+#[test]
+fn callback_report_without_attachment_fails_before_first_step() {
+    let run_dir = tempfile::tempdir().expect("tempdir");
+    let mut sim = config(false, &run_dir.path().join("run.parquet"));
+    sim.reports[0].destination = Destination::Callback;
+    let mut run = dwelling(sim, 7);
+    let err = run
+        .step()
+        .expect_err("the unattached callback report fails the first step");
+    match &err {
+        hares_types::HaresError::Callback { report, message } => {
+            assert_eq!(report, REPORT);
+            assert!(
+                message.contains("no callback is attached"),
+                "the refusal must name the missing attachment, got: {message}"
+            );
+        }
+        other => panic!("expected a callback error, got: {other:?}"),
+    }
+    // The refusal is the run's end: a later step carries it.
+    let later = run.step().expect_err("the run stays ended");
+    assert!(
+        later.to_string().contains("no callback is attached"),
+        "the later step's error must carry the refusal, got: {later}"
+    );
+}
+
 /// A callback attached before the first recorded row survives a roster
 /// rebuild: the dwelling holds the attachment and hands a clone to the
 /// fresh recorder, so the callback still receives every batch.
