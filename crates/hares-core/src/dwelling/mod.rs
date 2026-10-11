@@ -16122,6 +16122,86 @@ occupancy = 0.0
         restoring.run_timestep(false).expect("the run steps on");
     }
 
+    /// The Parquet and callback arms of the destination refusal (the CSV
+    /// arm is the test above; all three ride the one destination
+    /// check): a checkpoint whose run wrote to either is refused by a
+    /// restoring dwelling that writes to it, naming the report, and the
+    /// refused restore changes nothing: the run steps on with its own
+    /// rows.
+    #[test]
+    fn restore_with_parquet_destination_is_a_typed_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parquet_reports = || {
+            vec![hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(2),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Parquet {
+                    path: tmp.path().join("frame.parquet"),
+                    overwrite: true,
+                },
+            }]
+        };
+        let mut source = bestest_with_reports(parquet_reports());
+        for _ in 0..3 {
+            source.run_timestep(false).expect("step");
+        }
+        let checkpoint = source.save_checkpoint().expect("checkpoint saves");
+
+        let mut restoring = bestest_with_reports(parquet_reports());
+        restoring.run_timestep(false).expect("step");
+        let rows_before = restoring.recorded_rows();
+
+        let err = restoring
+            .load_checkpoint(checkpoint)
+            .expect_err("a parquet-destination report refuses the restore");
+        assert!(
+            err.to_string().contains("frame"),
+            "the refusal names the report: {err}"
+        );
+        assert_eq!(
+            restoring.recorded_rows(),
+            rows_before,
+            "the refused restore changes no recorded row"
+        );
+        restoring.run_timestep(false).expect("the run steps on");
+    }
+
+    #[test]
+    fn restore_with_callback_destination_is_a_typed_error() {
+        let callback_reports = || {
+            vec![hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(2),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Callback,
+            }]
+        };
+        let mut source = bestest_with_reports(callback_reports());
+        for _ in 0..3 {
+            source.run_timestep(false).expect("step");
+        }
+        let checkpoint = source.save_checkpoint().expect("checkpoint saves");
+
+        let mut restoring = bestest_with_reports(callback_reports());
+        restoring.run_timestep(false).expect("step");
+        let rows_before = restoring.recorded_rows();
+
+        let err = restoring
+            .load_checkpoint(checkpoint)
+            .expect_err("a callback-destination report refuses the restore");
+        assert!(
+            err.to_string().contains("frame"),
+            "the refusal names the report: {err}"
+        );
+        assert_eq!(
+            restoring.recorded_rows(),
+            rows_before,
+            "the refused restore changes no recorded row"
+        );
+        restoring.run_timestep(false).expect("the run steps on");
+    }
+
     /// A report's chunk size travels in its checkpoint section: a restore
     /// into a dwelling built at another chunk size is a typed error
     /// naming the report and both sizes (the same rows would rebuild into
