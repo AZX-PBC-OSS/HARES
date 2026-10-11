@@ -2467,3 +2467,47 @@ workspace dependency, `json_floats_round_trip_bitwise` failed on
 `std::f64::consts::PI * 1e-30` parsed one ULP off the value written
 (bits 4165790117795483861 against 4165790117795483862); with the
 feature, the suite passes (197/197 in `hares-tariff`).
+
+### The checkpoint resume row's checkpoint size and save wall, 2026-10-11 (branch `row/r48-or10`, tip `6a25ec97`)
+
+The measurement the checkpoint resume row's entry promises: the
+checkpoint's size in bytes and the `save_checkpoint` wall time for a
+full-year fixture, before and after, re-measured to confirm the figures
+the independent review took (284 KB at 1 week, 3.2 MB at a quarter,
+6.3 MB at half-year, 13.9 MB at a year, save about 8 ms at year-end).
+
+Method: a temporary release-built `hares-core` example (deleted after
+the run, never committed) builds the cz4a parity fixture
+(`tests/fixtures/parity/cz4a_ashp_hpwh`, start
+`2023-01-25T00:00:00-07:00`, duration 31 536 000 s at 900 s, 35 040
+steps, `metrics = true`, no warm-up) with one verbosity-2 memory
+report, steps `Dwelling::step()` 35 040 times in one continuous run,
+and saves a checkpoint at each milestone: 1 week (672 steps), a quarter
+(8 736), half-year (17 472) and the year (35 040). `save_checkpoint()`
+is timed with `Instant` (the state capture the API performs); the size
+is the written file's (`DwellingCheckpoint::save`, the JSON bytes with
+their checksum line); five year-end saves give the wall-time median.
+The "before" side runs the same harness on a temporary worktree of the
+parent `16b3c993`, whose checkpoint carried physics and tariff state
+but none of the run-surface sections. Load average at write time: 10 to
+14 (1 min; the host was busy).
+
+Before (parent `16b3c993`): 6 720 bytes at 1 week, 6 840 at a quarter,
+6 853 at half-year, 6 899 at the year, constant in the recorded rows,
+capture under 0.1 ms.
+
+After (this branch): 283 510 bytes at 1 week, 3 562 797 at a quarter,
+6 957 553 at half-year, 13 946 305 at the year. The growth is linear in
+the recorded rows, about 400 bytes per row (the frame's every row's
+timestamp and value columns in JSON text): that is the tradeoff the
+row's entry states, the checkpoint carries every memory report's row so
+the resumed run's frames continue bitwise, and the price is a
+checkpoint proportional to the recorded rows. The `save_checkpoint()`
+capture runs 6.5 ms median at year-end (five saves, 4.6 to 8.1 ms); the
+file write a caller adds on top (`cp.save()`, the JSON serialization
+plus checksum) runs about 50 to 84 ms at year-end sizes.
+
+Against the review's figures: week and year agree to rounding (284 KB,
+13.9 MB), quarter and half-year read slightly higher here (3.6 MB and
+7.0 MB); linearity holds in every recorded row on both sides, and the
+sizes are exact (all five year-end saves byte-count identical).
