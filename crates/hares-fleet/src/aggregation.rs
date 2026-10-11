@@ -388,14 +388,16 @@ pub fn aggregate(
     })
 }
 
+/// One dwelling's contribution: the folded report's schema and its
+/// retained batches, or `None` when the run declares no report the
+/// aggregate reads; the ambiguity of two candidates is an error.
+type ExtractedRows = Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, FleetError>;
+
 /// The one report the fleet's aggregate folds: the run's timestep-frequency
 /// `Memory` report, the run's own frame surface. A run that declares none
 /// contributes nothing; two that qualify are an ambiguity the caller must
 /// resolve, named by the error rather than silently folded together.
-fn extract_rows(
-    outcome: &DwellingOutcome,
-    dwelling_index: usize,
-) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, FleetError> {
+fn extract_rows(outcome: &DwellingOutcome, dwelling_index: usize) -> ExtractedRows {
     // The fleet's aggregate folds the timestep-frequency memory report's
     // retained batches: the run's own frame surface, one report at a time.
     // Folding every memory report would double-count a run that carries two
