@@ -3298,6 +3298,33 @@ pass unchanged.
 **Measurement:** `initialize()` wall time before and after, recorded (a
 measurement, not a test).
 
+Landed as `9db43ee7` on branch `row/r47-or9` (cut from `16b3c993`): the
+field and all six sites deleted, and `initialize()` keeps only the
+`initialized` flag, set unconditionally. The compilation is the
+enforcement the acceptance named: with the field gone, any reference
+that remained fails the build, and the commit's diff carries no other
+change. The existing Python tests that call `initialize()` pass
+unchanged (the full `-m ''` pytest run: 1672 passed, 6 xfailed,
+0 failed, 0 errors, on a worktree with the vendor submodules
+initialised; without them the OCHRE-filed cases fail for their absence,
+a worktree artifact, not a row effect). No new test: the row is a
+deletion whose acceptance is compile-enforced, so the RED first does
+not apply. The measurement is in `02-measurement.md`: the serialisation
+dominated the call, medians of about 60 microseconds before against
+about 3 after (41 fresh dwellings per run, three runs per side, the
+release wheel), about 20x lower, the behavior otherwise unchanged.
+
+Gates on the commit: `cargo fmt --check --all` clean;
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+clean; `cargo nextest run --workspace --all-features -j 4` 7923 passed
+(1 skipped); `cargo nextest run -F dst -j 4` 7853 passed (1 skipped);
+`cargo nextest run -p hares-python` 175 passed; `uv run pyright`
+0 errors; the goldens bitwise (`frame_golden compare-all` 7 manifests
+identical on the default build, `full_year_900s_dst` identical on the
+dst build). Every line was green again on the next row's staged block
+(the same numbers with the one acceptance test of the row after added:
+7924 and 7854).
+
 ## OR-17: JSON floats parse exactly in every build
 
 **Kind:** initiative work (OR-10's bitwise restore needs it); structural,
@@ -3358,6 +3385,55 @@ subnormal and extreme values), `serde_json::to_string` then
 **Commit:** `build: parse JSON floats exactly in every build`
 
 **Dependencies:** none; directly before OR-10.
+
+Landed as `f81618c8` on branch `row/r47-or9` (cut from `16b3c993`),
+directly after the row before it. The manifest change itself already
+sat on the base: the phase-1 fold `c561eb69` unified `float_roundtrip`
+into the workspace dependency and took `tools/frame_golden`'s own
+feature line out, so the branch's manifest diff is empty and the commit
+lands the acceptance test and the proofs (structural, by the proof: no
+comparison differs, so no numeric row).
+
+The RED first: `json_floats_round_trip_bitwise`
+(`crates/hares-tariff/tests/json_float_roundtrip.rs`) written against
+the workspace dependency, then `cargo nextest run -p hares-tariff` with
+the feature stripped from it: the test failed on
+`std::f64::consts::PI * 1e-30` parsed one ULP off the value written
+(bits 4165790117795483861 against 4165790117795483862), the discriminating
+proof the entry required (the build does not include `frame_golden`).
+GREEN with the feature: 197/197 in `hares-tariff`.
+
+The three proofs, all recorded in `02-measurement.md`:
+
+- the goldens: `frame_golden compare-all` on the default build, 7
+  manifests identical, and `full_year_900s_dst` identical on the dst
+  build;
+- the consumer: a worktree of `1d60f478` with only the manifest change
+  applied (one line), built through the engine-under-test mechanism
+  (release, maturin 1.15.0 from that commit's own lock, editable into
+  the B0 consumer worktree `aec2e3f`'s venv): the gate `run_all` 332
+  passed, 0 failed, 7 skipped, the skip set exactly the base seven;
+  the contract check PASS; ruff clean; the DE-trace capture compares
+  identical to the row-16g sweep's base sanity capture of `1d60f478`,
+  and the same-consumer before/after pair (the feature stripped,
+  rebuilt, re-captured) compares identical, so the only delta between
+  the pair is the feature and it moved nothing. The shipped
+  `B0-de-trace.json` could not serve as the compare target: its header
+  names a capture from the divergent audit line (recorded at the
+  rename row), and its payload carries consumer fields that postdate
+  `aec2e3f`; the compare against it exits 1 on that structural
+  difference before any number is reached;
+- the Python suite: the five tariff test files pass identically
+  without the feature (79 passed on a temporary no-feature wheel) and
+  with it (79 passed).
+
+Gates on the commit: `cargo fmt --check --all` clean;
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+clean; `cargo nextest run --workspace --all-features -j 4` 7924 passed
+(1 skipped); `cargo nextest run -F dst -j 4` 7854 passed (1 skipped);
+pytest `-m ''` 1672 passed, 6 xfailed, 0 failed, 0 errors; `uv run
+pyright` 0 errors; the goldens bitwise (compare-all 7 identical, dst
+identical).
 
 ## OR-10: checkpoint/restore resumes billing, metrics, reports, health and warnings
 

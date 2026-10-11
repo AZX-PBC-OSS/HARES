@@ -2394,3 +2394,76 @@ the structural claim: with no request no metrics code runs in the step
 the tests (`metrics_absent_unless_requested`, the in-crate pin that the
 dwelling holds no accumulator without the request). The consumer's fit
 path later gets exactly this shape: no request, no cost.
+
+### The unread checkpoint serialisation leaves `initialize()`, 2026-10-10 (branch `row/r47-or9`, commit `9db43ee7` on `16b3c993`)
+
+Quantity: `PyDwelling.initialize()` wall time, before and after the
+deletion of the unread checkpoint serialisation. Command: the release
+wheel (`uv run --locked --all-extras --all-groups maturin develop
+--release --uv`), a script timing `initialize()` alone over 41 fresh
+dwellings (the ochre_samples `base.xml` fixture, the Denver example
+weather and BEopt schedule, 3600 s at 60 s, seed 0), construction
+untimed, one warm-up pass first; median per run, three runs per side.
+Load average at write time: 5.11 (1 min) before, 19.95 (1 min) after
+(another session's build on the host; the per-run minima, 50 to 54
+microseconds before and 1.9 to 2.0 after, are the load-free floor).
+
+- before: medians 0.0641, 0.0584, 0.0598 ms per call.
+- after: medians 0.0029, 0.0030, 0.0035 ms per call.
+
+The serialisation dominated the call: about 60 microseconds against
+about 3, about 20x lower, and what remains is the Python call and the
+flag set. The behavior is unchanged: the checkpoint the field held was
+never read, the dwelling's state and every step's results are the same,
+and the goldens are bitwise (compare-all 7 manifests identical,
+`full_year_900s_dst` identical).
+
+### JSON floats parse exactly in every build: the three proofs, 2026-10-10 (branch `row/r47-or9`, commit `f81618c8` on `16b3c993`)
+
+The manifest change itself already sat on the row's base: the phase-1
+fold `c561eb69` unified `float_roundtrip` into the workspace
+dependency and took `tools/frame_golden`'s own feature line out, so the
+branch's manifest diff is empty and the commit lands the acceptance
+test and the proofs. Load average at write time: 2 to 5 (1 min).
+
+1. The goldens: `frame_golden compare-all` on the default build, 7
+   manifests identical (`consumer_shape_900s`, `fleet_mixed_offset`,
+   `full_year_hourly`, `leap_year_february_900s`,
+   `month_boundary_billing_3600s`, `resstock_2025_fleet`,
+   `weather_wrap_900s`), and `full_year_900s_dst` identical on the dst
+   build.
+2. The consumer: a worktree of the B0 engine commit `1d60f478` with
+   only the manifest change applied (one line:
+   `serde_json = { version = "1", features = ["float_roundtrip"] }`),
+   built through the engine-under-test mechanism (release, the
+   maturin 1.15.0 constraint from that commit's own `uv.lock`,
+   editable into the B0 consumer worktree `aec2e3f`'s venv) and run
+   against the B0 consumer `aec2e3f`: the gate `run_all` 332 passed,
+   0 failed, 7 skipped, the skip set exactly the base seven; the
+   contract check `[hares-contract] PASS`; `ruff check` clean. The
+   DE-trace capture compares identical (exit 0) to the row-16g sweep's
+   base sanity capture of `1d60f478`
+   (`/tmp/opencode/i08/b0-1d60f478.json`, consumer `18a8ec3`), and the
+   same-consumer before/after pair is identical too: the feature
+   stripped from the worktree, rebuilt, re-captured
+   (`capture-before.json`), the two captures compare identical, so the
+   only delta between the pair is the feature and it moved nothing.
+   The shipped `B0-de-trace.json` baseline could not serve as the
+   compare target: its header names engine `27db4a1e`, consumer
+   `384075185`, a capture from the divergent audit line (the
+   divergence recorded at the rename row), and its payload carries
+   consumer fields (`first_rejection`) that postdate `aec2e3f`; the
+   compare against it exits 1 on that structural difference before any
+   number is reached.
+3. The Python suite: the five tariff test files
+   (`test_tariff_builder.py`, `test_tariff_evaluator.py`,
+   `test_tariff_integration.py`, `test_tariff_telemetry.py`,
+   `test_ev_tariff_integration.py`) pass identically without the
+   feature (79 passed, a temporary no-feature wheel) and with it (79
+   passed), so the values they read are equal before and after.
+
+The acceptance test's RED/GREEN: with the feature stripped from the
+workspace dependency, `json_floats_round_trip_bitwise` failed on
+`std::f64::consts::PI * 1e-30` parsed one ULP off the value written
+(bits 4165790117795483861 against 4165790117795483862); with the
+feature, the suite passes (197/197 in `hares-tariff`).
