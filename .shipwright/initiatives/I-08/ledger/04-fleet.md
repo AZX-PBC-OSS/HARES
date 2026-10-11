@@ -79,7 +79,10 @@ max-resident-homes bound, the chunk size: `FleetResult.
 peak_live_home_results` reads it (the acceptance test pins exactly 1
 and 2 at chunk sizes 1 and 2), and the bench pair at 10000 homes
 measures it (104 MB at chunk 64 against 158 MB at the one-chunk
-collect shape, wall equal at 12.5 s vs 12.4 s; `02-measurement.md`).
+collect shape, wall equal at 12.5 s vs 12.4 s; corrected on review: the
+first record's pair was an artifact of one shared criterion process,
+and the fresh-process remeasurement in `02-measurement.md` has the pair
+agree, 85.1 MB against 85.3 MB, wall 13.20 s vs 12.84 s).
 The ordered-merge correctness: the fold's per-cell accumulation adds
 `v * w` and `w` home by home in entry order and divides a weighted mean
 once after the last home, the parent fold's operations and order; the
@@ -152,7 +155,11 @@ there) and compares sorted metric totals with an epsilon.
   `DwellingMetrics`, `FleetResults`, `aggregate()`, `resample_rows`,
   `build_aggregate_batch` and both unit tables are deleted.
 - Each home runs the reports of its own `SimulationConfig` (a home can still
-  write its own files) plus one report the fleet appends, named `fleet`: the
+  write its own files; a home whose own config carries a `Destination::Callback`
+  report fails that home at run start: through `Fleet::simulate` the dwellings
+  are built internally, so nothing can attach the report's callback, and the run
+  refuses a callback report with nothing attached instead of streaming its
+  batches to nowhere, pinned) plus one report the fleet appends, named `fleet`: the
   fleet selection restricted to that home's catalogue (below), at
   `Timestep`, to a `Callback` destination (`03-output-reporting.md` OR-14).
   The fleet attaches a Rust `BatchCallback` that feeds each batch into a

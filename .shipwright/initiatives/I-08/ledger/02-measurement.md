@@ -2572,3 +2572,62 @@ equivalent) holds every home's result at once; `chunk_64` holds at most
   3.6 kB per home (the entry list, the homes row and the fold's running
   cells share it with the criterion harness's own footprint; the pair
   difference isolates the home results).
+
+### The fleet fold's memory bound, re-measured in fresh processes, 2026-10-11
+
+A reviewer found the memory-bound record above artifactual: its pairs
+were read out of one criterion process in which both chunkings and every
+fleet size ran sequentially, so the second benchmark's VmHWM inherited
+the first's high-water mark and the samples' own accumulation, and the
+ten-thousand-home `chunk_1000` reading was that inherited peak, not the
+one-chunk shape's own.
+
+Re-measured soundly, one fleet run per fresh process: the bench gained a
+one-shot mode, `HARES_FLEET_FOLD_ONCE=<chunk_size>/<homes> cargo bench
+-p hares-core --bench fleet`, which runs the fold once and prints the
+run's wall seconds and the VmHWM read from `/proc/self/status` at run
+end (the bench's `peak_rss_kb` reads `/proc/self/status` now). Five
+fresh processes per pair, medians, the same fleet shape as before
+(copies of the base fixture at 24 h and 900 s steps, folded at the hour,
+8 threads):
+
+- 100 homes: `chunk_64` 66.2 MB, `chunk_1000` 66.5 MB VmHWM; wall 0.14 s
+  either way.
+- 1000 homes: `chunk_64` 68.9 MB, `chunk_1000` 69.0 MB; wall 1.33 s vs
+  1.28 s.
+- 10000 homes: `chunk_64` 85.1 MB, `chunk_1000` 85.3 MB; wall 13.20 s vs
+  12.84 s.
+
+The honest delta: none measurable. The two chunkings' peaks agree within
+the runs' spread at every size, because a home's result in the fold is
+its reduced period table at the report's frequency (a few kB per home at
+the hourly frequency), so the chunk bound has nothing to hold back at
+these sizes. The chunk barrier's wall cost at ten thousand homes is
++0.36 s of median (2.8%), inside the 5% band: nothing measurable. The
+bookkeeping slope at `chunk_64` from 1000 to 10000 homes is about
+1.8 kB per home. The earlier record's "saves about 54 MB" and its
+104.0-against-158.3 MB pair were the artifact; the bound's honest
+evidence is structural (`peak_live_home_results` pinned at 1 and 2)
+plus the reduced table's bytes below.
+
+One home's reduced table bytes (`RecordBatch` columns'
+`get_array_memory_size` summed, one `base.xml` home at 24 h and 900 s
+steps, verbosity 0, output chunk 10 000): at `Timestep`, the home's
+selected-variable frame, the shape the parent commit's collect held per
+home (the fold's reducer refuses the timestep frequency, so the frame
+comes from a standalone memory report), 96 rows, 480 576 bytes; at
+`Hourly`, the fold's reduced table read as the one-home fleet's
+aggregate, 24 rows, 6 columns, 46 684 bytes. The batch numbers carry the
+builders' buffer capacity; the fold's live hold is the reduced table
+itself, a few kB per home.
+
+The callback destination in fleet homes, stated correctly: the row's
+entry said each home runs the reports of its own `SimulationConfig`; for
+a `Destination::Callback` report that is wrong. Through `Fleet::simulate`
+the dwellings are built internally, so nothing can attach the report's
+callback, and a run now refuses a callback-destination report with
+nothing attached at its first step (the refusal latches and names the
+report) instead of streaming its batches to nowhere: a home config
+carrying `Destination::Callback` fails that home at run start, its
+fellows unaffected. Pinned at the engine (the first step refuses) and at
+the fleet (the home's status is `failed` with 0 steps).
