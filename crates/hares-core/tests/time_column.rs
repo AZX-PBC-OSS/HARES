@@ -33,8 +33,8 @@ fn cz2a_config(
         hpxml_path: fixture.join("building.xml"),
         schedule_path: Some(fixture.join("schedule.csv")),
         weather_path: fixture.join("weather.epw"),
-        sim_config: SimulationConfig {
-            start_time: start,
+            sim_config: SimulationConfig {
+                start_time: start,
             duration: chrono::Duration::seconds(duration_s),
             time_res: chrono::Duration::seconds(step_s),
             reports: vec![ReportSpec {
@@ -50,6 +50,7 @@ fn cz2a_config(
             civil_timezone: None,
             site_location: SiteLocationOverride::default(),
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_io::HealthPolicy::default(),
         },
         defaults_path: Some(project_root().join("defaults")),
         overrides: None,
