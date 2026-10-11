@@ -208,7 +208,11 @@ fn continuous_and_resumed(
 fn checkpoint_path(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("hares-r48-or10");
     std::fs::create_dir_all(&dir).expect("temp dir");
-    dir.join(format!("{name}.json"))
+    // Nextest runs this binary's tests concurrently as separate processes,
+    // and every caller here saves, loads and removes the one name: a
+    // process-unique suffix keeps a parallel test's overwrite (or a half
+    // written file) out of another test's load.
+    dir.join(format!("{name}-{}.json", std::process::id()))
 }
 
 /// A run checkpointed mid-billing-period and resumed equals the
