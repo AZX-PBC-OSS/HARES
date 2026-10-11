@@ -16191,6 +16191,20 @@ occupancy = 0.0
         restoring.run_timestep(false).expect("the run steps on");
     }
 
+    /// A callback that keeps nothing: the attachment a callback-destination
+    /// run needs to step, a pin's construction detail, never read.
+    struct SilentCallback;
+
+    impl BatchCallback for SilentCallback {
+        fn on_batch(
+            &mut self,
+            _ctx: &hares_io::output::callback::BatchContext<'_>,
+            _batch: &arrow::array::RecordBatch,
+        ) -> std::result::Result<(), hares_io::output::callback::CallbackError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn restore_with_callback_destination_is_a_typed_error() {
         let callback_reports = || {
@@ -16202,12 +16216,22 @@ occupancy = 0.0
             }]
         };
         let mut source = bestest_with_reports(callback_reports());
+        // The callback-destination run steps only with an attachment (the
+        // first-step refusal), and the restore refusal reads the
+        // destination alone, so the attachment rides both dwellings as
+        // construction detail.
+        source
+            .attach_callback("frame", Box::new(SilentCallback))
+            .expect("the callback attaches");
         for _ in 0..3 {
             source.run_timestep(false).expect("step");
         }
         let checkpoint = source.save_checkpoint().expect("checkpoint saves");
 
         let mut restoring = bestest_with_reports(callback_reports());
+        restoring
+            .attach_callback("frame", Box::new(SilentCallback))
+            .expect("the callback attaches");
         restoring.run_timestep(false).expect("step");
         let rows_before = restoring.recorded_rows();
 
