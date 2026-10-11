@@ -4550,11 +4550,15 @@ impl Dwelling {
 
     /// A gate over this step's rejected-control-signal counting, with the
     /// policy's limit for it (the run total is the gate's baseline; the
-    /// pass lands its own count through `end_dispatch_pass`).
+    /// pass lands its own count through `end_dispatch_pass`). The limit
+    /// comes through `limit_for`, the one policy-to-event mapping, so a
+    /// change of event or limit cannot drift between two readers.
     fn rejection_gate(&self) -> RejectionGate {
         RejectionGate::new(
             self.health.rejected_control_signals,
-            self.sim_config.health_policy.max_rejected_control_signals,
+            self.sim_config
+                .health_policy
+                .limit_for(HealthEvent::RejectedControlSignal),
         )
     }
 
@@ -18539,6 +18543,52 @@ latent_gain_fraction = 0.08
         assert_eq!(dwelling.health.port_rollbacks, 3);
     }
 
+    /// A policy limit and the failure budget that would both fire on the
+    /// same step: the policy's violation is the error the step returns
+    /// and the terminal error latched, not the budget's. The policy is
+    /// evaluated where the rollback counter changed, ahead of the
+    /// budget's own check.
+    #[test]
+    fn the_policy_escalation_wins_over_the_failure_budget_on_the_same_step() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.sim_config.health_policy = hares_io::HealthPolicy {
+            max_port_rollbacks: Some(0),
+            ..hares_io::HealthPolicy::default()
+        };
+        // A zero budget tolerates no failure, so the first failing step
+        // crosses the policy and the budget at once: only the violation
+        // may come out.
+        dwelling.sim_config.max_consecutive_step_failures = 0;
+        let failing = FlakyPortEquipment::new("FlakyEq", 500.0, &[false]);
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(failing)]);
+
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("the first failing step fails");
+
+        assert!(
+            matches!(
+                &err,
+                HaresError::HealthPolicyViolation {
+                    event: HealthEvent::PortRollback,
+                    step_index: Some(0),
+                    origin,
+                    count: 1,
+                    limit: 0,
+                } if origin == "FlakyEq"
+            ),
+            "the policy violation must win over the budget: got {err:?}"
+        );
+        assert!(
+            matches!(
+                dwelling.terminal_error,
+                Some(HaresError::HealthPolicyViolation { .. })
+            ),
+            "the terminal error latched is the violation, not the budget's: {:?}",
+            dwelling.terminal_error
+        );
+    }
+
     /// The strict policy escalates a non-converging warm-up: the run fails
     /// with the violation whose step index is None (warm-up is not a step
     /// of the run).
@@ -18574,6 +18624,83 @@ latent_gain_fraction = 0.08
         assert!(
             again.to_string().contains("ended"),
             "the terminal error persists: {again}"
+        );
+    }
+
+    /// The strict policy with no initialization duration configured:
+    /// warm-up never runs, so its convergence requirement has nothing to
+    /// reject and the run passes with the outcome recorded as Disabled.
+    /// The policy rides the TOML so it is live at construction, where the
+    /// warm-up decision happens.
+    #[test]
+    fn strict_policy_with_no_warmup_configured_runs_disabled_and_passes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("no-warmup-strict.toml");
+        // The same shape the reproducibility fixture uses, with the
+        // initialization duration left out entirely.
+        let toml_content = r#"building_id = 2003
+
+[simulation]
+start_time = "2024-01-15T00:00:00Z"
+time_res = 3600
+duration = 86400
+output_chunk_size = 1000
+master_seed = 42
+
+[simulation.health_policy]
+max_port_rollbacks = 0
+max_rejected_control_signals = 0
+max_clamped_actions = 0
+max_curve_index_clamps = 0
+require_warmup_convergence = true
+
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.8
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+
+[weather]
+outdoor_temp_c = 10.0
+dew_point_c = 5.0
+rel_humidity_pct = 50.0
+pressure_kpa = 101.325
+
+[infiltration]
+ach = 0.0
+
+[schedule]
+occupancy = 1.0
+"#;
+        fs::write(&toml_path, toml_content).expect("write TOML");
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&toml_path, Some(Vec::new()))
+            .expect("build a dwelling without a warm-up");
+        assert_eq!(
+            dwelling.sim_config.health_policy,
+            hares_io::HealthPolicy::strict(),
+            "the TOML table spells the strict policy"
+        );
+        assert_eq!(
+            dwelling.health().warmup,
+            WarmupOutcome::Disabled,
+            "no initialization duration, so warm-up never ran"
+        );
+
+        dwelling
+            .simulate()
+            .expect("the strict policy does not fail a run whose warm-up was disabled");
+
+        assert_eq!(
+            dwelling.health().warmup,
+            WarmupOutcome::Disabled,
+            "the disabled warm-up stays recorded as Disabled"
         );
     }
 
@@ -18619,6 +18746,61 @@ latent_gain_fraction = 0.08
         );
         // The counted rejection still landed on the run health.
         assert_eq!(dwelling.health.rejected_control_signals, 1);
+    }
+
+    /// A rejected-signal limit above one runs the gate's
+    /// baseline-plus-count arithmetic: each pass's count lands on the run
+    /// total the next pass's gate starts from, so two rejections pass a
+    /// limit of two and the third fails naming the run total (three), not
+    /// the pass's own count (one).
+    #[test]
+    fn rejected_signal_limit_counts_across_passes_naming_the_run_total() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.sim_config.health_policy = hares_io::HealthPolicy {
+            max_rejected_control_signals: Some(2),
+            ..hares_io::HealthPolicy::default()
+        };
+        let mut eq = TestEquipment::new(
+            "LoadA",
+            ControlCapabilities::POWER_SETPOINT | ControlCapabilities::SOC_TARGET,
+        );
+        eq.init(&EquipmentConfig::default(), &dwelling.latest_env)
+            .expect("init LoadA");
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
+        // Out of bounds: target_soc must be within [0, 1].
+        let out_of_bounds = || ControlSignal::SOCTarget {
+            target_soc: 1.5,
+            min_soc: None,
+            max_soc: None,
+        };
+
+        dwelling.apply_control("LoadA", out_of_bounds());
+        dwelling
+            .run_timestep(false)
+            .expect("the first rejection is within the limit");
+        dwelling.apply_control("LoadA", out_of_bounds());
+        dwelling
+            .run_timestep(false)
+            .expect("the second rejection reaches the limit exactly");
+        dwelling.apply_control("LoadA", out_of_bounds());
+        let err = dwelling
+            .run_timestep(false)
+            .expect_err("the third rejection crosses the limit");
+
+        assert!(
+            matches!(
+                &err,
+                HaresError::HealthPolicyViolation {
+                    event: HealthEvent::RejectedControlSignal,
+                    step_index: Some(2),
+                    origin,
+                    count: 3,
+                    limit: 2,
+                } if origin == "LoadA"
+            ),
+            "the violation must name the run total the crossing happened at: got {err:?}"
+        );
+        assert_eq!(dwelling.health.rejected_control_signals, 3);
     }
 
     /// The strict policy escalates clamped actions through
