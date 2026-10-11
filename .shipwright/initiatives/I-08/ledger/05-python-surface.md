@@ -647,6 +647,17 @@ Python callback, runs a construction underneath it (the seed reset),
 asserts the callback never fired during it, re-attaches to the rebuilt
 dwelling and reads the batches at the steps only.
 
+A release re-measure of the same probe, three runs of `cargo test
+--release -p hares-python concurrent_construction_scales -- --nocapture
+--test-threads=1` on this host (2026-10-11, load average 3 to 5, 1 min):
+serial 73.4, 75.5 and 74.4 ms against parallel 21.0, 20.6 and 20.3 ms,
+speedup 3.50x, 3.67x and 3.66x (the same command's runs this session
+spread 3.13x to 3.67x). The release number is the durable one: the
+release build is the shipped artifact, its construction cost about 5 to
+6 times below the debug test build's on both sides of the pair, and the
+3.86x above stays as the first measurement, taken on the debug build
+the RED/GREEN ran on.
+
 Gates: fmt clean; clippy --workspace --all-targets --all-features -D
 warnings clean; nextest --workspace --all-features 7950 passed, 1
 skipped (the catalogue pin generator, pre-existing); pytest -m '' 1675
