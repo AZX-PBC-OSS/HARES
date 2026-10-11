@@ -7,7 +7,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
-use crate::py_dwelling::{PyDwelling, to_py_err};
+use crate::py_dwelling::{PyDwelling, construct_detached, to_py_err};
 use crate::py_enums::PyEndUse;
 use crate::py_hvac::{
     PyASHPCooler, PyASHPHeater, PyAirConditioner, PyElectricBaseboard, PyElectricBoiler,
@@ -63,7 +63,9 @@ impl PyDwellingBlueprint {
                 unexpected,
             })?;
         let config = py_config.to_dwelling_config()?;
-        let inner = DwellingBlueprint::from_config(config.clone()).map_err(to_py_err)?;
+        let inner =
+            construct_detached(_cls.py(), || DwellingBlueprint::from_config(config.clone()))
+                .map_err(to_py_err)?;
         Ok(Self {
             inner: Some(inner),
             config,
@@ -120,14 +122,16 @@ impl PyDwellingBlueprint {
 
     /// Finalise the blueprint and return a PyDwelling ready for simulation.
     /// Consumes the blueprint; calling build() a second time will error.
-    pub fn build(&mut self) -> PyResult<PyDwelling> {
+    pub fn build(&mut self, py: Python<'_>) -> PyResult<PyDwelling> {
         let bp = self
             .inner
             .take()
             .ok_or_else(|| PyValueError::new_err("DwellingBlueprint has already been built"))?;
-        let dwelling = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bp.build()))
-            .map_err(|_| PyValueError::new_err("DwellingBlueprint::build() panicked"))?
-            .map_err(to_py_err)?;
+        let dwelling = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            construct_detached(py, || bp.build())
+        }))
+        .map_err(|_| PyValueError::new_err("DwellingBlueprint::build() panicked"))?
+        .map_err(to_py_err)?;
         Ok(PyDwelling::from_blueprint_build(
             dwelling,
             self.config.clone(),

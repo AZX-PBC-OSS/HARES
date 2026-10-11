@@ -105,6 +105,29 @@ def test_callback_exception_fails_the_run(tmp_path):
     assert len(collector.batches) == calls
 
 
+def test_construction_does_not_surface_the_callback(tmp_path):
+    """Construction runs with the GIL released: the registered callback
+    belongs to the dwelling it was attached to and must not fire during a
+    construction that runs underneath it. reset_with_seed rebuilds the
+    dwelling (the one construction a built dwelling can run); the callback
+    surfaces only at the batches of a run's steps, never during it."""
+    collector = Collector()
+    dw = build_dwelling(collector, tmp_path)
+
+    # Construction under release: the reset rebuilds the dwelling with the
+    # GIL released while the collector stays registered on the object.
+    dw.reset_with_seed(7)
+    assert collector.info == []
+    assert collector.batches == []
+
+    # The rebuilt dwelling carries no callback (the reset replaced it);
+    # after a fresh attach, the callback surfaces at the run's batches,
+    # never during construction.
+    dw.attach_callback(REPORT, collector)
+    dw.simulate()
+    assert [info[2] for info in collector.info] == [0, 1, 2]
+
+
 def test_attach_requires_a_callable(tmp_path):
     dw = make_dwelling(sim_config=callback_config(str(tmp_path / "run.parquet"), retain_batches=True))
     with pytest.raises(TypeError):

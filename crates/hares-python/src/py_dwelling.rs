@@ -654,6 +654,32 @@ pub(crate) fn step_result_to_py_dict(
     Ok(out.unbind().into())
 }
 
+/// The GIL state `construct_detached` observed inside the construction it
+/// ran, recorded for the `construction_runs_detached` test: 0 is released,
+/// 1 is held, -1 is no construction yet. Test-only, so no production call
+/// pays for the store.
+#[cfg(test)]
+pub(crate) static CONSTRUCT_GIL_STATE: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(-1);
+
+/// The one detached construction the Python-facing dwelling constructors
+/// share: the expensive parse+resolve runs with the GIL released, so
+/// parallel callers construct concurrently. Argument extraction stays
+/// attached, before the call, and the closure returns plain Rust values
+/// (`HaresError` crosses as data; the `PyErr` conversion needs the GIL and
+/// happens after). The audited construction path touches no Python-owned
+/// state while released: hares-core and hares-io carry no pyo3 dependency,
+/// and the batch callback attaches only to a built dwelling and
+/// re-acquires the GIL itself at delivery.
+pub(crate) fn construct_detached<T: Send>(py: Python<'_>, f: impl FnOnce() -> T + Send) -> T {
+    py.detach(|| {
+        #[cfg(test)]
+        // Safe: the check only reads the calling thread's GIL state.
+        CONSTRUCT_GIL_STATE.store(unsafe { pyo3::ffi::PyGILState_Check() }, Ordering::SeqCst);
+        f()
+    })
+}
+
 #[pyclass(name = "Dwelling")]
 pub struct PyDwelling {
     pub(crate) dwelling: Mutex<Dwelling>,
@@ -700,7 +726,8 @@ impl PyDwelling {
                 unexpected,
             })?;
         let config = config.to_dwelling_config()?;
-        let dwelling = Dwelling::from_config(config.clone()).map_err(to_py_err)?;
+        let dwelling = construct_detached(_cls.py(), || Dwelling::from_config(config.clone()))
+            .map_err(to_py_err)?;
         Ok(Self {
             dwelling: Mutex::new(dwelling),
             poisoned: AtomicBool::new(false),
@@ -1697,11 +1724,12 @@ impl PyDwelling {
             .map_err(to_py_err)
     }
 
-    pub fn reset_with_seed(&mut self, seed: u64) -> PyResult<()> {
+    pub fn reset_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<()> {
         let mut config = self.config.clone();
         config.sim_config.master_seed = seed;
 
-        let dwelling = Dwelling::from_config(config.clone()).map_err(to_py_err)?;
+        let dwelling =
+            construct_detached(py, || Dwelling::from_config(config.clone())).map_err(to_py_err)?;
         self.dwelling = Mutex::new(dwelling);
         self.poisoned.store(false, Ordering::SeqCst);
         self.mutex_poison_events.store(0, Ordering::SeqCst);
@@ -3852,6 +3880,201 @@ mod profiling_summary_tests {
                 .extract::<f64>()
                 .expect("finish_s is a float after the finalising call");
             assert!(finish.is_finite(), "the measurement is a float: {finish}");
+        });
+    }
+}
+
+/// The construction GIL discipline: the four Python-facing constructors run
+/// the expensive parse+resolve detached, so parallel callers construct
+/// concurrently, and no Python-owned state is touched while released.
+#[cfg(test)]
+mod construction_gil_tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    use pyo3::Python;
+
+    use crate::py_blueprint::PyDwellingBlueprint;
+    use crate::py_config::{PySimulationConfig, WholeSeconds};
+    use crate::py_dwelling::{CONSTRUCT_GIL_STATE, PyDwelling};
+
+    const THREADS: usize = 4;
+    /// Timed repetitions per scenario; the minimum is compared, so a loaded
+    /// machine inflates both sides and the comparison stays about the
+    /// construction cost, not scheduler noise.
+    const ATTEMPTS: usize = 3;
+
+    fn fixture_paths() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
+        (
+            fixture.join("building.xml"),
+            fixture.join("schedule.csv"),
+            fixture.join("weather.epw"),
+            root.join("defaults"),
+        )
+    }
+
+    fn sim_config_1h_900s() -> PySimulationConfig {
+        PySimulationConfig::new(
+            "2023-01-01T00:00:00-07:00",
+            WholeSeconds(3600),
+            WholeSeconds(900),
+            None,
+            false,
+            false,
+            hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+            None,
+            0,
+            None,
+            None,
+            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            None,
+            None,
+        )
+        .expect("the sim config builds")
+    }
+
+    fn construct_one() {
+        let (hpxml, schedule, weather, defaults) = fixture_paths();
+        Python::attach(|py| {
+            let cls = py.get_type::<PyDwelling>();
+            PyDwelling::from_hpxml(
+                &cls,
+                hpxml.to_string_lossy().into_owned(),
+                Some(schedule.to_string_lossy().into_owned()),
+                weather.to_string_lossy().into_owned(),
+                sim_config_1h_900s(),
+                1,
+                None,
+                Some(defaults.to_string_lossy().into_owned()),
+                None,
+                None,
+            )
+            .expect("the cz4a fixture must construct");
+        });
+    }
+
+    /// The concurrent-construction probe: N threads each constructing one
+    /// dwelling, against the wall time the same N constructions take
+    /// serially. While construction holds the GIL throughout, the threads
+    /// serialise and the parallel wall time is the serial one (the recorded
+    /// RED: 1.02x at the base); the assertion pins the speedup the release
+    /// buys, above scheduler noise.
+    #[test]
+    fn concurrent_construction_scales() {
+        // Warm the file cache once, untimed, so the probe times parse+resolve.
+        construct_one();
+
+        let mut serial_best = std::time::Duration::MAX;
+        for _ in 0..ATTEMPTS {
+            let start = Instant::now();
+            for _ in 0..THREADS {
+                construct_one();
+            }
+            serial_best = serial_best.min(start.elapsed());
+        }
+
+        let mut parallel_best = std::time::Duration::MAX;
+        for _ in 0..ATTEMPTS {
+            let start = Instant::now();
+            std::thread::scope(|scope| {
+                for _ in 0..THREADS {
+                    scope.spawn(construct_one);
+                }
+            });
+            parallel_best = parallel_best.min(start.elapsed());
+        }
+
+        let speedup = serial_best.as_secs_f64() / parallel_best.as_secs_f64();
+        eprintln!(
+            "concurrent construction: serial (best of {ATTEMPTS}) {serial_best:?}, \
+             parallel {THREADS} threads (best of {ATTEMPTS}) {parallel_best:?}, \
+             speedup {speedup:.2}x"
+        );
+        assert!(
+            speedup > 1.5,
+            "concurrent construction must beat the serial wall time while the \
+             GIL is released across the parse+resolve: serial {serial_best:?}, \
+             parallel {parallel_best:?}, speedup {speedup:.2}x"
+        );
+    }
+
+    /// The entry's acceptance test: each of the four construction entry
+    /// points runs through `construct_detached`, whose hook records the
+    /// GIL state it observes inside the construction; 0 is released. No
+    /// threads, no timing.
+    #[test]
+    fn construction_runs_detached() {
+        let (hpxml, schedule, weather, defaults) = fixture_paths();
+        let hpxml = hpxml.to_string_lossy().into_owned();
+        let schedule = schedule.to_string_lossy().into_owned();
+        let weather = weather.to_string_lossy().into_owned();
+        let defaults = defaults.to_string_lossy().into_owned();
+
+        Python::attach(|py| {
+            let recorded = || CONSTRUCT_GIL_STATE.load(Ordering::SeqCst);
+
+            CONSTRUCT_GIL_STATE.store(-1, Ordering::SeqCst);
+            let mut dwelling = PyDwelling::from_hpxml(
+                &py.get_type::<PyDwelling>(),
+                hpxml.clone(),
+                Some(schedule.clone()),
+                weather.clone(),
+                sim_config_1h_900s(),
+                1,
+                None,
+                Some(defaults.clone()),
+                None,
+                None,
+            )
+            .expect("the cz4a fixture must construct");
+            assert_eq!(
+                recorded(),
+                0,
+                "Dwelling.from_hpxml must construct with the GIL released"
+            );
+
+            CONSTRUCT_GIL_STATE.store(-1, Ordering::SeqCst);
+            dwelling
+                .reset_with_seed(py, 7)
+                .expect("the reset must rebuild the dwelling");
+            assert_eq!(
+                recorded(),
+                0,
+                "reset_with_seed must construct with the GIL released"
+            );
+
+            CONSTRUCT_GIL_STATE.store(-1, Ordering::SeqCst);
+            let mut blueprint = PyDwellingBlueprint::from_hpxml(
+                &py.get_type::<PyDwellingBlueprint>(),
+                hpxml.clone(),
+                Some(schedule.clone()),
+                weather.clone(),
+                sim_config_1h_900s(),
+                1,
+                None,
+                Some(defaults.clone()),
+                None,
+                None,
+            )
+            .expect("the blueprint must construct");
+            assert_eq!(
+                recorded(),
+                0,
+                "DwellingBlueprint.from_hpxml must construct with the GIL released"
+            );
+
+            CONSTRUCT_GIL_STATE.store(-1, Ordering::SeqCst);
+            let _built = blueprint
+                .build(py)
+                .expect("the blueprint must build a dwelling");
+            assert_eq!(
+                recorded(),
+                0,
+                "DwellingBlueprint.build must build with the GIL released"
+            );
         });
     }
 }
