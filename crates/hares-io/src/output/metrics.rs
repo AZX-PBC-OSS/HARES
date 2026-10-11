@@ -13,6 +13,11 @@
 //! catalogue. The two feeds run the same aggregations and produce the
 //! same values: a table the run itself recorded scores the run's metrics
 //! on bits.
+//!
+//! The table feed's exact-delta gate checks consecutive `Time` pairs
+//! only, so a table truncated at either end passes it: there is no
+//! start anchor. The caller owns the table's extent; the coverage year
+//! reads the first `Time` value.
 
 use std::collections::BTreeMap;
 
@@ -1289,8 +1294,9 @@ fn naive_local_clock(local_ms: i64) -> String {
 ///
 /// [`MetricsError::EmptyTable`] for a table with no rows;
 /// [`MetricsError::NonTimestepTable`] for a `Step Count` column, a
-/// missing `Time` column, a `Time` value outside the calendar range, or a
-/// consecutive pair not exactly `time_res` apart;
+/// missing `Time` column, a null `Time` value, a `Time` value outside
+/// the calendar range, or a consecutive pair not exactly `time_res`
+/// apart;
 /// [`MetricsError::ColumnTypeMismatch`] for a column contradicting its
 /// catalogue declaration; [`MetricsError::InconsistentBatches`] for
 /// batches that do not share one schema;
@@ -1386,9 +1392,12 @@ pub fn metrics_from_table(
         })?;
 
     // Consecutive `Time` values differ by exactly `time_res`, across the
-    // batch boundaries too: the first offending pair names the mismatch.
+    // batch boundaries too: the first offending pair names the mismatch,
+    // a null slot names itself (the value buffer's raw 0-ms slot is not
+    // the row's reading).
     let mut first_time_ms: Option<i64> = None;
     let mut previous_ms: Option<i64> = None;
+    let mut rows_before = 0usize;
     for batch in table {
         let times = batch
             .column(time_index)
@@ -1400,6 +1409,12 @@ pub fn metrics_from_table(
                 found: batch.schema().field(time_index).data_type().to_string(),
             })?;
         for row in 0..batch.num_rows() {
+            if times.is_null(row) {
+                return Err(MetricsError::NonTimestepTable(format!(
+                    "a null Time value at row {}",
+                    rows_before + row
+                )));
+            }
             let current = times.value(row);
             if first_time_ms.is_none() {
                 first_time_ms = Some(current);
@@ -1417,6 +1432,7 @@ pub fn metrics_from_table(
             }
             previous_ms = Some(current);
         }
+        rows_before += batch.num_rows();
     }
     let first_time_ms = first_time_ms.ok_or(MetricsError::EmptyTable)?;
 

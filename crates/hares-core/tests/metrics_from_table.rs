@@ -77,7 +77,21 @@ fn dwelling_config(sim_toml: &str) -> DwellingConfig {
 fn run_with_memory_report(
     verbosity: u8,
 ) -> (Arc<hares_core::RunResult>, Arc<Catalogue>, Vec<RecordBatch>) {
-    let toml = sim_toml(&memory_report("frame", verbosity));
+    run_with_memory_report_deadband(verbosity, None)
+}
+
+/// The same run with the config's `setpoint_deadband_c` set when given.
+fn run_with_memory_report_deadband(
+    verbosity: u8,
+    deadband: Option<f64>,
+) -> (Arc<hares_core::RunResult>, Arc<Catalogue>, Vec<RecordBatch>) {
+    let deadband_line = deadband
+        .map(|deadband| format!("setpoint_deadband_c = {deadband}\n"))
+        .unwrap_or_default();
+    let toml = sim_toml(&format!(
+        "{deadband_line}{}",
+        memory_report("frame", verbosity)
+    ));
     let mut dwelling = Dwelling::from_config(dwelling_config(&toml)).expect("dwelling builds");
     let catalogue = dwelling.catalogue();
     let result = dwelling.simulate().expect("run completes");
@@ -433,6 +447,27 @@ fn metrics_from_parquet_file_matches_in_run_metrics() {
     );
 }
 
+/// `metrics_from_table_matches_in_run_metrics_with_deadband`: the
+/// differential with the config's `setpoint_deadband_c` set: the run's
+/// own feed and the table feed both carry the constant, and the scores
+/// still agree on bits. The engine's dwelling surface carries no
+/// setpoint columns today, so the pin guards the pairing: a surface
+/// that gains them makes a table feed without the config's value fail
+/// here.
+#[test]
+fn metrics_from_table_matches_in_run_metrics_with_deadband() {
+    let (result, catalogue, batches) = run_with_memory_report_deadband(8, Some(1.5));
+    let in_run = result.metrics.as_ref().expect("the run requested metrics");
+
+    let from_table = metrics_from_table(&batches, &catalogue, Duration::seconds(900), Some(1.5))
+        .expect("the run's own table scores");
+    assert_run_metrics_bitwise_equal(
+        &RunMetrics::from(from_table),
+        in_run,
+        "the table feed scores the run's deadband metrics",
+    );
+}
+
 /// `metrics_from_table_rejects_type_mismatch`: a column whose Arrow type
 /// contradicts the catalogue is an error naming it.
 #[test]
@@ -455,6 +490,50 @@ fn metrics_from_table_rejects_type_mismatch() {
         message.contains("catalogue"),
         "the error names the catalogue: {message}"
     );
+}
+
+/// The table's batches rebuilt with one `Time` slot nulled: the rest of
+/// the table is untouched, the `Time` field made nullable for the rebuild.
+fn with_null_time(batches: &[RecordBatch], row: usize) -> Vec<RecordBatch> {
+    let mut rows_before = 0usize;
+    batches
+        .iter()
+        .map(|batch| {
+            let schema = batch.schema();
+            let index = schema
+                .fields()
+                .iter()
+                .position(|field| field.name() == "Time")
+                .expect("Time is in the table");
+            let times = batch
+                .column(index)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("the Time column is a timestamp column");
+            let mut fields: Vec<FieldRef> = schema.fields().to_vec();
+            fields[index] = Arc::new(Field::new(
+                "Time",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ));
+            let null_slot = row
+                .checked_sub(rows_before)
+                .filter(|offset| *offset < batch.num_rows());
+            let values: Vec<Option<i64>> = (0..batch.num_rows())
+                .map(|r| {
+                    if Some(r) == null_slot {
+                        None
+                    } else {
+                        Some(times.value(r))
+                    }
+                })
+                .collect();
+            let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
+            columns[index] = Arc::new(TimestampMillisecondArray::from(values));
+            rows_before += batch.num_rows();
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("rebuilt batch")
+        })
+        .collect()
 }
 
 /// `metrics_from_table_rejects_non_timestep_table`: the same run's table
@@ -481,6 +560,85 @@ fn metrics_from_table_rejects_non_timestep_table() {
     assert!(
         message.contains("Step Count"),
         "the error names the Step Count column: {message}"
+    );
+}
+
+/// `metrics_from_table_names_a_null_time`: a null `Time` slot is an
+/// error naming the null, not the raw 0-ms slot the value buffer reads.
+#[test]
+fn metrics_from_table_names_a_null_time() {
+    let (_result, catalogue, batches) = run_with_memory_report(2);
+    let nulled = with_null_time(&batches, 3);
+
+    let err = metrics_from_table(&nulled, &catalogue, Duration::seconds(900), None)
+        .expect_err("a null Time value is an error");
+    let message = err.to_string();
+    assert!(
+        message.contains("a null Time value at row 3"),
+        "the error names the null: {message}"
+    );
+    assert!(
+        !message.contains("1970"),
+        "the error does not name the raw 0-ms slot: {message}"
+    );
+}
+
+/// The first batch untouched, the second rebuilt without its last value
+/// column: a batch whose schema differs from the first batch's.
+fn with_second_batch_missing_last_column(batches: &[RecordBatch]) -> Vec<RecordBatch> {
+    batches
+        .iter()
+        .enumerate()
+        .map(|(index, batch)| {
+            if index != 1 {
+                return batch.clone();
+            }
+            let schema = batch.schema();
+            let last = schema.fields().len() - 1;
+            let dropped = schema.field(last).name().clone();
+            let fields: Vec<FieldRef> = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|&(position, _)| position != last)
+                .map(|(_, field)| field.clone())
+                .collect();
+            let columns: Vec<ArrayRef> = batch
+                .columns()
+                .iter()
+                .enumerate()
+                .filter(|&(position, _)| position != last)
+                .map(|(_, column)| column.clone())
+                .collect();
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+                .unwrap_or_else(|_| panic!("batch without {dropped} rebuilds"))
+        })
+        .collect()
+}
+
+/// `metrics_from_table_rejects_inconsistent_batches`: a batch whose
+/// schema differs from the first batch's is an error naming the batch
+/// and the first differing column, before any row is read.
+#[test]
+fn metrics_from_table_rejects_inconsistent_batches() {
+    let (_result, catalogue, batches) = run_with_memory_report(2);
+    let dropped = batches[1]
+        .schema()
+        .field(batches[1].schema().fields().len() - 1)
+        .name()
+        .clone();
+    let divergent = with_second_batch_missing_last_column(&batches);
+
+    let err = metrics_from_table(&divergent, &catalogue, Duration::seconds(900), None)
+        .expect_err("a batch off the first batch's schema is an error");
+    let message = err.to_string();
+    assert!(
+        message.contains("batch 1"),
+        "the error names the offending batch: {message}"
+    );
+    assert!(
+        message.contains(&dropped),
+        "the error names the first differing column: {message}"
     );
 }
 
