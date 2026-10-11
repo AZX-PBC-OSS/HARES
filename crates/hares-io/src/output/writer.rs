@@ -91,14 +91,17 @@ static PARTIAL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A recorder's row stream, as a checkpoint section: every row's
 /// timestamp and values in row order, the trailing rows that were still
-/// buffered when the checkpoint was taken, and the batch count (the
-/// batch index a resumed run's callback deliveries continue from).
+/// buffered when the checkpoint was taken, the batch count (the
+/// batch index a resumed run's callback deliveries continue from) and
+/// the chunk size the writing run's recorder flushed at.
 ///
 /// The rows carry the recorder's whole output state: a fresh recorder
 /// restored from the snapshot holds the written run's batches bitwise,
 /// the batches rebuilt from the rows deterministically (the flushes ran
 /// at the chunk boundaries, so the batch boundaries follow from the row
-/// stream and the chunk size).
+/// stream and the chunk size, which is why the chunk size travels with
+/// the rows: a recorder built at another chunk size would rebuild the
+/// same rows into batches of different shapes).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReportRowsSnapshot {
     /// Every row's timestamps, in row order (the naive local wall-clock
@@ -112,6 +115,10 @@ pub struct ReportRowsSnapshot {
     pub buffered_rows: usize,
     /// Batches the recorder had built (and delivered) so far.
     pub batches_built: u64,
+    /// The chunk size the writing run's recorder flushed at. The restore
+    /// refuses a recorder built at another: its flush boundaries would
+    /// re-chunk the rows into batches the writing run never built.
+    pub chunk_size: usize,
 }
 
 impl StreamingRecorder {
@@ -160,6 +167,7 @@ impl StreamingRecorder {
             values,
             buffered_rows: buffered,
             batches_built: self.batches_built,
+            chunk_size: self.chunk_size,
         }
     }
 
@@ -175,10 +183,16 @@ impl StreamingRecorder {
     /// # Errors
     ///
     /// [`OutputError::Snapshot`] when the section does not fit this
-    /// recorder: a values width off the schema's column count, a buffered
-    /// tail beyond the rows, or a batch count that disagrees with the
-    /// flushed shape.
+    /// recorder: a chunk size off this recorder's, a values width off the
+    /// schema's column count, a buffered tail beyond the rows, or a batch
+    /// count that disagrees with the flushed shape.
     pub fn restore_rows(&mut self, snapshot: &ReportRowsSnapshot) -> Result<(), OutputError> {
+        if snapshot.chunk_size != self.chunk_size {
+            return Err(OutputError::Snapshot(format!(
+                "the report was written with chunk size {}, this run uses {}",
+                snapshot.chunk_size, self.chunk_size
+            )));
+        }
         let width = self.value_bufs.len();
         let rows = snapshot.timestamps.len();
         if snapshot.values.len() != rows * width {
@@ -671,6 +685,13 @@ impl StreamingRecorder {
     #[must_use]
     pub fn batches_built(&self) -> u64 {
         self.batches_built
+    }
+
+    /// The chunk size the recorder flushes at: what a rows snapshot
+    /// carries, and what a restore refuses a mismatch with.
+    #[must_use]
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
     }
 
     /// Build a `RecordBatch` from the current buffer, draining buffers to
@@ -1238,6 +1259,10 @@ mod tests {
         assert_eq!(original.batches_built(), 2);
 
         let snapshot = original.rows_snapshot();
+        assert_eq!(
+            snapshot.chunk_size, 4,
+            "the section carries the writing run's chunk size"
+        );
         let json = serde_json::to_string(&snapshot).expect("serialize the snapshot");
         let decoded: ReportRowsSnapshot = serde_json::from_str(&json).expect("decode");
 
@@ -1264,6 +1289,57 @@ mod tests {
         let a = rows_of(original.flushed_batches());
         let b = rows_of(restored.flushed_batches());
         assert_eq!(a, b, "the post-restore batches continue bitwise");
+    }
+
+    /// A snapshot written at another chunk size is refused by name: the
+    /// resumed batches' shapes would differ from the writing run's, and
+    /// the refusal must name the chunk sizes, not blame the rows.
+    #[test]
+    fn recorder_rows_snapshot_refuses_a_foreign_chunk_size_by_name() {
+        let schema = test_schema();
+        let mut original = memory_recorder(&schema, 4);
+        for i in 0..9_i64 {
+            original
+                .push_row(1_000 * i, &[i as f64 * 1.5, i as f64 * -0.25])
+                .unwrap();
+        }
+        let snapshot = original.rows_snapshot();
+
+        let mut other = memory_recorder(&schema, 2);
+        let err = other
+            .restore_rows(&snapshot)
+            .expect_err("a foreign chunk size refuses the restore")
+            .to_string();
+        assert!(
+            err.contains("chunk size 4") && err.contains(" 2"),
+            "the refusal names both chunk sizes: {err}"
+        );
+    }
+
+    /// The batch-count check alone lets a chunk-size drift through when
+    /// the row count rebuilds the same batch count both ways (100 flushed
+    /// rows: one batch at chunk 100, one at chunk 150): the carried chunk
+    /// size is what refuses it, so a resumed run's batches cannot be
+    /// re-chunked out of the writing run's shapes.
+    #[test]
+    fn recorder_rows_snapshot_refuses_a_chunk_drift_the_batch_count_misses() {
+        let schema = test_schema();
+        let mut original = memory_recorder(&schema, 100);
+        for i in 0..100_i64 {
+            original.push_row(1_000 * i, &[i as f64, 0.0]).unwrap();
+        }
+        assert_eq!(original.batches_built(), 1);
+        let snapshot = original.rows_snapshot();
+
+        let mut other = memory_recorder(&schema, 150);
+        let err = other
+            .restore_rows(&snapshot)
+            .expect_err("the chunk drift must not re-chunk the batches")
+            .to_string();
+        assert!(
+            err.contains("chunk size 100") && err.contains("150"),
+            "the refusal names both chunk sizes: {err}"
+        );
     }
 
     /// A restored recorder's next callback delivery carries the batch

@@ -335,6 +335,15 @@ impl Dwelling {
         for (section, recorder) in cp.reports.iter().zip(&self.recorders) {
             let width = recorder.schema().fields().len().saturating_sub(1);
             let rows = section.rows.timestamps.len();
+            if section.rows.chunk_size != recorder.chunk_size() {
+                return Err(HaresError::Io(format!(
+                    "checkpoint restore: report '{}' was written with chunk size {}, \
+                     this run uses {}",
+                    section.name,
+                    section.rows.chunk_size,
+                    recorder.chunk_size()
+                )));
+            }
             if section.rows.values.len() != rows * width {
                 return Err(HaresError::Io(format!(
                     "checkpoint restore: report '{}' carries {} values for {} rows of \

@@ -65,7 +65,14 @@ use serde::{Deserialize, Serialize};
 /// counts) — so a run checkpointed mid-year and resumed finishes bitwise
 /// to the continuous run in every output surface. Checkpoints written by
 /// v14 builds are rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 15;
+///
+/// v16: each report's row-stream section carries the chunk size the
+/// writing run's recorder flushed at, and a restoring recorder built at
+/// another chunk size is a typed refusal (the same rows would rebuild
+/// into batches of different shapes, so the resumed frames would not be
+/// the writing run's bitwise). Checkpoints written by v15 builds are
+/// rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 16;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -462,6 +469,7 @@ mod tests {
                     values: vec![1.5, -0.25, 2.5, -0.5, 3.5, 0.75, 4.5, -1.0],
                     buffered_rows: 1,
                     batches_built: 3,
+                    chunk_size: 4,
                 },
             }],
             health: crate::health::RunHealth {
@@ -515,9 +523,9 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 15;
+    const PINNED_VERSION: u32 = 16;
     const PINNED_SCHEMA_SHA256: &str =
-        "58b25e204516716a3e782b2d260e395bcd1ab829a1a61aef206292d7371138a4";
+        "f196df1bc0c43b3e9d31c3a15508a3410f887a9bc76c6f9bd9bdee0609982c2f";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the

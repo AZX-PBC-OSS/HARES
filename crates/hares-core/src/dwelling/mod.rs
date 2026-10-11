@@ -16122,9 +16122,49 @@ occupancy = 0.0
         restoring.run_timestep(false).expect("the run steps on");
     }
 
+    /// A report's chunk size travels in its checkpoint section: a restore
+    /// into a dwelling built at another chunk size is a typed error
+    /// naming the report and both sizes (the same rows would rebuild into
+    /// batches of different shapes), and the refused restore changes
+    /// nothing: the run steps on with its own rows.
+    #[test]
+    fn restore_into_a_run_at_another_chunk_size_is_a_typed_error() {
+        let mut source = cz4a_with_metrics_chunk(false, 4);
+        for _ in 0..5 {
+            source.run_timestep(false).expect("step");
+        }
+        let checkpoint = source.save_checkpoint().expect("checkpoint");
+
+        let mut restoring = cz4a_with_metrics_chunk(false, 2);
+        restoring.run_timestep(false).expect("step");
+        let rows_before = restoring.recorded_rows();
+
+        let err = restoring
+            .load_checkpoint(checkpoint)
+            .expect_err("the chunk size refuses the restore");
+        let message = err.to_string();
+        assert!(
+            message.contains("frame") && message.contains("chunk size 4") && message.contains(" 2"),
+            "the refusal names the report and both chunk sizes: {message}"
+        );
+        assert_eq!(
+            restoring.recorded_rows(),
+            rows_before,
+            "the refused restore changes no recorded row"
+        );
+        restoring.run_timestep(false).expect("the run steps on");
+    }
+
     /// A cz4a dwelling with `metrics` as requested, one verbosity-2
-    /// memory report.
+    /// memory report, at the default chunk size.
     fn cz4a_with_metrics(metrics: bool) -> Dwelling {
+        cz4a_with_metrics_chunk(metrics, 10_000)
+    }
+
+    /// A cz4a dwelling with `metrics` as requested, one verbosity-2
+    /// memory report, at `output_chunk_size` (the recorders build at
+    /// assembly from the config).
+    fn cz4a_with_metrics_chunk(metrics: bool, output_chunk_size: usize) -> Dwelling {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let home = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
         let sim_toml = format!(
@@ -16133,6 +16173,7 @@ start_time = "2023-01-25T00:00:00-07:00"
 duration = 86400
 time_res = 900
 metrics = {metrics}
+output_chunk_size = {output_chunk_size}
 
 [[reports]]
 name = "frame"
