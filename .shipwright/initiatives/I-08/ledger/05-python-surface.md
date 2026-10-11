@@ -503,6 +503,60 @@ the `FleetResult`'s batches, floats by `to_bits()`.
 `ReportResult` class these exports attach to); `04-fleet.md` FL-1 (the
 `FleetResult` tables).
 
+**State:** committed `b8037120` (branch `row/r55-py1`, cut from
+`5a9c4ac8`, one commit; the Change paragraph's stale line numbers into
+`conversions.rs` reflect the file before rows 43 to 50: only
+`record_batches_to_polars_df` still existed to delete, the other three
+conversions died with the surfaces they served). `pyo3-arrow = "0.19"`
+in `crates/hares-python/Cargo.toml` (arrow 59.3, pyo3 0.29.3, numpy
+0.29 resolve; the predicted `thiserror` 1.0.69 arrives beside the
+workspace's `thiserror` 2). `ReportResult.arrow(rechunk=True)` returns
+pyo3-arrow's `PyTable` (the class named in the entry, module
+`arro3.core._core`); with `rechunk=True` the report's batches are
+concatenated once (`arrow::compute::concat_batches`) on the first
+export and the `OnceLock<RecordBatch>` field of the pyclass hands every
+later export the same buffers (`second_export_does_not_recopy` pins
+equal column-buffer data pointers); with `rechunk=False` the stream
+carries one chunk per built batch. `ReportResult.table(rechunk=True)`
+is `polars.DataFrame(self.arrow(rechunk))` exactly as the entry says.
+A file or callback report's `arrow()` and `table()` raise
+`HaresSimulationError` naming the report and its destination (the
+file's `path`, the callback's `batches_delivered` count). The three
+`FleetResult` tables are attributes returning the new frozen `FleetTable`
+pyclass over the table's batch, with the same `arrow(rechunk=True)` and
+`table(rechunk=True)`; the fleet tables are one batch, so `rechunk` is
+inert there, stated in the method docs. The batch callback's delivery
+frame is the capsule read (the per-batch IPC cost's death, measured in
+`02-measurement.md`). `_hares.pyi` annotates both `arrow()` returns as
+`ArrowStreamExportable`, the `typing.Protocol` the entry names, defined
+in `python/hares/_hares_types.py` beside the other declarations the
+compiled module cannot carry (the stub's own-test imports it, so the
+module check sees no unknown name), and `FleetTable` is stubbed with
+the `FleetResult` getters' new type; the docs' changes section carries
+the row. The acceptance tests: the seven named ones, four in
+`tests/python/test_py_results.py` (table matches the arrow export,
+exported twice, the rechunk boundaries over 40/40/16, the parquet
+report's refusal naming its path) and three in Rust (the capsule
+round-trip bitwise over the `full_year_hourly` run, the shared buffer
+pointers, the fleet's three tables round-tripped bitwise against their
+batches on the `fleet_same_offset_300s` homes at `Hourly`); RED first
+(the Python four failed with AttributeError on the missing `arrow()`,
+the Rust ones with 14 compile errors on the missing surface). The
+metrics-from-table binding is not here: the entry's own note (and
+OR-15's) gives it to PY-4, the first row with both the `Catalogue`
+pyclass and the stream import. Gates: fmt; clippy `--workspace
+--all-targets --all-features -D warnings` clean; nextest `--workspace
+--all-features -j 4` 7952/7952 (1 skipped: the ignored kind-pin
+generator); pytest `-m ''` 1678 passed, 6 xfailed, 0 failed, 0
+skipped; pyright 0; the eight goldens bitwise (compare-all 8
+identical, `full_year_900s_dst` identical). The measurement (the
+entry's Measurement section): the `full_year_hourly` frame read 0.318
+ms over IPC to 0.056 ms capsule rechunked and 0.047 not rechunked, the
+`arrow()` export itself 0.0024 ms first call and 0.0005 cached; the
+callback delivery 0.129 to 0.057 ms per batch end to end over a
+building-year at 876 batches; in `02-measurement.md` with the method
+and the host's noise bound.
+
 **Measurement:** conversion time of a full-year frame, IPC versus capsule,
 rechunked and not, in `02-measurement.md` (`context.md`: about 6.5 ms
 IPC, about 2.7 ms capsule rechunked).
