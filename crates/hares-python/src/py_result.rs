@@ -1,5 +1,5 @@
 //! Python bindings for the run result surface: `RunResult`, `ReportResult`,
-//! `RunHealth`, `WarmupOutcome`, `Warning` and `Provenance` — the frozen
+//! `RunHealth`, `WarmupOutcome`, `Warning` and `Provenance`, the frozen
 //! pyclasses over the Rust types `Dwelling::finish()` produces.
 
 use std::sync::Arc;

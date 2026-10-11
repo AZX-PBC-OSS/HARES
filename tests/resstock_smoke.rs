@@ -221,7 +221,7 @@ mod tests {
             .expect("a run with reports computes its metrics");
 
         eprintln!(
-            "[{version}] {bldg_name} OK — energy={:.4} kWh",
+            "[{version}] {bldg_name} OK, energy={:.4} kWh",
             metrics.total_energy_kwh.net_energy_kwh
         );
 

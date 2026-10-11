@@ -1,5 +1,5 @@
 //! The run's result surface: one `RunResult` per run, built by
-//! `Dwelling::finish()` — the single finalisation path `simulate()` and a
+//! `Dwelling::finish()`, the single finalisation path `simulate()` and a
 //! stepped run share. The caller reads the result it returns: the reports'
 //! delivered outputs, the run's metrics, its health totals, its warning
 //! record and its provenance.
@@ -18,7 +18,7 @@ use hares_types::{Warning, ZoneId};
 use crate::health::RunHealth;
 
 /// The metrics of a finished run: the full metric set, gas included
-/// (`FullSimulationMetrics` flattened — the calculator's own type stays in
+/// (`FullSimulationMetrics` flattened; the calculator's own type stays in
 /// `hares-io`; every result surface carries this one).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunMetrics {

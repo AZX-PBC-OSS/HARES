@@ -1845,7 +1845,7 @@ fn route_request(
                     warnings.push_from(
                         "control",
                         format!(
-                            "control target '{name}' is ambiguous — {instance_count} instances exist. Use ByEndUse or a qualified name like '{name} #1'"
+                            "control target '{name}' is ambiguous: {instance_count} instances exist. Use ByEndUse or a qualified name like '{name} #1'"
                         ),
                     );
                 } else {
@@ -3758,7 +3758,7 @@ impl Dwelling {
     /// Finalises the run: the billing close, the post-hoc diagnostic
     /// checks, the recorders' flush, close and publish (the final partial
     /// batch included), the run's metrics, health, warning record and
-    /// provenance, in one path — the path `simulate()` takes at the end of
+    /// provenance, in one path: the path `simulate()` takes at the end of
     /// the horizon and a stepped run takes at its own end. Idempotent: a
     /// call after the first returns the first call's result, and nothing
     /// finalises twice. A run that has stepped nothing cannot finish.

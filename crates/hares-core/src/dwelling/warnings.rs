@@ -18,7 +18,7 @@ use hares_types::Warning;
 ///
 /// Derefs to `[Warning]` (the pending drain), so callers can index,
 /// iterate, and query length exactly like the vector it replaces.
-/// Warnings beyond a buffer's capacity are never stored — only counted —
+/// Warnings beyond a buffer's capacity are never stored, only counted,
 /// and a draining take appends one summary `Warning` reporting its dropped
 /// count.
 #[derive(Debug, Default, Clone)]
@@ -197,7 +197,7 @@ mod tests {
         assert_eq!(log.take().len(), 1);
 
         // The run record is the drain's: it stopped at CAPACITY and counted
-        // the rest — the five overflow warnings and the post-drain "fresh"
+        // the rest, the five overflow warnings and the post-drain "fresh"
         // one (the record is the run's, not the drain's).
         let (record, dropped) = log.run_record();
         assert_eq!(record.len(), WarningLog::CAPACITY);
