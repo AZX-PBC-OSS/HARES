@@ -613,6 +613,46 @@ asserts the recorded value is 0 each time. No threads, no timing.
 
 **Dependencies:** OR-9; PY-2.
 
+**State:** committed `da9064cd` (2026-10-10, branch `row/r56-py3`, cut
+from `5a9c4ac8`). The audited surface: every one of the four construction
+calls the entry names now runs through one `construct_detached` in
+`py_dwelling.rs`, which calls `py.detach` around the pure-Rust section
+only. The audit that fixes the placement: the construction path (the
+config validation, the HPXML parse, the weather parse, the schedule load
+and resample, the assembly) lives in the engine crates, which carry no
+pyo3 dependency and touch no Python-owned state; the Python interactions
+of the three binding constructors are the argument extraction (the
+overrides dict, the unexpected-keyword dict, the typed config's keyword
+check), which stays attached before the call, and the error-to-PyErr
+conversion, which happens after, attached. The batch callback attaches
+only to a built dwelling, travels only with the dwelling it was attached
+to, and re-acquires the GIL itself at delivery, so a construction running
+detached cannot invoke one (the reset's replacement drops the old
+dwelling and its callback attached, after the release); the blueprint's
+`build` detaches inside its panic catch, and `from_blueprint_build` is a
+plain struct constructor. `initialize()` is untouched.
+
+RED: the concurrency probe `concurrent_construction_scales` on the base
+held 4 constructions on 4 threads against the same 4 serially: parallel
+372.5 ms against serial 391.6 ms, speedup 1.05x, the serialisation the
+GIL forced (the second base run read 1.04x); with the release the same
+probe reads serial 435.8 ms against parallel 112.9 ms, speedup 3.86x (4
+threads, 28 cores, debug test build, best of 3 per side). The hook test
+`construction_runs_detached` ran first against a pass-through
+`construct_detached` and recorded the GIL state 1 (held) at the first
+entry point, the feature missing; green, it records 0 at all four entry
+points (on the cz4a inputs, 1 h at 900 s; no threads, no timing). The
+safety pin `test_construction_does_not_surface_the_callback` attaches a
+Python callback, runs a construction underneath it (the seed reset),
+asserts the callback never fired during it, re-attaches to the rebuilt
+dwelling and reads the batches at the steps only.
+
+Gates: fmt clean; clippy --workspace --all-targets --all-features -D
+warnings clean; nextest --workspace --all-features 7950 passed, 1
+skipped (the catalogue pin generator, pre-existing); pytest -m '' 1675
+passed, 6 xfailed, 0 failed, 0 errors, 0 skipped; pyright 0 errors; the
+eight goldens bitwise across both frame_golden feature sets.
+
 ## PY-4: the catalogue in Python
 
 **Kind:** initiative work (V33).
