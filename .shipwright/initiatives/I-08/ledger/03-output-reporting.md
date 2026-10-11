@@ -3312,7 +3312,12 @@ deletion whose acceptance is compile-enforced, so the RED first does
 not apply. The measurement is in `02-measurement.md`: the serialisation
 dominated the call, medians of about 60 microseconds before against
 about 3 after (41 fresh dwellings per run, three runs per side, the
-release wheel), about 20x lower, the behavior otherwise unchanged.
+release wheel), about 20x lower, the behavior otherwise unchanged. One
+semantic note for the record: the deleted serialisation was also
+initialize()'s only fail-fast check, so a poisoned mutex or an
+unserialisable checkpoint, which initialize() used to surface on the
+call, now surfaces at the first step's acquire or the first save's
+serialise instead.
 
 Gates on the commit: `cargo fmt --check --all` clean;
 `cargo clippy --workspace --all-targets --all-features -- -D warnings`
@@ -3430,10 +3435,10 @@ The three proofs, all recorded in `02-measurement.md`:
 Gates on the commit: `cargo fmt --check --all` clean;
 `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 clean; `cargo nextest run --workspace --all-features -j 4` 7924 passed
-(1 skipped); `cargo nextest run -F dst -j 4` 7854 passed (1 skipped);
-pytest `-m ''` 1672 passed, 6 xfailed, 0 failed, 0 errors; `uv run
-pyright` 0 errors; the goldens bitwise (compare-all 7 identical, dst
-identical).
+(1 skipped); `cargo nextest run --workspace -F dst -j 4` 7854 passed
+(1 skipped); pytest `-m ''` 1672 passed, 6 xfailed, 0 failed, 0 errors;
+`uv run pyright` 0 errors; the goldens bitwise (compare-all 7
+identical, dst identical).
 
 ## OR-10: checkpoint/restore resumes billing, metrics, reports, health and warnings
 
