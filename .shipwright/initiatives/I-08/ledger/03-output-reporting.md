@@ -3559,6 +3559,76 @@ fixture restores, so none changes).
 **Commit:** `feat: checkpoints carry billing, metrics, reports, health and warnings`
 
 **Dependencies:** OR-1 (`rc`), OR-5, OR-6, OR-8, OR-13, OR-17
+
+**State:** committed `6b609568` on branch `row/r48-or10` (cut from
+`16b3c993`), one commit. The checkpoint (`CHECKPOINT_VERSION` 15, the
+schema fingerprint re-pinned against it) carries the run's remaining
+state as typed sections, each a snapshot type owned by the crate that
+owns the state: `billing_summaries` (one `BillingPeriodSummarySnapshot`
+per closed period, bounds as `LocalInstant`), `metrics` (an
+`Option<MetricsSnapshot>`: the input plan's resolved slots and every
+accumulator field, the rolling peak's ring included, peaks as
+`Option<f64>` because the `NEG_INFINITY` sentinel is the one non-finite
+the state can hold; present exactly when the run requested metrics), one
+section per report (the name and the recorder's row stream: every row's
+timestamp and values, the buffered tail and the batch count, the
+`ReportRowsSnapshot`), `health` (`RunHealth`) and `warnings` (both
+bounded buffers and their dropped counts, `Warning` gaining serde with
+the `rc` feature). Restore validates everything before anything changes:
+a restoring dwelling with a `Parquet`, `Csv` or `Callback` report is a
+typed error naming the report; the sections' report names must match in
+order; the metrics section's presence must match the request both ways
+and its plan must resolve the same slots; summaries without a tariff
+section are a typed error. The memory rows restore so a resumed run's
+frame continues the written run's, and the restored counters keep the
+callback deliveries continuing the original run's batch index (the
+attachment itself is not serialisable: a caller re-attaches on the fresh
+dwelling before the restore, the OR-14 rule, and the restored recorder
+re-delivers none of the carried rows). `restore_building_state` keeps
+its contract untouched.
+
+Adaptations recorded: (a) the tariff evaluator's own carry had landed
+with the mid-run tariff work (the `tariff_state` section at v12/v14);
+this row reworked the snapshot's bounds to `LocalInstant` (the local
+wall clock and the zone's offset at that time, never a bare UTC
+instant), `TARIFF_SNAPSHOT_SCHEMA_VERSION` 2, and moved the restore
+errors onto the typed `SnapshotError` in `hares-tariff` (thiserror added
+to the crate): `UnknownZone`, `ZoneMismatch` (a summary written in one
+zone restored into an evaluator in another),
+`UnresolvedLocalInstant` (a wall clock the zone skips, the
+spring-forward gap named), each carrying its values; (b) the fixture's
+billing boundary: the monthly cycle closes on the start's day
+anniversary, so a January 25 start's first boundary is February 25,
+outside a 12-day run; the tests set the seven-day cycle, which puts the
+boundary at February 1 with the entry's checkpoint instants kept exactly
+(`2023-01-28T16:30` mid-billing-period and mid-hour, `2023-02-03T12:00`
+after the close); (c) the `ReducerSnapshot` per non-`Timestep` report:
+the dwelling wires no reducers yet (the reporting-frequency entry's
+`PeriodReducer` is the caller's surface; the report layer that folds the
+reducer into the dwelling follows), so the checkpoint carries the
+recorders' row streams and counters, a reducer's partial-period state
+slots into the same section when the wiring lands, and
+`restore_mid_hour_matches_uninterrupted_hourly_report` drives the
+`PeriodReducer` over both runs' frames and asserts the hourly rows
+bitwise, the checkpoint's own hour carrying its four steps on both
+sides; (d) the two regression scenarios that restored into
+file-report dwellings (`checkpoint_restart`, `actor_state_checkpoint`)
+run on the memory report now: the typed refusal is the entry's rule, and
+no file state travels in a checkpoint.
+
+RED first: at the parent the acceptance tests failed behaviourally (the
+resumed run's metrics off by the pre-checkpoint steps, the frames short
+by the carried prefix, the closed summary lost, the health counters and
+warning record restarted, the memory rows un-truncated, the file and
+metrics refusals absent) and the schema-fingerprint pin failed on the
+new sections. Gates at `6b609568`: fmt clean, clippy `--workspace
+--all-targets --all-features -D warnings` clean, nextest
+`--all-features -j 4` 7943/7943 (the parent 7923, +20) and `-F dst`
+7873/7873, pytest `-m ''` 1676 passed 0 failed 0 errors 6 xfailed (the
+parent 1672, +4: the Python `save_state`/`load_state` path passes the
+mid-billing restore), pyright 0, the eight goldens bitwise (compare-all
+7 + `full_year_900s_dst` 1); the residue base-verified on a worktree of
+`16b3c993` (pytest 1672 passed 0 failed, pyright 0).
 (`float_roundtrip`).
 
 **Measurement:** checkpoint size in bytes and `save_checkpoint` wall time
