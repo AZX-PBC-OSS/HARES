@@ -136,30 +136,81 @@ pub(crate) fn unit_keyed_fleet_rules(
     )
 }
 
-/// The fleet rules of a report schema field, read from the field's `unit`
-/// metadata (the `Unit::symbol()` string the schema builders write). A
-/// field without the metadata, or with a symbol outside the table,
-/// averages over time and sums across homes: the parent commit's
-/// fallback.
+/// The fleet rules of a report schema field: the field's `unit` metadata
+/// first (the `Unit::symbol()` string the schema builders write). A field
+/// without the metadata, or with a symbol outside the table, parses the
+/// column name's parenthesised suffix, the parent commit's fallback; a
+/// name whose suffix is not recognised either averages over time and sums
+/// across homes. The recorder schemas always carry the metadata, so the
+/// engine's own path never reaches the suffix.
 pub(crate) fn field_fleet_rules(field: &Field) -> (TimeRule, hares_types::AcrossHomes) {
+    if let Some(symbol) = field.metadata().get("unit")
+        && let Some(unit) = unit_from_symbol(symbol)
+    {
+        return unit_keyed_fleet_rules(unit);
+    }
+    suffix_fleet_rules(field.name())
+}
+
+/// The unit a `unit` metadata symbol names, the table the engine's
+/// schemas write; `None` for any other spelling.
+fn unit_from_symbol(symbol: &str) -> Option<hares_types::Unit> {
     use hares_types::Unit;
-    let unit = match field.metadata().get("unit").map(String::as_str) {
-        Some("kWh") => Unit::KilowattHour,
-        Some("kW") => Unit::Kilowatt,
-        Some("C") | Some("\u{b0}C") => Unit::Celsius,
-        Some("W") => Unit::Watt,
-        Some("-") => Unit::Dimensionless,
-        Some("therms/hour") => Unit::ThermPerHour,
-        Some("kVAR") => Unit::VoltAmpereReactive,
-        Some("W/m2") => Unit::WattPerSquareMeter,
-        Some("s") => Unit::Second,
-        Some("deg") => Unit::Degree,
-        Some("kWh/mi") => Unit::KilowattHourPerMile,
-        Some("enum") => Unit::Enum,
-        // Any other unit, including no metadata and the empty unit.
-        _ => Unit::None,
+    match symbol {
+        "kWh" => Some(Unit::KilowattHour),
+        "kW" => Some(Unit::Kilowatt),
+        "C" | "\u{b0}C" => Some(Unit::Celsius),
+        "W" => Some(Unit::Watt),
+        "-" => Some(Unit::Dimensionless),
+        "therms/hour" => Some(Unit::ThermPerHour),
+        "kVAR" => Some(Unit::VoltAmpereReactive),
+        "W/m2" => Some(Unit::WattPerSquareMeter),
+        "s" => Some(Unit::Second),
+        "deg" => Some(Unit::Degree),
+        "kWh/mi" => Some(Unit::KilowattHourPerMile),
+        "enum" => Some(Unit::Enum),
+        _ => None,
+    }
+}
+
+/// The parent commit's suffix-parsing fallback, for a field whose unit is
+/// missing or unknown: the column name's parenthesised suffix picks the
+/// rules, and a name with no recognised suffix takes the stage defaults
+/// (mean over time, weighted sum across homes). The recognised suffixes
+/// and their rules are the parent's two suffix tables, `kWh` summing over
+/// time and the power units summing across homes.
+fn suffix_fleet_rules(name: &str) -> (TimeRule, hares_types::AcrossHomes) {
+    let name = name.trim();
+    let over_time = if name.ends_with("(kWh)") {
+        Aggregation::Sum
+    } else {
+        Aggregation::Mean
     };
-    unit_keyed_fleet_rules(unit)
+    let across = if name.ends_with("(kW)")
+        || name.ends_with("(kWh)")
+        || name.ends_with("(therms/hour)")
+        || name.ends_with("(kVAR)")
+        || name.ends_with("(W)")
+    {
+        hares_types::AcrossHomes::Sum
+    } else if name.ends_with("(C)")
+        || name.ends_with("(\u{b0}C)")
+        || name.ends_with("(-)")
+        || name.ends_with("(W/m2)")
+        || name.ends_with("(s)")
+        || name.ends_with("(deg)")
+    {
+        hares_types::AcrossHomes::Mean
+    } else {
+        hares_types::AcrossHomes::Sum
+    };
+    (
+        TimeRule {
+            aggregation: over_time,
+            enum_codes: None,
+        },
+        across,
+    )
 }
 
 /// One cell's running sums: the weighted values and the covered weight,
@@ -685,6 +736,81 @@ mod tests {
                 "{spelling}"
             );
         }
+    }
+
+    /// A field without unit metadata parses its name's parenthesised
+    /// suffix, the parent commit's fallback: the energy suffix sums over
+    /// time, the power suffixes sum across homes, the intensive suffixes
+    /// mean across homes, and a name with no recognised suffix takes the
+    /// stage defaults. The metadata, when present and known, still wins.
+    #[test]
+    fn fields_without_unit_metadata_parse_the_name_suffix() {
+        let no_unit = |name: &str| Field::new(name, DataType::Float64, true);
+        let cases: [(&str, Aggregation, hares_types::AcrossHomes); 7] = [
+            (
+                "Total Energy (kWh)",
+                Aggregation::Sum,
+                hares_types::AcrossHomes::Sum,
+            ),
+            (
+                "Total Electric Power (kW)",
+                Aggregation::Mean,
+                hares_types::AcrossHomes::Sum,
+            ),
+            (
+                "Temperature - Indoor (C)",
+                Aggregation::Mean,
+                hares_types::AcrossHomes::Mean,
+            ),
+            (
+                "Temperature - Outdoor (\u{b0}C)",
+                Aggregation::Mean,
+                hares_types::AcrossHomes::Mean,
+            ),
+            (
+                "Gas Power (therms/hour)",
+                Aggregation::Mean,
+                hares_types::AcrossHomes::Sum,
+            ),
+            (
+                "Irradiance (W/m2)",
+                Aggregation::Mean,
+                hares_types::AcrossHomes::Mean,
+            ),
+            (
+                "No Suffix",
+                Aggregation::Mean,
+                hares_types::AcrossHomes::Sum,
+            ),
+        ];
+        for (name, over_time, across) in cases {
+            let (rule_over, rule_across) = field_fleet_rules(&no_unit(name));
+            assert_eq!(
+                rule_over.aggregation, over_time,
+                "{name}: the over-time rule"
+            );
+            assert_eq!(rule_across, across, "{name}: the across-homes rule");
+        }
+
+        // A unit symbol the table does not know also falls to the name's
+        // suffix, and a suffix it does not recognise takes the stage
+        // defaults.
+        let unknown_unit = field("Fraction (fraction)", "fraction");
+        let (over, across) = field_fleet_rules(&unknown_unit);
+        assert!(matches!(over.aggregation, Aggregation::Mean));
+        assert!(matches!(across, hares_types::AcrossHomes::Sum));
+
+        let unknown_unit_known_suffix = field("Total Energy (kWh)", "fraction");
+        let (over, across) = field_fleet_rules(&unknown_unit_known_suffix);
+        assert!(matches!(over.aggregation, Aggregation::Sum), "{over:?}");
+        assert!(matches!(across, hares_types::AcrossHomes::Sum));
+
+        // The metadata, when the table knows the symbol, wins over the
+        // suffix.
+        let known_unit_other_suffix = field("Total Energy (kWh)", "kW");
+        let (over, across) = field_fleet_rules(&known_unit_other_suffix);
+        assert!(matches!(over.aggregation, Aggregation::Mean));
+        assert!(matches!(across, hares_types::AcrossHomes::Sum));
     }
 
     /// Three homes, one bucket: the fold's cells accumulate `v * w` and
