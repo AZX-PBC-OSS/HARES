@@ -1030,6 +1030,17 @@ impl MetricsCalculator {
         self.plan.snapshot()
     }
 
+    /// The rolling peak ring's capacity: the length a snapshot's ring
+    /// must have for [`Self::apply_snapshot`] to restore it. The input
+    /// plan is resolution-free, so this is the one state a restore gates
+    /// on that the plan comparison cannot see; a pre-mutation validator
+    /// reads it to refuse a foreign time resolution before any state
+    /// changes (the restore itself refuses too).
+    #[must_use]
+    pub fn rolling_peak_ring_len(&self) -> usize {
+        self.rolling_peak.buffer.len()
+    }
+
     /// Read the total electric power slot's value, returning `Some` for
     /// finite values and `None` for non-finite (NaN/Inf) values,
     /// incrementing [`nan_step_count`](Self::nan_step_count) on each skip.
@@ -3973,7 +3984,9 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("rolling peak ring") && err.contains("4") && err.contains("12"),
+            err.contains("rolling peak ring")
+                && err.contains("holds 4 readings")
+                && err.contains("needs 12"),
             "the refusal is the typed snapshot error naming both ring \
              lengths: {err}"
         );

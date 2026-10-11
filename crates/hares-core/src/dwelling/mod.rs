@@ -16209,13 +16209,13 @@ occupancy = 0.0
     /// nothing: the run steps on with its own rows.
     #[test]
     fn restore_into_a_run_at_another_chunk_size_is_a_typed_error() {
-        let mut source = cz4a_with_metrics_chunk(false, 4);
+        let mut source = cz4a_with_metrics_chunk(false, 900, 4);
         for _ in 0..5 {
             source.run_timestep(false).expect("step");
         }
         let checkpoint = source.save_checkpoint().expect("checkpoint");
 
-        let mut restoring = cz4a_with_metrics_chunk(false, 2);
+        let mut restoring = cz4a_with_metrics_chunk(false, 900, 2);
         restoring.run_timestep(false).expect("step");
         let rows_before = restoring.recorded_rows();
 
@@ -16224,7 +16224,9 @@ occupancy = 0.0
             .expect_err("the chunk size refuses the restore");
         let message = err.to_string();
         assert!(
-            message.contains("frame") && message.contains("chunk size 4") && message.contains(" 2"),
+            message.contains("frame")
+                && message.contains("chunk size 4")
+                && message.contains("this run uses 2"),
             "the refusal names the report and both chunk sizes: {message}"
         );
         assert_eq!(
@@ -16235,23 +16237,95 @@ occupancy = 0.0
         restoring.run_timestep(false).expect("the run steps on");
     }
 
-    /// A cz4a dwelling with `metrics` as requested, one verbosity-2
-    /// memory report, at the default chunk size.
-    fn cz4a_with_metrics(metrics: bool) -> Dwelling {
-        cz4a_with_metrics_chunk(metrics, 10_000)
+    /// A metrics section written at another time resolution is refused
+    /// before anything changes: the input plan is resolution-free, so the
+    /// refusal is the rolling peak's ring (900 s fills a 4-reading ring,
+    /// 300 s a 12-reading one), and the refusal must land in the
+    /// pre-mutation gate. A restore that got as far as the metrics
+    /// accumulator would have applied the checkpoint's physics, clock,
+    /// RNG and tariff already: the dwelling would be half the
+    /// checkpoint's and half its own.
+    #[test]
+    fn restore_into_a_run_at_another_time_resolution_changes_nothing() {
+        let mut source = cz4a_with_metrics_chunk(true, 900, 4);
+        for _ in 0..2 {
+            source.run_timestep(false).expect("step");
+        }
+        let checkpoint = source.save_checkpoint().expect("checkpoint");
+
+        let mut restoring = cz4a_with_metrics_chunk(true, 300, 4);
+        restoring.run_timestep(false).expect("step");
+        let rows_before = restoring.recorded_rows();
+
+        let err = restoring
+            .load_checkpoint(checkpoint)
+            .expect_err("the time resolution refuses the restore");
+        let message = err.to_string();
+        assert!(
+            message.contains("rolling peak ring")
+                && message.contains("holds 4 readings")
+                && message.contains("needs 12"),
+            "the refusal names both ring lengths: {message}"
+        );
+        assert_eq!(
+            restoring.clock.current_step, 1,
+            "the refused restore leaves the clock where the run was"
+        );
+        assert_eq!(
+            restoring.recorded_rows(),
+            rows_before,
+            "the refused restore changes no recorded row"
+        );
+        restoring.run_timestep(false).expect("the run steps on");
+    }
+
+    /// A report section whose batch count disagrees with its rows' flushed
+    /// shape is refused before anything changes, like the section's other
+    /// fit refusals: a restore that reached the recorder would already
+    /// have applied the checkpoint's physics and clock.
+    #[test]
+    fn restore_with_a_disagreeing_batch_count_changes_nothing() {
+        let mut source = cz4a_with_metrics_chunk(false, 900, 4);
+        for _ in 0..5 {
+            source.run_timestep(false).expect("step");
+        }
+        let mut checkpoint = source.save_checkpoint().expect("checkpoint");
+        checkpoint.reports[0].rows.batches_built = 99;
+
+        let mut restoring = cz4a_with_metrics_chunk(false, 900, 4);
+        restoring.run_timestep(false).expect("step");
+
+        let err = restoring
+            .load_checkpoint(checkpoint)
+            .expect_err("the batch count refuses the restore");
+        assert!(
+            err.to_string().contains("99"),
+            "the refusal names the disagreeing count: {err}"
+        );
+        assert_eq!(
+            restoring.clock.current_step, 1,
+            "the refused restore leaves the clock where the run was"
+        );
+        restoring.run_timestep(false).expect("the run steps on");
     }
 
     /// A cz4a dwelling with `metrics` as requested, one verbosity-2
-    /// memory report, at `output_chunk_size` (the recorders build at
-    /// assembly from the config).
-    fn cz4a_with_metrics_chunk(metrics: bool, output_chunk_size: usize) -> Dwelling {
+    /// memory report, at the default chunk size.
+    fn cz4a_with_metrics(metrics: bool) -> Dwelling {
+        cz4a_with_metrics_chunk(metrics, 900, 10_000)
+    }
+
+    /// A cz4a dwelling with `metrics` as requested, one verbosity-2
+    /// memory report, at `time_res` seconds and `output_chunk_size` (the
+    /// recorders build at assembly from the config).
+    fn cz4a_with_metrics_chunk(metrics: bool, time_res: u32, output_chunk_size: usize) -> Dwelling {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let home = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
         let sim_toml = format!(
             r#"
 start_time = "2023-01-25T00:00:00-07:00"
 duration = 86400
-time_res = 900
+time_res = {time_res}
 metrics = {metrics}
 output_chunk_size = {output_chunk_size}
 

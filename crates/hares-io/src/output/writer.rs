@@ -1311,7 +1311,7 @@ mod tests {
             .expect_err("a foreign chunk size refuses the restore")
             .to_string();
         assert!(
-            err.contains("chunk size 4") && err.contains(" 2"),
+            err.contains("chunk size 4") && err.contains("this run uses 2"),
             "the refusal names both chunk sizes: {err}"
         );
     }
@@ -1337,7 +1337,7 @@ mod tests {
             .expect_err("the chunk drift must not re-chunk the batches")
             .to_string();
         assert!(
-            err.contains("chunk size 100") && err.contains("150"),
+            err.contains("chunk size 100") && err.contains("this run uses 150"),
             "the refusal names both chunk sizes: {err}"
         );
     }

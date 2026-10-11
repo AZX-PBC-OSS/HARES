@@ -360,9 +360,27 @@ impl Dwelling {
                     section.name, section.rows.buffered_rows, rows
                 )));
             }
+            // The batch count must agree with the flushed shape the rows
+            // rebuild: the restore would refuse it, and here is before
+            // anything changed.
+            let flushed = rows - section.rows.buffered_rows;
+            let expected_batches = if flushed == 0 {
+                0
+            } else {
+                u64::try_from(flushed.div_ceil(recorder.chunk_size())).expect("row count fits u64")
+            };
+            if section.rows.batches_built != expected_batches {
+                return Err(HaresError::Io(format!(
+                    "checkpoint restore: report '{}' names {} built batches but its \
+                     rows rebuild {}",
+                    section.name, section.rows.batches_built, expected_batches
+                )));
+            }
         }
         // The metrics section's presence must match the request, and its
-        // plan must resolve the same slots the fresh calculator's does.
+        // plan must resolve the same slots the fresh calculator's does;
+        // the rolling peak's ring must be this resolution's (the plan is
+        // resolution-free, so the plan comparison cannot see it).
         match (&cp.metrics, &self.metrics_calculator) {
             (Some(snapshot), Some(calculator)) => {
                 if snapshot.plan != calculator.plan_snapshot() {
@@ -371,6 +389,14 @@ impl Dwelling {
                          resolve the same producer slots this run's does"
                             .to_string(),
                     ));
+                }
+                let ring = calculator.rolling_peak_ring_len();
+                if snapshot.accumulators.rolling_peak.buffer.len() != ring {
+                    return Err(HaresError::InvalidState(format!(
+                        "checkpoint restore: the checkpoint's rolling peak ring \
+                         holds {} readings, this run's time resolution needs {ring}",
+                        snapshot.accumulators.rolling_peak.buffer.len()
+                    )));
                 }
             }
             (Some(_), None) => {
