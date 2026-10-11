@@ -112,6 +112,16 @@ pub enum FleetError {
     InvalidAggregationWeight { index: usize, value: f64 },
     #[error("verbosity {value} exceeds the maximum of {max}")]
     InvalidOutputVerbosity { value: u8, max: u8 },
+    #[error(
+        "dwelling at index {dwelling_index} declares timestep-frequency memory reports \
+         {names:?}: the aggregate folds one timestep report, and two with identical \
+         schemas would concatenate into double-counted rows; drop or rename all but \
+         one so exactly one memory report records at the timestep frequency"
+    )]
+    AmbiguousTimestepReport {
+        dwelling_index: usize,
+        names: Vec<String>,
+    },
 }
 
 /// Errors returned by [`Fleet::simulate`].

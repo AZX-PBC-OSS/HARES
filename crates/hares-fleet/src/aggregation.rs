@@ -295,7 +295,7 @@ pub fn aggregate(
             });
         }
 
-        let Some((schema, rows)) = extract_rows(outcome, index) else {
+        let Some((schema, rows)) = extract_rows(outcome, index)? else {
             continue;
         };
         if rows.is_empty() {
@@ -388,19 +388,52 @@ pub fn aggregate(
     })
 }
 
+/// The one report the fleet's aggregate folds: the run's timestep-frequency
+/// `Memory` report, the run's own frame surface. A run that declares none
+/// contributes nothing; two that qualify are an ambiguity the caller must
+/// resolve, named by the error rather than silently folded together.
 fn extract_rows(
     outcome: &DwellingOutcome,
     dwelling_index: usize,
-) -> Option<(Arc<Schema>, Vec<RecordBatch>)> {
-    // The fleet's aggregate folds the memory reports' retained batches: the
-    // run's own frame surface, one report at a time.
-    let batches: Vec<RecordBatch> = outcome
+) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, FleetError> {
+    // The fleet's aggregate folds the timestep-frequency memory report's
+    // retained batches: the run's own frame surface, one report at a time.
+    // Folding every memory report would double-count a run that carries two
+    // memory reports with identical schemas at different frequencies (a
+    // timestep report beside an hourly or daily one), so the destination
+    // and the frequency pick the report and two candidates are an error.
+    let memory_reports: Vec<&hares_core::ReportResult> = outcome
         .result
         .reports
         .iter()
-        .flat_map(|report| report.batches().to_vec())
+        .filter(|report| matches!(report.output, hares_core::ReportOutput::Memory(_)))
         .collect();
-    let first = batches.first()?;
+    let report = match memory_reports
+        .iter()
+        .filter(|report| report.frequency == hares_io::Frequency::Timestep)
+        .count()
+    {
+        1 => memory_reports
+            .iter()
+            .find(|report| report.frequency == hares_io::Frequency::Timestep)
+            .expect("one timestep-frequency memory report was counted above"),
+        0 => return Ok(None),
+        _ => {
+            let names: Vec<String> = memory_reports
+                .iter()
+                .filter(|report| report.frequency == hares_io::Frequency::Timestep)
+                .map(|report| report.name.clone())
+                .collect();
+            return Err(FleetError::AmbiguousTimestepReport {
+                dwelling_index,
+                names,
+            });
+        }
+    };
+    let batches: Vec<RecordBatch> = report.batches().to_vec();
+    let Some(first) = batches.first() else {
+        return Ok(None);
+    };
     let schema = first.schema();
 
     for (batch_idx, batch) in batches.iter().enumerate().skip(1) {
@@ -435,11 +468,11 @@ fn extract_rows(
                 );
             }
 
-            return None;
+            return Ok(None);
         }
     }
 
-    Some((schema, batches.clone()))
+    Ok(Some((schema, batches.clone())))
 }
 
 fn numeric_column_indexes(schema: &Schema) -> Vec<usize> {
@@ -1687,8 +1720,126 @@ mod tests {
             elapsed: StdDuration::from_secs(1),
         };
 
-        let result = extract_rows(&outcome, 0);
+        let result = extract_rows(&outcome, 0).expect("the report selection resolves");
         assert!(result.is_none());
+    }
+
+    /// Two timestep-frequency memory reports are an ambiguity the caller
+    /// must resolve: the aggregate cannot pick one, and folding both would
+    /// concatenate their rows into double counts.
+    #[test]
+    fn extract_rows_errors_naming_two_timestep_memory_reports() {
+        let batch1 = batch(
+            &["2021-01-01T00:00:00Z"],
+            vec![("Total Electric Power (kW)", vec![Some(1.0)])],
+        );
+
+        let outcome = DwellingOutcome {
+            result: std::sync::Arc::new(hares_core::RunResult {
+                reports: vec![
+                    hares_core::ReportResult {
+                        name: "frame".to_string(),
+                        output: hares_core::ReportOutput::Memory(vec![batch1.clone()]),
+                        frequency: hares_io::Frequency::Timestep,
+                        rows: 1,
+                        batches_delivered: 1,
+                    },
+                    hares_core::ReportResult {
+                        name: "twin".to_string(),
+                        output: hares_core::ReportOutput::Memory(vec![batch1]),
+                        frequency: hares_io::Frequency::Timestep,
+                        rows: 1,
+                        batches_delivered: 1,
+                    },
+                ],
+                metrics: Some(hares_core::RunMetrics::from(
+                    hares_io::FullSimulationMetrics {
+                        metrics: sample_metrics(10.0, 1.0),
+                        gas_energy: None,
+                    },
+                )),
+                health: Default::default(),
+                warnings: Vec::new(),
+                warnings_dropped: 0,
+                provenance: hares_core::Provenance {
+                    config: crate::fleet::resstock_sim_config_for_tests(),
+                    bldg_id: 0,
+                    site_utc_offset_s: 0,
+                    equipment: Vec::new(),
+                },
+            }),
+            sample_weight: 1.0,
+            status: SimStatus::Ok,
+            elapsed: StdDuration::from_secs(1),
+        };
+
+        let err = extract_rows(&outcome, 3).expect_err("two candidates are an error");
+        let message = err.to_string();
+        assert!(
+            message.contains("3") && message.contains("frame") && message.contains("twin"),
+            "the error names the dwelling and both reports, got: {message}"
+        );
+    }
+
+    /// A timestep report beside a memory report at another frequency folds
+    /// the timestep report only: the hourly report's rows (identical
+    /// schemas, fewer rows) never join the aggregate.
+    #[test]
+    fn extract_rows_folds_only_the_timestep_frequency_memory_report() {
+        let step_rows = batch(
+            &["2021-01-01T00:00:00Z", "2021-01-01T00:15:00Z"],
+            vec![("Total Electric Power (kW)", vec![Some(1.0), Some(2.0)])],
+        );
+        let hourly_rows = batch(
+            &["2021-01-01T00:00:00Z"],
+            vec![("Total Electric Power (kW)", vec![Some(9.9)])],
+        );
+
+        let outcome = DwellingOutcome {
+            result: std::sync::Arc::new(hares_core::RunResult {
+                reports: vec![
+                    hares_core::ReportResult {
+                        name: "hourly".to_string(),
+                        output: hares_core::ReportOutput::Memory(vec![hourly_rows]),
+                        frequency: hares_io::Frequency::Hourly,
+                        rows: 1,
+                        batches_delivered: 1,
+                    },
+                    hares_core::ReportResult {
+                        name: "frame".to_string(),
+                        output: hares_core::ReportOutput::Memory(vec![step_rows]),
+                        frequency: hares_io::Frequency::Timestep,
+                        rows: 2,
+                        batches_delivered: 1,
+                    },
+                ],
+                metrics: Some(hares_core::RunMetrics::from(
+                    hares_io::FullSimulationMetrics {
+                        metrics: sample_metrics(10.0, 1.0),
+                        gas_energy: None,
+                    },
+                )),
+                health: Default::default(),
+                warnings: Vec::new(),
+                warnings_dropped: 0,
+                provenance: hares_core::Provenance {
+                    config: crate::fleet::resstock_sim_config_for_tests(),
+                    bldg_id: 0,
+                    site_utc_offset_s: 0,
+                    equipment: Vec::new(),
+                },
+            }),
+            sample_weight: 1.0,
+            status: SimStatus::Ok,
+            elapsed: StdDuration::from_secs(1),
+        };
+
+        let (schema, rows) = extract_rows(&outcome, 0)
+            .expect("the report selection resolves")
+            .expect("the timestep report qualifies");
+        assert_eq!(schema.fields().len(), 2);
+        let total: usize = rows.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(total, 2, "only the timestep report's two rows fold in");
     }
 
     #[test]
