@@ -660,7 +660,6 @@ pub struct PyDwelling {
     pub(crate) poisoned: AtomicBool,
     pub(crate) mutex_poison_events: std::sync::atomic::AtomicU64,
     pub(crate) config: DwellingConfig,
-    initial_state: Option<Vec<u8>>,
     initialized: bool,
     registry: ActorRegistry,
     equipment_registry: EquipmentRegistry,
@@ -707,7 +706,6 @@ impl PyDwelling {
             poisoned: AtomicBool::new(false),
             mutex_poison_events: std::sync::atomic::AtomicU64::new(0),
             config,
-            initial_state: None,
             initialized: false,
             registry: ActorRegistry::new(),
             equipment_registry: EquipmentRegistry::new(),
@@ -723,18 +721,6 @@ impl PyDwelling {
     }
 
     pub fn initialize(&mut self) -> PyResult<()> {
-        if self.initialized || self.initial_state.is_some() {
-            self.initialized = true;
-            return Ok(());
-        }
-
-        let bytes = {
-            let dwelling = self.acquire()?;
-            serde_json::to_vec(&dwelling.save_checkpoint().map_err(to_py_err)?)
-                .map_err(to_py_err_display)?
-        };
-
-        self.initial_state = Some(bytes);
         self.initialized = true;
         Ok(())
     }
@@ -1721,7 +1707,6 @@ impl PyDwelling {
         self.mutex_poison_events.store(0, Ordering::SeqCst);
         self.config = config;
         self.initialized = false;
-        self.initial_state = None;
         self.zone_keys = None;
 
         self.initialize()
@@ -2176,7 +2161,6 @@ impl PyDwelling {
             poisoned: AtomicBool::new(false),
             mutex_poison_events: std::sync::atomic::AtomicU64::new(0),
             config,
-            initial_state: None,
             initialized: false,
             registry: ActorRegistry::new(),
             equipment_registry: EquipmentRegistry::new(),
