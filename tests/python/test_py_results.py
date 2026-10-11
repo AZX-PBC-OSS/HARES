@@ -1,4 +1,4 @@
-"""Row 43a (PY-9): RunResult, finish(), health() and reports in Python.
+"""RunResult, finish(), health() and reports in Python.
 
 The Rust lifecycle's Python surface: simulate() and finish() return the
 run's RunResult, health() reads the run's live health totals, and the
@@ -78,7 +78,7 @@ def test_python_stepped_finish_equals_simulate() -> None:
 
 def test_health_readable_with_no_reports_requested() -> None:
     """reports=[]: health() after 10 steps reads zero counters and warmup
-    Disabled — the live health needs no report."""
+    "disabled": the live health needs no report."""
     from hares import SimulationConfig
 
     dw = build(SimulationConfig(start_time="2023-01-01T00:00:00-07:00", duration=86400, time_res=900))
