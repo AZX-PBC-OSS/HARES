@@ -1849,11 +1849,13 @@ def test_gym_env_exposes_the_finished_run_result():
         episode_length=timedelta(minutes=5),
     )
     env.reset(seed=0)
-    assert env.run_result is None, "no result before the truncating step"
+    before = env.run_result
+    assert before is None, "no result before the truncating step"
 
     for _ in range(4):
         env.step(np.array([21.0], dtype=np.float64))
-    assert env.run_result is None, "no result while the episode runs"
+    running = env.run_result
+    assert running is None, "no result while the episode runs"
 
     obs, reward, terminated, truncated, info = env.step(
         np.array([21.0], dtype=np.float64)
@@ -1861,12 +1863,14 @@ def test_gym_env_exposes_the_finished_run_result():
     assert truncated is True, "the fifth step truncates the episode"
     result = env.run_result
     assert result is not None, "the truncating step finalises the run"
-    assert [report.name for report in result.reports] == ["frame"]
-    assert result.reports[0].rows == 5, "the report holds the episode's five steps"
+    reports: list[Any] = list(result.reports)
+    assert [report.name for report in reports] == ["frame"]
+    assert reports[0].rows == 5, "the report holds the episode's five steps"
     assert result.health.clamped_actions == 0
 
     env.reset(seed=0)
-    assert env.run_result is None, "reset() clears the finished result"
+    cleared = env.run_result
+    assert cleared is None, "reset() clears the finished result"
 
 
 def test_vec_gym_exposes_each_dwelling_run_result():
