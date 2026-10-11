@@ -227,11 +227,11 @@ impl StreamingRecorder {
                 snapshot.buffered_rows
             )));
         }
-        if snapshot.batches_built != snapshot.expected_batches(self.chunk_size) {
+        let expected_batches = snapshot.expected_batches(self.chunk_size);
+        if snapshot.batches_built != expected_batches {
             return Err(OutputError::Snapshot(format!(
                 "the section names {} built batches but its rows rebuild {}",
-                snapshot.batches_built,
-                snapshot.expected_batches(self.chunk_size)
+                snapshot.batches_built, expected_batches
             )));
         }
         let flushed = rows - snapshot.buffered_rows;

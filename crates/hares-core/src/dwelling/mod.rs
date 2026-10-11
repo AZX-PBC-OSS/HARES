@@ -16289,6 +16289,44 @@ occupancy = 0.0
         restoring.run_timestep(false).expect("the run steps on");
     }
 
+    /// A corrupted metrics section (a ring the resolution cannot produce)
+    /// is refused before anything changes too: the resolution gate passes
+    /// it, so the ring's own check must sit in the pre-mutation gate, not
+    /// behind it where the checkpoint's physics and clock are already
+    /// applied.
+    #[test]
+    fn restore_with_a_corrupted_ring_changes_nothing() {
+        let mut source = cz4a_with_metrics_chunk(true, 900, 4);
+        for _ in 0..3 {
+            source.step().expect("step");
+        }
+        let mut checkpoint = source.save_checkpoint().expect("checkpoint");
+        checkpoint
+            .metrics
+            .as_mut()
+            .expect("the section is present")
+            .accumulators
+            .rolling_peak
+            .buffer
+            .push(0.0);
+
+        let mut restoring = cz4a_with_metrics_chunk(true, 900, 4);
+        restoring.step().expect("step");
+
+        let err = restoring
+            .load_checkpoint(checkpoint)
+            .expect_err("the corrupted ring refuses the restore");
+        assert!(
+            err.to_string().contains("rolling peak ring"),
+            "the refusal names the ring: {err}"
+        );
+        assert_eq!(
+            restoring.clock.current_step, 1,
+            "the refused restore leaves the clock where the run was"
+        );
+        restoring.step().expect("the run steps on");
+    }
+
     /// A report section whose batch count disagrees with its rows' flushed
     /// shape is refused before anything changes, like the section's other
     /// fit refusals: a restore that reached the recorder would already

@@ -997,9 +997,11 @@ impl MetricsCalculator {
             )));
         }
         let restored = &snapshot.accumulators;
-        // The rolling peak's ring refuses a foreign time resolution before
-        // anything changes, so the accumulators below take the
-        // checkpoint's state only once the whole section is known to fit.
+        // The rolling peak's ring is the backstop behind the resolution
+        // gate above: a section whose ring this resolution cannot produce
+        // refuses before anything changes, so the accumulators below take
+        // the checkpoint's state only once the whole section is known to
+        // fit.
         self.rolling_peak.restore(restored.rolling_peak.clone())?;
         self.total_electric_energy_kwh = restored.total_electric_energy_kwh;
         self.total_gas_energy_therms = restored.total_gas_energy_therms;
@@ -1052,6 +1054,15 @@ impl MetricsCalculator {
     #[must_use]
     pub fn time_res_secs(&self) -> u32 {
         self.time_res_secs
+    }
+
+    /// The rolling peak ring's capacity, the length a snapshot's ring
+    /// must have at this resolution: a pre-mutation validator reads it to
+    /// refuse a corrupted section before any state changes (the restore's
+    /// own check refuses it too).
+    #[must_use]
+    pub fn rolling_peak_ring_len(&self) -> usize {
+        self.rolling_peak.buffer.len()
     }
 
     /// Read the total electric power slot's value, returning `Some` for

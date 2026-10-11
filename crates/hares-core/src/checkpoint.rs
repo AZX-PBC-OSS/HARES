@@ -70,12 +70,15 @@ use serde::{Deserialize, Serialize};
 /// writing run's recorder flushed at, and a restoring recorder built at
 /// another chunk size is a typed refusal (the same rows would rebuild
 /// into batches of different shapes, so the resumed frames would not be
-/// the writing run's bitwise). The metrics section carries the time
-/// resolution it was written at, and a restoring run at another is a
-/// typed refusal (the input plan is resolution-free, and two distinct
-/// resolutions can size the rolling peak's ring identically).
-/// Checkpoints written by v15 builds are rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 16;
+/// the writing run's bitwise). Checkpoints written by v15 builds are
+/// rejected by the version gate.
+///
+/// v17: the metrics section carries the time resolution it was written
+/// at, and a restoring run at another is a typed refusal (the input plan
+/// is resolution-free, and two distinct resolutions can size the rolling
+/// peak's ring identically). Checkpoints written by v16 builds are
+/// rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 17;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -527,7 +530,7 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 16;
+    const PINNED_VERSION: u32 = 17;
     const PINNED_SCHEMA_SHA256: &str =
         "0a3c663b628492ca03cc9104e777e245b59537df817159b0d655196670fd842e";
 

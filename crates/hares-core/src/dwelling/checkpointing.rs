@@ -363,13 +363,12 @@ impl Dwelling {
             // The batch count must agree with the flushed shape the rows
             // rebuild: the restore would refuse it, and here is before
             // anything changed.
-            if section.rows.batches_built != section.rows.expected_batches(recorder.chunk_size()) {
+            let expected_batches = section.rows.expected_batches(recorder.chunk_size());
+            if section.rows.batches_built != expected_batches {
                 return Err(HaresError::Io(format!(
                     "checkpoint restore: report '{}' names {} built batches but its \
-                     rows rebuild {}",
-                    section.name,
-                    section.rows.batches_built,
-                    section.rows.expected_batches(recorder.chunk_size())
+                     rows rebuild {expected_batches}",
+                    section.name, section.rows.batches_built
                 )));
             }
         }
@@ -377,7 +376,9 @@ impl Dwelling {
         // plan must resolve the same slots the fresh calculator's does;
         // its time resolution must be this run's (the plan is
         // resolution-free and two resolutions can size the rolling
-        // peak's ring identically, so the resolution itself is the gate).
+        // peak's ring identically, so the resolution itself is the
+        // gate), and the ring must be the resolution's (the corrupted
+        // section the resolution gate cannot see).
         match (&cp.metrics, &self.metrics_calculator) {
             (Some(snapshot), Some(calculator)) => {
                 if snapshot.plan != calculator.plan_snapshot() {
@@ -393,6 +394,14 @@ impl Dwelling {
                          resolution {} s, this run's is {} s",
                         snapshot.time_res_secs,
                         calculator.time_res_secs()
+                    )));
+                }
+                let ring = calculator.rolling_peak_ring_len();
+                if snapshot.accumulators.rolling_peak.buffer.len() != ring {
+                    return Err(HaresError::InvalidState(format!(
+                        "checkpoint restore: the metrics section's rolling peak ring \
+                         holds {} readings, this run's time resolution needs {ring}",
+                        snapshot.accumulators.rolling_peak.buffer.len()
                     )));
                 }
             }
