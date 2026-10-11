@@ -6,20 +6,29 @@
 //! is fed per step from the row plan's producer slots. The state is exact
 //! at every step, and a run that does not request metrics builds no plan
 //! and no accumulator and pays nothing.
+//!
+//! The one accumulator has two feeds: the run feeds it per step from the
+//! row plan's producer slots, and [`metrics_from_table`] feeds it from
+//! any Timestep results table, its columns resolved through the
+//! catalogue. The two feeds run the same aggregations and produce the
+//! same values: a table the run itself recorded scores the run's metrics
+//! on bits.
 
 use std::collections::BTreeMap;
 
-use chrono::Datelike;
+use arrow::array::{Array, Float64Array, RecordBatch, TimestampMillisecondArray};
+use arrow::datatypes::DataType;
+use chrono::{DateTime, Datelike, Duration};
 use thiserror::Error;
 
 use hares_physics::constants::HOURS_PER_YEAR;
 use hares_physics::units::energy_therms_to_kwh;
 use hares_types::telemetry_keys as tk;
 
+use crate::SimulationConfig;
+use crate::output::catalogue::{Catalogue, time_field, variable_field};
 #[cfg(feature = "observe")]
 use crate::output::columns::ELECTRIC_POWER_SUFFIX;
-
-use crate::SimulationConfig;
 
 const TOTAL_ELECTRIC_POWER_KW: &str = "Total Electric Power (kW)";
 const TOTAL_GAS_POWER_THERMS: &str = "Total Gas Power (therms/hour)";
@@ -27,10 +36,15 @@ const GRID_ELECTRIC_POWER_KW: &str = "Grid Electric Power (kW)";
 const SETPOINT_DEADBAND_C: &str = "Setpoint Deadband (C)";
 const DEADBAND_C: &str = "Deadband (C)";
 
+/// The reduced tables' step-count column: a period row's step count. The
+/// catalogue declares no such variable, so the Timestep table check names
+/// this column when it finds one.
+const STEP_COUNT_COLUMN: &str = "Step Count";
+
 const EPSILON: f64 = 1e-9;
 
-/// Errors returned by [`MetricsInputPlan::build`] and
-/// [`MetricsCalculator::new`].
+/// Errors returned by [`MetricsInputPlan::build`],
+/// [`MetricsCalculator::new`] and [`metrics_from_table`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MetricsError {
     #[error("time_res_secs must be greater than zero")]
@@ -39,6 +53,22 @@ pub enum MetricsError {
     MissingRequiredColumn(String),
     #[error("metrics accumulator `{0}` is non-finite")]
     NonFiniteAccumulator(String),
+    #[error(
+        "table column `{column}` is {found}, contradicting the catalogue's {expected} declaration"
+    )]
+    ColumnTypeMismatch {
+        column: String,
+        expected: String,
+        found: String,
+    },
+    #[error("not a Timestep table: {0}")]
+    NonTimestepTable(String),
+    #[error("the table is empty: the metrics are computed from a Timestep results table's rows")]
+    EmptyTable,
+    #[error(
+        "table batches do not share one schema: batch {batch} differs from the first at column `{column}`"
+    )]
+    InconsistentBatches { batch: usize, column: String },
 }
 
 /// Total accumulated electric energy over the simulation period.
@@ -410,6 +440,21 @@ impl MetricsInputPlan {
     /// for that end use exist (schema drift: the aggregate metric would
     /// silently read zero).
     pub fn build(available: &[String], config: &SimulationConfig) -> Result<Self, MetricsError> {
+        Self::build_from_names(available, config.setpoint_deadband_c)
+    }
+
+    /// Builds the plan from column names, with the thermostat deadband
+    /// given directly: the table feed's constructor, carrying the config
+    /// field's value the caller read (`None` leaves the deadband column
+    /// the one source, as in-run).
+    ///
+    /// # Errors
+    ///
+    /// The same errors [`Self::build`] documents.
+    pub fn build_from_names(
+        available: &[String],
+        setpoint_deadband_c: Option<f64>,
+    ) -> Result<Self, MetricsError> {
         let total_electric_power_slot = required_slot(available, TOTAL_ELECTRIC_POWER_KW)?;
         let total_gas_power_slot = optional_slot(available, &[TOTAL_GAS_POWER_THERMS])?;
         let grid_power_slot = optional_slot(available, &[GRID_ELECTRIC_POWER_KW])?
@@ -418,7 +463,7 @@ impl MetricsInputPlan {
 
         let end_use_columns =
             discover_end_use_slots(available, total_electric_power_slot, grid_power_slot)?;
-        let setpoints = discover_setpoint_inputs(available, config)?;
+        let setpoints = discover_setpoint_inputs(available, setpoint_deadband_c)?;
         let hvac_capacity_pairs = discover_hvac_capacity_pairs(available)?;
 
         // Optional envelope component gain columns (verbosity >= 6).
@@ -545,8 +590,9 @@ pub struct MetricsCalculator {
     total_row_count: u64,
     setpoint_missing_row_count: u64,
 
-    // Stored config for duration validation and leap-year normalization in finish()
-    config: SimulationConfig,
+    // The calendar year the coverage reads: the run's start time in-run,
+    // the table's first Time value for the table feed.
+    coverage_year: i32,
 
     // Non-finite power value tracking
     nan_step_count: u64,
@@ -567,7 +613,9 @@ enum DeadbandSource {
 }
 
 impl MetricsCalculator {
-    /// Build the metrics accumulator from a resolved input plan.
+    /// Build the metrics accumulator from a resolved input plan, the run's
+    /// config deciding the coverage year (the leap-year normalisation's
+    /// calendar year).
     ///
     /// # Errors
     ///
@@ -576,6 +624,21 @@ impl MetricsCalculator {
         plan: MetricsInputPlan,
         time_res_secs: u32,
         config: &SimulationConfig,
+    ) -> Result<Self, MetricsError> {
+        Self::for_coverage_year(plan, time_res_secs, config.start_time.year())
+    }
+
+    /// Build the accumulator with the coverage year given directly: the
+    /// table feed's constructor, the year of the table's first `Time`
+    /// value standing in for the run's start time.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::InvalidTimeResolution`] for a zero time resolution.
+    pub fn for_coverage_year(
+        plan: MetricsInputPlan,
+        time_res_secs: u32,
+        coverage_year: i32,
     ) -> Result<Self, MetricsError> {
         if time_res_secs == 0 {
             return Err(MetricsError::InvalidTimeResolution);
@@ -639,7 +702,7 @@ impl MetricsCalculator {
             battery_energy_out_kwh: 0.0,
             total_row_count: 0,
             setpoint_missing_row_count: 0,
-            config: config.clone(),
+            coverage_year,
             nan_step_count: 0,
         })
     }
@@ -957,8 +1020,9 @@ impl MetricsCalculator {
         let actual_duration_h = self.total_row_count as f64 * self.timestep_h;
 
         // ASHRAE HoF 2021 Ch.15: standard (non-leap) year = 365 d = 8760 h;
-        // leap year = 366 d = 8784 h.
-        let year = self.config.start_time.year();
+        // leap year = 366 d = 8784 h. The calendar year is the run's start
+        // time in-run, the table's first Time value for the table feed.
+        let year = self.coverage_year;
         let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
 
         // Coverage: determined by accumulated row-hours vs a full calendar year.
@@ -1191,6 +1255,227 @@ impl MetricsCalculator {
     }
 }
 
+/// Renders naive local wall-clock milliseconds as the wall clock they
+/// carry: the reading the `Time` column's values name in errors.
+fn naive_local_clock(local_ms: i64) -> String {
+    DateTime::from_timestamp_millis(local_ms)
+        .map(|instant| instant.naive_utc().to_string())
+        .unwrap_or_else(|| format!("{local_ms} ms"))
+}
+
+/// Computes the run metrics from any results table: the same accumulator
+/// the run feeds per step, fed from the table instead.
+///
+/// The table is a `Timestep` table: a `Time` column of naive local
+/// wall-clock milliseconds and `Float64` columns, every consecutive pair
+/// of `Time` values exactly `time_res` apart and no `Step Count` column.
+/// A reduced table passed with the step resolution is an error naming the
+/// first offending pair of `Time` values (or the `Step Count` column), so
+/// an `Hourly` table passed with `time_res = 900` is an error, not wrong
+/// metrics. The columns resolve through the catalogue: a column whose
+/// Arrow type contradicts its declaration is an error naming it. An empty
+/// table is an error naming it.
+///
+/// What the run's calculator reads from its stored config comes from the
+/// table: the year of the first `Time` value decides the leap-year
+/// coverage, the duration is the row count times `time_res`, and
+/// `setpoint_deadband_c` is the config field's value. A metrics input
+/// variable absent from the table leaves the metric it feeds `None`, by
+/// the same rule as in-run (the total electric power column is required).
+/// A table the run itself recorded therefore scores the run's metrics on
+/// bits.
+///
+/// # Errors
+///
+/// [`MetricsError::EmptyTable`] for a table with no rows;
+/// [`MetricsError::NonTimestepTable`] for a `Step Count` column, a
+/// missing `Time` column, a `Time` value outside the calendar range, or a
+/// consecutive pair not exactly `time_res` apart;
+/// [`MetricsError::ColumnTypeMismatch`] for a column contradicting its
+/// catalogue declaration; [`MetricsError::InconsistentBatches`] for
+/// batches that do not share one schema;
+/// [`MetricsError::InvalidTimeResolution`] for a `time_res` that is not a
+/// whole number of positive seconds; and the plan build's and the
+/// accumulator's own errors (a missing required column, a non-finite
+/// accumulator).
+pub fn metrics_from_table(
+    table: &[RecordBatch],
+    catalogue: &Catalogue,
+    time_res: Duration,
+    setpoint_deadband_c: Option<f64>,
+) -> Result<FullSimulationMetrics, MetricsError> {
+    // The step resolution: a whole number of positive seconds, the rule
+    // the config's own validation runs.
+    let time_res_ms = time_res.num_milliseconds();
+    if time_res_ms <= 0 || time_res_ms % 1000 != 0 {
+        return Err(MetricsError::InvalidTimeResolution);
+    }
+    let time_res_secs =
+        u32::try_from(time_res.num_seconds()).map_err(|_| MetricsError::InvalidTimeResolution)?;
+
+    let total_rows: usize = table.iter().map(|batch| batch.num_rows()).sum();
+    if total_rows == 0 {
+        return Err(MetricsError::EmptyTable);
+    }
+
+    let time_label = time_field();
+    let schema = table[0].schema();
+    // One table, one layout: every batch carries the first batch's fields,
+    // in order, so one schema check covers the table.
+    for (index, batch) in table.iter().enumerate() {
+        let batch_schema = batch.schema();
+        let fields = batch_schema.fields();
+        if fields != schema.fields() {
+            let first_fields = schema.fields();
+            let column = (0..fields.len().max(first_fields.len()))
+                .find(|&i| fields.get(i) != first_fields.get(i))
+                .and_then(|i| fields.get(i).or(first_fields.get(i)))
+                .map(|field| field.name().clone())
+                .unwrap_or_default();
+            return Err(MetricsError::InconsistentBatches {
+                batch: index,
+                column,
+            });
+        }
+    }
+
+    // No `Step Count` column: a reduced table's rows are periods, not
+    // steps, and its step counts are not a timestep stream.
+    if schema
+        .fields()
+        .iter()
+        .any(|field| field.name() == STEP_COUNT_COLUMN)
+    {
+        return Err(MetricsError::NonTimestepTable(format!(
+            "the table carries a `{STEP_COUNT_COLUMN}` column: a reduced table's rows are \
+             periods, not steps"
+        )));
+    }
+
+    // Every column resolves through the catalogue: a column whose Arrow
+    // type contradicts its declaration is an error naming it. A column the
+    // catalogue declares nothing for has nothing to contradict, and no
+    // metrics input reads it.
+    for field in schema.fields() {
+        let declared: Option<DataType> = if field.name() == time_label.name() {
+            Some(time_label.data_type().clone())
+        } else {
+            catalogue
+                .resolve(field.name())
+                .map(|def| variable_field(def).data_type().clone())
+        };
+        let Some(declared) = declared else {
+            continue;
+        };
+        if field.data_type() != &declared {
+            return Err(MetricsError::ColumnTypeMismatch {
+                column: field.name().clone(),
+                expected: declared.to_string(),
+                found: field.data_type().to_string(),
+            });
+        }
+    }
+
+    // The `Time` column, wherever the schema puts it.
+    let time_index = schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == time_label.name())
+        .ok_or_else(|| {
+            MetricsError::NonTimestepTable("the table carries no Time column".to_string())
+        })?;
+
+    // Consecutive `Time` values differ by exactly `time_res`, across the
+    // batch boundaries too: the first offending pair names the mismatch.
+    let mut first_time_ms: Option<i64> = None;
+    let mut previous_ms: Option<i64> = None;
+    for batch in table {
+        let times = batch
+            .column(time_index)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .ok_or_else(|| MetricsError::ColumnTypeMismatch {
+                column: time_label.name().clone(),
+                expected: time_label.data_type().to_string(),
+                found: batch.schema().field(time_index).data_type().to_string(),
+            })?;
+        for row in 0..batch.num_rows() {
+            let current = times.value(row);
+            if first_time_ms.is_none() {
+                first_time_ms = Some(current);
+            }
+            if let Some(previous) = previous_ms
+                && current - previous != time_res_ms
+            {
+                return Err(MetricsError::NonTimestepTable(format!(
+                    "consecutive Time values {} and {} differ by {} ms, not the time \
+                     resolution's {time_res_ms} ms",
+                    naive_local_clock(previous),
+                    naive_local_clock(current),
+                    current - previous,
+                )));
+            }
+            previous_ms = Some(current);
+        }
+    }
+    let first_time_ms = first_time_ms.ok_or(MetricsError::EmptyTable)?;
+
+    // The calendar year the coverage reads: the first `Time` value's year.
+    let coverage_year = DateTime::from_timestamp_millis(first_time_ms)
+        .ok_or_else(|| {
+            MetricsError::NonTimestepTable(format!(
+                "the first Time value {first_time_ms} ms is outside the calendar range"
+            ))
+        })?
+        .naive_utc()
+        .year();
+
+    let value_indices: Vec<usize> = (0..schema.fields().len())
+        .filter(|index| *index != time_index)
+        .collect();
+    let names: Vec<String> = value_indices
+        .iter()
+        .map(|&index| schema.field(index).name().clone())
+        .collect();
+    let plan = MetricsInputPlan::build_from_names(&names, setpoint_deadband_c)?;
+    let mut calculator = MetricsCalculator::for_coverage_year(plan, time_res_secs, coverage_year)?;
+
+    // Every row, in table order, through the accumulator the run feeds
+    // per step: the same aggregation, the same values.
+    let mut row_buf: Vec<f64> = Vec::with_capacity(names.len());
+    for batch in table {
+        let mut value_columns = Vec::with_capacity(value_indices.len());
+        for (slot, &index) in value_indices.iter().enumerate() {
+            let column = batch
+                .column(index)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or_else(|| MetricsError::ColumnTypeMismatch {
+                    column: names[slot].clone(),
+                    expected: DataType::Float64.to_string(),
+                    found: batch.schema().field(index).data_type().to_string(),
+                })?;
+            value_columns.push(column);
+        }
+        for row in 0..batch.num_rows() {
+            row_buf.clear();
+            for column in &value_columns {
+                // A null carries no value: NaN routes it through the
+                // accumulator's non-finite guard, the skip a non-finite
+                // power value gets in-run. The engine's own tables carry
+                // no nulls.
+                row_buf.push(if column.is_null(row) {
+                    f64::NAN
+                } else {
+                    column.value(row)
+                });
+            }
+            calculator.accumulate_row(&row_buf)?;
+        }
+    }
+    calculator.finish()
+}
+
 fn discover_end_use_slots(
     available: &[String],
     total_electric_power_slot: usize,
@@ -1286,7 +1571,7 @@ fn optional_slot(available: &[String], candidates: &[&str]) -> Result<Option<usi
 
 fn discover_setpoint_inputs(
     available: &[String],
-    config: &SimulationConfig,
+    config_deadband: Option<f64>,
 ) -> Result<Option<SetpointInputs>, MetricsError> {
     let heating_setpoint_slot = optional_slot(available, &["HVAC Heating Setpoint (C)"])?;
     let cooling_setpoint_slot = optional_slot(available, &["HVAC Cooling Setpoint (C)"])?;
@@ -1302,7 +1587,7 @@ fn discover_setpoint_inputs(
         return Ok(None);
     }
 
-    let deadband = if let Some(deadband_c) = config.setpoint_deadband_c {
+    let deadband = if let Some(deadband_c) = config_deadband {
         DeadbandSource::Constant(deadband_c)
     } else if let Some(slot) = optional_slot(available, &[SETPOINT_DEADBAND_C, DEADBAND_C])? {
         DeadbandSource::Column(slot)
