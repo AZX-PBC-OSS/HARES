@@ -82,6 +82,7 @@ fn metrics_present_without_any_report() {
     let result = engine.run(dwelling_config(&toml)).expect("run completes");
     let metrics = result
         .metrics
+        .as_ref()
         .expect("a run that requests metrics returns them without any report");
     assert!(
         (metrics.simulation_duration_hours - 24.0).abs() < 1e-9,
@@ -112,9 +113,9 @@ fn metrics_independent_of_destination() {
         .run(dwelling_config(&sim_toml("", true)))
         .expect("reportless run completes");
 
-    let memory_metrics = memory.metrics.expect("memory run has metrics");
-    let file_metrics = file.metrics.expect("parquet run has metrics");
-    let none_metrics = none.metrics.expect("reportless run has metrics");
+    let memory_metrics = memory.metrics.as_ref().expect("memory run has metrics");
+    let file_metrics = file.metrics.as_ref().expect("parquet run has metrics");
+    let none_metrics = none.metrics.as_ref().expect("reportless run has metrics");
     assert_eq!(
         memory_metrics, file_metrics,
         "the metrics are the same under a memory and a parquet report"

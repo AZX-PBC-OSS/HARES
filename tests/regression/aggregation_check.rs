@@ -133,12 +133,14 @@ fn test_sim_config() -> hares_io::SimulationConfig {
         time_res: chrono::Duration::minutes(1),
         reports: Vec::new(),
         diagnostics: false,
+        metrics: false,
         output_chunk_size: 10_000,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
     }
 }
 

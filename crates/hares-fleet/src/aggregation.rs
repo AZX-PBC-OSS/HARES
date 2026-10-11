@@ -1732,7 +1732,7 @@ mod tests {
     #[test]
     fn extract_rows_errors_naming_two_timestep_memory_reports() {
         let batch1 = batch(
-            &["2021-01-01T00:00:00Z"],
+            &[utc_ms("2021-01-01T00:00:00Z")],
             vec![("Total Electric Power (kW)", vec![Some(1.0)])],
         );
 
@@ -1789,11 +1789,14 @@ mod tests {
     #[test]
     fn extract_rows_folds_only_the_timestep_frequency_memory_report() {
         let step_rows = batch(
-            &["2021-01-01T00:00:00Z", "2021-01-01T00:15:00Z"],
+            &[
+                utc_ms("2021-01-01T00:00:00Z"),
+                utc_ms("2021-01-01T00:15:00Z"),
+            ],
             vec![("Total Electric Power (kW)", vec![Some(1.0), Some(2.0)])],
         );
         let hourly_rows = batch(
-            &["2021-01-01T00:00:00Z"],
+            &[utc_ms("2021-01-01T00:00:00Z")],
             vec![("Total Electric Power (kW)", vec![Some(9.9)])],
         );
 
