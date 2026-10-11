@@ -651,6 +651,31 @@ carries), OR-12 (`HealthPolicy`), OR-6 (`RunResult.warnings`);
 
 ## FL-3: `SteppableFleet::step` past the end is one fleet-level error
 
+**State:** committed `455eb8a3` (branch `row/r52-fl3-fl4`, 2026-10-11).
+`SteppableFleet::step` returns
+`Result<Vec<Result<StepResult, SimError>>, FleetError>` and after
+`is_finished()` returns `Err(FleetError::AlreadyFinished { total_steps })`
+with no per-home results; Python's `step()` raises `HaresSimulationError`
+naming the finished step count (`test_steppable_fleet_step_after_finish_raises`,
+RED at the parent: DID NOT RAISE). `telemetry` returns
+`Result<DwellingTelemetry, FleetError>` (`NoSuchHome { index, len }` out of
+range, `Telemetry { bldg_id, source }` for a snapshot that cannot be
+built), `set_grid_voltage` and `apply_control` return `Result` with
+`NoSuchHome` in place of the logged warning, and the building ids come
+from an infallible `SteppableFleet::bldg_ids()`: a failed snapshot in
+`step()` is that home's `ok: false` item carrying the message (never a
+silent `None` reactive power) and `bldg_id(idx).unwrap_or(-1)` is gone
+(`git grep 'unwrap_or(-1)'` over the binding prints nothing, SL-10's
+check). Python maps the errors through one conversion function:
+`NoSuchHome` to `IndexError`, `Telemetry` to `HaresSimulationError`
+naming the building id and the snapshot error, and the binding's own
+bound checks before `apply_control` and `set_grid_voltage` are gone. RED
+first: the acceptance tests failed at the parent as compile errors on the
+missing API. Full block green on the commit (fmt; clippy --workspace
+--all-targets --all-features -D warnings; nextest --all-features -j 4
+7951/7951, 1 skipped; pytest 1676 passed, 6 xfailed, 0 failed, 0 errors;
+pyright 0; compare-all 8 + dst 1 identical).
+
 **Kind:** initiative work. Fixes V41.
 
 **Problem:** every step up to the end returns `Ok` per home
@@ -712,6 +737,42 @@ tests/python/test_py_fleet.py`.
 **Dependencies:** FL-2 (`HomeStatus`).
 
 ## FL-4: fleet time alignment is declared
+
+**State:** committed `d1c52c42` (branch `row/r52-fl3-fl4`, 2026-10-11).
+`Alignment::{Instant(FixedOffset), LocalClock}` is declared at
+construction (`Fleet::with_alignment`; Python `hares.Alignment.instant(
+"-07:00")` / `hares.Alignment.local_clock()` with the `alignment=`
+keyword on `Fleet.from_buildings` and `Fleet.from_resstock`). The
+pre-pass (`hares_io::hpxml::read_site`, `hares_io::read_weather_meta`,
+`hares_core::dwelling::site_offset` with the shared checked offset
+conversion) runs over every entry before the first chunk starts, reading
+no schedule, no defaults and no weather row; a fleet whose homes span
+more than one UTC offset and declares no alignment fails
+`AlignmentRequired { offsets_s }` there with the progress callback never
+called, and the by-alignment time-grid check fails
+`HeterogeneousTimeGrid { bldg_id }` naming the first home that breaks
+it. The period-origin offset rides `PeriodCalendar` (`origin_offset_s`,
+`home_offset_s`; the default buckets the fed wall clock itself, a home's
+own reports unchanged); the rows align by period (naive local start
+under `LocalClock`, the period's start instant under `Instant` and
+undeclared) and the labels keep the Utf8 RFC 3339 forms (`+00:00`
+renders `Z` byte for byte the undeclared label, `-07:00` renders at the
+declared offset, `LocalClock` with no offset); under `Instant` a home
+period whose step count is below the period's full span is null for that
+home, so edge periods carry the reduced covered weight. `frame_golden`'s
+`[fleet]` table takes the optional `alignment` and `fleet_mixed_offset`
+declares `Instant(+00:00)`: every product compares bitwise with the
+parent's capture (compare-all 8 + dst 1 identical). RED first: the nine
+acceptance tests failed at the parent as compile errors on the missing
+API. Full block green on the commit (fmt; clippy --workspace
+--all-targets --all-features -D warnings; nextest --all-features -j 4
+7960/7960, 1 skipped; pytest 1678 passed, 6 xfailed, 0 failed, 0 errors;
+pyright 0). A home whose site the pre-pass cannot resolve declares no
+offset and fails its run for the same cause, the way the selection's
+per-home restriction treats a home whose inputs fail to parse; the
+committed `cross_offset_homes_align_on_the_start_instant` pin declares
+`Instant(+00:00)` now (its assertions hold verbatim: the same labels,
+the same bits).
 
 **Kind:** initiative work. The label change (every alignment to a naive
 local `Timestamp`) is the numeric fix B-12 (`09-numeric-fixes.md`), in its

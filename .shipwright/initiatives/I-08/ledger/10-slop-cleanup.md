@@ -384,6 +384,12 @@ and `config` on `profiling`, so every feature set compiles warning-free);
 
 ## SL-10: `SteppableFleet`'s per-home accessors hide failures
 
+**State:** fixed by row 52 (FL-3, `455eb8a3`): the accessors return
+`Result<_, FleetError>` (`NoSuchHome`, `Telemetry`), Python maps each
+variant to its exception through one conversion function, a failed
+snapshot in `step()` is that home's `ok: false` item, and the building
+ids come from an infallible iterator; the check below prints nothing.
+
 **Evidence** (at `21d90588`): `SteppableFleet::telemetry`
 (`crates/hares-fleet/src/fleet.rs:638-659`, added by
 `03-output-reporting.md` OR-5's `dc033cee`) maps a telemetry snapshot that
