@@ -414,21 +414,30 @@ impl RollingPeakBuffer {
     /// and the snapshot's ring must have been built at the same
     /// resolution: the plan comparison ahead of the restore pins the
     /// calculator's identity, and a same-plan rebuild sizes the ring
-    /// identically.
-    fn restore(&mut self, snapshot: MetricsRollingPeakSnapshot) {
-        debug_assert_eq!(
-            snapshot.buffer.len(),
-            self.buffer.len(),
-            "a restored rolling peak buffer holds its resolution's ring"
-        );
-        if snapshot.buffer.len() == self.buffer.len() {
-            self.buffer.copy_from_slice(&snapshot.buffer);
-            self.head = snapshot.head % self.buffer.len().max(1);
-            self.count = snapshot.count.min(self.buffer.len());
-            self.peak_15min_kw = snapshot.peak_15min_kw;
-            self.peak_30min_kw = snapshot.peak_30min_kw;
-            self.peak_60min_kw = snapshot.peak_60min_kw;
+    /// identically. A snapshot whose ring was built at another resolution
+    /// is refused in both debug and release: restoring it would leave the
+    /// resumed run's peaks zeroed.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::Snapshot`] naming both lengths when the snapshot's
+    /// ring does not fit this buffer's resolution.
+    fn restore(&mut self, snapshot: MetricsRollingPeakSnapshot) -> Result<(), MetricsError> {
+        if snapshot.buffer.len() != self.buffer.len() {
+            return Err(MetricsError::Snapshot(format!(
+                "the checkpoint's rolling peak ring holds {} readings, \
+                 this run's time resolution needs {}",
+                snapshot.buffer.len(),
+                self.buffer.len()
+            )));
         }
+        self.buffer.copy_from_slice(&snapshot.buffer);
+        self.head = snapshot.head % self.buffer.len().max(1);
+        self.count = snapshot.count.min(self.buffer.len());
+        self.peak_15min_kw = snapshot.peak_15min_kw;
+        self.peak_30min_kw = snapshot.peak_30min_kw;
+        self.peak_60min_kw = snapshot.peak_60min_kw;
+        Ok(())
     }
 }
 
@@ -974,6 +983,10 @@ impl MetricsCalculator {
             ));
         }
         let restored = &snapshot.accumulators;
+        // The rolling peak's ring refuses a foreign time resolution before
+        // anything changes, so the accumulators below take the
+        // checkpoint's state only once the whole section is known to fit.
+        self.rolling_peak.restore(restored.rolling_peak.clone())?;
         self.total_electric_energy_kwh = restored.total_electric_energy_kwh;
         self.total_gas_energy_therms = restored.total_gas_energy_therms;
         self.total_consumption_kwh = restored.total_consumption_kwh;
@@ -988,7 +1001,6 @@ impl MetricsCalculator {
             .collect();
         self.comfort_step_count = restored.comfort_step_count;
         self.unmet_step_count = restored.unmet_step_count;
-        self.rolling_peak.restore(restored.rolling_peak.clone());
         self.envelope_window_solar_wh = restored.envelope_window_solar_wh;
         self.envelope_opaque_conduction_wh = restored.envelope_opaque_conduction_wh;
         self.envelope_window_conduction_wh = restored.envelope_window_conduction_wh;
@@ -3932,6 +3944,38 @@ mod tests {
         assert_eq!(
             a.rolling.peak_60min_kw.to_bits(),
             b.rolling.peak_60min_kw.to_bits()
+        );
+    }
+
+    /// A snapshot written at one time resolution refuses to restore into
+    /// a calculator built at another: the plan's slots are
+    /// resolution-free, so the refusal comes from the rolling peak's ring
+    /// (900 s fills a 4-reading ring, 300 s a 12-reading one), and the
+    /// typed error names both lengths. The refusal is the same in debug
+    /// and release: a silent skip would leave the resumed run's rolling
+    /// peaks zeroed.
+    #[test]
+    fn metrics_snapshot_rejects_a_foreign_time_resolution_by_name() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config(None);
+        let mut source = calc_for(&schema, 900, &config);
+        accumulate(
+            &mut source,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![5.0])]),
+        )
+        .unwrap();
+        let snapshot = source.snapshot();
+
+        let mut target = calc_for(&schema, 300, &config);
+        let err = target
+            .apply_snapshot(&snapshot)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("rolling peak ring") && err.contains("4") && err.contains("12"),
+            "the refusal is the typed snapshot error naming both ring \
+             lengths: {err}"
         );
     }
 }
