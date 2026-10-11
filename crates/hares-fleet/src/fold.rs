@@ -23,7 +23,7 @@ use hares_io::output::reduce::{PeriodCalendar, PeriodReducer, PeriodRow, ReduceE
 use hares_io::{Selection, classify_sample_weight};
 use hares_types::Aggregation;
 
-use crate::fleet::{FleetError, SimStatus};
+use crate::fleet::{FleetError, HomeStatus};
 
 /// The fleet's report request: the variable selection, the reporting
 /// frequency the fold reduces onto, and the fleet's
@@ -46,8 +46,9 @@ pub struct Coverage {
     pub weight_total: f64,
     /// The `ok` homes' weight.
     pub weight_ok: f64,
-    /// The `flagged` homes' weight.
-    pub weight_flagged: f64,
+    /// The `degraded` homes' weight: homes that finished but carry a
+    /// warning or a health event. Never part of `weight_ok`.
+    pub weight_degraded: f64,
     /// The `failed` homes' weight.
     pub weight_failed: f64,
 }
@@ -61,8 +62,8 @@ pub struct HomeResult {
     /// The home's weight.
     pub weight: f64,
     /// The run's status.
-    pub status: SimStatus,
-    /// Why the home was flagged or failed; `None` for an `ok` home.
+    pub status: HomeStatus,
+    /// Why the home was degraded or failed; `None` for an `ok` home.
     pub reason: Option<String>,
     /// Steps the home ran (the run's configured step count); 0 for a home
     /// that failed to build or run.
@@ -87,7 +88,8 @@ pub struct FleetResult {
     pub homes: Vec<HomeResult>,
     /// The homes' weights by status.
     pub coverage: Coverage,
-    /// Homes that succeeded: `ok` and `flagged` at this commit.
+    /// The `ok` homes' count: a degraded or failed home is never a
+    /// success.
     pub n_succeeded: usize,
     /// The largest number of home results held at once, bounded by the
     /// chunk size by construction.
@@ -224,8 +226,8 @@ struct Cell {
 /// The running aggregate the fold streams home results into.
 #[derive(Debug)]
 pub(crate) struct FleetFold {
-    /// The folded variables' fields, from the first folded home's report
-    /// schema: the aggregate's columns.
+    /// The folded variables' fields: the union of the folding homes'
+    /// report schemas, in order of first appearance in entry order.
     columns: Vec<Field>,
     /// The across-homes rule per column.
     rules: Vec<hares_types::AcrossHomes>,
@@ -235,11 +237,6 @@ pub(crate) struct FleetFold {
     intersection: BTreeSet<i64>,
     /// Homes folded so far (a nonempty reduced table each).
     folded: usize,
-    /// Whether any home's variables differed from the first folded
-    /// home's: the aggregate empties, as today, until FL-2.
-    mismatched: bool,
-    /// Whether any folding home carried a positive weight.
-    has_positive_weight: bool,
 }
 
 impl Default for FleetFold {
@@ -256,14 +253,15 @@ impl FleetFold {
             cells: BTreeMap::new(),
             intersection: BTreeSet::new(),
             folded: 0,
-            mismatched: false,
-            has_positive_weight: false,
         }
     }
 
     /// Folds one home's reduced table into the running aggregate, in entry
-    /// order. Each cell adds `v * w` and `w` for the home: the operations
-    /// and their order the collect-then-aggregate fold performed.
+    /// order. The columns are the union of the folding homes' variables in
+    /// order of first appearance; a variable a home does not declare gets
+    /// neither value nor weight from it. Each cell adds `v * w` and `w`
+    /// for the home: the operations and their order the
+    /// collect-then-aggregate fold performed.
     ///
     /// # Errors
     ///
@@ -288,36 +286,47 @@ impl FleetFold {
             return Ok(());
         }
         if self.folded == 0 {
-            self.columns = fields.to_vec();
-            self.rules = self
-                .columns
-                .iter()
-                .map(field_fleet_rules)
-                .map(|(_, across)| across)
-                .collect();
             self.intersection = table.keys().copied().collect();
-            self.has_positive_weight = weight > 0.0;
         } else {
-            if fields != self.columns {
-                self.mismatched = true;
-            }
-            self.has_positive_weight = self.has_positive_weight || weight > 0.0;
             self.intersection
                 .retain(|bucket| table.contains_key(bucket));
         }
-        self.folded += 1;
-        if self.mismatched {
-            return Ok(());
+        let grew = !fields.is_empty()
+            && fields.iter().any(|field| {
+                !self
+                    .columns
+                    .iter()
+                    .any(|column| column.name() == field.name())
+            });
+        for field in fields {
+            if !self
+                .columns
+                .iter()
+                .any(|column| column.name() == field.name())
+            {
+                self.rules.push(field_fleet_rules(field).1);
+                self.columns.push(field.clone());
+            }
         }
+        self.folded += 1;
         for (&bucket, values) in table {
             let cells = self
                 .cells
                 .entry(bucket)
                 .or_insert_with(|| vec![Cell::default(); self.columns.len()]);
-            for (slot, value) in values.iter().enumerate() {
+            if grew {
+                cells.resize(self.columns.len(), Cell::default());
+            }
+            for (home_slot, value) in values.iter().enumerate() {
                 let Some(value) = value else {
                     continue;
                 };
+                let field = &fields[home_slot];
+                let slot = self
+                    .columns
+                    .iter()
+                    .position(|column| column.name() == field.name())
+                    .expect("the column is unioned above");
                 let cell = &mut cells[slot];
                 cell.sum_vw += *value * weight;
                 cell.weight += weight;
@@ -326,31 +335,18 @@ impl FleetFold {
         Ok(())
     }
 
-    /// The number of homes that folded at least one value.
-    pub(crate) fn folded(&self) -> usize {
-        self.folded
-    }
-
-    /// Whether any folding home carried a positive weight: the check the
-    /// parent commit's aggregate made over its successful homes.
-    pub(crate) fn has_positive_weight(&self) -> bool {
-        self.has_positive_weight
-    }
-
     /// Closes the fold: the fleet result's aggregate and covered weight,
-    /// and the count of aggregate periods (0 when the fold is empty or a
-    /// variable mismatch emptied it). A variable mismatch between homes
-    /// empties both tables, as today, until FL-2.
+    /// and the count of aggregate periods. The rows are the periods every
+    /// folding home has a row for; the columns are the union.
     pub(crate) fn finish(self) -> (RecordBatch, RecordBatch, usize) {
-        let periods = if self.mismatched {
-            0
-        } else {
-            self.intersection.len()
-        };
-        if self.folded == 0 || self.mismatched {
-            return (empty_table(), empty_table(), periods);
+        if self.folded == 0 {
+            return (empty_table(), empty_table(), 0);
         }
-        (self.build_table(true), self.build_table(false), periods)
+        (
+            self.build_table(true),
+            self.build_table(false),
+            self.intersection.len(),
+        )
     }
 
     /// Builds one of the two per-period tables: the aggregate's cells by
@@ -567,7 +563,7 @@ impl BatchCallback for ReducerFeed {
 
 /// The homes table as a batch: one row per home, in entry order, with the
 /// run metrics' columns when any home requested them.
-fn homes_batch(homes: &[HomeResult]) -> RecordBatch {
+pub(crate) fn homes_batch(homes: &[HomeResult]) -> RecordBatch {
     let any_metrics = homes.iter().any(|home| home.metrics.is_some());
     let mut bldg_ids = arrow::array::Int64Builder::new();
     let mut weights = Float64Builder::new();
@@ -582,13 +578,13 @@ fn homes_batch(homes: &[HomeResult]) -> RecordBatch {
         bldg_ids.append_value(home.bldg_id);
         weights.append_value(home.weight);
         statuses.append_value(match &home.status {
-            SimStatus::Ok => "ok",
-            SimStatus::Flagged(_) => "flagged",
-            SimStatus::Failed(_) => "failed",
+            HomeStatus::Ok => "ok",
+            HomeStatus::Degraded(_) => "degraded",
+            HomeStatus::Failed(_) => "failed",
         });
         match &home.status {
-            SimStatus::Ok => reasons.append_null(),
-            SimStatus::Flagged(reason) | SimStatus::Failed(reason) => {
+            HomeStatus::Ok => reasons.append_null(),
+            HomeStatus::Degraded(reason) | HomeStatus::Failed(reason) => {
                 reasons.append_value(reason.as_str())
             }
         }
@@ -1007,10 +1003,13 @@ mod tests {
         );
     }
 
-    /// A variable mismatch between homes empties the aggregate, as today,
-    /// until FL-2.
+    /// Homes with different column sets aggregate to the union, in order
+    /// of first appearance in entry order; a mismatch no longer empties
+    /// the aggregate. A variable only one home declares carries that
+    /// home's value with its weight alone; a shared variable combines
+    /// both homes by the rule in force.
     #[test]
-    fn variable_mismatch_empties_the_aggregate() {
+    fn heterogeneous_columns_aggregate_to_the_union() {
         let key = 0_i64;
         let mut home_a = BTreeMap::new();
         home_a.insert(key, row(Some(1.0), Some(20.0)));
@@ -1028,10 +1027,52 @@ mod tests {
             .expect("valid weight");
         let (aggregate, covered_weight, periods) = fold.finish();
 
-        assert_eq!(periods, 0);
-        assert_eq!(aggregate.num_columns(), 1, "the Time label only");
-        assert_eq!(aggregate.num_rows(), 0);
-        assert_eq!(covered_weight.num_rows(), 0);
+        assert_eq!(periods, 1);
+        let names: Vec<&str> = aggregate
+            .schema_ref()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Time",
+                "Total Electric Power (kW)",
+                "Temperature - Indoor (C)",
+                "Other Power (kW)",
+            ],
+            "the union in order of first appearance"
+        );
+        // The power column: home a's alone (home b declares the other
+        // power column), covered weight 1.
+        assert_eq!(
+            column(&aggregate, 1)[0].unwrap().to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(
+            column(&covered_weight, 1)[0].unwrap().to_bits(),
+            1.0_f64.to_bits()
+        );
+        // The shared temperature column means across homes.
+        assert_eq!(
+            column(&aggregate, 2)[0].unwrap().to_bits(),
+            20.5_f64.to_bits()
+        );
+        assert_eq!(
+            column(&covered_weight, 2)[0].unwrap().to_bits(),
+            2.0_f64.to_bits()
+        );
+        // The other power column: home b's alone, covered weight 1.
+        assert_eq!(
+            column(&aggregate, 3)[0].unwrap().to_bits(),
+            2.0_f64.to_bits()
+        );
+        assert_eq!(
+            column(&covered_weight, 3)[0].unwrap().to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(covered_weight.num_rows(), 1);
     }
 
     /// A nonempty fold with an empty intersection keeps the full schema
@@ -1089,7 +1130,7 @@ mod tests {
             .expect("valid weight");
         fold.fold_home(1, 2.0, &fields, &home_a)
             .expect("valid weight");
-        let folded = fold.folded();
+        let folded = fold.folded;
         let (aggregate, _, periods) = fold.finish();
 
         assert_eq!(folded, 1, "only the home with rows folded");

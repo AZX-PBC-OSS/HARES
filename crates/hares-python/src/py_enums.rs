@@ -10,7 +10,6 @@ use hares_equipment::ev::catalog::{
     EvArchetypeId as RustEvArchetypeId, VehicleId as RustVehicleId,
 };
 use hares_equipment::ndinterp::ExtrapolationStrategy as RustExtrapolationStrategy;
-use hares_fleet::fleet::SimStatus as FleetSimStatus;
 use hares_io::ResStockVersion as IoResStockVersion;
 use hares_types::{
     BatteryChemistry as RustBatteryChemistry, BmsAction as RustBmsAction, BmsMode as RustBmsMode,
@@ -805,16 +804,6 @@ impl PySimStatus {
             }
         }
         hasher.finish()
-    }
-}
-
-impl From<FleetSimStatus> for PySimStatus {
-    fn from(status: FleetSimStatus) -> Self {
-        match status {
-            FleetSimStatus::Ok => PySimStatus::Success(None),
-            FleetSimStatus::Flagged(msg) => PySimStatus::Flagged(Some(msg)),
-            FleetSimStatus::Failed(msg) => PySimStatus::Failed(Some(msg)),
-        }
     }
 }
 

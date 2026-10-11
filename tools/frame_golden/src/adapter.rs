@@ -402,7 +402,7 @@ fn fleet_products(
     report: Option<FleetBuildReport>,
 ) -> FrameGoldenResult<RunProducts> {
     for home in &result.homes {
-        if let hares_fleet::SimStatus::Failed(message) = &home.status {
+        if let hares_fleet::HomeStatus::Failed(message) = &home.status {
             return Err(FrameGoldenError::Engine(format!(
                 "home {} failed: {message}",
                 home.bldg_id

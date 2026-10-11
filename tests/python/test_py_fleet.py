@@ -355,6 +355,14 @@ def _minutes_15_report():
     return FleetReport(Selection.verbosity(2), Frequency.minutes(15))
 
 
+def _hourly_fleet_report():
+    """The fleet report at calendar hours over tier 2 of every home,
+    independent of the file-report helper."""
+    from hares import FleetReport, Frequency
+
+    return FleetReport(Selection.verbosity(2), Frequency.hourly())
+
+
 def _hourly_report():
     """The fleet report at calendar hours over tier 2 of every home."""
     from hares import FleetReport, Frequency
@@ -423,18 +431,28 @@ def test_simulate_raise_on_failure_true_raises(tmp_path: Path) -> None:
     """Verify simulate(raise_on_failure=True) raises naming every failed home."""
     from hares._hares import HaresSimulationError
 
-    # Use invalid paths to force simulation failure
+    hpxml = str(EXAMPLES / "BEopt_example.xml")
+    schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
+    weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+
     sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60)
-    config = DwellingConfig(
+
+    # One valid home so the fleet's ok weight is not zero, one home whose
+    # inputs do not exist; raise_on_failure names the failed home.
+    good = DwellingConfig(
+        hpxml=hpxml, schedule=schedule, weather=weather,
+        config=sim_config, bldg_id=1,
+    )
+    bad = DwellingConfig(
         hpxml="/nonexistent/building.xml",
         schedule="/nonexistent/schedule.csv",
         weather="/nonexistent/weather.epw",
         config=sim_config,
-        bldg_id=1,
+        bldg_id=2,
     )
-    fleet = PyFleet.from_buildings([config])
+    fleet = PyFleet.from_buildings([good, bad])
 
-    with pytest.raises(HaresSimulationError, match="home 1"):
+    with pytest.raises(HaresSimulationError, match="home 2"):
         fleet.simulate(_hourly_report(), raise_on_failure=True)
 
 
@@ -476,13 +494,13 @@ def test_simulate_fault_tolerant_lists_failed_homes(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_heterogeneous_equipment_column_mismatch_empties_the_aggregate() -> None:
-    """Verify the aggregate empties when the homes' column sets differ.
+def test_heterogeneous_equipment_aggregates_the_union_of_columns() -> None:
+    """Verify the aggregate is the union when the homes' column sets differ.
 
     Two dwellings with different equipment types produce different output
     column sets (e.g., a battery-equipped dwelling has extra battery
-    columns). The fold detects the mismatch and returns an empty aggregate
-    until FL-2 unions the columns.
+    columns). The aggregate's columns are the union of the two homes'
+    variables, and a mismatch no longer empties it.
     """
     fixture_dir = ROOT / "tests" / "fixtures" / "hpxml" / "ochre_samples"
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
@@ -515,13 +533,75 @@ def test_heterogeneous_equipment_column_mismatch_empties_the_aggregate() -> None
 
     results = fleet.simulate(_hourly_report())
 
-    # Both dwellings complete (the mismatch empties the aggregate, it does
-    # not fail a home).
+    # The canary: both homes are ok, so a warning a fixture carries fails
+    # here, naming it.
     assert results.n_succeeded == 2, (
         f"Expected both dwellings to succeed, got n_succeeded={results.n_succeeded}"
     )
+    statuses = dict(
+        zip(results.homes["bldg_id"].to_list(), results.homes["status"].to_list())
+    )
+    assert statuses[1] == "ok", f"home 1 must be ok, got {statuses[1]}"
+    assert statuses[2] == "ok", f"home 2 must be ok, got {statuses[2]}"
 
-    # The aggregate is empty because column sets differ across dwellings,
-    # as does the covered weight behind it.
-    assert results.aggregate.height == 0
-    assert results.covered_weight.height == 0
+    # The aggregate is the union of the homes' columns: non-empty, and
+    # wider than either home's own set. The covered weight behind it is
+    # the two homes' weights in every shared cell.
+    assert results.aggregate.height == 1
+    assert results.covered_weight.height == 1
+    assert results.aggregate.width > 1
+    assert results.covered_weight.width == results.aggregate.width
+
+
+def _schedule_with_unread_column(dest: Path) -> Path:
+    """The stock schedule with one added column `unread_load` (every value
+    0.0), which no mapping reads: the run carries the unmapped-column
+    `Warning`."""
+    stock = (EXAMPLES / "BEopt_example_schedule.csv").read_text()
+    lines = stock.splitlines()
+    out = [lines[0] + ",unread_load"]
+    out.extend(line + ",0.0" for line in lines[1:])
+    dest.write_text("\n".join(out) + "\n")
+    return dest
+
+
+def _base_home(tmp_path: Path, bldg_id: int, schedule: Path) -> DwellingConfig:
+    """The base fixture at 24 h and 900 s over the given schedule."""
+    fixture = ROOT / "tests" / "fixtures" / "hpxml" / "ochre_samples" / "base.xml"
+    return DwellingConfig(
+        hpxml=str(fixture),
+        schedule=str(schedule),
+        weather=str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400, time_res=900),
+        defaults_path=str(HARES_DEFAULTS),
+        bldg_id=bldg_id,
+    )
+
+
+@pytest.mark.slow
+def test_zero_ok_weight_raises_with_every_home(tmp_path: Path) -> None:
+    """A fleet whose every home is degraded raises the simulation error:
+    the counts are in the message and the homes table is the exception's
+    `homes` attribute, holding both building ids with status `degraded`
+    and a reason naming the unread column."""
+    from hares._hares import HaresSimulationError
+
+    unread = _schedule_with_unread_column(tmp_path / "unread_load_schedule.csv")
+    fleet = PyFleet.from_buildings([
+        _base_home(tmp_path, 1, unread),
+        _base_home(tmp_path, 2, unread),
+    ])
+
+    with pytest.raises(HaresSimulationError, match="ok weight is zero") as info:
+        fleet.simulate(_hourly_fleet_report())
+    message = str(info.value)
+    assert "0 ok" in message
+    assert "2 degraded" in message
+    assert "0 failed" in message
+    # The attribute is set by the binding on the raised instance, so it
+    # is read dynamically: the class carries no homes.
+    homes = getattr(info.value, "homes")
+    assert homes["bldg_id"].to_list() == [1, 2]
+    assert homes["status"].to_list() == ["degraded", "degraded"]
+    for reason in homes["reason"].to_list():
+        assert "unread_load" in reason

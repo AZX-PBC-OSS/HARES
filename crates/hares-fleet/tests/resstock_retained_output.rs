@@ -51,7 +51,7 @@ fn resstock_fleet_runs_without_a_recorder_by_default() {
     assert_eq!(result.homes.len(), 3);
     for home in &result.homes {
         assert!(
-            !matches!(home.status, hares_fleet::SimStatus::Failed(_)),
+            !matches!(home.status, hares_fleet::HomeStatus::Failed(_)),
             "a missing recorder is not a run failure: {:?}",
             home.status
         );
@@ -67,7 +67,7 @@ fn resstock_fleet_runs_without_a_recorder_by_default() {
     );
     assert_eq!(
         result.coverage.weight_total,
-        result.coverage.weight_ok + result.coverage.weight_flagged + result.coverage.weight_failed,
+        result.coverage.weight_ok + result.coverage.weight_degraded + result.coverage.weight_failed,
         "the coverage weights partition the fleet's total"
     );
     assert_eq!(

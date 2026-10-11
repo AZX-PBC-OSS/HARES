@@ -8,12 +8,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, FixedOffset, TimeZone};
-use hares_core::{Dwelling, DwellingConfig, DwellingTelemetry, SimulationEngine, StepResult};
+use hares_core::{
+    Dwelling, DwellingConfig, DwellingTelemetry, RunResult, SimulationEngine, StepResult,
+    WarmupOutcome,
+};
 use hares_io::{
     ResStockBuilding, ResStockVersion, SampleWeightClass, Selection, SimulationConfig,
     classify_sample_weight, parse_resstock_metadata,
 };
 use hares_types::ControlSignal;
+use hares_types::HaresError;
 use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
@@ -21,6 +25,7 @@ use thiserror::Error;
 
 use crate::fold::{
     Coverage, FleetFold, FleetReport, FleetResult, HomeFoldState, HomeResult, ReducerFeed,
+    homes_batch,
 };
 
 const DEFAULT_RESSTOCK_VERSION: ResStockVersion = ResStockVersion::V2025_1;
@@ -34,15 +39,61 @@ type ProgressCallback = Arc<dyn Fn(usize, usize) + Send + Sync + 'static>;
 /// Result type for fleet construction operations.
 pub type Result<T> = std::result::Result<T, FleetError>;
 
-/// Execution status for a single dwelling in fleet mode.
+/// The outcome class of one home's run, decided by [`home_status`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SimStatus {
-    /// Simulation completed with no warnings.
+pub enum HomeStatus {
+    /// The run finished clean: no warning, no health event, the warm-up
+    /// converged or disabled.
     Ok,
-    /// Simulation completed with non-fatal warnings.
-    Flagged(String),
-    /// Simulation failed to complete.
+    /// The run finished but carried a degradation: the reason names the
+    /// first warning and each non-zero health field. A degraded home is
+    /// never a fleet success.
+    Degraded(String),
+    /// The run did not finish: the error or panic.
     Failed(String),
+}
+
+/// The one classification of a home's run. A clean run is
+/// [`HomeStatus::Ok`]; a run that finished but carries a warning, a
+/// non-zero health counter or an unconverged warm-up is
+/// [`HomeStatus::Degraded`], its reason naming the first warning and each
+/// non-zero health field; a run error or panic, a `HealthPolicyViolation`
+/// under the fleet's health policy included, is [`HomeStatus::Failed`]
+/// with the error.
+pub fn home_status(run: &std::result::Result<RunResult, HaresError>) -> HomeStatus {
+    let result = match run {
+        Ok(result) => result,
+        Err(err) => return HomeStatus::Failed(err.to_string()),
+    };
+    let mut events: Vec<String> = Vec::new();
+    if let Some(warning) = result.warnings.first() {
+        events.push(format!("warning: {warning}"));
+    }
+    let health = &result.health;
+    let counters = [
+        ("port_rollbacks", health.port_rollbacks),
+        ("rejected_control_signals", health.rejected_control_signals),
+        ("clamped_actions", health.clamped_actions),
+        ("curve_index_clamps", health.curve_index_clamps),
+        ("fluid_payload_absences", health.fluid_payload_absences),
+        ("evicted_actors", health.evicted_actors),
+    ];
+    for (name, count) in counters {
+        if count > 0 {
+            events.push(format!("{name}: {count}"));
+        }
+    }
+    if let WarmupOutcome::Ran {
+        converged: false, ..
+    } = health.warmup
+    {
+        events.push("the warm-up did not converge".to_string());
+    }
+    if events.is_empty() {
+        HomeStatus::Ok
+    } else {
+        HomeStatus::Degraded(events.join("; "))
+    }
 }
 
 /// The fleet's construction report: what a ResStock fleet build parsed and
@@ -95,8 +146,16 @@ pub enum FleetError {
     AllSteppableDwellingsFailed { count: usize, causes: Vec<String> },
     #[error("failed to build local rayon thread pool: {0}")]
     ThreadPoolBuild(String),
-    #[error("fleet has no dwelling with positive sample_weight")]
-    ZeroWeightFleet,
+    #[error(
+        "the fleet's ok weight is zero: {ok} ok home(s), {degraded} degraded, {failed} failed; \
+         every home's status and reason is in the homes table"
+    )]
+    NoCoveredWeight {
+        ok: usize,
+        degraded: usize,
+        failed: usize,
+        homes: arrow::record_batch::RecordBatch,
+    },
     #[error("sample_weights length ({provided}) must match fleet size ({expected})")]
     SampleWeightLengthMismatch { expected: usize, provided: usize },
     #[error(
@@ -437,8 +496,8 @@ impl Fleet {
     /// built, [`FleetError::UnmatchedSelection`] when a selection name
     /// matches no home's catalogue, [`FleetError::InvalidAggregationWeight`]
     /// for a weight that is not finite and non-negative, and
-    /// [`FleetError::ZeroWeightFleet`] when homes folded but none carried
-    /// a positive weight.
+    /// [`FleetError::NoCoveredWeight`] when the fleet's ok weight is
+    /// zero: every home failed, degraded, or carried no positive weight.
     pub fn simulate(
         &self,
         report: &FleetReport,
@@ -511,8 +570,10 @@ impl Fleet {
             peak_live = peak_live.max(outcomes.len());
             for (offset, outcome) in outcomes.drain(..).enumerate() {
                 let index = chunk_start + offset;
-                let folds =
-                    !matches!(outcome.status, SimStatus::Failed(_)) && !outcome.table.is_empty();
+                // A degraded home is never a success: it enters neither
+                // the aggregate nor the covered weight, whatever its
+                // reduced table holds.
+                let folds = outcome.status == HomeStatus::Ok && !outcome.table.is_empty();
                 if folds {
                     fold.fold_home(index, outcome.weight, &outcome.fields, &outcome.table)?;
                 }
@@ -521,8 +582,8 @@ impl Fleet {
                     bldg_id: outcome.bldg_id,
                     weight: outcome.weight,
                     reason: match &status {
-                        SimStatus::Ok => None,
-                        SimStatus::Flagged(reason) | SimStatus::Failed(reason) => {
+                        HomeStatus::Ok => None,
+                        HomeStatus::Degraded(reason) | HomeStatus::Failed(reason) => {
                             Some(reason.clone())
                         }
                     },
@@ -536,29 +597,46 @@ impl Fleet {
             chunk_start += chunk.len();
         }
 
-        if fold.folded() > 0 && !fold.has_positive_weight() {
-            return Err(FleetError::ZeroWeightFleet);
+        let mut coverage = Coverage::default();
+        let mut ok_count = 0usize;
+        let mut degraded_count = 0usize;
+        let mut failed_count = 0usize;
+        for home in &homes {
+            coverage.weight_total += home.weight;
+            match home.status {
+                HomeStatus::Ok => {
+                    coverage.weight_ok += home.weight;
+                    ok_count += 1;
+                }
+                HomeStatus::Degraded(_) => {
+                    coverage.weight_degraded += home.weight;
+                    degraded_count += 1;
+                }
+                HomeStatus::Failed(_) => {
+                    coverage.weight_failed += home.weight;
+                    failed_count += 1;
+                }
+            }
         }
+
+        // A fleet whose ok weight is zero has nothing to fold: the
+        // counts per status and the full homes table survive the error.
+        if coverage.weight_ok == 0.0 {
+            return Err(FleetError::NoCoveredWeight {
+                ok: ok_count,
+                degraded: degraded_count,
+                failed: failed_count,
+                homes: homes_batch(&homes),
+            });
+        }
+
         let (aggregate, covered_weight, periods) = fold.finish();
         for (home, folds) in homes.iter_mut().zip(folded_flags) {
             if folds {
                 home.periods_folded = periods;
             }
         }
-
-        let mut coverage = Coverage::default();
-        for home in &homes {
-            coverage.weight_total += home.weight;
-            match home.status {
-                SimStatus::Ok => coverage.weight_ok += home.weight,
-                SimStatus::Flagged(_) => coverage.weight_flagged += home.weight,
-                SimStatus::Failed(_) => coverage.weight_failed += home.weight,
-            }
-        }
-        let n_succeeded = homes
-            .iter()
-            .filter(|home| !matches!(home.status, SimStatus::Failed(_)))
-            .count();
+        let n_succeeded = ok_count;
 
         Ok(FleetResult {
             aggregate,
@@ -760,7 +838,7 @@ fn check_home_configs(configs: &[DwellingConfig]) -> Result<()> {
 struct HomeRun {
     bldg_id: i64,
     weight: f64,
-    status: SimStatus,
+    status: HomeStatus,
     steps: u64,
     metrics: Option<hares_core::RunMetrics>,
     /// The home's reduced period table, keyed by the period start's
@@ -773,8 +851,9 @@ struct HomeRun {
 /// Runs one home: its own reports plus the fleet's appended `fleet`
 /// report, whose batches the home's period reducer reduces and drops. A
 /// construction failure, a run error or a panic is that home's `Failed`
-/// status; every other home's run completes. The progress callback fires
-/// once per completed home, whatever the outcome.
+/// status; every other home's run completes and is classified by
+/// [`home_status`] (`Ok`, or `Degraded` with its reason). The progress
+/// callback fires once per completed home, whatever the outcome.
 fn run_home(
     entry: &FleetEntry,
     report: &FleetReport,
@@ -798,7 +877,7 @@ fn run_home(
             let handler = panic::catch_unwind(AssertUnwindSafe(|| HomeRun {
                 bldg_id: entry.config.bldg_id,
                 weight: entry.sample_weight,
-                status: SimStatus::Failed(format!(
+                status: HomeStatus::Failed(format!(
                     "panicked: {}",
                     panic_hook::panic_payload_to_string(payload)
                 )),
@@ -819,7 +898,7 @@ fn run_home(
                     HomeRun {
                         bldg_id: entry.config.bldg_id,
                         weight: entry.sample_weight,
-                        status: SimStatus::Failed(
+                        status: HomeStatus::Failed(
                             "panic handling failed (double-panic prevented)".into(),
                         ),
                         steps: 0,
@@ -853,7 +932,7 @@ fn run_home_body(entry: &FleetEntry, report: &FleetReport, restriction: &Restric
     let failed = |message: String| HomeRun {
         bldg_id: entry.config.bldg_id,
         weight: entry.sample_weight,
-        status: SimStatus::Failed(message),
+        status: HomeStatus::Failed(message),
         steps: 0,
         metrics: None,
         table: BTreeMap::new(),
@@ -886,14 +965,16 @@ fn run_home_body(entry: &FleetEntry, report: &FleetReport, restriction: &Restric
     }
 
     let engine = SimulationEngine::new();
-    let result = match engine.run_dwelling(&mut dwelling, &config.sim_config) {
+    // The one classification: a run error, a panic turned error and a
+    // health-policy violation are all `Failed` with the error; a run
+    // that finished carries its warnings and health into the status.
+    let run: std::result::Result<RunResult, HaresError> = engine
+        .run_dwelling(&mut dwelling, &config.sim_config)
+        .map(Arc::unwrap_or_clone);
+    let status = home_status(&run);
+    let result = match run {
         Ok(result) => result,
         Err(err) => return failed(err.to_string()),
-    };
-    let status = if result.warnings.is_empty() {
-        SimStatus::Ok
-    } else {
-        SimStatus::Flagged(format!("{} warning(s)", result.warnings.len()))
     };
     let (table, fields) = state
         .lock()
@@ -904,7 +985,7 @@ fn run_home_body(entry: &FleetEntry, report: &FleetReport, restriction: &Restric
         weight: entry.sample_weight,
         status,
         steps,
-        metrics: result.metrics.clone(),
+        metrics: result.metrics,
         table,
         fields,
     }
@@ -1520,6 +1601,7 @@ mod fixture_start;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hares_core::{Provenance, RunHealth};
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
@@ -1722,7 +1804,7 @@ mod tests {
 
         assert_eq!(result.homes.len(), 3);
         for home in &result.homes {
-            assert!(matches!(home.status, SimStatus::Ok | SimStatus::Flagged(_)));
+            assert_eq!(home.status, HomeStatus::Ok, "the fixture homes are clean");
             assert!(home.weight > 0.0);
         }
         assert_eq!(result.n_succeeded, 3);
@@ -1828,7 +1910,7 @@ mod tests {
         let panicked = result
             .homes
             .iter()
-            .filter(|home| matches!(home.status, SimStatus::Failed(_)))
+            .filter(|home| matches!(home.status, HomeStatus::Failed(_)))
             .count();
 
         let success_count = result.n_succeeded;
@@ -1858,7 +1940,7 @@ mod tests {
             .homes
             .iter()
             .find_map(|home| match &home.status {
-                SimStatus::Failed(message) => Some(message.clone()),
+                HomeStatus::Failed(message) => Some(message.clone()),
                 _ => None,
             })
             .expect("one home should carry the panic");
@@ -1877,9 +1959,21 @@ mod tests {
         let thread_ids = Arc::new(Mutex::new(HashSet::new()));
         let thread_ids_for_callback = Arc::clone(&thread_ids);
 
-        // Keep each unit of work non-trivial so Rayon has time to schedule
-        // across workers, even when simulations fail quickly.
-        let fleet = Fleet::from_buildings(build_missing_configs(64))
+        // Keep each unit of work non-trivial so Rayon has time to
+        // schedule across workers: the homes run one real hour each. An
+        // all-failed fleet is the NoCoveredWeight error, so the thread
+        // assertions run over valid homes, whose file destinations
+        // overwrite: the test reruns the same fleet into one directory.
+        let dir = tempdir().expect("temp dir");
+        let mut configs = build_valid_configs(dir.path(), 64);
+        for config in &mut configs {
+            for spec in &mut config.sim_config.reports {
+                if let hares_io::Destination::Csv { overwrite, .. } = &mut spec.destination {
+                    *overwrite = true;
+                }
+            }
+        }
+        let fleet = Fleet::from_buildings(configs)
             .expect("the configs carry no reserved report or shared destination")
             .with_progress(move |_done, _total| {
                 let id = thread::current().id();
@@ -1945,7 +2039,8 @@ mod tests {
         let lock = Arc::new(Mutex::new(()));
         let lock_cb = Arc::clone(&lock);
 
-        let fleet = Fleet::from_buildings(build_missing_configs(8))
+        let dir = tempdir().expect("temp dir");
+        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 8))
             .expect("the configs carry no reserved report or shared destination")
             .with_progress(move |_done, _total| {
                 let _guard = lock_cb.lock().expect("lock in callback");
@@ -2986,7 +3081,7 @@ mod tests {
         // The fleet's sim config writes no output: the run's metrics are
         // None (no report), and no run warning accompanies that.
         match &result.homes[0].status {
-            SimStatus::Ok => {}
+            HomeStatus::Ok => {}
             status => panic!("the dwelling must run to completion, got: {status:?}"),
         }
         assert_eq!(
@@ -3425,21 +3520,24 @@ mod tests {
             }
             means
         };
-        let a = standalone(1, examples.join("BEopt_example_schedule.csv"));
-        let b = standalone(2, examples.join("bldg0112631_schedule.csv"));
+        let stock = examples.join("BEopt_example_schedule.csv");
+        let a = standalone(1, stock.clone());
+        // Same schedule, different building id: the random streams
+        // partition by seed and building id, so the profiles differ, and
+        // a swapped home or weight cannot pass. The bldg0112631 schedule
+        // this probe once used carries unmapped-column warnings, which
+        // would degrade the home out of the fold.
+        let b = standalone(2, stock.clone());
         assert_eq!(a.len(), 8, "two hours of quarter hours");
         assert!(
             a.iter().zip(&b).any(|(a, b)| a.to_bits() != b.to_bits()),
             "the two homes' load profiles differ, so a swapped home or weight cannot pass"
         );
 
-        let fleet = Fleet::from_buildings(vec![
-            home(1, examples.join("BEopt_example_schedule.csv")),
-            home(2, examples.join("bldg0112631_schedule.csv")),
-        ])
-        .expect("the homes carry no reserved report or shared destination")
-        .with_sample_weights(vec![1.0, 3.0])
-        .expect("the weights are finite and non-negative");
+        let fleet = Fleet::from_buildings(vec![home(1, stock.clone()), home(2, stock)])
+            .expect("the homes carry no reserved report or shared destination")
+            .with_sample_weights(vec![1.0, 3.0])
+            .expect("the weights are finite and non-negative");
         let result = fleet
             .simulate(
                 &FleetReport {
@@ -3571,7 +3669,7 @@ mod tests {
         assert_eq!(result.n_succeeded, 2, "both homes succeed");
         for home in &result.homes {
             assert!(
-                !matches!(home.status, SimStatus::Failed(_)),
+                !matches!(home.status, HomeStatus::Failed(_)),
                 "a name the home does not declare must not fail it: {:?}",
                 home.status
             );
@@ -3703,12 +3801,12 @@ mod tests {
             .expect("the fleet runs; the refusal is that home's status");
         assert_eq!(result.homes.len(), 2);
         assert!(
-            !matches!(result.homes[0].status, SimStatus::Failed(_)),
+            !matches!(result.homes[0].status, HomeStatus::Failed(_)),
             "the home without the callback report is unaffected: {:?}",
             result.homes[0].status
         );
         match &result.homes[1].status {
-            SimStatus::Failed(reason) => {
+            HomeStatus::Failed(reason) => {
                 assert!(
                     reason.contains("mine") && reason.contains("no callback is attached"),
                     "the refusal names the report and the missing attachment: {reason}"
@@ -3794,7 +3892,7 @@ mod tests {
             .expect("the fleet runs");
         for home in &result.homes {
             assert!(
-                !matches!(home.status, SimStatus::Failed(_)),
+                !matches!(home.status, HomeStatus::Failed(_)),
                 "both homes run: {:?}",
                 home.status
             );
@@ -3899,5 +3997,840 @@ mod tests {
             energy.is_null(1) && peak.is_null(1),
             "the other home reads null"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // A flagged or degraded home is never a success: the acceptance.
+    // -------------------------------------------------------------------
+
+    /// The fleet selection's status and reason columns read off the homes
+    /// table, the one surface both the old and the new classification
+    /// spell.
+    fn table_string_column(table: &RecordBatch, name: &str) -> Vec<Option<String>> {
+        let slot = table
+            .schema_ref()
+            .fields()
+            .iter()
+            .position(|field| field.name() == name)
+            .unwrap_or_else(|| panic!("no {name} column"));
+        let values = table
+            .column(slot)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("a Utf8 column");
+        (0..values.len())
+            .map(|row| (!values.is_null(row)).then(|| values.value(row).to_string()))
+            .collect()
+    }
+
+    fn table_float_column(table: &RecordBatch, name: &str) -> Vec<Option<f64>> {
+        let slot = table
+            .schema_ref()
+            .fields()
+            .iter()
+            .position(|field| field.name() == name)
+            .unwrap_or_else(|| panic!("no {name} column"));
+        let values = table
+            .column(slot)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("a Float64 column");
+        (0..values.len())
+            .map(|row| (!values.is_null(row)).then(|| values.value(row)))
+            .collect()
+    }
+
+    /// The stock schedule with one added column `unread_load` (every value
+    /// 0.0), which no mapping reads: the run carries the unmapped-column
+    /// `Warning`. Written under `dir` so the stock file is untouched.
+    fn schedule_with_unread_column(dir: &Path) -> PathBuf {
+        let stock =
+            fs::read_to_string(repo_root().join("data/examples/BEopt_example_schedule.csv"))
+                .expect("the stock schedule reads");
+        let mut out = String::with_capacity(stock.len() + 8 * 8761);
+        for (index, line) in stock.lines().enumerate() {
+            if index == 0 {
+                out.push_str(line);
+                out.push_str(",unread_load\n");
+            } else {
+                out.push_str(line);
+                out.push_str(",0.0\n");
+            }
+        }
+        let dest = dir.join("unread_load_schedule.csv");
+        fs::write(&dest, out).expect("the schedule copy writes");
+        dest
+    }
+
+    /// The unread-load acceptance fleet: the base fixture at 24 h and
+    /// 900 s, the first home on the stock schedule and the second on the
+    /// unread-load copy, weights 1 and 2, folded at the hour.
+    fn fl2_fleet(unread_schedule: &Path, metrics: bool) -> Fleet {
+        let home = |bldg_id: i64, schedule: &Path| DwellingConfig {
+            hpxml_path: fixture_hpxml_path(),
+            schedule_path: Some(schedule.to_path_buf()),
+            weather_path: repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            defaults_path: Some(repo_defaults_path()),
+            sim_config: SimulationConfig {
+                start_time: fixture_start::fixture_start(),
+                duration: Duration::hours(24),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics,
+                output_chunk_size: 10_000,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            overrides: None,
+            bldg_id,
+            initialization_duration: None,
+            patches: None,
+        };
+        Fleet::from_buildings(vec![
+            home(
+                1,
+                &repo_root().join("data/examples/BEopt_example_schedule.csv"),
+            ),
+            home(2, unread_schedule),
+        ])
+        .expect("the homes carry no reserved report or shared destination")
+        .with_sample_weights(vec![1.0, 2.0])
+        .expect("the weights are finite and non-negative")
+    }
+
+    fn report_24h_hourly() -> crate::fold::FleetReport {
+        crate::fold::FleetReport {
+            selection: hares_io::Selection::Verbosity(2),
+            frequency: hares_io::Frequency::Hourly,
+            health_policy: hares_io::HealthPolicy::default(),
+        }
+    }
+
+    /// The clean home's own hourly period means of the power column, run
+    /// standalone at the fleet home's building id, seed and inputs: the
+    /// Timestep memory report grouped four 900 s steps to the hour, the
+    /// mean dividing once, in bucket order.
+    fn standalone_hourly_power_means(bldg_id: i64, schedule: &Path) -> Vec<f64> {
+        let mut config = DwellingConfig {
+            hpxml_path: fixture_hpxml_path(),
+            schedule_path: Some(schedule.to_path_buf()),
+            weather_path: repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            defaults_path: Some(repo_defaults_path()),
+            sim_config: SimulationConfig {
+                start_time: fixture_start::fixture_start(),
+                duration: Duration::hours(24),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 10_000,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            overrides: None,
+            bldg_id,
+            initialization_duration: None,
+            patches: None,
+        };
+        config.sim_config.reports = vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(2),
+            frequency: hares_io::Frequency::Timestep,
+            destination: hares_io::Destination::Memory,
+        }];
+        let mut dwelling = Dwelling::from_config(config).expect("the home builds");
+        let engine = SimulationEngine::new();
+        let sim_config = dwelling.sim_config().clone();
+        let result = engine
+            .run_dwelling(&mut dwelling, &sim_config)
+            .expect("the home runs");
+        let batches: Vec<RecordBatch> = result
+            .reports
+            .iter()
+            .flat_map(|report| report.batches().to_vec())
+            .collect();
+        let power_slot = batches
+            .first()
+            .expect("the memory report recorded")
+            .schema_ref()
+            .fields()
+            .iter()
+            .position(|field| field.name() == "Total Electric Power (kW)")
+            .expect("the power column exists at tier 2");
+        let mut means = Vec::new();
+        let mut steps: Vec<f64> = Vec::new();
+        for batch in &batches {
+            let values = batch
+                .column(power_slot)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("a Float64 column");
+            for row in 0..batch.num_rows() {
+                steps.push(values.value(row));
+                if steps.len() == 4 {
+                    means.push(steps.iter().sum::<f64>() / 4.0);
+                    steps.clear();
+                }
+            }
+        }
+        means
+    }
+
+    /// A home that finishes with a warning is never a fleet success: the
+    /// warned home is degraded with its reason naming the event, its
+    /// weight sits outside weight_ok, it counts out of n_succeeded, and
+    /// it enters no cell of the aggregate or the covered weight.
+    #[test]
+    fn flagged_home_is_not_counted_as_success() {
+        let dir = tempdir().expect("temp dir");
+        let unread = schedule_with_unread_column(dir.path());
+        let fleet = fl2_fleet(&unread, false);
+
+        let result = fleet
+            .simulate(&report_24h_hourly(), 1, chunk(64))
+            .expect("the fleet runs");
+        assert_eq!(result.homes.len(), 2);
+
+        // The canary: the stock home is ok, so a warning the fixture
+        // carries fails here, naming it.
+        let table = result.homes_table();
+        let statuses = table_string_column(&table, "status");
+        let reasons = table_string_column(&table, "reason");
+        assert_eq!(statuses[0].as_deref(), Some("ok"), "the stock home is ok");
+        assert_eq!(
+            statuses[1].as_deref(),
+            Some("degraded"),
+            "the warned home is not a success"
+        );
+        let reason = reasons[1]
+            .as_deref()
+            .expect("the degraded home names its reason");
+        assert!(
+            reason.contains("unread_load"),
+            "the reason names the event: {reason}"
+        );
+
+        // The success count is the ok homes alone, and the degraded
+        // home's weight sits outside weight_ok.
+        assert_eq!(result.n_succeeded, 1);
+        assert_eq!(result.coverage.weight_ok, 1.0);
+
+        // The degraded home enters no cell: the covered weight is the
+        // clean home's 1.0 in every cell.
+        assert_eq!(result.aggregate.num_rows(), 24, "24 hourly periods");
+        for slot in 1..result.covered_weight.num_columns() {
+            let weights = table_float_column(
+                &result.covered_weight,
+                result.covered_weight.schema_ref().field(slot).name(),
+            );
+            for (row, weight) in weights.iter().enumerate() {
+                let weight = weight.expect("every cell is covered by the clean home");
+                assert_eq!(
+                    weight.to_bits(),
+                    1.0_f64.to_bits(),
+                    "row {row}: only the clean home's weight"
+                );
+            }
+        }
+
+        // Every aggregate cell is the clean home's own period value: the
+        // power column equals its standalone hourly means on bits.
+        let means = standalone_hourly_power_means(
+            1,
+            &repo_root().join("data/examples/BEopt_example_schedule.csv"),
+        );
+        assert_eq!(means.len(), 24);
+        let power = table_float_column(&result.aggregate, "Total Electric Power (kW)");
+        for (row, mean) in means.iter().enumerate() {
+            let cell = power[row].expect("the cell is covered");
+            assert_eq!(
+                cell.to_bits(),
+                mean.to_bits(),
+                "row {row}: the clean home's period value alone"
+            );
+        }
+    }
+
+    /// The one classification: clean health with no warning and a
+    /// disabled or converged warm-up is `Ok`; each health counter alone,
+    /// an unconverged warm-up alone and one warning alone are each
+    /// `Degraded` with a reason naming that event; an error, a
+    /// `HealthPolicyViolation` included, is `Failed` naming it.
+    #[test]
+    fn home_status_follows_health_and_warnings() {
+        let run = |health: RunHealth, warnings: Vec<hares_types::Warning>| RunResult {
+            reports: Vec::new(),
+            metrics: None,
+            health,
+            warnings,
+            warnings_dropped: 0,
+            provenance: Provenance {
+                config: simulation_config(PathBuf::from("unused.csv")),
+                bldg_id: 1,
+                site_utc_offset_s: 0,
+                equipment: Vec::new(),
+            },
+        };
+        let status = |run: &RunResult| home_status(&Ok(run.clone()));
+
+        // Clean health, no warning, the warm-up disabled: Ok.
+        assert_eq!(
+            status(&run(RunHealth::default(), Vec::new())),
+            HomeStatus::Ok
+        );
+
+        // A converged warm-up is not an event.
+        let converged = RunHealth {
+            warmup: WarmupOutcome::Ran {
+                days_run: 2,
+                converged: true,
+                residuals: None,
+            },
+            ..RunHealth::default()
+        };
+        assert_eq!(status(&run(converged, Vec::new())), HomeStatus::Ok);
+
+        // Each non-zero health counter alone is Degraded naming it.
+        let counters = [
+            "port_rollbacks",
+            "rejected_control_signals",
+            "clamped_actions",
+            "curve_index_clamps",
+            "fluid_payload_absences",
+            "evicted_actors",
+        ];
+        for name in counters {
+            let mut health = RunHealth::default();
+            match name {
+                "port_rollbacks" => health.port_rollbacks = 1,
+                "rejected_control_signals" => health.rejected_control_signals = 1,
+                "clamped_actions" => health.clamped_actions = 1,
+                "curve_index_clamps" => health.curve_index_clamps = 1,
+                "fluid_payload_absences" => health.fluid_payload_absences = 1,
+                "evicted_actors" => health.evicted_actors = 1,
+                other => panic!("no such counter: {other}"),
+            }
+            match status(&run(health, Vec::new())) {
+                HomeStatus::Degraded(reason) => assert!(
+                    reason.contains(name) && reason.contains('1'),
+                    "the reason names the counter and its count: {reason}"
+                ),
+                other => panic!("{name} alone must be degraded, got {other:?}"),
+            }
+        }
+
+        // An unconverged warm-up alone is Degraded naming it.
+        let unconverged = RunHealth {
+            warmup: WarmupOutcome::Ran {
+                days_run: 5,
+                converged: false,
+                residuals: None,
+            },
+            ..RunHealth::default()
+        };
+        match status(&run(unconverged, Vec::new())) {
+            HomeStatus::Degraded(reason) => assert!(
+                reason.contains("warm-up"),
+                "the reason names the warm-up: {reason}"
+            ),
+            other => panic!("an unconverged warm-up must be degraded, got {other:?}"),
+        }
+
+        // One warning alone is Degraded naming it.
+        let warning = hares_types::Warning::new("schedule", "the unmapped column");
+        match status(&run(RunHealth::default(), vec![warning])) {
+            HomeStatus::Degraded(reason) => assert!(
+                reason.contains("schedule") && reason.contains("the unmapped column"),
+                "the reason names the warning: {reason}"
+            ),
+            other => panic!("a warning must be degraded, got {other:?}"),
+        }
+
+        // A run error is Failed with the error.
+        let err = HaresError::Simulation("the run failed".to_string());
+        match home_status(&Err(err)) {
+            HomeStatus::Failed(reason) => {
+                assert!(reason.contains("the run failed"), "{reason}");
+            }
+            other => panic!("an error must be failed, got {other:?}"),
+        }
+
+        // A health-policy violation is Failed naming it.
+        let violation = HaresError::HealthPolicyViolation {
+            event: hares_types::HealthEvent::ClampedAction,
+            step_index: Some(7),
+            origin: "the equipment".to_string(),
+            count: 1,
+            limit: 0,
+        };
+        match home_status(&Err(violation)) {
+            HomeStatus::Failed(reason) => {
+                assert!(
+                    reason.contains("health policy") && reason.contains("the equipment"),
+                    "the failure names the violation: {reason}"
+                );
+            }
+            other => panic!("a policy violation must be failed, got {other:?}"),
+        }
+    }
+
+    /// The battery fleet: the plain home and the battery home over the
+    /// committed fixtures, at 24 h and 900 s, the battery declaring the
+    /// `Manual` control its test requires. The plain home is entry 1 at
+    /// weight 3, the battery home entry 2 at weight 1; the battery
+    /// variable's name comes from the battery home's own catalogue.
+    fn battery_fleet(order_battery_first: bool, metrics: bool) -> (Fleet, String) {
+        let examples = repo_root().join("data/examples");
+        let fixtures = repo_root().join("tests/fixtures/hpxml/ochre_samples");
+        let home =
+            |bldg_id: i64, hpxml: PathBuf, overrides: Option<serde_json::Value>| DwellingConfig {
+                hpxml_path: hpxml,
+                schedule_path: Some(examples.join("BEopt_example_schedule.csv")),
+                weather_path: examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+                defaults_path: Some(repo_defaults_path()),
+                sim_config: SimulationConfig {
+                    start_time: fixture_start::fixture_start(),
+                    duration: Duration::hours(24),
+                    time_res: Duration::seconds(900),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                overrides,
+                bldg_id,
+                initialization_duration: None,
+                patches: None,
+            };
+        let plain = home(1, fixtures.join("base.xml"), None);
+        let battery = home(
+            2,
+            fixtures.join("base-battery.xml"),
+            Some(serde_json::json!({"Battery": {"bms_mode": "\"Manual\""}})),
+        );
+        let battery_variable = Dwelling::from_config(battery.clone())
+            .expect("the battery home builds")
+            .catalogue()
+            .variables()
+            .iter()
+            .map(|def| def.name.to_string())
+            .find(|name| name.contains("Battery"))
+            .expect("the battery home declares battery variables");
+        let configs = if order_battery_first {
+            // The battery home is entry 1 at weight 1, the plain home
+            // entry 2 at weight 3.
+            Fleet::from_buildings(vec![battery, plain])
+                .expect("the homes carry no reserved report or shared destination")
+                .with_sample_weights(vec![1.0, 3.0])
+                .expect("the weights are finite and non-negative")
+        } else {
+            Fleet::from_buildings(vec![plain, battery])
+                .expect("the homes carry no reserved report or shared destination")
+                .with_sample_weights(vec![3.0, 1.0])
+                .expect("the weights are finite and non-negative")
+        };
+        (configs, battery_variable)
+    }
+
+    /// A home whose restricted selection holds no variable is ok and
+    /// uncovered: it folds nothing, keeps periods_folded 0, and counts in
+    /// weight_ok and n_succeeded; the aggregate's rows are the folding
+    /// home's, the battery column's covered weight its weight alone.
+    #[test]
+    fn home_with_no_selected_variable_is_ok_and_uncovered() {
+        let (fleet, battery_variable) = battery_fleet(false, false);
+        let report = crate::fold::FleetReport {
+            selection: hares_io::Selection::Named(vec![battery_variable]),
+            frequency: hares_io::Frequency::Hourly,
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let result = fleet
+            .simulate(&report, 1, chunk(64))
+            .expect("the fleet runs");
+
+        // The plain home is ok and uncovered; the battery home folds.
+        assert_eq!(result.homes[0].status, HomeStatus::Ok);
+        assert_eq!(result.homes[0].periods_folded, 0);
+        assert_eq!(result.homes[1].status, HomeStatus::Ok);
+        assert_eq!(result.homes[1].periods_folded, 24);
+        assert_eq!(result.coverage.weight_ok, 4.0);
+        assert_eq!(result.n_succeeded, 2);
+
+        // The aggregate: the battery home's 24 hourly rows, its column's
+        // covered weight 1 in each.
+        assert_eq!(result.aggregate.num_rows(), 24);
+        let weight_name = result.covered_weight.schema_ref().field(1).name().clone();
+        let weights = table_float_column(&result.covered_weight, &weight_name);
+        for (row, weight) in weights.iter().enumerate() {
+            assert_eq!(
+                weight.expect("covered").to_bits(),
+                1.0_f64.to_bits(),
+                "row {row}: the battery home's weight alone"
+            );
+        }
+    }
+
+    /// One standalone home's hourly period table: per variable column,
+    /// the period value in bucket order, by the column's over-time rule
+    /// (the four 900 s steps summed or meaned as the rule says), the
+    /// column names alongside.
+    fn standalone_home_hourly(config: &DwellingConfig) -> (Vec<String>, Vec<Vec<f64>>) {
+        let mut config = config.clone();
+        config.sim_config.reports = vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(2),
+            frequency: hares_io::Frequency::Timestep,
+            destination: hares_io::Destination::Memory,
+        }];
+        let mut dwelling = Dwelling::from_config(config).expect("the home builds");
+        let engine = SimulationEngine::new();
+        let sim_config = dwelling.sim_config().clone();
+        let result = engine
+            .run_dwelling(&mut dwelling, &sim_config)
+            .expect("the home runs");
+        let batches: Vec<RecordBatch> = result
+            .reports
+            .iter()
+            .flat_map(|report| report.batches().to_vec())
+            .collect();
+        let schema = batches
+            .first()
+            .expect("the memory report recorded")
+            .schema_ref()
+            .clone();
+        let names: Vec<String> = schema
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|field| field.name().clone())
+            .collect();
+        let over_time: Vec<hares_types::Aggregation> = schema
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|field| crate::fold::field_fleet_rules(field).0.aggregation)
+            .collect();
+        let mut columns: Vec<Vec<f64>> = names.iter().map(|_| Vec::new()).collect();
+        let mut steps: Vec<Vec<f64>> = names.iter().map(|_| Vec::new()).collect();
+        for batch in &batches {
+            for (slot, column) in columns.iter_mut().enumerate() {
+                let values = batch
+                    .column(slot + 1)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .expect("a Float64 column");
+                for row in 0..batch.num_rows() {
+                    if !values.is_null(row) {
+                        steps[slot].push(values.value(row));
+                    }
+                    if steps[slot].len() == 4 {
+                        let sum = steps[slot].iter().sum::<f64>();
+                        // The fleet's over-time rules are Sum and Mean
+                        // only; the reducer's Mode and Last never arise
+                        // from the fleet's rule resolver.
+                        column.push(match over_time[slot] {
+                            hares_types::Aggregation::Sum => sum,
+                            _ => sum / 4.0,
+                        });
+                        steps[slot].clear();
+                    }
+                }
+            }
+        }
+        (names, columns)
+    }
+
+    /// The battery home and the plain home aggregate together: the
+    /// aggregate's columns are the union of the two homes' variables,
+    /// each battery variable's cell the battery home's period value with
+    /// covered weight 1 (the plain home contributes neither value nor
+    /// weight to a variable it does not declare), and every shared
+    /// variable the combination of both homes' period values by the rule
+    /// in force.
+    #[test]
+    fn battery_home_and_plain_home_aggregate_together() {
+        let (fleet, _battery_variable) = battery_fleet(true, false);
+        let report = crate::fold::FleetReport {
+            selection: hares_io::Selection::Verbosity(2),
+            frequency: hares_io::Frequency::Hourly,
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let result = fleet
+            .simulate(&report, 1, chunk(64))
+            .expect("the fleet runs");
+
+        // Both homes are ok (the canary), both fold.
+        for home in &result.homes {
+            assert_eq!(home.status, HomeStatus::Ok, "{}", home.bldg_id);
+        }
+        assert_eq!(result.coverage.weight_ok, 4.0);
+        assert_eq!(result.n_succeeded, 2);
+        assert!(result.aggregate.num_rows() > 0, "a non-empty aggregate");
+
+        // The two homes' standalone hourly tables: the source of the
+        // hand-computed cells.
+        let examples = repo_root().join("data/examples");
+        let fixtures = repo_root().join("tests/fixtures/hpxml/ochre_samples");
+        let plain_config = DwellingConfig {
+            hpxml_path: fixtures.join("base.xml"),
+            schedule_path: Some(examples.join("BEopt_example_schedule.csv")),
+            weather_path: examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            defaults_path: Some(repo_defaults_path()),
+            sim_config: SimulationConfig {
+                start_time: fixture_start::fixture_start(),
+                duration: Duration::hours(24),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 10_000,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            overrides: None,
+            bldg_id: 1,
+            initialization_duration: None,
+            patches: None,
+        };
+        let battery_config = DwellingConfig {
+            hpxml_path: fixtures.join("base-battery.xml"),
+            overrides: Some(serde_json::json!({"Battery": {"bms_mode": "\"Manual\""}})),
+            bldg_id: 2,
+            ..plain_config.clone()
+        };
+        let (plain_names, plain_columns) = standalone_home_hourly(&plain_config);
+        let (battery_names, battery_columns) = standalone_home_hourly(&battery_config);
+
+        // The union's first appearance is the battery home's schema (it
+        // is entry 1 and declares the superset), then the plain home's
+        // extras, if any.
+        let aggregate_names: Vec<String> = result
+            .aggregate
+            .schema_ref()
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|field| field.name().clone())
+            .collect();
+        for name in &plain_names {
+            assert!(
+                battery_names.contains(name),
+                "the battery home declares the plain home's {name}"
+            );
+        }
+        for (position, name) in aggregate_names.iter().enumerate() {
+            let expected = battery_names
+                .iter()
+                .position(|candidate| candidate == name)
+                .unwrap_or_else(|| {
+                    plain_names
+                        .iter()
+                        .position(|candidate| candidate == name)
+                        .expect("the union holds only the homes' variables")
+                });
+            assert_eq!(
+                position, expected,
+                "{name}: the union keeps the first appearance's position"
+            );
+        }
+
+        // Every cell of every column, on bits: a battery-only variable
+        // carries the battery home's value with covered weight 1; a
+        // shared variable the weighted combination by its rule, with the
+        // two homes' covered weight 4.
+        let rows = result.aggregate.num_rows();
+        for (slot, name) in aggregate_names.iter().enumerate() {
+            let battery_only = !plain_names.contains(name);
+            let battery_slot = battery_names
+                .iter()
+                .position(|candidate| candidate == name)
+                .expect("the battery home declares the column");
+            let plain_slot = plain_names.iter().position(|candidate| candidate == name);
+            let battery = &battery_columns[battery_slot];
+            let field = result.aggregate.schema_ref().field(slot + 1);
+            let across = crate::fold::field_fleet_rules(field).1;
+            let aggregate_column = table_float_column(&result.aggregate, name);
+            let weight_column = table_float_column(&result.covered_weight, name);
+            for row in 0..rows {
+                let weight = weight_column[row].expect("the cell is covered");
+                if battery_only {
+                    assert_eq!(
+                        weight.to_bits(),
+                        1.0_f64.to_bits(),
+                        "{name} row {row}: the battery home's weight alone"
+                    );
+                    assert_eq!(
+                        aggregate_column[row].expect("covered").to_bits(),
+                        battery[row].to_bits(),
+                        "{name} row {row}: the battery home's period value"
+                    );
+                } else {
+                    let plain = &plain_columns[plain_slot.expect("the plain home declares it")];
+                    let expected = match across {
+                        hares_types::AcrossHomes::Sum => plain[row] * 3.0 + battery[row],
+                        hares_types::AcrossHomes::Mean => (plain[row] * 3.0 + battery[row]) / 4.0,
+                    };
+                    assert_eq!(
+                        weight.to_bits(),
+                        4.0_f64.to_bits(),
+                        "{name} row {row}: both homes' weights"
+                    );
+                    assert_eq!(
+                        aggregate_column[row].expect("covered").to_bits(),
+                        expected.to_bits(),
+                        "{name} row {row}: the weighted combination"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The fleet's run metrics ride the homes' own request: with it, the
+    /// aggregate is non-empty and every home's metrics are non-zero; the
+    /// degraded home's included. Without it, the homes table carries no
+    /// metrics columns.
+    #[test]
+    fn default_fleet_produces_aggregate_and_metrics() {
+        let dir = tempdir().expect("temp dir");
+        let unread = schedule_with_unread_column(dir.path());
+
+        {
+            let fleet = fl2_fleet(&unread, true);
+            let result = fleet
+                .simulate(&report_24h_hourly(), 1, chunk(64))
+                .expect("the fleet runs");
+            assert!(result.aggregate.num_rows() > 0, "a non-empty aggregate");
+            for home in &result.homes {
+                let metrics = home
+                    .metrics
+                    .as_ref()
+                    .expect("the home's config requested metrics");
+                assert!(
+                    metrics.total_energy_kwh.net_energy_kwh != 0.0,
+                    "home {}'s metrics are non-zero",
+                    home.bldg_id
+                );
+            }
+            let table = result.homes_table();
+            let names: Vec<String> = table
+                .schema_ref()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect();
+            assert!(names.contains(&"total_energy_kwh".to_string()));
+        }
+
+        let fleet = fl2_fleet(&unread, false);
+        let result = fleet
+            .simulate(&report_24h_hourly(), 1, chunk(64))
+            .expect("the fleet runs");
+        let names: Vec<String> = result
+            .homes_table()
+            .schema_ref()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
+        assert!(
+            !names.contains(&"total_energy_kwh".to_string()),
+            "no home requested metrics: the homes table carries none"
+        );
+    }
+
+    /// A fleet whose every home is degraded has no covered ok weight: the
+    /// NoCoveredWeight error carries the counts per status and the full
+    /// homes table, so every home's status and reason survive the error.
+    #[test]
+    fn zero_ok_weight_raises() {
+        let dir = tempdir().expect("temp dir");
+        let unread = schedule_with_unread_column(dir.path());
+        let home = |bldg_id: i64| DwellingConfig {
+            hpxml_path: fixture_hpxml_path(),
+            schedule_path: Some(unread.clone()),
+            weather_path: repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            defaults_path: Some(repo_defaults_path()),
+            sim_config: SimulationConfig {
+                start_time: fixture_start::fixture_start(),
+                duration: Duration::hours(24),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 10_000,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            overrides: None,
+            bldg_id,
+            initialization_duration: None,
+            patches: None,
+        };
+        let fleet = Fleet::from_buildings(vec![home(1), home(2)])
+            .expect("the homes carry no reserved report or shared destination");
+
+        let err = fleet
+            .simulate(&report_24h_hourly(), 1, chunk(64))
+            .expect_err("no home is ok: the ok weight is zero");
+        let message = err.to_string();
+        assert!(
+            message.contains("0 ok")
+                && message.contains("2 degraded")
+                && message.contains("0 failed"),
+            "the message names the counts: {message}"
+        );
+        match err {
+            FleetError::NoCoveredWeight {
+                ok,
+                degraded,
+                failed,
+                homes,
+            } => {
+                assert_eq!((ok, degraded, failed), (0, 2, 0));
+                let ids = homes
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                    .expect("an Int64 bldg_id column");
+                let statuses = table_string_column(&homes, "status");
+                let reasons = table_string_column(&homes, "reason");
+                assert_eq!(ids.value(0), 1);
+                assert_eq!(ids.value(1), 2);
+                for row in 0..2 {
+                    assert_eq!(statuses[row].as_deref(), Some("degraded"));
+                    let reason = reasons[row]
+                        .as_deref()
+                        .expect("the degraded home names its reason");
+                    assert!(
+                        reason.contains("unread_load"),
+                        "the reason names the event: {reason}"
+                    );
+                }
+            }
+            other => panic!("expected NoCoveredWeight, got {other:?}"),
+        }
     }
 }

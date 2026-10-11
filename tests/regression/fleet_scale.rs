@@ -54,7 +54,7 @@ pub fn run_fleet_scale_check() -> Result<(), Vec<String>> {
     let mut inspected = 0usize;
     for home in result.homes.iter() {
         match &home.status {
-            hares_fleet::SimStatus::Failed(reason) => {
+            hares_fleet::HomeStatus::Failed(reason) => {
                 failures.push(format!("home {} failed: {reason}", home.bldg_id));
             }
             status => {

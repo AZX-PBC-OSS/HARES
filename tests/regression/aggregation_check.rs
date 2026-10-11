@@ -178,13 +178,13 @@ pub fn run_aggregation_check() -> Result<(), Vec<String>> {
         Err(err) => return Err(vec![format!("fleet simulate: {err}")]),
     };
 
-    // The failed home is listed with its reason, and excluded from the
-    // fold-eligible weight: the three good homes carry the BEopt
-    // fixture's own HPXML provenance warning (they are flagged, not ok),
-    // so their weight sits in weight_flagged; the failed home's weight is
-    // in neither.
+    // The failed home is listed with its reason, and excluded from
+    // weight_ok: the three good homes run clean (the BEopt example no
+    // longer declares the SimulationControl element OS-HPXML ignores, so
+    // no home carries a warning) and their weight is weight_ok; the
+    // failed home's weight is in neither.
     let failed = &result.homes[3];
-    if !matches!(failed.status, hares_fleet::SimStatus::Failed(_)) {
+    if !matches!(failed.status, hares_fleet::HomeStatus::Failed(_)) {
         failures.push(format!("home 4 must be failed, got {:?}", failed.status));
     } else if failed
         .reason
@@ -194,10 +194,16 @@ pub fn run_aggregation_check() -> Result<(), Vec<String>> {
         failures.push("the failed home's reason is empty".to_string());
     }
     let good_weight = 1.0 + 2.0 + 5.0;
-    if result.coverage.weight_ok + result.coverage.weight_flagged != good_weight {
+    if result.coverage.weight_ok != good_weight {
         failures.push(format!(
-            "coverage.weight_ok {} + weight_flagged {} != {good_weight} (the failed home's weight excluded)",
-            result.coverage.weight_ok, result.coverage.weight_flagged
+            "coverage.weight_ok {} != {good_weight} (the failed home's weight excluded)",
+            result.coverage.weight_ok
+        ));
+    }
+    if result.coverage.weight_degraded != 0.0 {
+        failures.push(format!(
+            "coverage.weight_degraded {} != 0.0 (no good home carries an event)",
+            result.coverage.weight_degraded
         ));
     }
     if result.coverage.weight_failed != 1.0 {

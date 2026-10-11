@@ -118,8 +118,8 @@ impl PyCoverage {
     }
 
     #[getter]
-    pub fn weight_flagged(&self) -> f64 {
-        self.0.weight_flagged
+    pub fn weight_degraded(&self) -> f64 {
+        self.0.weight_degraded
     }
 
     #[getter]
@@ -129,8 +129,8 @@ impl PyCoverage {
 
     pub fn __repr__(&self) -> String {
         format!(
-            "Coverage(weight_total={}, weight_ok={}, weight_flagged={}, weight_failed={})",
-            self.0.weight_total, self.0.weight_ok, self.0.weight_flagged, self.0.weight_failed,
+            "Coverage(weight_total={}, weight_ok={}, weight_degraded={}, weight_failed={})",
+            self.0.weight_total, self.0.weight_ok, self.0.weight_degraded, self.0.weight_failed,
         )
     }
 }
@@ -276,14 +276,17 @@ impl PyFleet {
             py.detach(|| self.fleet.simulate(&report.0, thread_count, chunk))
         };
 
-        let result = result.map_err(to_py_err)?;
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => return Err(fleet_error_to_py_err(py, err)?),
+        };
 
         if raise_on_failure {
             let failed: Vec<String> = result
                 .homes
                 .iter()
                 .filter_map(|home| match &home.status {
-                    hares_fleet::SimStatus::Failed(reason) => {
+                    hares_fleet::HomeStatus::Failed(reason) => {
                         Some(format!("home {}: {reason}", home.bldg_id))
                     }
                     _ => None,
@@ -350,7 +353,7 @@ impl PyFleetResult {
         self.result
             .homes
             .iter()
-            .filter(|home| matches!(home.status, hares_fleet::SimStatus::Failed(_)))
+            .filter(|home| matches!(home.status, hares_fleet::HomeStatus::Failed(_)))
             .count()
     }
 
@@ -396,6 +399,23 @@ fn normalize_thread_count(n_threads: Option<isize>) -> PyResult<usize> {
 
 fn to_py_err<E: std::fmt::Display>(err: E) -> PyErr {
     PyValueError::new_err(err.to_string())
+}
+
+/// The fleet error surface: `NoCoveredWeight` raises the simulation error
+/// with the counts in its message and the full homes table as the
+/// exception's `homes` attribute, read as `FleetResult.homes` is; every
+/// other fleet error is a `ValueError` with its display.
+fn fleet_error_to_py_err(py: Python<'_>, err: hares_fleet::fleet::FleetError) -> PyResult<PyErr> {
+    match &err {
+        hares_fleet::fleet::FleetError::NoCoveredWeight { homes, .. } => {
+            let message = err.to_string();
+            let table = record_batches_to_polars_df(py, std::slice::from_ref(homes))?;
+            let py_err = HaresSimulationError::new_err(message);
+            py_err.value(py).setattr("homes", table)?;
+            Ok(py_err)
+        }
+        _ => Ok(to_py_err(err)),
+    }
 }
 
 #[pyclass(name = "SteppableFleet")]

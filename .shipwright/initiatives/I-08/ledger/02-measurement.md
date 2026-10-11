@@ -2631,3 +2631,69 @@ report) instead of streaming its batches to nowhere: a home config
 carrying `Destination::Callback` fails that home at run start, its
 fellows unaffected. Pinned at the engine (the first step refuses) and at
 the fleet (the home's status is `failed` with 0 steps).
+
+### FL-2's golden re-capture and fixture corrections, 2026-10-11 (branch `row/r51-fl2`, worktree of `5a9c4ac8`)
+
+**The fleet goldens' changes.** Two of the eight goldens move, both in
+the way the entry's verification paragraph declares and its closing
+premise paragraph governs:
+
+- `fleet_mixed_offset`: the `aggregate` and `covered_weight` products go
+  from zero rows (the three homes declared different variable sets and
+  the mismatch emptied both) to 165 rows, the union of the three homes'
+  selected variables, 46 columns, over the 165 UTC instants every home's
+  hourly grid shares. The `homes` product's `status` values do not
+  change spelling: the entry expected them to, but FL-1's premise record
+  found every mixed_offset home clean (no warning, no non-zero health
+  counter, the converging warm-up), so under the new mapping every home
+  is `ok`, as it was `ok` before. The only homes change is
+  `periods_folded`, 0 to 165 per home: the fold's period count is now
+  the union aggregate's 165 rows, where the emptied aggregate counted 0.
+- `resstock_2025_fleet`: the fleet's three homes are not all clean, so
+  two leave the fold. `bldg0162486` is degraded naming the envelope
+  warning ("boundary 'Wall1': the outside Siding layer's 'none' names no
+  material; it is treated as absent and takes the roughness of
+  OS-HPXML's default for an absent element, wood siding,
+  defaults.rb:1338, :1379") and `bldg0352714` is degraded naming the
+  hpxml warning ("the attic has 28.6 m2 of gable walls, but its roofs
+  are not one gable; its volume is OS-HPXML's square hip"). Neither
+  event is a defect: both are the row-21i chain's cited-default and
+  cited-derivation warnings on the vendor's own inputs. The two homes'
+  `status` values change spelling `flagged` to `degraded`, their
+  `reason` values carry the warning text instead of "1 warning(s)", and
+  `bldg0019694` (the one clean home) takes `periods_folded` 48, folding
+  alone: the `aggregate` and `covered_weight` products go from zero rows
+  to 48 rows, 28 columns, the clean home's tier-2 set over its 48 hourly
+  instants, covered weight 253.903673 in every cell. The `metrics`
+  product stays zero rows; `fleet_report` compares bitwise.
+
+Every other product of every other manifest compares bitwise, including
+all four products of `fleet_same_offset_300s` (every home clean, the
+single column set folding exactly as before) and the six dwelling
+goldens (the fleet changes touch no dwelling path). Both re-captures ran
+twice, the golden file's sha256 identical each time
+(`fleet_mixed_offset` `4d22c64f60418710`, `resstock_2025_fleet`
+`f8da5ae94527933a`).
+
+**The fixture corrections the row's acceptance tests needed.** The
+entry's acceptance tests first assert that every home they expect to be
+ok is ok, so a warning a fixture carries fails the test naming it. Two
+fixtures carried one:
+
+- `tests/fixtures/hpxml/ochre_samples/base.xml` and `base-battery.xml`:
+  each carries one added element, `<ShieldingofHome>normal</ShieldingofHome>`
+  in the `BuildingDetails` `Site`, naming the value OS-HPXML's cited
+  default already applies (defaults.rb:822-830); the warning ("the
+  building gives no ShieldingofHome; the shielding is Normal") named the
+  omission. The applied value is unchanged, so every number is.
+- `data/examples/BEopt_example.xml`: the
+  `SimulationControl/TemperatureCapacitanceMultiplier` element (1.0) is
+  deleted. OS-HPXML v1.12 reads the multiplier only from
+  `AdvancedResearchFeatures` (hpxml.rb:1051) and applies 7 when absent;
+  the `SimulationControl` form was ignored (the warning said so), so the
+  applied value is unchanged, 7 before and after, and every number is.
+
+No golden manifest runs either fixture; the dwellings' own paths are
+untouched. The two correction classes are the schedule's recognised
+"fixture correction" outside the numeric block, every other product and
+column bitwise, and the change is this entry.
