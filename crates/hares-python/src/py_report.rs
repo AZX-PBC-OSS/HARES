@@ -57,8 +57,54 @@ impl PyFrequency {
         Self(Frequency::Timestep)
     }
 
+    /// Sub-hourly periods of `n` minutes: `n` divides the hour.
+    #[staticmethod]
+    pub fn minutes(n: u32) -> Self {
+        Self(Frequency::Minutes(
+            n.try_into().expect("minutes must be nonzero"),
+        ))
+    }
+
+    /// Calendar hours in the naive local wall clock.
+    #[staticmethod]
+    pub fn hourly() -> Self {
+        Self(Frequency::Hourly)
+    }
+
+    /// Calendar days in the naive local wall clock.
+    #[staticmethod]
+    pub fn daily() -> Self {
+        Self(Frequency::Daily)
+    }
+
+    /// Calendar months in the naive local wall clock.
+    #[staticmethod]
+    pub fn monthly() -> Self {
+        Self(Frequency::Monthly)
+    }
+
+    /// Calendar years in the naive local wall clock.
+    #[staticmethod]
+    pub fn annual() -> Self {
+        Self(Frequency::Annual)
+    }
+
+    /// One row covering the whole run.
+    #[staticmethod]
+    pub fn run_period() -> Self {
+        Self(Frequency::RunPeriod)
+    }
+
     pub fn __repr__(&self) -> String {
-        "Frequency.timestep()".to_string()
+        match &self.0 {
+            Frequency::Timestep => "Frequency.timestep()".to_string(),
+            Frequency::Minutes(n) => format!("Frequency.minutes({n})"),
+            Frequency::Hourly => "Frequency.hourly()".to_string(),
+            Frequency::Daily => "Frequency.daily()".to_string(),
+            Frequency::Monthly => "Frequency.monthly()".to_string(),
+            Frequency::Annual => "Frequency.annual()".to_string(),
+            Frequency::RunPeriod => "Frequency.run_period()".to_string(),
+        }
     }
 }
 

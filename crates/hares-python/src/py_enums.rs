@@ -818,49 +818,6 @@ impl From<FleetSimStatus> for PySimStatus {
     }
 }
 
-#[pyclass(name = "AggregationResolution", from_py_object)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PyAggregationResolution {
-    FifteenMin,
-    Hourly,
-}
-
-#[pymethods]
-impl PyAggregationResolution {
-    #[staticmethod]
-    fn fifteen_min() -> Self {
-        PyAggregationResolution::FifteenMin
-    }
-
-    #[staticmethod]
-    fn hourly() -> Self {
-        PyAggregationResolution::Hourly
-    }
-
-    #[staticmethod]
-    pub fn from_str(name: &str) -> PyResult<Self> {
-        match name.to_lowercase().as_str() {
-            "15min" | "fifteenmin" | "fifteen_min" => Ok(PyAggregationResolution::FifteenMin),
-            "hourly" => Ok(PyAggregationResolution::Hourly),
-            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "invalid AggregationResolution variant: {}",
-                name
-            ))),
-        }
-    }
-
-    fn __repr__(&self) -> String {
-        format!("AggregationResolution.{:?}", self)
-    }
-
-    fn __str__(&self) -> String {
-        match self {
-            PyAggregationResolution::FifteenMin => "FifteenMin".to_string(),
-            PyAggregationResolution::Hourly => "Hourly".to_string(),
-        }
-    }
-}
-
 #[pyclass(name = "ResStockVersion", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PyResStockVersion {

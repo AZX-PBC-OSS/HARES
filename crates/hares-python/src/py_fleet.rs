@@ -1,12 +1,12 @@
 //! Python bindings for fleet simulation.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use hares_fleet::aggregation::{AggregationResolution, aggregate};
-use hares_fleet::{DwellingBuildError, Fleet, FleetResults, SimError, SteppableFleet};
+use hares_fleet::{Coverage, Fleet, FleetReport, FleetResult};
 use hares_io::ResStockVersion as IoResStockVersion;
 use pyo3::Python;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
@@ -14,13 +14,12 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyType};
 use tracing::warn;
 
-use crate::conversions::{
-    dwelling_metrics_to_polars_df, fleet_results_to_py, naive_chrono_to_py_datetime,
-    record_batches_to_polars_df,
-};
-use crate::py_config::{MAX_CHRONO_SECONDS, PyDwellingConfig};
+use crate::conversions::{naive_chrono_to_py_datetime, record_batches_to_polars_df};
+use crate::py_config::{MAX_CHRONO_SECONDS, PyDwellingConfig, PyHealthPolicy};
 use crate::py_control::PyControlSignal;
-use crate::py_enums::{PyAggregationResolution, PyResStockVersion};
+use crate::py_dwelling::HaresSimulationError;
+use crate::py_enums::PyResStockVersion;
+use crate::py_report::{PyFrequency, PySelection};
 use crate::py_telemetry::PyTelemetry;
 use crate::utils::check_unexpected_kwargs;
 
@@ -41,17 +40,6 @@ fn parse_resstock_version(s: &str) -> PyResult<IoResStockVersion> {
     }
 }
 
-fn parse_aggregation_resolution(s: &str) -> PyResult<AggregationResolution> {
-    match s.to_lowercase().as_str() {
-        "15min" | "fifteenmin" | "fifteen_min" => Ok(AggregationResolution::FifteenMin),
-        "hourly" => Ok(AggregationResolution::Hourly),
-        _ => Err(PyValueError::new_err(format!(
-            "invalid AggregationResolution variant: {}",
-            s
-        ))),
-    }
-}
-
 fn extract_resstock_version(obj: Bound<'_, PyAny>) -> PyResult<Option<IoResStockVersion>> {
     if let Ok(v) = obj.extract::<PyResStockVersion>() {
         Ok(Some(IoResStockVersion::from(v)))
@@ -64,17 +52,86 @@ fn extract_resstock_version(obj: Bound<'_, PyAny>) -> PyResult<Option<IoResStock
     }
 }
 
-fn extract_aggregation_resolution(
-    obj: Bound<'_, PyAny>,
-) -> PyResult<Option<AggregationResolution>> {
-    if let Ok(v) = obj.extract::<PyAggregationResolution>() {
-        Ok(Some(AggregationResolution::from(v)))
-    } else if let Ok(s) = obj.extract::<String>() {
-        Ok(Some(parse_aggregation_resolution(&s)?))
-    } else {
-        Err(PyValueError::new_err(
-            "resolution must be an AggregationResolution enum or string",
-        ))
+/// The fleet's report request: the variable selection, the reporting
+/// frequency the fold reduces onto, and the fleet's health policy, which
+/// is applied to every home's run.
+///
+/// `FleetReport(selection, frequency, health_policy=HealthPolicy())`.
+#[pyclass(name = "FleetReport", from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyFleetReport(pub FleetReport);
+
+#[pymethods]
+impl PyFleetReport {
+    #[new]
+    #[pyo3(signature = (selection, frequency, health_policy=None))]
+    pub fn new(
+        selection: PySelection,
+        frequency: PyFrequency,
+        health_policy: Option<PyHealthPolicy>,
+    ) -> Self {
+        Self(FleetReport {
+            selection: selection.0,
+            frequency: frequency.0,
+            health_policy: health_policy.map(|policy| policy.0).unwrap_or_default(),
+        })
+    }
+
+    #[getter]
+    pub fn selection(&self) -> PySelection {
+        PySelection(self.0.selection.clone())
+    }
+
+    #[getter]
+    pub fn frequency(&self) -> PyFrequency {
+        PyFrequency(self.0.frequency)
+    }
+
+    #[getter]
+    pub fn health_policy(&self) -> PyHealthPolicy {
+        PyHealthPolicy(self.0.health_policy.clone())
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "FleetReport(selection={:?}, frequency={:?}, health_policy=...)",
+            self.0.selection, self.0.frequency,
+        )
+    }
+}
+
+/// The fleet's coverage weights, by home status.
+#[pyclass(name = "Coverage", from_py_object)]
+#[derive(Debug, Clone, Copy)]
+pub struct PyCoverage(pub Coverage);
+
+#[pymethods]
+impl PyCoverage {
+    #[getter]
+    pub fn weight_total(&self) -> f64 {
+        self.0.weight_total
+    }
+
+    #[getter]
+    pub fn weight_ok(&self) -> f64 {
+        self.0.weight_ok
+    }
+
+    #[getter]
+    pub fn weight_flagged(&self) -> f64 {
+        self.0.weight_flagged
+    }
+
+    #[getter]
+    pub fn weight_failed(&self) -> f64 {
+        self.0.weight_failed
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "Coverage(weight_total={}, weight_ok={}, weight_flagged={}, weight_failed={})",
+            self.0.weight_total, self.0.weight_ok, self.0.weight_flagged, self.0.weight_failed,
+        )
     }
 }
 
@@ -103,7 +160,7 @@ impl PyFleet {
             .map(|c| c.to_dwelling_config())
             .collect::<PyResult<Vec<_>>>()?;
 
-        let fleet = Fleet::from_buildings(dwelling_configs);
+        let fleet = Fleet::from_buildings(dwelling_configs).map_err(to_py_err)?;
 
         // `with_sample_weights` validates both the length and each weight
         // (rejecting NaN/infinite/negative), so the Python layer defers to it
@@ -181,25 +238,27 @@ impl PyFleet {
         Ok(Self { fleet })
     }
 
-    #[pyo3(signature = (n_threads=None, resolution=None, raise_on_failure=None, progress=None))]
+    /// Simulates the fleet through the streaming ordered fold: the homes
+    /// run in consecutive chunks of the fleet's entry order, and each
+    /// finished chunk's homes fold into the running aggregate one at a
+    /// time in entry order before the next chunk starts. The global fold
+    /// order is the entry order for every chunk size and thread count.
+    #[pyo3(signature = (report, *, n_threads=None, chunk_size=64, raise_on_failure=None, progress=None))]
     pub fn simulate(
         &self,
         py: Python<'_>,
+        report: &PyFleetReport,
         n_threads: Option<isize>,
-        resolution: Option<Bound<'_, PyAny>>,
+        chunk_size: usize,
         raise_on_failure: Option<bool>,
         progress: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyFleetResults> {
+    ) -> PyResult<PyFleetResult> {
         let thread_count = normalize_thread_count(n_threads)?;
-        let resolution = match resolution {
-            Some(obj) => {
-                extract_aggregation_resolution(obj)?.unwrap_or(AggregationResolution::FifteenMin)
-            }
-            None => AggregationResolution::FifteenMin,
-        };
+        let chunk = NonZeroUsize::new(chunk_size)
+            .ok_or_else(|| PyValueError::new_err("chunk_size must be at least 1"))?;
         let raise_on_failure = raise_on_failure.unwrap_or(false);
 
-        let outcomes = if let Some(callback) = progress {
+        let result = if let Some(callback) = progress {
             // PyO3 `#[pymethods]` require `&self`, but `Fleet::set_progress` mutates
             // the fleet to install the callback. Cloning is the only way to attach
             // the progress callback without forcing `&mut self` on the Python API.
@@ -212,63 +271,34 @@ impl PyFleet {
                     }
                 });
             });
-            py.detach(|| fleet_clone.simulate(thread_count))
+            py.detach(|| fleet_clone.simulate(&report.0, thread_count, chunk))
         } else {
-            py.detach(|| self.fleet.simulate(thread_count))
+            py.detach(|| self.fleet.simulate(&report.0, thread_count, chunk))
         };
 
-        let outcomes = outcomes.into_iter().collect::<Vec<_>>();
+        let result = result.map_err(to_py_err)?;
 
-        let mut success = Vec::with_capacity(outcomes.len());
-        let mut failures = Vec::new();
-
-        for outcome in outcomes {
-            match outcome {
-                Ok(ok) => success.push(ok),
-                Err(err) => {
-                    let bldg_id = match &err {
-                        SimError::Failed { bldg_id, .. } => *bldg_id,
-                        SimError::Engine { bldg_id, .. } => *bldg_id,
-                        SimError::Panic { bldg_id, .. } => *bldg_id,
-                        SimError::Skipped { bldg_id, .. } => *bldg_id,
-                        SimError::ThreadPoolBuild(_) => -1,
-                    };
-                    failures.push((bldg_id, err.to_string()));
-                }
+        if raise_on_failure {
+            let failed: Vec<String> = result
+                .homes
+                .iter()
+                .filter_map(|home| match &home.status {
+                    hares_fleet::SimStatus::Failed(reason) => {
+                        Some(format!("home {}: {reason}", home.bldg_id))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !failed.is_empty() {
+                return Err(HaresSimulationError::new_err(format!(
+                    "fleet simulation failed for {} home(s): {}",
+                    failed.len(),
+                    failed.join("; ")
+                )));
             }
         }
 
-        if !failures.is_empty() && raise_on_failure {
-            let failure_msgs: Vec<_> = failures.iter().map(|(_, m)| m.clone()).collect();
-            return Err(PyValueError::new_err(format!(
-                "fleet simulation failed for {} dwelling(s): {}",
-                failures.len(),
-                failure_msgs.join("; ")
-            )));
-        }
-
-        if success.is_empty() && !failures.is_empty() {
-            return Err(PyValueError::new_err(
-                "all dwellings in the fleet failed to simulate",
-            ));
-        }
-
-        let aggregated = aggregate(&success, resolution)
-            .map_err(|e| PyValueError::new_err(format!("fleet aggregation failed: {e}")))?;
-
-        if aggregated.aggregate_timeseries.num_rows() == 0 && !success.is_empty() {
-            py.import("warnings")?.call_method1(
-                "warn",
-                ("Fleet aggregation produced an empty timeseries despite \
-                     successful dwellings. This may indicate column mismatches \
-                     across dwellings.",),
-            )?;
-        }
-
-        let mut results = fleet_results_to_py(aggregated);
-        results.failures = failures;
-        results.n_succeeded = success.len();
-        Ok(results)
+        Ok(PyFleetResult { result })
     }
 
     fn __len__(&self) -> usize {
@@ -280,73 +310,62 @@ impl PyFleet {
     }
 }
 
-impl From<PyAggregationResolution> for AggregationResolution {
-    fn from(py_res: PyAggregationResolution) -> Self {
-        match py_res {
-            PyAggregationResolution::FifteenMin => AggregationResolution::FifteenMin,
-            PyAggregationResolution::Hourly => AggregationResolution::Hourly,
-        }
-    }
-}
-
-#[pyclass(name = "FleetResults")]
-pub struct PyFleetResults {
-    pub(crate) results: FleetResults,
-    pub(crate) failures: Vec<(i64, String)>,
-    pub(crate) n_succeeded: usize,
-}
-
-impl PyFleetResults {
-    pub(crate) fn new(results: FleetResults) -> Self {
-        let n_succeeded = results.per_dwelling_metrics.len();
-        Self {
-            results,
-            failures: Vec::new(),
-            n_succeeded,
-        }
-    }
+/// The fleet's result: the aggregate, the covered weight behind it, the
+/// homes table and the coverage weights.
+#[pyclass(name = "FleetResult")]
+pub struct PyFleetResult {
+    pub(crate) result: FleetResult,
 }
 
 #[pymethods]
-impl PyFleetResults {
+impl PyFleetResult {
     #[getter]
-    pub fn per_dwelling_metrics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        dwelling_metrics_to_polars_df(py, &self.results.per_dwelling_metrics)
+    pub fn aggregate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        record_batches_to_polars_df(py, std::slice::from_ref(&self.result.aggregate))
     }
 
     #[getter]
-    pub fn aggregate_timeseries(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        record_batches_to_polars_df(py, std::slice::from_ref(&self.results.aggregate_timeseries))
+    pub fn covered_weight(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        record_batches_to_polars_df(py, std::slice::from_ref(&self.result.covered_weight))
     }
 
     #[getter]
-    pub fn failures(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        let list = PyList::empty(py);
-        for (bldg_id, error) in &self.failures {
-            let dict = PyDict::new(py);
-            dict.set_item("bldg_id", *bldg_id)?;
-            dict.set_item("error", error)?;
-            list.append(dict)?;
-        }
-        Ok(list.into())
+    pub fn homes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let homes = self.result.homes_table();
+        record_batches_to_polars_df(py, std::slice::from_ref(&homes))
+    }
+
+    #[getter]
+    pub fn coverage(&self) -> PyCoverage {
+        PyCoverage(self.result.coverage)
     }
 
     #[getter]
     pub fn n_succeeded(&self) -> usize {
-        self.n_succeeded
+        self.result.n_succeeded
     }
 
     #[getter]
     pub fn n_failed(&self) -> usize {
-        self.failures.len()
+        self.result
+            .homes
+            .iter()
+            .filter(|home| matches!(home.status, hares_fleet::SimStatus::Failed(_)))
+            .count()
+    }
+
+    #[getter]
+    pub fn peak_live_home_results(&self) -> usize {
+        self.result.peak_live_home_results
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "PyFleetResults(per_dwelling_rows={}, aggregate_rows={}, failures={})",
-            self.results.per_dwelling_metrics.len(),
-            self.results.aggregate_timeseries.num_rows(),
-            self.failures.len()
+            "FleetResult(aggregate_rows={}, homes={}, n_succeeded={}, peak_live_home_results={})",
+            self.result.aggregate.num_rows(),
+            self.result.homes.len(),
+            self.result.n_succeeded,
+            self.result.peak_live_home_results,
         )
     }
 }
@@ -381,13 +400,13 @@ fn to_py_err<E: std::fmt::Display>(err: E) -> PyErr {
 
 #[pyclass(name = "SteppableFleet")]
 pub struct PySteppableFleet {
-    fleet: Mutex<SteppableFleet>,
+    fleet: Mutex<hares_fleet::SteppableFleet>,
     poisoned: AtomicBool,
-    build_errors: Vec<DwellingBuildError>,
+    build_errors: Vec<hares_fleet::DwellingBuildError>,
 }
 
 impl PySteppableFleet {
-    fn acquire(&self) -> PyResult<std::sync::MutexGuard<'_, SteppableFleet>> {
+    fn acquire(&self) -> PyResult<std::sync::MutexGuard<'_, hares_fleet::SteppableFleet>> {
         if self.poisoned.load(Ordering::Acquire) {
             return Err(PyRuntimeError::new_err(
                 "steppable fleet is in a fatal error state (internal state corruption); \
@@ -421,7 +440,8 @@ impl PySteppableFleet {
             .collect::<PyResult<Vec<_>>>()?;
 
         let (fleet, build_errors) =
-            SteppableFleet::from_configs(dwelling_configs, thread_count).map_err(to_py_err)?;
+            hares_fleet::SteppableFleet::from_configs(dwelling_configs, thread_count)
+                .map_err(to_py_err)?;
         if !build_errors.is_empty() {
             warn!(
                 "SteppableFleet initialized with {} build failure(s)",
@@ -505,11 +525,11 @@ impl PySteppableFleet {
                     item.set_item("ok", false)?;
                     item.set_item("error", err.to_string())?;
                     let bldg_id = match err {
-                        SimError::Failed { bldg_id, .. } => bldg_id,
-                        SimError::Engine { bldg_id, .. } => bldg_id,
-                        SimError::Panic { bldg_id, .. } => bldg_id,
-                        SimError::Skipped { bldg_id, .. } => bldg_id,
-                        SimError::ThreadPoolBuild(_) => -1,
+                        hares_fleet::SimError::Failed { bldg_id, .. } => bldg_id,
+                        hares_fleet::SimError::Engine { bldg_id, .. } => bldg_id,
+                        hares_fleet::SimError::Panic { bldg_id, .. } => bldg_id,
+                        hares_fleet::SimError::Skipped { bldg_id, .. } => bldg_id,
+                        hares_fleet::SimError::ThreadPoolBuild(_) => -1,
                     };
                     item.set_item("bldg_id", bldg_id)?;
                 }

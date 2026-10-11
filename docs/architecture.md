@@ -572,18 +572,18 @@ graph TD
     BUILDINGS_DIR["Unpacked Buildings Directory"] --> Fleet
     WX_DIR["Weather Directory"] --> Fleet
 
-    Fleet --> |"Rayon par_iter"| D1["Dwelling 1"]
-    Fleet --> |"Rayon par_iter"| D2["Dwelling 2"]
-    Fleet --> |"Rayon par_iter"| D3["Dwelling N"]
+    Fleet --> |"chunks of homes, Rayon par_iter"| D1["Dwelling 1"]
+    Fleet --> |"chunks of homes, Rayon par_iter"| D2["Dwelling 2"]
+    Fleet --> |"chunks of homes, Rayon par_iter"| D3["Dwelling N"]
 
-    D1 --> R1["SimulationResults"]
-    D2 --> R2["SimulationResults"]
-    D3 --> R3["SimulationResults"]
+    D1 --> R1["PeriodReducer<br/>(fleet report callback)"]
+    D2 --> R2["PeriodReducer<br/>(fleet report callback)"]
+    D3 --> R3["PeriodReducer<br/>(fleet report callback)"]
 
-    R1 --> AGG["Aggregation<br/>15-min resolution"]
+    R1 --> AGG["Streaming ordered fold<br/>(entry order, chunk-bounded)"]
     R2 --> AGG
     R3 --> AGG
-    AGG --> OUT["PyFleetResults<br/>per-dwelling + aggregate metrics"]
+    AGG --> OUT["PyFleetResult<br/>aggregate + covered_weight + homes"]
 ```
 
 Individual dwellings are fully independent (no shared mutable state), enabling linear scaling with Rayon thread pools.
@@ -627,7 +627,7 @@ graph TD
 | `PyDwelling.step()` | Advance one timestep, return telemetry dict |
 | `PyDwelling.apply_control(name, signal)` | Queue control signal for next step |
 | `PyFleet.from_resstock(metadata, buildings_dir, weather_dir)` | Load building portfolio |
-| `PyFleet.simulate(n_threads)` | Parallel simulation with aggregated results |
+| `PyFleet.simulate(report, n_threads, chunk_size)` | Chunked parallel simulation, the streaming ordered fold into `FleetResult` |
 
 ---
 

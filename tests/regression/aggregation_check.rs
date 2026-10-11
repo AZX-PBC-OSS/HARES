@@ -1,636 +1,298 @@
 //! Fleet aggregation regression sub-suite.
 //!
-//! Validates that `hares_fleet::aggregation::aggregate()` produces correct
-//! per-dwelling metrics and weighted fleet timeseries from both synthetic data
-//! and real Fleet simulation outputs.  The synthetic tests mirror the unit-test
-//! logic in `crates/hares-fleet/src/aggregation.rs:491-734` but exercise the
-//! public API from the integration-test layer.
+//! The one test that replaces both former halves (the synthetic
+//! `aggregation::aggregate` cases and the fleet integration check): four
+//! `base.xml` homes run through `Fleet::simulate` with weights 1, 2, 5
+//! and 1, the last given a nonexistent schedule path so it fails, and the
+//! result's properties checked: the failed home is listed with its reason
+//! and excluded from `coverage.weight_ok`, a `Total Electric Power (kW)`
+//! cell is the weighted sum of the three homes' period means, a zone
+//! temperature (`C`) cell is their weighted mean, and the row count is
+//! the period count.
 
-use arrow::array::{Array, Float64Array, Float64Builder, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, Duration};
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration as StdDuration;
 
-/// The epoch milliseconds of an RFC 3339 instant: the Time value a
-/// synthetic batch carries (UTC-stamped homes, offset 0).
-fn utc_ms(instant: &str) -> i64 {
-    DateTime::parse_from_rfc3339(instant)
-        .expect("instant")
-        .timestamp_millis()
-}
-
-use hares_fleet::Fleet;
-use hares_fleet::aggregation::{self, AggregationResolution};
-use hares_fleet::fleet::{DwellingOutcome, SimStatus};
-use hares_io::output::metrics::{
-    GridInteractionMetrics, PeakPowerKw, Reliability, RollingPeakKw, SimulationCoverage,
-    SimulationMetrics, TotalEnergyKwh,
-};
+use arrow::array::Float64Array;
+use arrow::record_batch::RecordBatch;
+use chrono::{Duration, Timelike};
+use hares_fleet::{Fleet, FleetReport};
+use hares_io::{Frequency, Selection};
 
 use super::helpers;
 
-// ---------------------------------------------------------------------------
-// Synthetic-data helpers (mirror aggregation.rs unit-test helpers)
-// ---------------------------------------------------------------------------
-
-fn sample_metrics(energy: f64, peak: f64) -> SimulationMetrics {
-    SimulationMetrics {
-        total_energy_kwh: TotalEnergyKwh {
-            net_energy_kwh: energy,
-            gross_consumption_kwh: energy,
-            gross_pv_generation_kwh: 0.0,
-            per_end_use: BTreeMap::new(),
-            duration_hours: 0.0,
-        },
-        peak_power_kw: PeakPowerKw {
-            per_end_use: BTreeMap::new(),
-            rolling: RollingPeakKw {
-                peak_15min_kw: 0.0,
-                peak_30min_kw: 0.0,
-                peak_60min_kw: 0.0,
-            },
-        },
-        comfort_hours: None,
-        unmet_load_hours: None,
-        renewable_energy_fraction: None,
-        grid_interaction_metrics: GridInteractionMetrics {
-            peak_import_kw: peak,
-            peak_export_kw: 0.0,
-        },
-        envelope_loads_kwh: None,
-        efficiency: Default::default(),
-        rows_with_partial_setpoint_data_fraction: None,
-        simulation_duration_hours: 0.0,
-        coverage: SimulationCoverage::PartialYear,
-        nan_step_count: 0,
-        metrics_reliability: Reliability::Reliable,
-    }
-}
-
-fn outcome(
-    sample_weight: f64,
-    status: SimStatus,
-    metrics: SimulationMetrics,
-    batch: Option<RecordBatch>,
-) -> DwellingOutcome {
-    DwellingOutcome {
-        result: std::sync::Arc::new(test_run_result(metrics, batch)),
-        sample_weight,
-        status,
-        elapsed: StdDuration::from_secs(1),
-    }
-}
-
-fn test_run_result(
-    metrics: SimulationMetrics,
-    batch: Option<RecordBatch>,
-) -> hares_core::RunResult {
-    let reports = batch
-        .map(|b| {
-            let rows = b.num_rows();
-            hares_core::ReportResult {
-                name: "frame".to_string(),
-                output: hares_core::ReportOutput::Memory(vec![b]),
-                frequency: hares_io::Frequency::default(),
-                rows,
-                batches_delivered: 1,
-            }
-        })
-        .into_iter()
-        .collect();
-    hares_core::RunResult {
-        reports,
-        metrics: Some(hares_core::RunMetrics::from(
-            hares_io::FullSimulationMetrics {
-                metrics,
-                gas_energy: None,
-            },
-        )),
-        health: Default::default(),
-        warnings: Vec::new(),
-        warnings_dropped: 0,
-        provenance: hares_core::Provenance {
-            config: test_sim_config(),
-            bldg_id: 0,
-            site_utc_offset_s: 0,
-            equipment: Vec::new(),
-        },
-    }
-}
-
-fn test_sim_config() -> hares_io::SimulationConfig {
-    use chrono::TimeZone;
-    hares_io::SimulationConfig {
-        start_time: chrono::FixedOffset::east_opt(0)
-            .expect("UTC offset")
-            .with_ymd_and_hms(2019, 1, 1, 0, 0, 0)
-            .single()
-            .expect("valid timestamp"),
-        duration: chrono::Duration::hours(24),
-        time_res: chrono::Duration::minutes(1),
-        reports: Vec::new(),
-        diagnostics: false,
-        metrics: false,
-        output_chunk_size: 10_000,
-        setpoint_deadband_c: None,
-        master_seed: 0,
-        civil_timezone: None,
-        site_location: hares_io::SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
-    }
-}
-
-fn batch(rows: &[i64], columns: Vec<(&str, Vec<Option<f64>>)>) -> RecordBatch {
-    let mut fields = vec![Field::new(
-        "Time",
-        DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-        false,
-    )];
-    let mut arrays: Vec<Arc<dyn arrow::array::Array>> = vec![Arc::new(
-        arrow::array::TimestampMillisecondArray::from(rows.to_vec()),
-    )];
-
-    for (name, values) in columns {
-        fields.push(Field::new(name, DataType::Float64, true));
-        let mut builder = Float64Builder::new();
-        for value in values {
-            match value {
-                Some(v) => builder.append_value(v),
-                None => builder.append_null(),
-            }
-        }
-        arrays.push(Arc::new(builder.finish()));
-    }
-
-    let schema = Arc::new(
-        Schema::new(fields).with_metadata(std::collections::HashMap::from([(
-            "hares:utc_offset_s".to_string(),
-            "0".to_string(),
-        )])),
+/// One home's Timestep memory report, run standalone at the same
+/// building id, seed and inputs: the source of the hand-computed period
+/// means.
+fn standalone_home_periods(
+    bldg_id: i64,
+    seed: u64,
+    schedule_path: std::path::PathBuf,
+    weather_path: std::path::PathBuf,
+    duration: Duration,
+    output_dir: &std::path::Path,
+) -> BTreeMap<i64, Vec<f64>> {
+    let mut config = helpers::build_dwelling_config(
+        output_dir,
+        bldg_id,
+        schedule_path,
+        weather_path,
+        duration,
+        seed,
     );
-    RecordBatch::try_new(schema, arrays).expect("valid test batch")
-}
+    config.sim_config.reports = vec![hares_io::ReportSpec {
+        name: "frame".to_string(),
+        selection: Selection::Verbosity(2),
+        frequency: Frequency::Timestep,
+        destination: hares_io::Destination::Memory,
+    }];
+    let mut dwelling = hares_core::Dwelling::from_config(config).expect("the home builds");
+    let sim_config = dwelling.sim_config().clone();
+    let result = hares_core::SimulationEngine::new()
+        .run_dwelling(&mut dwelling, &sim_config)
+        .expect("the home runs");
 
-// ---------------------------------------------------------------------------
-// Public entry-point
-// ---------------------------------------------------------------------------
+    // The power and the indoor-temperature columns, in step order, keyed
+    // by the hour bucket the fleet's fold keys (the naive local wall
+    // clock floored to the hour, read as UTC seconds). Per bucket: the
+    // step-order sums and the step count; the period means divide once.
+    let batches: Vec<RecordBatch> = result
+        .reports
+        .iter()
+        .flat_map(|report| report.batches().to_vec())
+        .collect();
+    let schema = batches
+        .first()
+        .expect("the memory report retained batches")
+        .schema_ref()
+        .clone();
+    let power_slot = schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == "Total Electric Power (kW)")
+        .expect("the power column exists at tier 2");
+    let temp_slot = schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == "Temperature - Indoor (C)")
+        .expect("the indoor temperature column exists at tier 2");
+    let time_slot = 0usize;
+    let utc_offset_s: i64 = schema
+        .metadata()
+        .get("hares:utc_offset_s")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+
+    let mut periods: BTreeMap<i64, (Vec<f64>, u32)> = BTreeMap::new();
+    for batch in &batches {
+        let times = batch
+            .column(time_slot)
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+            .expect("the timestamp Time column");
+        let power = batch
+            .column(power_slot)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("a Float64 column");
+        let temp = batch
+            .column(temp_slot)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("a Float64 column");
+        for row in 0..batch.num_rows() {
+            let naive = chrono::DateTime::from_timestamp_millis(times.value(row))
+                .expect("a valid stamp")
+                .naive_utc();
+            // The bucket key: the row's local wall clock floored to the
+            // hour (the reducer's period start), read as UTC seconds,
+            // minus the home's offset.
+            let floored = naive
+                .with_minute(0)
+                .and_then(|n| n.with_second(0))
+                .and_then(|n| n.with_nanosecond(0))
+                .expect("a valid hour floor");
+            let bucket = floored.and_utc().timestamp() - utc_offset_s;
+            let (sums, count) = periods.entry(bucket).or_insert_with(|| (vec![0.0, 0.0], 0));
+            sums[0] += power.value(row);
+            sums[1] += temp.value(row);
+            *count += 1;
+        }
+    }
+    // The period means: the step-order sums divided once by the step
+    // count, the same division the fleet's reducer performs.
+    periods
+        .into_iter()
+        .map(|(bucket, (sums, count))| {
+            let count = f64::from(count);
+            (bucket, vec![sums[0] / count, sums[1] / count])
+        })
+        .collect()
+}
 
 pub fn run_aggregation_check() -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
 
-    run_fleet_integration(&mut failures);
-    run_weighted_sum_with_weights(&mut failures);
-    run_hourly_resample_suffix_rules(&mut failures);
-    run_weighted_mean_vs_sum(&mut failures);
-    run_null_propagates_to_aggregate(&mut failures);
-
-    if failures.is_empty() {
-        eprintln!("[aggregation_check] PASS");
-        Ok(())
-    } else {
-        Err(failures)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Integration: fleet simulation → aggregation end-to-end
-// ---------------------------------------------------------------------------
-
-fn run_fleet_integration(failures: &mut Vec<String>) {
     let scratch = tempfile::tempdir().expect("create scratch directory");
     let schedule_path = scratch.path().join("schedule.csv");
     let weather_path = scratch.path().join("weather.epw");
     helpers::write_schedule_csv(&schedule_path);
     helpers::write_weather_epw(&weather_path);
 
-    let configs: Vec<_> = (0..3)
+    let duration = Duration::hours(1);
+    let mut configs: Vec<_> = (0..3)
         .map(|idx| {
             helpers::build_dwelling_config(
                 scratch.path(),
                 idx as i64 + 1,
                 schedule_path.clone(),
                 weather_path.clone(),
-                Duration::hours(1),
+                duration,
                 idx as u64,
             )
         })
         .collect();
+    // The fourth home's schedule does not exist: the home fails.
+    configs.push(hares_core::DwellingConfig {
+        schedule_path: Some(scratch.path().join("no-such-schedule.csv")),
+        ..helpers::build_dwelling_config(
+            scratch.path(),
+            4,
+            schedule_path.clone(),
+            weather_path.clone(),
+            duration,
+            3,
+        )
+    });
 
     let fleet = Fleet::from_buildings(configs)
-        .with_sample_weights(vec![1.0, 2.0, 0.5])
-        .expect("valid positive sample weights");
-    let outcomes = fleet.simulate(1);
+        .map_err(|err| vec![format!("fleet construction: {err}")])?
+        .with_sample_weights(vec![1.0, 2.0, 5.0, 1.0])
+        .map_err(|err| vec![format!("sample weights: {err}")])?;
+    let report = FleetReport {
+        selection: Selection::Verbosity(2),
+        frequency: Frequency::Hourly,
+        health_policy: hares_io::HealthPolicy::default(),
+    };
+    let result = match fleet.simulate(&report, 1, std::num::NonZeroUsize::new(64).expect("64")) {
+        Ok(result) => result,
+        Err(err) => return Err(vec![format!("fleet simulate: {err}")]),
+    };
 
-    let successful: Vec<DwellingOutcome> = outcomes
-        .into_iter()
-        .enumerate()
-        .filter_map(|(idx, result)| match result {
-            Ok(outcome) => {
-                if matches!(outcome.status, SimStatus::Failed(_)) {
-                    failures.push(format!("dwelling[{idx}] simulation status is Failed"));
-                    None
-                } else {
-                    Some(outcome)
-                }
-            }
-            Err(err) => {
-                failures.push(format!("dwelling[{idx}] fleet error: {err}"));
-                None
-            }
-        })
-        .collect();
-
-    if successful.len() != 3 {
+    // The failed home is listed with its reason, and excluded from the
+    // fold-eligible weight: the three good homes carry the BEopt
+    // fixture's own HPXML provenance warning (they are flagged, not ok),
+    // so their weight sits in weight_flagged; the failed home's weight is
+    // in neither.
+    let failed = &result.homes[3];
+    if !matches!(failed.status, hares_fleet::SimStatus::Failed(_)) {
+        failures.push(format!("home 4 must be failed, got {:?}", failed.status));
+    } else if failed
+        .reason
+        .as_deref()
+        .is_none_or(|reason| reason.is_empty())
+    {
+        failures.push("the failed home's reason is empty".to_string());
+    }
+    let good_weight = 1.0 + 2.0 + 5.0;
+    if result.coverage.weight_ok + result.coverage.weight_flagged != good_weight {
         failures.push(format!(
-            "expected 3 successful dwellings, got {}",
-            successful.len()
+            "coverage.weight_ok {} + weight_flagged {} != {good_weight} (the failed home's weight excluded)",
+            result.coverage.weight_ok, result.coverage.weight_flagged
         ));
     }
-
-    if !successful.is_empty() {
-        let results =
-            aggregation::aggregate(&successful, AggregationResolution::Hourly).expect("aggregate");
-
-        if results.per_dwelling_metrics.len() != successful.len() {
-            failures.push(format!(
-                "per_dwelling_metrics length {} != dwelling count {}",
-                results.per_dwelling_metrics.len(),
-                successful.len()
-            ));
-        }
-
-        for (idx, metrics) in results.per_dwelling_metrics.iter().enumerate() {
-            if metrics.total_energy_kwh <= 0.0 || !metrics.total_energy_kwh.is_finite() {
-                failures.push(format!(
-                    "dwelling[{idx}] total_energy_kwh={} (expected > 0.0)",
-                    metrics.total_energy_kwh
-                ));
-            }
-            if metrics.sample_weight <= 0.0 || !metrics.sample_weight.is_finite() {
-                failures.push(format!(
-                    "dwelling[{idx}] sample_weight={} (expected > 0.0)",
-                    metrics.sample_weight
-                ));
-            }
-        }
-
-        if results.aggregate_timeseries.num_rows() == 0 {
-            failures.push("aggregate_timeseries is empty".to_string());
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Synthetic: weighted sum uses sample weights and nulls
-// ---------------------------------------------------------------------------
-
-fn run_weighted_sum_with_weights(failures: &mut Vec<String>) {
-    let t0 = utc_ms("2021-01-01T00:00:00Z");
-    let t1 = utc_ms("2021-01-01T00:15:00Z");
-    let t2 = utc_ms("2021-01-01T00:30:00Z");
-
-    let d1 = outcome(
-        1.0,
-        SimStatus::Ok,
-        sample_metrics(10.0, 1.0),
-        Some(batch(
-            &[t0, t1, t2],
-            vec![(
-                "Total Electric Power (kW)",
-                vec![Some(1.0), Some(2.0), Some(3.0)],
-            )],
-        )),
-    );
-    let d2 = outcome(
-        2.0,
-        SimStatus::Ok,
-        sample_metrics(11.0, 2.0),
-        Some(batch(
-            &[t0, t1, t2],
-            vec![(
-                "Total Electric Power (kW)",
-                vec![Some(10.0), None, Some(30.0)],
-            )],
-        )),
-    );
-    let d3 = outcome(
-        0.5,
-        SimStatus::Ok,
-        sample_metrics(12.0, 3.0),
-        Some(batch(
-            &[t0, t1],
-            vec![("Total Electric Power (kW)", vec![Some(100.0), Some(200.0)])],
-        )),
-    );
-    let failed = outcome(
-        5.0,
-        SimStatus::Failed("boom".to_string()),
-        sample_metrics(0.0, 0.0),
-        Some(batch(
-            &[t0, t1, t2],
-            vec![(
-                "Total Electric Power (kW)",
-                vec![Some(999.0), Some(999.0), Some(999.0)],
-            )],
-        )),
-    );
-
-    let fleet = aggregation::aggregate(&[d1, d2, d3, failed], AggregationResolution::FifteenMin)
-        .expect("aggregate");
-
-    if fleet.per_dwelling_metrics.len() != 4 {
+    if result.coverage.weight_failed != 1.0 {
         failures.push(format!(
-            "per_dwelling_metrics length {} != 4",
-            fleet.per_dwelling_metrics.len()
+            "coverage.weight_failed {} != 1.0",
+            result.coverage.weight_failed
         ));
-        return;
     }
-    let failed_count = fleet
-        .per_dwelling_metrics
-        .iter()
-        .filter(|m| m.failed)
-        .count();
-    if failed_count != 1 {
-        failures.push(format!("expected 1 failed dwelling, got {failed_count}"));
+    if result.n_succeeded != 3 {
+        failures.push(format!("n_succeeded {} != 3", result.n_succeeded));
     }
 
-    let times = fleet
-        .aggregate_timeseries
+    // The row count is the period count: one hourly period.
+    if result.aggregate.num_rows() != 1 {
+        failures.push(format!(
+            "the aggregate's row count {} != 1 (the run's period count)",
+            result.aggregate.num_rows()
+        ));
+        return Err(failures);
+    }
+
+    // A power cell is the weighted sum of the three homes' period means;
+    // a temperature cell is their weighted mean. The homes' own period
+    // means come from standalone runs at the same building ids.
+    let period_start = result
+        .aggregate
         .column(0)
         .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("time column");
-    let values = fleet
-        .aggregate_timeseries
-        .column(1)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("power column");
+        .downcast_ref::<arrow::array::StringArray>()
+        .expect("the Time column")
+        .value(0)
+        .to_string();
+    let bucket = chrono::DateTime::parse_from_rfc3339(&period_start)
+        .map(|dt| dt.timestamp())
+        .unwrap_or_else(|err| {
+            failures.push(format!("the aggregate's Time label: {err}"));
+            0
+        });
 
-    if times.len() != 2 {
-        failures.push(format!("expected 2 time buckets, got {}", times.len()));
-        return;
+    let homes: [(i64, f64); 3] = [(1, 1.0), (2, 2.0), (3, 5.0)];
+    let mut weighted_power = 0.0;
+    let mut weighted_temp = 0.0;
+    let mut total_weight = 0.0;
+    for (bldg_id, weight) in homes {
+        let seed = u64::try_from(bldg_id - 1).expect("seed");
+        let periods = standalone_home_periods(
+            bldg_id,
+            seed,
+            schedule_path.clone(),
+            weather_path.clone(),
+            duration,
+            scratch.path(),
+        );
+        let means = periods
+            .get(&bucket)
+            .expect("the home's hourly period covers the fleet's row");
+        weighted_power += means[0] * weight;
+        weighted_temp += means[1] * weight;
+        total_weight += weight;
     }
+    let expected_temp = weighted_temp / total_weight;
 
-    // 1*1 + 10*2 + 100*0.5 = 71.0
-    let v0 = values.value(0);
-    if (v0 - 71.0).abs() >= 1e-9 {
-        failures.push(format!("weighted sum t0 expected 71.0, got {v0}"));
-    }
-
-    // dwelling 2 has null at t1 → aggregate must be null
-    if !values.is_null(1) {
-        failures.push(format!(
-            "weighted sum t1 expected null (dwelling 2 has null), got {:?}",
-            if values.is_null(1) {
-                "null".to_string()
-            } else {
-                values.value(1).to_string()
-            }
-        ));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Synthetic: hourly resample applies suffix aggregation rules
-// ---------------------------------------------------------------------------
-
-fn run_hourly_resample_suffix_rules(failures: &mut Vec<String>) {
-    let rows = [
-        utc_ms("2021-01-01T00:00:00Z"),
-        utc_ms("2021-01-01T00:15:00Z"),
-        utc_ms("2021-01-01T00:30:00Z"),
-        utc_ms("2021-01-01T00:45:00Z"),
-    ];
-
-    let d1 = outcome(
-        1.0,
-        SimStatus::Ok,
-        sample_metrics(20.0, 2.0),
-        Some(batch(
-            &rows,
-            vec![
-                (
-                    "Total Electric Power (kW)",
-                    vec![Some(1.0), Some(3.0), Some(5.0), Some(7.0)],
-                ),
-                (
-                    "Battery Energy (kWh)",
-                    vec![Some(0.2), Some(0.2), Some(0.2), Some(0.2)],
-                ),
-                (
-                    "Temperature - Indoor (\u{b0}C)",
-                    vec![Some(20.0), Some(22.0), Some(24.0), Some(26.0)],
-                ),
-                (
-                    "Battery SOC (-)",
-                    vec![Some(0.1), Some(0.3), Some(0.5), Some(0.7)],
-                ),
-            ],
-        )),
-    );
-
-    let d2 = outcome(
-        2.0,
-        SimStatus::Ok,
-        sample_metrics(30.0, 3.0),
-        Some(batch(
-            &rows,
-            vec![
-                (
-                    "Total Electric Power (kW)",
-                    vec![Some(2.0), Some(4.0), Some(6.0), Some(8.0)],
-                ),
-                (
-                    "Battery Energy (kWh)",
-                    vec![Some(0.5), Some(0.5), Some(0.5), Some(0.5)],
-                ),
-                (
-                    "Temperature - Indoor (\u{b0}C)",
-                    vec![Some(10.0), Some(12.0), Some(14.0), Some(16.0)],
-                ),
-                (
-                    "Battery SOC (-)",
-                    vec![Some(0.2), Some(0.4), Some(0.6), Some(0.8)],
-                ),
-            ],
-        )),
-    );
-
-    let fleet =
-        aggregation::aggregate(&[d1, d2], AggregationResolution::Hourly).expect("aggregate");
-    if fleet.aggregate_timeseries.num_rows() != 1 {
-        failures.push(format!(
-            "expected 1 aggregate row, got {}",
-            fleet.aggregate_timeseries.num_rows()
-        ));
-        return;
-    }
-
-    let col = |idx: usize| -> f64 {
-        fleet
-            .aggregate_timeseries
-            .column(idx)
+    let cell = |name: &str| -> Option<f64> {
+        let slot = result
+            .aggregate
+            .schema_ref()
+            .fields()
+            .iter()
+            .position(|field| field.name() == name);
+        let slot = slot?;
+        result
+            .aggregate
+            .column(slot)
             .as_any()
             .downcast_ref::<Float64Array>()
-            .unwrap()
-            .value(0)
+            .map(|values| values.value(0))
     };
-
-    let power = col(1);
-    let energy = col(2);
-    let temp = col(3);
-    let frac = col(4);
-
-    // Power (kW): Phase-1 mean → Phase-2 weighted sum = (4.0*1) + (5.0*2) = 14.0
-    let expected_power = 14.0;
-    if (power - expected_power).abs() >= 1e-9 {
-        failures.push(format!("power (kW) expected {expected_power}, got {power}"));
-    }
-
-    // Energy (kWh): Phase-1 sum → Phase-2 weighted sum = (0.8*1) + (2.0*2) = 4.8
-    let expected_energy = 4.8;
-    if (energy - expected_energy).abs() >= 1e-9 {
+    if cell("Total Electric Power (kW)")
+        .is_none_or(|power| power.to_bits() != weighted_power.to_bits())
+    {
         failures.push(format!(
-            "energy (kWh) expected {expected_energy}, got {energy}"
+            "the power cell is not the weighted sum of the homes' period means ({weighted_power})"
+        ));
+    }
+    if cell("Temperature - Indoor (C)").is_none_or(|temp| temp.to_bits() != expected_temp.to_bits())
+    {
+        failures.push(format!(
+            "the temperature cell is not the weighted mean of the homes' period means ({expected_temp})"
         ));
     }
 
-    // Temperature (°C): weighted mean = (23*1 + 13*2) / (1+2) = 49/3
-    let expected_temp = 49.0 / 3.0;
-    if (temp - expected_temp).abs() >= 1e-9 {
-        failures.push(format!("temp (°C) expected {expected_temp}, got {temp}"));
-    }
-
-    // SOC (-): weighted mean = (0.4*1 + 0.5*2) / (1+2) = 1.4/3
-    let expected_frac = 1.4 / 3.0;
-    if (frac - expected_frac).abs() >= 1e-9 {
-        failures.push(format!("SOC (-) expected {expected_frac}, got {frac}"));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Synthetic: weighted mean vs sum with unequal weights
-// ---------------------------------------------------------------------------
-
-fn run_weighted_mean_vs_sum(failures: &mut Vec<String>) {
-    let t0 = utc_ms("2021-01-01T00:00:00Z");
-
-    let make_dwelling = |weight: f64, power: f64, temp: f64, soc: f64| {
-        outcome(
-            weight,
-            SimStatus::Ok,
-            sample_metrics(10.0, 1.0),
-            Some(batch(
-                &[t0],
-                vec![
-                    ("Total Electric Power (kW)", vec![Some(power)]),
-                    ("Temperature - Indoor (\u{b0}C)", vec![Some(temp)]),
-                    ("Battery SOC (-)", vec![Some(soc)]),
-                ],
-            )),
-        )
-    };
-
-    let d1 = make_dwelling(1.0, 10.0, 20.0, 0.8);
-    let d2 = make_dwelling(2.0, 20.0, 30.0, 0.5);
-    let d3 = make_dwelling(3.0, 30.0, 25.0, 0.2);
-
-    let fleet =
-        aggregation::aggregate(&[d1, d2, d3], AggregationResolution::Hourly).expect("aggregate");
-    if fleet.aggregate_timeseries.num_rows() != 1 {
-        failures.push(format!(
-            "weighted mean vs sum: expected 1 row, got {}",
-            fleet.aggregate_timeseries.num_rows()
-        ));
-        return;
-    }
-
-    let col = |idx: usize| -> f64 {
-        fleet
-            .aggregate_timeseries
-            .column(idx)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
-            .value(0)
-    };
-
-    let power = col(1);
-    let temp = col(2);
-    let soc = col(3);
-
-    // Power (kW): weighted sum = 10*1 + 20*2 + 30*3 = 140
-    let expected_power = 140.0;
-    if (power - expected_power).abs() >= 1e-9 {
-        failures.push(format!("power (kW) expected {expected_power}, got {power}"));
-    }
-
-    // Temperature (°C): weighted mean = (20*1 + 30*2 + 25*3) / (1+2+3) = 155/6
-    let expected_temp = (20.0 + 30.0 * 2.0 + 25.0 * 3.0) / 6.0;
-    if (temp - expected_temp).abs() >= 1e-9 {
-        failures.push(format!("temp (°C) expected {expected_temp}, got {temp}"));
-    }
-
-    // SOC (-): weighted mean = (0.8*1 + 0.5*2 + 0.2*3) / 6 = 2.4/6 = 0.4
-    let expected_soc = (0.8 + 0.5 * 2.0 + 0.2 * 3.0) / 6.0;
-    if (soc - expected_soc).abs() >= 1e-9 {
-        failures.push(format!("SOC (-) expected {expected_soc}, got {soc}"));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Synthetic: null values propagate to aggregate null
-// ---------------------------------------------------------------------------
-
-fn run_null_propagates_to_aggregate(failures: &mut Vec<String>) {
-    let t0 = utc_ms("2021-01-01T00:00:00Z");
-
-    let d1 = outcome(
-        1.0,
-        SimStatus::Ok,
-        sample_metrics(10.0, 1.0),
-        Some(batch(
-            &[t0],
-            vec![("Total Electric Power (kW)", vec![Some(1.0)])],
-        )),
-    );
-    let d2 = outcome(
-        1.0,
-        SimStatus::Ok,
-        sample_metrics(10.0, 1.0),
-        Some(batch(
-            &[t0],
-            vec![("Total Electric Power (kW)", vec![None])],
-        )),
-    );
-
-    let fleet =
-        aggregation::aggregate(&[d1, d2], AggregationResolution::Hourly).expect("aggregate");
-    if fleet.aggregate_timeseries.num_rows() != 1 {
-        failures.push(format!(
-            "null propagation: expected 1 row, got {}",
-            fleet.aggregate_timeseries.num_rows()
-        ));
-        return;
-    }
-
-    let values = fleet
-        .aggregate_timeseries
-        .column(1)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("power column");
-
-    // One dwelling has null at this timestep → aggregate must be null
-    if !values.is_null(0) {
-        failures.push(format!(
-            "null propagation: expected null when one dwelling has null, got {}",
-            values.value(0)
-        ));
+    if failures.is_empty() {
+        eprintln!("[aggregation_check] PASS");
+        Ok(())
+    } else {
+        Err(failures)
     }
 }

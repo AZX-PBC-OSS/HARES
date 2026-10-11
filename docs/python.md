@@ -367,6 +367,20 @@ replacement.
   methods, `DwellingBlueprint` and its constructors, `SimulationPlan`,
   `SimulationConfig.diagnostics`, `Fleet.from_resstock`,
   `SteppableFleet` and its methods.
+- Added: `FleetReport` (a `Selection`, a `Frequency` and the fleet's
+  `HealthPolicy`), `FleetResult` (with `aggregate`, `covered_weight`,
+  `homes`, `coverage`, `n_succeeded`, `n_failed`,
+  `peak_live_home_results`), `Coverage` (with `weight_total`,
+  `weight_ok`, `weight_flagged`, `weight_failed`), and the
+  `Frequency` constructors `minutes`, `hourly`, `daily`, `monthly`,
+  `annual` and `run_period`.
+- Removed: `FleetResults` with `per_dwelling_metrics`,
+  `aggregate_timeseries` and `failures`: read `FleetResult.homes` (a
+  failed home is a `homes` row with status `failed` and its reason),
+  `FleetResult.aggregate` and `FleetResult.n_failed`.
+- Renamed: `AggregationResolution` (with the `resolution=` keyword) to
+  the `FleetReport`'s `frequency` (`Frequency.minutes(15)` is the old
+  `FifteenMin`, `Frequency.hourly` the old `Hourly`).
 - Removed: `Dwelling.results()`: read the run's reports off the
   `RunResult` (`simulate()`'s or `finish()`'s return,
   `result.reports[i].table()`).

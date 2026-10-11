@@ -1,7 +1,10 @@
 kind = "fleet"
 features = []
 defaults = "defaults"
-resolution = "hourly"
+
+[fleet]
+frequency = "hourly"
+selection = "verbosity-2"
 
 [simulation]
 start_time = "2018-01-01T00:00:00-06:00"

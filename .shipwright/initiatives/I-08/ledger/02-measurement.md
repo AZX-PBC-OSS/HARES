@@ -2511,3 +2511,64 @@ Against the review's figures: week and year agree to rounding (284 KB,
 13.9 MB), quarter and half-year read slightly higher here (3.6 MB and
 7.0 MB); linearity holds in every recorded row on both sides, and the
 sizes are exact (all five year-end saves byte-count identical).
+
+### The streaming fleet fold's golden homes, wall time and memory bound, 2026-10-11 (branch `row/r50-fl1`, worktree of `16b3c993`)
+
+**The golden homes' premise record (FL-2's premise).** Every home of
+both fleet goldens, run standalone at its own building id, seed and
+inputs (the manifest's sim config: `fleet_same_offset_300s` at
+2018-01-01T00:00:00-08:00, two days at 300 s, no warm-up;
+`fleet_mixed_offset` at 2018-01-01T00:00:00-06:00, seven days at
+3600 s, the converging warm-up): every home carries an empty
+`RunResult.warnings` (zero dropped) and every `RunHealth` counter zero
+(`port_rollbacks`, `rejected_control_signals`, `clamped_actions`,
+`curve_index_clamps`, `fluid_payload_absences`, `evicted_actors`). The
+same_offset homes' warm-up is disabled; the mixed_offset homes' warm-up
+leaves no warning. The premise FL-2's bitwise claim rests on holds:
+every golden home is clean.
+
+**The goldens' re-capture (the second commit).** `fleet_same_offset_300s`:
+the `aggregate` product (36 columns, 192 rows) and the `metrics` product
+compare bitwise with the first commit's capture (captured on the parent
+code's collect-then-aggregate fold); the `covered_weight` and `homes`
+products are new shapes (the first commit carried the `weights`
+stand-in) and were captured in the second commit. `fleet_mixed_offset`:
+the `aggregate` stays the empty schema (zero rows: its three homes
+declare different variable sets, the mismatch empties the aggregate
+until FL-2) and `metrics` compares bitwise; `covered_weight` (zero rows,
+same empty schema) and the new-shape `homes` captured here.
+`resstock_2025_fleet` was re-captured too: its `aggregate` (zero rows)
+and `fleet_report` products compare bitwise, its `homes` product takes
+the new shape, its `metrics` product goes from three rows to zero (the
+ResStock constructor's homes request no run metrics; per-home metrics
+are computed only when the home's `SimulationConfig` requests them) and
+its `weights` stand-in is replaced by the zero-row `covered_weight`.
+
+**Wall time (the `perf:` commit's rule).** `frame_golden run`, five
+fresh runs, median, this host, WSL2, the release build at the parent
+(16b3c993's collect-then-aggregate) and after (the streaming fold at
+chunk 64, the Python default):
+
+- `fleet_same_offset_300s`: parent median 0.413 s (0.399 to 0.474);
+  after 0.405 s (0.394 to 0.429). Within the 5% band, on the fast side.
+- `fleet_mixed_offset`: parent median 0.252 s (0.246 to 0.263); after
+  0.253 s (0.249 to 0.256). Within the 5% band.
+
+**The memory bound (the new `fleet_fold` bench group,
+`cargo bench -p hares-core --bench fleet`).** Copies of the base
+fixture at 24 h and 900 s steps, folded at the hour, 8 threads; peak
+RSS (VmHWM) read after the runs, the bench's chunk size in the
+benchmark id. The chunk bound's effect is the pair at one fleet size:
+the one-chunk shape (`chunk_1000`, the parent commit's collect
+equivalent) holds every home's result at once; `chunk_64` holds at most
+64.
+
+- 100 homes: `chunk_64` 66.1 MB VmHWM (one chunk at this size).
+- 1000 homes: `chunk_64` 71.7 MB; `chunk_1000` 71.8 MB. 1.3 s either way.
+- 10000 homes: `chunk_64` 104.0 MB; `chunk_1000` 158.3 MB. 12.5 s vs
+  12.4 s: the chunk barrier costs nothing measurable, and the bound
+  saves about 54 MB of resident home results at ten thousand homes.
+- The bookkeeping slope at `chunk_64` from 1000 to 10000 homes is about
+  3.6 kB per home (the entry list, the homes row and the fold's running
+  cells share it with the criterion harness's own footprint; the pair
+  difference isolates the home results).

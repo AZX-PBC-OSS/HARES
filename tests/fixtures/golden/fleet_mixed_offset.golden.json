@@ -3,8 +3,8 @@
   "features": [],
   "defaults_dir": "defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "c15f0dd24d5643b51579253ad2ef559b5ddef64b",
-  "git_dirty": false,
+  "git_head": "9eb66255f2d7474d5c961b6af7fd113c303c9e89",
+  "git_dirty": true,
   "metrics": [
     {
       "comfort_hours": {
@@ -488,6 +488,23 @@
         }
       ]
     },
+    "covered_weight": {
+      "num_rows": 0,
+      "schema": [
+        {
+          "name": "Time",
+          "arrow_type": "Utf8",
+          "nullable": false
+        }
+      ],
+      "columns": [
+        {
+          "name": "Time",
+          "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "blocks": []
+        }
+      ]
+    },
     "homes": {
       "num_rows": 3,
       "schema": [
@@ -497,17 +514,7 @@
           "nullable": false
         },
         {
-          "name": "total_energy_kwh",
-          "arrow_type": "Float64",
-          "nullable": false
-        },
-        {
-          "name": "peak_power_kw",
-          "arrow_type": "Float64",
-          "nullable": false
-        },
-        {
-          "name": "sample_weight",
+          "name": "weight",
           "arrow_type": "Float64",
           "nullable": false
         },
@@ -517,9 +524,29 @@
           "nullable": false
         },
         {
-          "name": "failed",
-          "arrow_type": "Boolean",
+          "name": "reason",
+          "arrow_type": "Utf8",
+          "nullable": true
+        },
+        {
+          "name": "steps",
+          "arrow_type": "Int64",
           "nullable": false
+        },
+        {
+          "name": "periods_folded",
+          "arrow_type": "Int64",
+          "nullable": false
+        },
+        {
+          "name": "total_energy_kwh",
+          "arrow_type": "Float64",
+          "nullable": true
+        },
+        {
+          "name": "peak_power_kw",
+          "arrow_type": "Float64",
+          "nullable": true
         }
       ],
       "columns": [
@@ -528,6 +555,41 @@
           "digest": "f80f29313c8e36a9d907db713fb3b63b3e3191e98c3147a665ff6666bf37538e",
           "blocks": [
             "f80f29313c8e36a9d907db713fb3b63b3e3191e98c3147a665ff6666bf37538e"
+          ]
+        },
+        {
+          "name": "weight",
+          "digest": "cd5e18422219addc4acedc45d4b5290300730e38e2a3fbdf57a878f41cbf8c43",
+          "blocks": [
+            "cd5e18422219addc4acedc45d4b5290300730e38e2a3fbdf57a878f41cbf8c43"
+          ]
+        },
+        {
+          "name": "status",
+          "digest": "73432e712fa7a6a5343cfb080584e4606f11956f603d3f604d88e1661f203474",
+          "blocks": [
+            "73432e712fa7a6a5343cfb080584e4606f11956f603d3f604d88e1661f203474"
+          ]
+        },
+        {
+          "name": "reason",
+          "digest": "dd46c3eebb1884ff3b5258c0a2fc9398e560a29e0780d4b53869b6254aa46a96",
+          "blocks": [
+            "dd46c3eebb1884ff3b5258c0a2fc9398e560a29e0780d4b53869b6254aa46a96"
+          ]
+        },
+        {
+          "name": "steps",
+          "digest": "a429a78ddab964f19d3ddac4fe73d5a8e8b41be1534bda8466d57cdf55b7070b",
+          "blocks": [
+            "a429a78ddab964f19d3ddac4fe73d5a8e8b41be1534bda8466d57cdf55b7070b"
+          ]
+        },
+        {
+          "name": "periods_folded",
+          "digest": "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104",
+          "blocks": [
+            "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104"
           ]
         },
         {
@@ -542,58 +604,6 @@
           "digest": "84e81b9d963e6fdc85c10f00aa6530413393e460cd551959137d275e98a03d76",
           "blocks": [
             "84e81b9d963e6fdc85c10f00aa6530413393e460cd551959137d275e98a03d76"
-          ]
-        },
-        {
-          "name": "sample_weight",
-          "digest": "cd5e18422219addc4acedc45d4b5290300730e38e2a3fbdf57a878f41cbf8c43",
-          "blocks": [
-            "cd5e18422219addc4acedc45d4b5290300730e38e2a3fbdf57a878f41cbf8c43"
-          ]
-        },
-        {
-          "name": "status",
-          "digest": "17ef56bc82ee9048bb650aca5057923996bb870aa482dc71b2bbb4afa361c53e",
-          "blocks": [
-            "17ef56bc82ee9048bb650aca5057923996bb870aa482dc71b2bbb4afa361c53e"
-          ]
-        },
-        {
-          "name": "failed",
-          "digest": "e8613f5a5bc9f9feeda32a8e7c80b69dd4878e47b6a91723fb15eb84236b6a2b",
-          "blocks": [
-            "e8613f5a5bc9f9feeda32a8e7c80b69dd4878e47b6a91723fb15eb84236b6a2b"
-          ]
-        }
-      ]
-    },
-    "weights": {
-      "num_rows": 3,
-      "schema": [
-        {
-          "name": "bldg_id",
-          "arrow_type": "Int64",
-          "nullable": false
-        },
-        {
-          "name": "sample_weight",
-          "arrow_type": "Float64",
-          "nullable": false
-        }
-      ],
-      "columns": [
-        {
-          "name": "bldg_id",
-          "digest": "f80f29313c8e36a9d907db713fb3b63b3e3191e98c3147a665ff6666bf37538e",
-          "blocks": [
-            "f80f29313c8e36a9d907db713fb3b63b3e3191e98c3147a665ff6666bf37538e"
-          ]
-        },
-        {
-          "name": "sample_weight",
-          "digest": "cd5e18422219addc4acedc45d4b5290300730e38e2a3fbdf57a878f41cbf8c43",
-          "blocks": [
-            "cd5e18422219addc4acedc45d4b5290300730e38e2a3fbdf57a878f41cbf8c43"
           ]
         }
       ]

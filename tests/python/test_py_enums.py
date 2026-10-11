@@ -11,7 +11,6 @@ from hares import (
     InverterPriority,
     DutyCycleComponent,
     SimStatus,
-    AggregationResolution,
     ResStockVersion,
     ControlCapabilities,
     LutType,
@@ -237,18 +236,6 @@ class TestSimStatus:
     def test_from_str_invalid_raises(self):
         with pytest.raises(ValueError):
             SimStatus.from_str("Invalid")
-
-
-class TestAggregationResolution:
-    def test_variants_accessible(self):
-        assert AggregationResolution.FifteenMin is not None
-        assert AggregationResolution.Hourly is not None
-
-    def test_from_str_round_trip(self):
-        assert (
-            AggregationResolution.from_str("15min") == AggregationResolution.FifteenMin
-        )
-        assert AggregationResolution.from_str("hourly") == AggregationResolution.Hourly
 
 
 class TestResStockVersion:

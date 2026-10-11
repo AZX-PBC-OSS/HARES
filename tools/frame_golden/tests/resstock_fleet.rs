@@ -90,10 +90,7 @@ fn resstock_fleet_manifest_parses_with_its_keys() {
     assert_eq!(manifest.version, Some(hares_io::ResStockVersion::V2025_1));
     assert_eq!(manifest.duration, Some(172800));
     let fleet = manifest.fleet.as_ref().expect("the [fleet] table parses");
-    assert_eq!(
-        fleet.frequency,
-        frame_golden::manifest::ManifestResolution::Hourly
-    );
+    assert_eq!(fleet.frequency, hares_io::Frequency::Hourly);
     assert_eq!(fleet.selection.verbosity(), 2);
     assert!(
         manifest.home.is_empty(),
@@ -241,12 +238,12 @@ fn resstock_fleet_manifest_rejects_unknown_spellings() {
     );
 
     let unknown_frequency = resstock_fleet_manifest(172800)
-        .replace("frequency = \"hourly\"", "frequency = \"monthly\"");
+        .replace("frequency = \"hourly\"", "frequency = \"fortnightly\"");
     let manifest_path = write_manifest(&dir, &unknown_frequency);
     let error = GoldenManifest::load(&manifest_path)
         .expect_err("an unknown frequency spelling must be rejected");
     assert!(
-        error.to_string().contains("monthly"),
+        error.to_string().contains("fortnightly"),
         "the error must name the value: {error}"
     );
 }
@@ -271,34 +268,34 @@ fn resstock_fleet_run_reports_the_construction() {
     assert_eq!(int_column(batch, "weather_resolved").value(0), 3);
     assert_eq!(int_column(batch, "weather_failed").value(0), 0);
 
-    let weights = products.frames.get("weights").expect("the weights product");
-    let batch = weights.batches.first().unwrap();
+    // The homes table: one row per home, in metadata order, each home's
+    // metadata weight.
+    let homes = products.frames.get("homes").expect("the homes product");
+    let batch = homes.batches.first().unwrap();
     let ids = int_column(batch, "bldg_id");
     assert_eq!(ids.value(0), 19694, "rows in metadata order");
     assert_eq!(ids.value(1), 162486);
     assert_eq!(ids.value(2), 352714);
-    let sample_weights = batch
+    let weights = batch
         .column(1)
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()
         .unwrap();
     assert_eq!(
-        sample_weights.value(0),
+        weights.value(0),
         253.90367272727272,
         "the weight comes from the metadata's weight column"
     );
-
-    let homes = products.frames.get("homes").expect("the homes product");
-    let batch = homes.batches.first().unwrap();
-    let energy = batch
-        .column(1)
+    let statuses = batch
+        .column(2)
         .as_any()
-        .downcast_ref::<arrow::array::Float64Array>()
+        .downcast_ref::<arrow::array::StringArray>()
         .unwrap();
     for row in 0..3 {
-        assert!(
-            energy.value(row) > 0.0,
-            "the homes ran with their recorders on: real energies"
+        assert_ne!(
+            statuses.value(row),
+            "failed",
+            "a warning is not a failure: the fixture homes run"
         );
     }
 }
@@ -341,20 +338,20 @@ fn resstock_fleet_capture_compares_and_detects_mutation() {
     }
     let homes = products.frames.get("homes").unwrap();
     let batch = homes.batches.first().unwrap();
-    let energy: arrow::array::Float64Array = batch
+    let weight: arrow::array::Float64Array = batch
         .column(1)
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()
         .unwrap()
         .clone();
-    let flipped = f64::from_bits(energy.value(0).to_bits() ^ 0x10);
+    let flipped = f64::from_bits(weight.value(0).to_bits() ^ 0x10);
     let mutated: arrow::array::ArrayRef = Arc::new({
         let mut builder = arrow::array::Float64Builder::new();
-        for row in 0..energy.len() {
+        for row in 0..weight.len() {
             if row == 0 {
                 builder.append_value(flipped);
             } else {
-                builder.append_value(energy.value(row));
+                builder.append_value(weight.value(row));
             }
         }
         builder.finish()
@@ -379,7 +376,7 @@ fn resstock_fleet_capture_compares_and_detects_mutation() {
         report.differences.iter().any(|difference| matches!(
             difference,
             frame_golden::Difference::ColumnDigest { product, column, .. }
-                if product == "homes" && column == "total_energy_kwh"
+                if product == "homes" && column == "weight"
         )),
         "the difference must name the corrupted product and column: {report:?}"
     );

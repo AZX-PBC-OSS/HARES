@@ -244,7 +244,10 @@ overrides = {{}}
 kind = "fleet"
 features = [{features}]
 defaults = "defaults"
-resolution = "hourly"
+
+[fleet]
+frequency = "hourly"
+selection = "verbosity-2"
 
 [simulation]
 start_time = "2018-01-01T00:00:00-05:00"
@@ -265,35 +268,69 @@ destination = "memory"
 }
 
 #[test]
-fn fleet_manifest_weights_reach_the_weights_product() {
+fn fleet_manifest_weights_reach_the_covered_weight() {
     let dir = tempfile::tempdir().unwrap();
     let manifest_path = dir.path().join("fleet_weights.toml");
     std::fs::write(&manifest_path, weighted_fleet_manifest()).unwrap();
 
     let products = run_products(&manifest_path);
-    let weights = products
+    // The homes table: one row per home, in home order, each home's own
+    // manifest weight.
+    let homes = products
         .frames
-        .get("weights")
-        .expect("a fleet run produces a weights product");
-    let batch = weights
+        .get("homes")
+        .expect("a fleet run produces a homes product");
+    let batch = homes
         .batches
         .first()
-        .expect("the weights product has a batch");
+        .expect("the homes product has a batch");
     let bldg_ids = batch
         .column(0)
         .as_any()
         .downcast_ref::<Int64Array>()
         .expect("bldg_id is an Int64 column");
-    let sample_weights = batch
+    let weights = batch
         .column(1)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .expect("sample_weight is a Float64 column");
-    assert_eq!(bldg_ids.len(), 2, "one weights row per home");
+        .expect("weight is a Float64 column");
+    assert_eq!(bldg_ids.len(), 2, "one homes row per home");
     assert_eq!(bldg_ids.value(0), 2, "rows are in home order");
     assert_eq!(bldg_ids.value(1), 2, "rows are in home order");
-    assert_eq!(sample_weights.value(0), 1.0, "the first home's weight");
-    assert_eq!(sample_weights.value(1), 3.0, "the second home's weight");
+    assert_eq!(weights.value(0), 1.0, "the first home's weight");
+    assert_eq!(weights.value(1), 3.0, "the second home's weight");
+
+    // The covered weight: the weight behind the aggregate's cells, the
+    // same shape as the aggregate. The two homes declare one column set,
+    // so every cell carries both weights.
+    let covered = products
+        .frames
+        .get("covered_weight")
+        .expect("a fleet run produces a covered_weight product");
+    let covered_batch = covered
+        .batches
+        .first()
+        .expect("the covered weight has a batch");
+    let covered_weights = covered_batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("a covered weight cell is a Float64 column");
+    assert_eq!(
+        covered_batch.num_columns(),
+        products
+            .frames
+            .get("aggregate")
+            .and_then(|frame| frame.batches.first())
+            .map(|batch| batch.num_columns())
+            .expect("an aggregate product"),
+        "the covered weight carries the aggregate's columns"
+    );
+    assert_eq!(
+        covered_weights.value(0),
+        4.0,
+        "the cell's covered weight is both homes'"
+    );
 }
 
 /// Runs git in the fixture repository `dir` with an empty configuration of

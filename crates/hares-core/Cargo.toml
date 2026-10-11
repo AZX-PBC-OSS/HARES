@@ -115,11 +115,6 @@ path = "../../benches/rl_step.rs"
 harness = false
 
 [[bench]]
-name = "aggregation"
-path = "../../benches/aggregation.rs"
-harness = false
-
-[[bench]]
 name = "rl_episode"
 path = "../../benches/rl_episode.rs"
 harness = false

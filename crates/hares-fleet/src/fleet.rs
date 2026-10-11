@@ -1,18 +1,17 @@
 //! Fleet struct and parallel dwelling simulation.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, FixedOffset, TimeZone};
-use hares_core::{
-    Dwelling, DwellingConfig, DwellingTelemetry, RunResult, SimulationEngine, StepResult,
-};
+use hares_core::{Dwelling, DwellingConfig, DwellingTelemetry, SimulationEngine, StepResult};
 use hares_io::{
-    ResStockBuilding, ResStockVersion, SampleWeightClass, SimulationConfig, classify_sample_weight,
-    parse_resstock_metadata,
+    ResStockBuilding, ResStockVersion, SampleWeightClass, Selection, SimulationConfig,
+    classify_sample_weight, parse_resstock_metadata,
 };
 use hares_types::ControlSignal;
 use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
@@ -20,7 +19,15 @@ use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use thiserror::Error;
 
+use crate::fold::{
+    Coverage, FleetFold, FleetReport, FleetResult, HomeFoldState, HomeResult, ReducerFeed,
+};
+
 const DEFAULT_RESSTOCK_VERSION: ResStockVersion = ResStockVersion::V2025_1;
+
+/// The report name the fleet appends to every home's config; a home
+/// whose own config already carries it is a construction error.
+pub const FLEET_REPORT_NAME: &str = "fleet";
 
 type ProgressCallback = Arc<dyn Fn(usize, usize) + Send + Sync + 'static>;
 
@@ -38,17 +45,7 @@ pub enum SimStatus {
     Failed(String),
 }
 
-/// Fleet-owned simulation payload for one dwelling.
-#[derive(Debug, Clone)]
-pub struct DwellingOutcome {
-    pub result: std::sync::Arc<RunResult>,
-    pub sample_weight: f64,
-    pub status: SimStatus,
-    /// Wall-clock the home's run took (the engine's own timing).
-    pub elapsed: std::time::Duration,
-}
-
-/// The fleet construction report: what a ResStock fleet build parsed and
+/// The fleet's construction report: what a ResStock fleet build parsed and
 /// built, and how many homes' weather files resolved.
 ///
 /// The counts describe one [`Fleet::from_resstock`] build: every metadata
@@ -58,7 +55,7 @@ pub struct DwellingOutcome {
 /// any other constructor carries no report, because no metadata parse or
 /// weather resolution happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FleetReport {
+pub struct FleetBuildReport {
     /// Metadata rows parsed into buildings, before any filter.
     pub buildings_parsed: usize,
     /// Dwellings built from the parsed buildings (post-filter entries).
@@ -113,14 +110,23 @@ pub enum FleetError {
     #[error("verbosity {value} exceeds the maximum of {max}")]
     InvalidOutputVerbosity { value: u8, max: u8 },
     #[error(
-        "dwelling at index {dwelling_index} declares timestep-frequency memory reports \
-         {names:?}: the aggregate folds one timestep report, and two with identical \
-         schemas would concatenate into double-counted rows; drop or rename all but \
-         one so exactly one memory report records at the timestep frequency"
+        "dwelling {bldg_id} declares a report named '{FLEET_REPORT_NAME}': the name is \
+         reserved for the report the fleet appends; rename the home's own report"
     )]
-    AmbiguousTimestepReport {
-        dwelling_index: usize,
-        names: Vec<String>,
+    ReservedReportName { bldg_id: i64 },
+    #[error(
+        "no home declares {names:?}: a selection name must be declared by at least one \
+         home's catalogue (a home that does not declare a name folds no value for it)"
+    )]
+    UnmatchedSelection { names: Vec<String> },
+    #[error(
+        "homes {first} and {second} write file destinations to the same path ({path}): \
+         every home's file destination must resolve to its own path"
+    )]
+    DuplicateDestination {
+        first: i64,
+        second: i64,
+        path: String,
     },
 }
 
@@ -146,7 +152,7 @@ pub struct Fleet {
     progress: Option<ProgressCallback>,
     /// The construction report, recorded when the fleet was built from
     /// ResStock metadata.
-    report: Option<FleetReport>,
+    build_report: Option<FleetBuildReport>,
 }
 
 impl std::fmt::Debug for Fleet {
@@ -154,15 +160,22 @@ impl std::fmt::Debug for Fleet {
         f.debug_struct("Fleet")
             .field("entries", &self.entries)
             .field("progress", &self.progress.as_ref().map(|_| "..."))
-            .field("report", &self.report)
+            .field("build_report", &self.build_report)
             .finish()
     }
 }
 
 impl Fleet {
     /// Constructs a fleet from explicit dwelling configs.
-    #[must_use]
-    pub fn from_buildings(configs: Vec<DwellingConfig>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`FleetError::ReservedReportName`] when a home's config already
+    /// carries a report named `fleet`, and
+    /// [`FleetError::DuplicateDestination`] when two homes' file
+    /// destinations resolve to the same path.
+    pub fn from_buildings(configs: Vec<DwellingConfig>) -> Result<Self> {
+        check_home_configs(&configs)?;
         let entries = configs
             .into_iter()
             .map(|config| FleetEntry {
@@ -170,11 +183,11 @@ impl Fleet {
                 sample_weight: 1.0,
             })
             .collect();
-        Self {
+        Ok(Self {
             entries,
             progress: None,
-            report: None,
-        }
+            build_report: None,
+        })
     }
 
     /// Constructs a fleet from ResStock metadata and local data directories.
@@ -291,7 +304,7 @@ impl Fleet {
             unresolved,
         );
 
-        let report = FleetReport {
+        let report = FleetBuildReport {
             buildings_parsed,
             dwellings_built: entries.len(),
             weather_resolved: resolved,
@@ -300,7 +313,7 @@ impl Fleet {
         Ok(Self {
             entries,
             progress: None,
-            report: Some(report),
+            build_report: Some(report),
         })
     }
 
@@ -309,53 +322,19 @@ impl Fleet {
     /// fleet was built by a constructor that parses no metadata and
     /// resolves no weather files.
     #[must_use]
-    pub fn report(&self) -> Option<&FleetReport> {
-        self.report.as_ref()
+    pub fn build_report(&self) -> Option<&FleetBuildReport> {
+        self.build_report.as_ref()
     }
 
     /// The fleet's building identities, in fleet order: the order
-    /// [`simulate`](Self::simulate) emits its outcomes in, so a caller can
-    /// label per-home results without re-reading the metadata.
+    /// [`simulate`](Self::simulate) folds its homes in, so a caller can
+    /// label the homes table's rows without re-reading the metadata.
     #[must_use]
     pub fn bldg_ids(&self) -> Vec<i64> {
         self.entries
             .iter()
             .map(|entry| entry.config.bldg_id)
             .collect()
-    }
-
-    /// Gives every dwelling one memory report at the verbosity: the run
-    /// mode whose retained batches a caller reads (the fleet's aggregate
-    /// folds them), with real run metrics. The metrics are a per-home
-    /// config request: this builder sets `metrics = true` on every home's
-    /// config, so the aggregate's per-dwelling metrics are computed.
-    ///
-    /// A fleet built from ResStock metadata constructs its homes' sim
-    /// configs itself, so this builder is the one surface that moves their
-    /// output mode after construction and before
-    /// [`simulate`](Self::simulate).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FleetError::InvalidOutputVerbosity`] when `verbosity`
-    /// exceeds `hares_io::MAX_VERBOSITY`.
-    pub fn with_memory_report(mut self, verbosity: u8) -> Result<Self> {
-        if verbosity > hares_io::MAX_VERBOSITY {
-            return Err(FleetError::InvalidOutputVerbosity {
-                value: verbosity,
-                max: hares_io::MAX_VERBOSITY,
-            });
-        }
-        for entry in &mut self.entries {
-            entry.config.sim_config.reports = vec![hares_io::ReportSpec {
-                name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(verbosity),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Memory,
-            }];
-            entry.config.sim_config.metrics = true;
-        }
-        Ok(self)
     }
 
     /// Installs a fleet progress callback.
@@ -434,34 +413,53 @@ impl Fleet {
         self.entries.is_empty()
     }
 
-    /// Simulates all dwellings in parallel.
+    /// Simulates the fleet through the streaming ordered fold: the homes
+    /// run in consecutive chunks of the fleet's entry order on the fleet's
+    /// pool, and each finished chunk's homes fold into the running
+    /// [`FleetResult`] one at a time in entry order before the next chunk
+    /// starts. The global fold order is the entry order for every chunk
+    /// size and thread count, and at most one chunk's home results are
+    /// alive at once.
     ///
-    /// When `n_threads > 0`, a local Rayon pool is created for this call. When
-    /// `n_threads == 0`, the global Rayon pool is used.
-    #[must_use]
+    /// The fleet appends one report to every home, named `fleet`: the
+    /// report's selection restricted to the home's catalogue, at the
+    /// `Timestep` frequency, to a callback destination. The callback feeds
+    /// each batch into a period reducer the fleet owns and drops the
+    /// batch, so a home's result in the fold is its reduced period table,
+    /// never its frame.
+    ///
+    /// When `n_threads > 0`, a local Rayon pool is created for this call.
+    /// When `n_threads == 0`, the global Rayon pool is used.
+    ///
+    /// # Errors
+    ///
+    /// [`FleetError::ThreadPoolBuild`] when the local pool cannot be
+    /// built, [`FleetError::UnmatchedSelection`] when a selection name
+    /// matches no home's catalogue, [`FleetError::InvalidAggregationWeight`]
+    /// for a weight that is not finite and non-negative, and
+    /// [`FleetError::ZeroWeightFleet`] when homes folded but none carried
+    /// a positive weight.
     pub fn simulate(
         &self,
+        report: &FleetReport,
         n_threads: usize,
-    ) -> Vec<std::result::Result<DwellingOutcome, SimError>> {
+        chunk_size: NonZeroUsize,
+    ) -> Result<FleetResult> {
         if n_threads == 0 {
-            return self.simulate_parallel();
+            return self.simulate_folded(report, chunk_size);
         }
-
-        match ThreadPoolBuilder::new().num_threads(n_threads).build() {
-            Ok(pool) => pool.install(|| self.simulate_parallel()),
-            Err(err) => vec![Err(SimError::ThreadPoolBuild(err.to_string())); self.entries.len()],
-        }
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(n_threads)
+            .build()
+            .map_err(|err| FleetError::ThreadPoolBuild(err.to_string()))?;
+        pool.install(|| self.simulate_folded(report, chunk_size))
     }
 
-    fn simulate_parallel(&self) -> Vec<std::result::Result<DwellingOutcome, SimError>> {
-        let total = self.entries.len();
-        let completed = AtomicUsize::new(0);
-        let progress = self.progress.clone();
-
-        // Outer guard ensures the custom hook is installed before any worker
-        // starts. Each worker's engine.run() installs its own guard as well,
-        // but this one covers the gap before worker guards are constructed and
-        // serves as defense-in-depth in case a worker path skips the guard.
+    fn simulate_folded(
+        &self,
+        report: &FleetReport,
+        chunk_size: NonZeroUsize,
+    ) -> Result<FleetResult> {
         let _guard = PanicHookGuard::new();
         #[cfg(debug_assertions)]
         {
@@ -471,68 +469,444 @@ impl Fleet {
             );
         }
 
-        self.entries
-            .par_iter()
-            .map(|entry| {
-                let outcome = match panic::catch_unwind(AssertUnwindSafe(|| {
-                    let result = run_entry(entry);
-                    if let Some(cb) = &progress {
-                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                        cb(done, total);
-                    }
-                    result
-                })) {
-                    Ok(result) => result,
-                    Err(payload) => {
-                        // Increment progress even on panic so the bar reaches 100%.
-                        if progress.is_some() {
-                            completed.fetch_add(1, Ordering::Relaxed);
-                        }
-                        // Guard against double-panic: SimError::Panic construction
-                        // and panic_payload_to_string both involve String allocation.
-                        // If the allocator is corrupted from a prior near-panic, these
-                        // could panic and abort the process.
-                        let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {
-                            Err(SimError::Panic {
-                                bldg_id: entry.config.bldg_id,
-                                message: panic_hook::panic_payload_to_string(payload),
-                            })
-                        }));
-                        match handler_result {
-                            Ok(result) => result,
-                            Err(_) => {
-                                record_double_panic_prevented();
-                                tracing::error!(
-                                    bldg_id = entry.config.bldg_id,
-                                    "CRITICAL: error handling panicked \
-                                     (double-panic prevented) in fleet::simulate_parallel"
-                                );
-                                Err(SimError::Panic {
-                                    bldg_id: entry.config.bldg_id,
-                                    message: "panic handling failed (double-panic prevented)"
-                                        .into(),
-                                })
-                            }
-                        }
-                    }
-                };
+        let total = self.entries.len();
+        let completed = AtomicUsize::new(0);
+        let progress = self.progress.clone();
 
-                if let Err(err) = &outcome {
-                    // Guard tracing::warn! against Display panics. The %err
-                    // formatting calls SimError::fmt which could panic if an
-                    // inner Display implementation is unexpectedly fallible.
-                    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-                        tracing::warn!(
-                            bldg_id = entry.config.bldg_id,
-                            error = %err,
-                            "dwelling simulation failed"
-                        );
-                    }));
+        // The selection's per-home restriction and the unmatched-name
+        // bookkeeping. A catalogue exists only once a home's inputs are
+        // parsed, so a Named or Pattern selection probes each home's
+        // catalogue as the home's chunk comes up; the check runs when the
+        // last home has been built and before its chunk runs.
+        let mut matcher = SelectionMatcher::new(&report.selection);
+
+        let mut fold = FleetFold::new();
+        let mut homes: Vec<HomeResult> = Vec::with_capacity(total);
+        let mut folded_flags: Vec<bool> = Vec::with_capacity(total);
+        let mut peak_live = 0usize;
+        let mut chunk_start = 0usize;
+
+        for chunk in self.entries.chunks(chunk_size.get()) {
+            let restrictions = matcher.restrictions(chunk);
+            let is_last_chunk = chunk_start + chunk.len() >= total;
+            if is_last_chunk && let Some(names) = matcher.unmatched() {
+                return Err(FleetError::UnmatchedSelection { names });
+            }
+
+            let mut outcomes: Vec<HomeRun> = chunk
+                .par_iter()
+                .zip(restrictions)
+                .map(|(entry, restriction)| {
+                    run_home(
+                        entry,
+                        report,
+                        &restriction,
+                        progress.as_ref(),
+                        &completed,
+                        total,
+                    )
+                })
+                .collect();
+
+            peak_live = peak_live.max(outcomes.len());
+            for (offset, outcome) in outcomes.drain(..).enumerate() {
+                let index = chunk_start + offset;
+                let folds =
+                    !matches!(outcome.status, SimStatus::Failed(_)) && !outcome.table.is_empty();
+                if folds {
+                    fold.fold_home(index, outcome.weight, &outcome.fields, &outcome.table)?;
                 }
+                let status = outcome.status;
+                homes.push(HomeResult {
+                    bldg_id: outcome.bldg_id,
+                    weight: outcome.weight,
+                    reason: match &status {
+                        SimStatus::Ok => None,
+                        SimStatus::Flagged(reason) | SimStatus::Failed(reason) => {
+                            Some(reason.clone())
+                        }
+                    },
+                    status,
+                    steps: outcome.steps,
+                    periods_folded: 0,
+                    metrics: outcome.metrics,
+                });
+                folded_flags.push(folds);
+            }
+            chunk_start += chunk.len();
+        }
 
-                outcome
-            })
-            .collect()
+        if fold.folded() > 0 && !fold.has_positive_weight() {
+            return Err(FleetError::ZeroWeightFleet);
+        }
+        let (aggregate, covered_weight, periods) = fold.finish();
+        for (home, folds) in homes.iter_mut().zip(folded_flags) {
+            if folds {
+                home.periods_folded = periods;
+            }
+        }
+
+        let mut coverage = Coverage::default();
+        for home in &homes {
+            coverage.weight_total += home.weight;
+            match home.status {
+                SimStatus::Ok => coverage.weight_ok += home.weight,
+                SimStatus::Flagged(_) => coverage.weight_flagged += home.weight,
+                SimStatus::Failed(_) => coverage.weight_failed += home.weight,
+            }
+        }
+        let n_succeeded = homes
+            .iter()
+            .filter(|home| !matches!(home.status, SimStatus::Failed(_)))
+            .count();
+
+        Ok(FleetResult {
+            aggregate,
+            covered_weight,
+            homes,
+            coverage,
+            n_succeeded,
+            peak_live_home_results: peak_live,
+        })
+    }
+}
+
+/// The restricted form of the fleet's selection for one home.
+enum Restricted {
+    /// The home's restricted selection holds no variable: the home gets
+    /// no `fleet` report, folds no value and enters no cell's covered
+    /// weight.
+    NotApplicable,
+    /// The restricted selection, as the report's own column list.
+    Names(Vec<String>),
+    /// A verbosity selection: the run resolves the home's own tier.
+    Verbosity(u8),
+}
+
+/// The fleet selection's per-home restriction and the unmatched-name
+/// bookkeeping. A `Named` name that no home declares, or a `Pattern` that
+/// matches nothing in any home, is the unmatched check's error; a variable
+/// a home does not declare is not applicable to it.
+struct SelectionMatcher {
+    selection: Selection,
+    /// Per `Named` name, whether any home declared it.
+    named_matched: Vec<bool>,
+    /// Whether a `Pattern` matched any home's catalogue.
+    pattern_matched: bool,
+}
+
+impl SelectionMatcher {
+    fn new(selection: &Selection) -> Self {
+        let named_matched = match selection {
+            Selection::Named(names) => vec![false; names.len()],
+            _ => Vec::new(),
+        };
+        Self {
+            selection: selection.clone(),
+            named_matched,
+            pattern_matched: false,
+        }
+    }
+
+    /// The per-home restrictions for one chunk. A `Verbosity` selection
+    /// restricts to itself (the run resolves the home's own tier); a
+    /// `Named` or `Pattern` selection probes the home's catalogue, which
+    /// exists only once the home's inputs are parsed.
+    fn restrictions(&mut self, chunk: &[FleetEntry]) -> Vec<Restricted> {
+        match &self.selection {
+            Selection::Verbosity(verbosity) => chunk
+                .iter()
+                .map(|_| Restricted::Verbosity(*verbosity))
+                .collect(),
+            // The diagnostics block rides the home's own run; the fleet's
+            // fold reads the report the selection resolves to.
+            Selection::Diagnostics => chunk
+                .iter()
+                .map(|_| Restricted::Names(Vec::new()))
+                .collect(),
+            Selection::Named(_) | Selection::Pattern(_) => chunk
+                .iter()
+                .map(|entry| self.restrict_entry(entry))
+                .collect(),
+        }
+    }
+
+    /// Probes one home's catalogue: builds the home's inputs, restricts
+    /// the selection to it, and drops the home. A home whose inputs fail
+    /// to parse declares nothing; its run fails for the same cause.
+    fn restrict_entry(&mut self, entry: &FleetEntry) -> Restricted {
+        let dwelling = match Dwelling::from_config(entry.config.clone()) {
+            Ok(dwelling) => dwelling,
+            Err(_) => return Restricted::NotApplicable,
+        };
+        let catalogue = dwelling.catalogue();
+        match &self.selection {
+            Selection::Named(names) => {
+                let mut kept = Vec::new();
+                for (position, name) in names.iter().enumerate() {
+                    if catalogue.resolve(name).is_some() {
+                        self.named_matched[position] = true;
+                        kept.push(name.clone());
+                    }
+                }
+                restricted_from_names(kept)
+            }
+            Selection::Pattern(pattern) => {
+                let matched =
+                    hares_io::resolve_selection(&Selection::Pattern(pattern.clone()), &catalogue)
+                        .unwrap_or_default();
+                if matched.is_empty() {
+                    Restricted::NotApplicable
+                } else {
+                    self.pattern_matched = true;
+                    Restricted::Names(matched)
+                }
+            }
+            // Handled by `restrictions`.
+            Selection::Verbosity(_) | Selection::Diagnostics => Restricted::NotApplicable,
+        }
+    }
+
+    /// The selection names that matched no home's catalogue, after the
+    /// last home has been built.
+    fn unmatched(&self) -> Option<Vec<String>> {
+        match &self.selection {
+            Selection::Named(names) => {
+                let unmatched: Vec<String> = names
+                    .iter()
+                    .zip(&self.named_matched)
+                    .filter(|(_, matched)| !**matched)
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                (!unmatched.is_empty()).then_some(unmatched)
+            }
+            Selection::Pattern(pattern) => (!self.pattern_matched).then(|| vec![pattern.clone()]),
+            Selection::Verbosity(_) | Selection::Diagnostics => None,
+        }
+    }
+}
+
+fn restricted_from_names(kept: Vec<String>) -> Restricted {
+    if kept.is_empty() {
+        Restricted::NotApplicable
+    } else {
+        Restricted::Names(kept)
+    }
+}
+
+/// The fleet report's `ReportSpec` for one home: the restricted selection
+/// at the `Timestep` frequency, to a callback destination. `None` when the
+/// home's restricted selection holds no variable.
+fn fleet_report_spec(restriction: &Restricted) -> Option<hares_io::ReportSpec> {
+    let selection = match restriction {
+        Restricted::NotApplicable => return None,
+        Restricted::Names(names) => Selection::Named(names.clone()),
+        Restricted::Verbosity(verbosity) => Selection::Verbosity(*verbosity),
+    };
+    Some(hares_io::ReportSpec {
+        name: FLEET_REPORT_NAME.to_string(),
+        selection,
+        frequency: hares_io::Frequency::Timestep,
+        destination: hares_io::Destination::Callback,
+    })
+}
+
+/// The config's step count: the run's duration tiled by its step. The
+/// config's validation rejects a zero duration and one that is not a
+/// multiple of the step.
+fn configured_steps(config: &SimulationConfig) -> u64 {
+    let step = config.time_res.num_seconds();
+    if step > 0 {
+        u64::try_from(config.duration.num_seconds() / step).unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+/// The fleet's construction-time config checks: a home whose config
+/// already carries a report named `fleet`, and two homes whose file
+/// destinations resolve to the same path.
+fn check_home_configs(configs: &[DwellingConfig]) -> Result<()> {
+    let mut seen: HashMap<String, i64> = HashMap::new();
+    for config in configs {
+        for spec in &config.sim_config.reports {
+            if spec.name == FLEET_REPORT_NAME {
+                return Err(FleetError::ReservedReportName {
+                    bldg_id: config.bldg_id,
+                });
+            }
+            if let Some(path) = spec.destination.path() {
+                let key = path.to_string_lossy().to_string();
+                match seen.get(&key).copied() {
+                    Some(first) if first != config.bldg_id => {
+                        return Err(FleetError::DuplicateDestination {
+                            first,
+                            second: config.bldg_id,
+                            path: key,
+                        });
+                    }
+                    _ => {
+                        seen.insert(key, config.bldg_id);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One home's completed run: the identity, status and metrics the homes
+/// table reads, and the reduced period table the fold consumes.
+struct HomeRun {
+    bldg_id: i64,
+    weight: f64,
+    status: SimStatus,
+    steps: u64,
+    metrics: Option<hares_core::RunMetrics>,
+    /// The home's reduced period table, keyed by the period start's
+    /// instant (the epoch key), the `Time` column excluded.
+    table: BTreeMap<i64, Vec<Option<f64>>>,
+    /// The folded variables' fields, from the home's report schema.
+    fields: Vec<arrow::datatypes::Field>,
+}
+
+/// Runs one home: its own reports plus the fleet's appended `fleet`
+/// report, whose batches the home's period reducer reduces and drops. A
+/// construction failure, a run error or a panic is that home's `Failed`
+/// status; every other home's run completes. The progress callback fires
+/// once per completed home, whatever the outcome.
+fn run_home(
+    entry: &FleetEntry,
+    report: &FleetReport,
+    restriction: &Restricted,
+    progress: Option<&ProgressCallback>,
+    completed: &AtomicUsize,
+    total: usize,
+) -> HomeRun {
+    let caught = panic::catch_unwind(AssertUnwindSafe(|| {
+        run_home_inner(entry, report, restriction, progress, completed, total)
+    }));
+    match caught {
+        Ok(run) => run,
+        Err(payload) => {
+            // Guard against double-panic: the message construction
+            // allocates, and the progress callback's completion counter
+            // is a relaxed add.
+            if progress.is_some() {
+                completed.fetch_add(1, Ordering::Relaxed);
+            }
+            let handler = panic::catch_unwind(AssertUnwindSafe(|| HomeRun {
+                bldg_id: entry.config.bldg_id,
+                weight: entry.sample_weight,
+                status: SimStatus::Failed(format!(
+                    "panicked: {}",
+                    panic_hook::panic_payload_to_string(payload)
+                )),
+                steps: 0,
+                metrics: None,
+                table: BTreeMap::new(),
+                fields: Vec::new(),
+            }));
+            match handler {
+                Ok(run) => run,
+                Err(_) => {
+                    record_double_panic_prevented();
+                    tracing::error!(
+                        bldg_id = entry.config.bldg_id,
+                        "CRITICAL: error handling panicked \
+                         (double-panic prevented) in fleet::run_home"
+                    );
+                    HomeRun {
+                        bldg_id: entry.config.bldg_id,
+                        weight: entry.sample_weight,
+                        status: SimStatus::Failed(
+                            "panic handling failed (double-panic prevented)".into(),
+                        ),
+                        steps: 0,
+                        metrics: None,
+                        table: BTreeMap::new(),
+                        fields: Vec::new(),
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn run_home_inner(
+    entry: &FleetEntry,
+    report: &FleetReport,
+    restriction: &Restricted,
+    progress: Option<&ProgressCallback>,
+    completed: &AtomicUsize,
+    total: usize,
+) -> HomeRun {
+    let run = run_home_body(entry, report, restriction);
+    if let Some(cb) = progress {
+        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+        cb(done, total);
+    }
+    run
+}
+
+fn run_home_body(entry: &FleetEntry, report: &FleetReport, restriction: &Restricted) -> HomeRun {
+    let failed = |message: String| HomeRun {
+        bldg_id: entry.config.bldg_id,
+        weight: entry.sample_weight,
+        status: SimStatus::Failed(message),
+        steps: 0,
+        metrics: None,
+        table: BTreeMap::new(),
+        fields: Vec::new(),
+    };
+
+    let mut config = entry.config.clone();
+    // The fleet's health policy is applied to every home's run.
+    config.sim_config.health_policy = report.health_policy.clone();
+    if let Some(spec) = fleet_report_spec(restriction) {
+        config.sim_config.reports.push(spec);
+    }
+    let steps = configured_steps(&config.sim_config);
+
+    let mut dwelling = match Dwelling::from_config(config.clone()) {
+        Ok(dwelling) => dwelling,
+        Err(err) => return failed(err.to_string()),
+    };
+    let has_fleet_report = config
+        .sim_config
+        .reports
+        .iter()
+        .any(|spec| spec.name == FLEET_REPORT_NAME);
+    let state = Arc::new(Mutex::new(HomeFoldState::new(report.frequency)));
+    if has_fleet_report
+        && let Err(err) =
+            dwelling.attach_callback(FLEET_REPORT_NAME, Box::new(ReducerFeed::new(state.clone())))
+    {
+        return failed(err.to_string());
+    }
+
+    let engine = SimulationEngine::new();
+    let result = match engine.run_dwelling(&mut dwelling, &config.sim_config) {
+        Ok(result) => result,
+        Err(err) => return failed(err.to_string()),
+    };
+    let status = if result.warnings.is_empty() {
+        SimStatus::Ok
+    } else {
+        SimStatus::Flagged(format!("{} warning(s)", result.warnings.len()))
+    };
+    let (table, fields) = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .finish(result.provenance.site_utc_offset_s);
+    HomeRun {
+        bldg_id: entry.config.bldg_id,
+        weight: entry.sample_weight,
+        status,
+        steps,
+        metrics: result.metrics.clone(),
+        table,
+        fields,
     }
 }
 
@@ -832,30 +1206,6 @@ impl SteppableFleet {
     }
 }
 
-fn run_entry(entry: &FleetEntry) -> std::result::Result<DwellingOutcome, SimError> {
-    let engine = SimulationEngine::new();
-    let started = std::time::Instant::now();
-    match engine.run(entry.config.clone()) {
-        Ok(result) => {
-            let status = if result.warnings.is_empty() {
-                SimStatus::Ok
-            } else {
-                SimStatus::Flagged(format!("{} warning(s)", result.warnings.len()))
-            };
-            Ok(DwellingOutcome {
-                result,
-                sample_weight: entry.sample_weight,
-                status,
-                elapsed: started.elapsed(),
-            })
-        }
-        Err(err) => Err(SimError::Failed {
-            bldg_id: entry.config.bldg_id,
-            message: err.to_string(),
-        }),
-    }
-}
-
 fn step_dwellings_parallel(
     dwellings: &mut [Dwelling],
 ) -> Vec<std::result::Result<StepResult, SimError>> {
@@ -932,13 +1282,6 @@ fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
     }
-}
-
-/// The aggregation tests' provenance placeholder config: the fleet sim
-/// config with no reports.
-#[cfg(test)]
-pub(crate) fn resstock_sim_config_for_tests() -> SimulationConfig {
-    resstock_sim_config(None)
 }
 
 fn matches_filter(
@@ -1345,7 +1688,9 @@ mod tests {
                 hpxml_path: Path::new(MISSING_ROOT).join("hpxml.xml"),
                 schedule_path: Some(Path::new(MISSING_ROOT).join("schedule.csv")),
                 weather_path: Path::new(MISSING_ROOT).join("weather.epw"),
-                sim_config: simulation_config(Path::new(MISSING_ROOT).join("output.csv")),
+                sim_config: simulation_config(
+                    Path::new(MISSING_ROOT).join(format!("output-{idx}.csv")),
+                ),
                 defaults_path: None,
                 overrides: None,
                 bldg_id: idx as i64 + 1,
@@ -1355,28 +1700,39 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn simulate_runs_three_dwellings() {
-        let dir = tempdir().expect("temp dir");
-        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3));
-        let results = fleet.simulate(1);
-
-        assert_eq!(results.len(), 3);
-        assert!(results.iter().all(|entry| entry.is_ok()));
-
-        for entry in results {
-            let outcome = entry.expect("successful outcome");
-            assert!(matches!(
-                outcome.status,
-                SimStatus::Ok | SimStatus::Flagged(_)
-            ));
-            assert!(outcome.sample_weight > 0.0);
+    /// The default fleet report for the unit tests: every variable the
+    /// homes' tier 0 declares, folded to quarter hours.
+    fn test_report() -> crate::fold::FleetReport {
+        crate::fold::FleetReport {
+            selection: hares_io::Selection::Verbosity(0),
+            frequency: hares_io::Frequency::Minutes(std::num::NonZeroU32::new(15).expect("15")),
+            health_policy: hares_io::HealthPolicy::default(),
         }
     }
 
     #[test]
+    fn simulate_runs_three_dwellings() {
+        let dir = tempdir().expect("temp dir");
+        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3))
+            .expect("the configs carry no reserved report or shared destination");
+        let chunk = std::num::NonZeroUsize::new(2).expect("2");
+        let result = fleet
+            .simulate(&test_report(), 1, chunk)
+            .expect("the homes run");
+
+        assert_eq!(result.homes.len(), 3);
+        for home in &result.homes {
+            assert!(matches!(home.status, SimStatus::Ok | SimStatus::Flagged(_)));
+            assert!(home.weight > 0.0);
+        }
+        assert_eq!(result.n_succeeded, 3);
+        assert_eq!(result.peak_live_home_results, 2);
+    }
+
+    #[test]
     fn from_buildings_defaults_to_valid_weight() {
-        let fleet = Fleet::from_buildings(build_missing_configs(3));
+        let fleet = Fleet::from_buildings(build_missing_configs(3))
+            .expect("the configs carry no reserved report or shared destination");
         let weights: Vec<f64> = fleet.entries.iter().map(|e| e.sample_weight).collect();
         assert_eq!(weights, vec![1.0, 1.0, 1.0]);
     }
@@ -1384,6 +1740,7 @@ mod tests {
     #[test]
     fn with_sample_weights_accepts_zero_and_positive() {
         let fleet = Fleet::from_buildings(build_missing_configs(3))
+            .expect("the configs carry no reserved report or shared destination")
             .with_sample_weights(vec![1.0, 0.0, 2.5])
             .expect("finite non-negative weights are accepted");
         let weights: Vec<f64> = fleet.entries.iter().map(|e| e.sample_weight).collect();
@@ -1393,6 +1750,7 @@ mod tests {
     #[test]
     fn with_sample_weights_rejects_nan() {
         let err = Fleet::from_buildings(build_missing_configs(2))
+            .expect("the configs carry no reserved report or shared destination")
             .with_sample_weights(vec![1.0, f64::NAN])
             .expect_err("NaN weight must be rejected");
         match err {
@@ -1407,6 +1765,7 @@ mod tests {
     #[test]
     fn with_sample_weights_rejects_negative() {
         let err = Fleet::from_buildings(build_missing_configs(2))
+            .expect("the configs carry no reserved report or shared destination")
             .with_sample_weights(vec![1.0, -3.0])
             .expect_err("negative weight must be rejected");
         match err {
@@ -1421,6 +1780,7 @@ mod tests {
     #[test]
     fn with_sample_weights_rejects_infinite() {
         let err = Fleet::from_buildings(build_missing_configs(1))
+            .expect("the configs carry no reserved report or shared destination")
             .with_sample_weights(vec![f64::INFINITY])
             .expect_err("infinite weight must be rejected");
         match err {
@@ -1435,6 +1795,7 @@ mod tests {
     #[test]
     fn with_sample_weights_rejects_length_mismatch() {
         let err = Fleet::from_buildings(build_missing_configs(2))
+            .expect("the configs carry no reserved report or shared destination")
             .with_sample_weights(vec![1.0])
             .expect_err("length mismatch must be rejected");
         match err {
@@ -1450,24 +1811,28 @@ mod tests {
     fn panic_in_callback_is_isolated_to_one_result() {
         let dir = tempdir().expect("temp dir");
         let panic_on = 2usize;
-        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3)).with_progress(
-            move |done, _total| {
+        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3))
+            .expect("the configs carry no reserved report or shared destination")
+            .with_progress(move |done, _total| {
                 if done == panic_on {
                     panic!("injected callback panic");
                 }
-            },
-        );
+            });
 
-        let results = fleet.simulate(3);
-        assert_eq!(results.len(), 3);
+        let chunk = std::num::NonZeroUsize::new(1).expect("1");
+        let result = fleet
+            .simulate(&test_report(), 3, chunk)
+            .expect("the fleet completes");
+        assert_eq!(result.homes.len(), 3);
 
-        let panic_count = results
+        let panicked = result
+            .homes
             .iter()
-            .filter(|result| matches!(result, Err(SimError::Panic { .. })))
+            .filter(|home| matches!(home.status, SimStatus::Failed(_)))
             .count();
 
-        let success_count = results.iter().filter(|result| result.is_ok()).count();
-        assert_eq!(panic_count, 1);
+        let success_count = result.n_succeeded;
+        assert_eq!(panicked, 1);
         assert_eq!(success_count, 2);
     }
 
@@ -1475,30 +1840,34 @@ mod tests {
     fn panic_error_message_includes_file_and_line() {
         let dir = tempdir().expect("temp dir");
         let panic_on = 2usize;
-        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3)).with_progress(
-            move |done, _total| {
+        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3))
+            .expect("the configs carry no reserved report or shared destination")
+            .with_progress(move |done, _total| {
                 if done == panic_on {
                     panic!("injected callback panic");
                 }
-            },
-        );
+            });
 
-        let results = fleet.simulate(3);
-        assert_eq!(results.len(), 3);
+        let chunk = std::num::NonZeroUsize::new(1).expect("1");
+        let result = fleet
+            .simulate(&test_report(), 3, chunk)
+            .expect("the fleet completes");
+        assert_eq!(result.homes.len(), 3);
 
-        let panic_msg = results
+        let panic_msg = result
+            .homes
             .iter()
-            .find_map(|result| match result {
-                Err(SimError::Panic { message, .. }) => Some(message.clone()),
+            .find_map(|home| match &home.status {
+                SimStatus::Failed(message) => Some(message.clone()),
                 _ => None,
             })
-            .expect("one result should be a Panic error");
+            .expect("one home should carry the panic");
 
         // Verifies the end-to-end chain: PanicHookGuard (installed in calling thread)
-        // → custom hook fires in Rayon worker → thread-local PANIC_INFO populated
-        // → catch_unwind captures payload → panic_payload_to_string enriches with file:line.
+        // -> custom hook fires in Rayon worker -> thread-local PANIC_INFO populated
+        // -> catch_unwind captures payload -> panic_payload_to_string enriches with file:line.
         assert!(
-            panic_msg.contains("fleet.rs") && panic_msg.contains(" — "),
+            panic_msg.contains("fleet.rs:"),
             "panic message should contain file:line location enrichment, got: {panic_msg}"
         );
     }
@@ -1510,8 +1879,9 @@ mod tests {
 
         // Keep each unit of work non-trivial so Rayon has time to schedule
         // across workers, even when simulations fail quickly.
-        let fleet =
-            Fleet::from_buildings(build_missing_configs(64)).with_progress(move |_done, _total| {
+        let fleet = Fleet::from_buildings(build_missing_configs(64))
+            .expect("the configs carry no reserved report or shared destination")
+            .with_progress(move |_done, _total| {
                 let id = thread::current().id();
                 thread_ids_for_callback
                     .lock()
@@ -1520,8 +1890,12 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             });
 
-        let sequential = fleet.simulate(1);
-        assert_eq!(sequential.len(), 64);
+        let chunk = std::num::NonZeroUsize::new(8).expect("8");
+        let report = test_report();
+        let sequential = fleet
+            .simulate(&report, 1, chunk)
+            .expect("the fleet completes");
+        assert_eq!(sequential.homes.len(), 64);
         let sequential_threads = thread_ids
             .lock()
             .expect("lock thread ids after sequential run")
@@ -1537,8 +1911,10 @@ mod tests {
                 .expect("lock thread id set for clear")
                 .clear();
 
-            let parallel = fleet.simulate(4);
-            assert_eq!(parallel.len(), 64);
+            let parallel = fleet
+                .simulate(&report, 4, chunk)
+                .expect("the fleet completes");
+            assert_eq!(parallel.homes.len(), 64);
 
             let parallel_threads = thread_ids
                 .lock()
@@ -1556,8 +1932,10 @@ mod tests {
             "expected >1 worker thread with n_threads=4, observed {max_parallel_threads}"
         );
 
-        let global_pool = fleet.simulate(0);
-        assert_eq!(global_pool.len(), 64);
+        let global_pool = fleet
+            .simulate(&report, 0, chunk)
+            .expect("the fleet completes");
+        assert_eq!(global_pool.homes.len(), 64);
     }
 
     #[test]
@@ -1567,13 +1945,17 @@ mod tests {
         let lock = Arc::new(Mutex::new(()));
         let lock_cb = Arc::clone(&lock);
 
-        let fleet =
-            Fleet::from_buildings(build_missing_configs(8)).with_progress(move |_done, _total| {
+        let fleet = Fleet::from_buildings(build_missing_configs(8))
+            .expect("the configs carry no reserved report or shared destination")
+            .with_progress(move |_done, _total| {
                 let _guard = lock_cb.lock().expect("lock in callback");
                 progress_count_cb.fetch_add(1, Ordering::Relaxed);
             });
 
-        let _ = fleet.simulate(2);
+        let chunk = std::num::NonZeroUsize::new(2).expect("2");
+        let _ = fleet
+            .simulate(&test_report(), 2, chunk)
+            .expect("the fleet completes");
         assert!(progress_count.load(Ordering::Relaxed) > 0);
     }
 
@@ -2381,7 +2763,9 @@ mod tests {
         )
         .expect("fleet construction");
 
-        let report = fleet.report().expect("a ResStock build records its report");
+        let report = fleet
+            .build_report()
+            .expect("a ResStock build records its report");
         assert_eq!(report.buildings_parsed, 1, "one metadata row");
         assert_eq!(report.dwellings_built, 1, "one built dwelling");
         assert_eq!(
@@ -2406,53 +2790,10 @@ mod tests {
             initialization_duration: None,
             patches: None,
         };
-        let fleet = Fleet::from_buildings(vec![config]);
-        assert!(fleet.report().is_none());
+        let fleet = Fleet::from_buildings(vec![config])
+            .expect("the configs carry no reserved report or shared destination");
+        assert!(fleet.build_report().is_none());
         assert_eq!(fleet.bldg_ids(), vec![1], "the identities stay readable");
-    }
-
-    /// The verbosity builder sets every dwelling's sim config and applies
-    /// the same bound the config parser does.
-    #[test]
-    fn with_output_verbosity_sets_every_home_and_validates() {
-        let config = |bldg_id| DwellingConfig {
-            hpxml_path: PathBuf::from("no.xml"),
-            schedule_path: None,
-            weather_path: PathBuf::from("no.epw"),
-            defaults_path: None,
-            sim_config: resstock_sim_config(None),
-            overrides: None,
-            bldg_id,
-            initialization_duration: None,
-            patches: None,
-        };
-        let fleet = Fleet::from_buildings(vec![config(1), config(2)])
-            .with_memory_report(2)
-            .expect("verbosity 2 is valid");
-        for id in fleet.bldg_ids() {
-            let entry = fleet
-                .entries
-                .iter()
-                .find(|entry| entry.config.bldg_id == id)
-                .expect("the id came from the fleet");
-            assert_eq!(
-                entry
-                    .config
-                    .sim_config
-                    .reports
-                    .first()
-                    .map(|r| &r.selection),
-                Some(&hares_io::Selection::Verbosity(2))
-            );
-        }
-
-        let error = Fleet::from_buildings(vec![config(1)])
-            .with_memory_report(hares_io::MAX_VERBOSITY + 1)
-            .expect_err("verbosity above the maximum must be rejected");
-        assert!(
-            error.to_string().contains("verbosity"),
-            "the error names the field: {error}"
-        );
     }
 
     #[test]
@@ -2629,22 +2970,32 @@ mod tests {
         .expect("fleet construction");
         assert_eq!(fleet.entries.len(), 1);
 
-        let outcomes = fleet.simulate(1);
-        assert_eq!(outcomes.len(), 1);
-        let outcome = outcomes
-            .into_iter()
-            .next()
-            .expect("one outcome")
+        let chunk = std::num::NonZeroUsize::new(1).expect("1");
+        let result = fleet
+            .simulate(
+                &crate::fold::FleetReport {
+                    selection: hares_io::Selection::Verbosity(0),
+                    frequency: hares_io::Frequency::Hourly,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                1,
+                chunk,
+            )
             .expect("the fixture dwelling must run without a simulation error");
+        assert_eq!(result.homes.len(), 1);
         // The fleet's sim config writes no output: the run's metrics are
         // None (no report), and no run warning accompanies that.
-        match &outcome.status {
+        match &result.homes[0].status {
             SimStatus::Ok => {}
             status => panic!("the dwelling must run to completion, got: {status:?}"),
         }
+        assert_eq!(
+            result.homes[0].steps, 1440,
+            "the default 24 h at the constructor's step"
+        );
         assert!(
-            outcome.elapsed > std::time::Duration::ZERO,
-            "the dwelling must have stepped"
+            result.homes[0].metrics.is_none(),
+            "without the metrics request the run's result carries none"
         );
     }
 
@@ -2679,6 +3030,649 @@ mod tests {
         assert!(
             message.contains("unpacked buildings directory"),
             "must name the fix: {message}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // FL-1's acceptance: the streaming ordered fold.
+    // -------------------------------------------------------------------
+
+    /// The repo root the fixture paths resolve from.
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn resstock_fixture(name: &str) -> PathBuf {
+        repo_root()
+            .join("tests/fixtures/resstock/2025.1")
+            .join(name)
+    }
+
+    /// One home of the same-offset golden fleet: three copies of the
+    /// bldg0176227 building, one weather county each, all UTC-8, so the
+    /// homes share one column set and differ in value. The weight rides
+    /// `with_sample_weights` after construction.
+    fn golden_fleet_config(bldg_id: i64, weather: &str) -> DwellingConfig {
+        DwellingConfig {
+            hpxml_path: resstock_fixture("bldg0176227/home.xml"),
+            schedule_path: Some(resstock_fixture("bldg0176227/in.schedules.csv")),
+            weather_path: resstock_fixture("weather").join(weather),
+            defaults_path: Some(repo_defaults_path()),
+            sim_config: SimulationConfig {
+                start_time: FixedOffset::east_opt(-8 * 3600)
+                    .expect("valid offset")
+                    .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                    .single()
+                    .expect("valid start"),
+                duration: Duration::days(2),
+                time_res: Duration::seconds(300),
+                reports: vec![hares_io::ReportSpec {
+                    name: "frame".to_string(),
+                    selection: hares_io::Selection::Verbosity(2),
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Memory,
+                }],
+                diagnostics: false,
+                metrics: true,
+                output_chunk_size: 10_000,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            overrides: None,
+            bldg_id,
+            initialization_duration: Some(std::time::Duration::ZERO),
+            patches: None,
+        }
+    }
+
+    /// The golden fleet: the same-offset manifest's homes and weights.
+    fn golden_fleet() -> Fleet {
+        Fleet::from_buildings(vec![
+            golden_fleet_config(1, "G0600770_2018.csv"),
+            golden_fleet_config(2, "G0600650_2018.csv"),
+            golden_fleet_config(3, "G0600790_2018.csv"),
+        ])
+        .expect("the golden homes carry no reserved report or shared destination")
+        .with_sample_weights(vec![1.0, 2.5, 0.5])
+        .expect("the manifest's weights are finite and non-negative")
+    }
+
+    fn minutes_15() -> FleetReport {
+        FleetReport {
+            selection: hares_io::Selection::Verbosity(2),
+            frequency: hares_io::Frequency::Minutes(std::num::NonZeroU32::new(15).expect("15")),
+            health_policy: hares_io::HealthPolicy::default(),
+        }
+    }
+
+    fn chunk(size: usize) -> NonZeroUsize {
+        NonZeroUsize::new(size).expect("nonzero chunk size")
+    }
+
+    /// Compares two record batches column by column, floats on bits.
+    fn assert_batches_bitwise_equal(left: &RecordBatch, right: &RecordBatch, label: &str) {
+        assert_eq!(
+            left.num_columns(),
+            right.num_columns(),
+            "{label}: column count"
+        );
+        assert_eq!(left.num_rows(), right.num_rows(), "{label}: row count");
+        for (slot, (a, b)) in left.columns().iter().zip(right.columns()).enumerate() {
+            assert_eq!(
+                left.schema_ref().field(slot),
+                right.schema_ref().field(slot),
+                "{label}: column {slot} field"
+            );
+            assert_eq!(
+                a.to_data(),
+                b.to_data(),
+                "{label}: column {} ({}) differs",
+                left.schema_ref().field(slot).name(),
+                slot
+            );
+        }
+    }
+
+    /// The ordered-merge differential: the streaming fold's aggregate is
+    /// the same bits whether the fold crosses the chunk barrier between
+    /// every home or runs one chunk, at the golden fleet's scale and at a
+    /// 12-home scale the barrier actually stresses (six crossings).
+    #[test]
+    fn fleet_fold_matches_collect_then_aggregate() {
+        let fleet = golden_fleet();
+        let collected = fleet
+            .simulate(&minutes_15(), 1, chunk(64))
+            .expect("the golden fleet runs");
+        let streamed = fleet
+            .simulate(&minutes_15(), 1, chunk(1))
+            .expect("the golden fleet runs");
+
+        assert_eq!(
+            collected.aggregate.num_rows(),
+            192,
+            "two days of quarter hours"
+        );
+        assert_eq!(
+            collected.covered_weight.num_rows(),
+            192,
+            "the covered weight carries the same periods"
+        );
+        assert_batches_bitwise_equal(
+            &collected.aggregate,
+            &streamed.aggregate,
+            "the golden fleet's aggregate",
+        );
+        assert_batches_bitwise_equal(
+            &collected.covered_weight,
+            &streamed.covered_weight,
+            "the golden fleet's covered weight",
+        );
+        assert_batches_bitwise_equal(
+            &collected.homes_table(),
+            &streamed.homes_table(),
+            "the golden fleet's homes table",
+        );
+        assert_eq!(collected.coverage, streamed.coverage);
+        assert_eq!(collected.n_succeeded, streamed.n_succeeded);
+        assert_eq!(collected.peak_live_home_results, 3);
+        assert_eq!(streamed.peak_live_home_results, 1);
+        assert_eq!(collected.n_succeeded, 3, "every golden home folds");
+
+        // The 12-home scale: distinct weights, six chunk crossings at
+        // chunk size 2, compared against the one-chunk fold on bits.
+        let weights: Vec<f64> = (1..=12).map(f64::from).collect();
+        let homes: Vec<DwellingConfig> = (1..=12)
+            .map(|idx| {
+                golden_fleet_config(
+                    i64::try_from(idx).expect("home index"),
+                    [
+                        "G0600770_2018.csv",
+                        "G0600650_2018.csv",
+                        "G0600790_2018.csv",
+                    ][idx % 3],
+                )
+            })
+            .collect();
+        let fleet = Fleet::from_buildings(homes)
+            .expect("the homes carry no reserved report or shared destination")
+            .with_sample_weights(weights)
+            .expect("the weights are finite and non-negative");
+        let collected = fleet
+            .simulate(&minutes_15(), 1, chunk(64))
+            .expect("the 12-home fleet runs");
+        let streamed = fleet
+            .simulate(&minutes_15(), 1, chunk(2))
+            .expect("the 12-home fleet runs");
+        assert_batches_bitwise_equal(
+            &collected.aggregate,
+            &streamed.aggregate,
+            "the 12-home fleet's aggregate",
+        );
+        assert_batches_bitwise_equal(
+            &collected.covered_weight,
+            &streamed.covered_weight,
+            "the 12-home fleet's covered weight",
+        );
+    }
+
+    /// One fleet result across every thread count and chunk size: the
+    /// aggregate, the covered weight, the homes table and the coverage,
+    /// compared column by column with the floats on bits.
+    #[test]
+    fn fleet_result_identical_across_threads_and_chunks() {
+        let fleet = golden_fleet();
+        let reference = fleet
+            .simulate(&minutes_15(), 1, chunk(64))
+            .expect("the golden fleet runs");
+        for &n_threads in [1usize, 2, 8].iter() {
+            for &size in [1usize, 2, 64].iter() {
+                let result = fleet
+                    .simulate(&minutes_15(), n_threads, chunk(size))
+                    .expect("the golden fleet runs");
+                assert_batches_bitwise_equal(
+                    &reference.aggregate,
+                    &result.aggregate,
+                    &format!("aggregate at {n_threads} threads, chunk {size}"),
+                );
+                assert_batches_bitwise_equal(
+                    &reference.covered_weight,
+                    &result.covered_weight,
+                    &format!("covered weight at {n_threads} threads, chunk {size}"),
+                );
+                assert_batches_bitwise_equal(
+                    &reference.homes_table(),
+                    &result.homes_table(),
+                    &format!("homes at {n_threads} threads, chunk {size}"),
+                );
+                assert_eq!(
+                    reference.coverage, result.coverage,
+                    "coverage at {n_threads} threads, chunk {size}"
+                );
+                assert_eq!(reference.n_succeeded, result.n_succeeded);
+            }
+        }
+    }
+
+    /// The memory bound's own read: the peak number of home results held
+    /// at once is the chunk size.
+    #[test]
+    fn fleet_peak_live_home_results_bounded_by_chunk() {
+        let fleet = golden_fleet();
+        for (size, expected) in [(1usize, 1usize), (2, 2)] {
+            let result = fleet
+                .simulate(&minutes_15(), 2, chunk(size))
+                .expect("the golden fleet runs");
+            assert_eq!(result.peak_live_home_results, expected, "chunk size {size}");
+        }
+    }
+
+    /// The aggregate's columns are the first folded home's own report
+    /// schema: every column after Time has the name and the unit metadata
+    /// of the variable of that name in the first home's Timestep memory
+    /// report of the same selection, and the covered weight carries the
+    /// same names in the same order.
+    #[test]
+    fn fleet_aggregate_columns_match_home_report_schema() {
+        // The first home's own Timestep memory report of the same
+        // selection, run standalone.
+        let mut home_config = golden_fleet_config(1, "G0600770_2018.csv");
+        home_config.sim_config.reports = vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(2),
+            frequency: hares_io::Frequency::Timestep,
+            destination: hares_io::Destination::Memory,
+        }];
+        let mut dwelling = Dwelling::from_config(home_config).expect("the home builds");
+        let engine = SimulationEngine::new();
+        let sim_config = dwelling.sim_config().clone();
+        let result = engine
+            .run_dwelling(&mut dwelling, &sim_config)
+            .expect("the home runs");
+        let report = result
+            .reports
+            .iter()
+            .find(|report| report.name == "frame")
+            .expect("the memory report ran");
+        let schema = report
+            .batches()
+            .first()
+            .expect("the memory report retained batches")
+            .schema();
+
+        let fleet = golden_fleet();
+        let fleet_result = fleet
+            .simulate(&minutes_15(), 1, chunk(64))
+            .expect("the golden fleet runs");
+        let aggregate = &fleet_result.aggregate;
+
+        assert_eq!(
+            aggregate.num_columns(),
+            schema.fields().len(),
+            "Time plus every variable of the home's own report"
+        );
+        for slot in 1..aggregate.num_columns() {
+            let fleet_field = aggregate.schema_ref().field(slot);
+            let home_field = schema.field(slot);
+            assert_eq!(fleet_field.name(), home_field.name(), "column {slot} name");
+            assert_eq!(
+                fleet_field.metadata().get("unit"),
+                home_field.metadata().get("unit"),
+                "column {} ({}) unit metadata",
+                fleet_field.name(),
+                slot
+            );
+            assert_eq!(
+                *fleet_field.data_type(),
+                arrow::datatypes::DataType::Float64,
+                "column {} type",
+                fleet_field.name()
+            );
+        }
+        for slot in 0..fleet_result.covered_weight.num_columns() {
+            assert_eq!(
+                fleet_result.covered_weight.schema_ref().field(slot).name(),
+                aggregate.schema_ref().field(slot).name(),
+                "the covered weight's column {slot} names the same variable"
+            );
+        }
+    }
+
+    /// Fifteen-minute periods reduce one-minute steps: each power cell
+    /// equals `a*w_a + b*w_b` where `a` and `b` are the two homes' own
+    /// period means, added in step order and divided once by 15.
+    #[test]
+    fn fleet_minutes_15_reduces_one_minute_steps() {
+        let examples = repo_root().join("data/examples");
+        let home = |bldg_id: i64, schedule: PathBuf| DwellingConfig {
+            hpxml_path: fixture_hpxml_path(),
+            schedule_path: Some(schedule),
+            weather_path: examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            defaults_path: Some(repo_defaults_path()),
+            sim_config: SimulationConfig {
+                start_time: fixture_start::fixture_start(),
+                duration: Duration::hours(2),
+                time_res: Duration::minutes(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 10_000,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            overrides: None,
+            bldg_id,
+            initialization_duration: None,
+            patches: None,
+        };
+
+        // Each home's own Timestep memory report, for the hand-computed
+        // period means; the fleet homes carry no own reports. The probes
+        // run at the fleet homes' building ids: the random streams
+        // partition by seed and building id.
+        let standalone = |bldg_id: i64, schedule: PathBuf| {
+            let mut config = home(bldg_id, schedule);
+            config.sim_config.reports = vec![hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(2),
+                frequency: hares_io::Frequency::Timestep,
+                destination: hares_io::Destination::Memory,
+            }];
+            let mut dwelling = Dwelling::from_config(config).expect("the home builds");
+            let engine = SimulationEngine::new();
+            let sim_config = dwelling.sim_config().clone();
+            let result = engine
+                .run_dwelling(&mut dwelling, &sim_config)
+                .expect("the home runs");
+            let batches: Vec<RecordBatch> = result
+                .reports
+                .iter()
+                .flat_map(|report| report.batches().to_vec())
+                .collect();
+            // Per quarter hour: the mean of the fifteen step values, added
+            // in step order and divided once by 15.
+            let power_slot = batches
+                .first()
+                .expect("the memory report recorded")
+                .schema_ref()
+                .fields()
+                .iter()
+                .position(|field| field.name() == "Total Electric Power (kW)")
+                .expect("the power column exists at tier 2");
+            let mut means = Vec::new();
+            let mut steps: Vec<f64> = Vec::new();
+            for batch in &batches {
+                let values = batch
+                    .column(power_slot)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Float64Array>()
+                    .expect("a Float64 column");
+                for row in 0..batch.num_rows() {
+                    steps.push(values.value(row));
+                    if steps.len() == 15 {
+                        let sum = steps.iter().sum::<f64>();
+                        means.push(sum / 15.0);
+                        steps.clear();
+                    }
+                }
+            }
+            means
+        };
+        let a = standalone(1, examples.join("BEopt_example_schedule.csv"));
+        let b = standalone(2, examples.join("bldg0112631_schedule.csv"));
+        assert_eq!(a.len(), 8, "two hours of quarter hours");
+        assert!(
+            a.iter().zip(&b).any(|(a, b)| a.to_bits() != b.to_bits()),
+            "the two homes' load profiles differ, so a swapped home or weight cannot pass"
+        );
+
+        let fleet = Fleet::from_buildings(vec![
+            home(1, examples.join("BEopt_example_schedule.csv")),
+            home(2, examples.join("bldg0112631_schedule.csv")),
+        ])
+        .expect("the homes carry no reserved report or shared destination")
+        .with_sample_weights(vec![1.0, 3.0])
+        .expect("the weights are finite and non-negative");
+        let result = fleet
+            .simulate(
+                &FleetReport {
+                    selection: hares_io::Selection::Verbosity(2),
+                    frequency: hares_io::Frequency::Minutes(
+                        std::num::NonZeroU32::new(15).expect("15"),
+                    ),
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                1,
+                chunk(64),
+            )
+            .expect("the fleet runs");
+
+        let aggregate = &result.aggregate;
+        assert_eq!(aggregate.num_rows(), 8);
+        let power_slot = aggregate
+            .schema_ref()
+            .fields()
+            .iter()
+            .position(|field| field.name() == "Total Electric Power (kW)")
+            .expect("the power column folded");
+        let values = aggregate
+            .column(power_slot)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .expect("a Float64 column");
+        for row in 0..8 {
+            let expected = a[row] * 1.0 + b[row] * 3.0;
+            assert_eq!(
+                values.value(row).to_bits(),
+                expected.to_bits(),
+                "row {row}: the weighted sum of the homes' period means"
+            );
+        }
+    }
+
+    /// A Named selection keeps the names the home declares: the
+    /// aggregate's and the covered weight's columns are Time plus those
+    /// two variables, and the daily frequency gives two rows.
+    #[test]
+    fn fleet_report_selects_columns_and_frequency() {
+        let fleet = golden_fleet();
+        let report = FleetReport {
+            selection: hares_io::Selection::Named(vec![
+                "Total Electric Power (kW)".to_string(),
+                "Temperature - Indoor (C)".to_string(),
+            ]),
+            frequency: hares_io::Frequency::Daily,
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let result = fleet
+            .simulate(&report, 1, chunk(64))
+            .expect("the golden fleet runs");
+        for table in [&result.aggregate, &result.covered_weight] {
+            let names: Vec<String> = table
+                .schema_ref()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect();
+            assert_eq!(
+                names,
+                vec![
+                    "Time".to_string(),
+                    "Total Electric Power (kW)".to_string(),
+                    "Temperature - Indoor (C)".to_string(),
+                ],
+                "the selection's two variables, in order"
+            );
+            assert_eq!(table.num_rows(), 2, "two days at the daily frequency");
+        }
+    }
+
+    /// A variable a home does not declare is not applicable to it: the
+    /// home neither fails nor folds a value for it.
+    #[test]
+    fn selection_missing_from_some_homes_does_not_fail_them() {
+        let dir = tempdir().expect("temp dir");
+        write_temp_file(&dir.path().join("schedule.csv"), &build_schedule_csv());
+        write_temp_file(&dir.path().join("weather.epw"), &build_epw_8760());
+        let fixtures = repo_root().join("tests/fixtures/hpxml/ochre_samples");
+        let battery_home = DwellingConfig {
+            hpxml_path: fixtures.join("base-battery.xml"),
+            schedule_path: Some(dir.path().join("schedule.csv")),
+            weather_path: dir.path().join("weather.epw"),
+            defaults_path: Some(repo_defaults_path()),
+            sim_config: simulation_config(dir.path().join("battery.csv")),
+            overrides: Some(serde_json::json!({"Battery": {"bms_mode": "\"Manual\""}})),
+            bldg_id: 2,
+            initialization_duration: None,
+            patches: None,
+        };
+        // A battery variable's name, from the battery home's own catalogue.
+        let catalogue = Dwelling::from_config(battery_home.clone())
+            .expect("the battery home builds")
+            .catalogue();
+        let battery_variable = catalogue
+            .variables()
+            .iter()
+            .map(|def| def.name.to_string())
+            .find(|name| name.contains("Battery"))
+            .expect("the battery home declares battery variables");
+        let plain_home = DwellingConfig {
+            hpxml_path: fixture_hpxml_path(),
+            schedule_path: Some(dir.path().join("schedule.csv")),
+            weather_path: dir.path().join("weather.epw"),
+            defaults_path: Some(repo_defaults_path()),
+            sim_config: simulation_config(dir.path().join("plain.csv")),
+            overrides: None,
+            bldg_id: 1,
+            initialization_duration: None,
+            patches: None,
+        };
+
+        let fleet = Fleet::from_buildings(vec![plain_home, battery_home])
+            .expect("the homes carry no reserved report or shared destination");
+        let report = FleetReport {
+            selection: hares_io::Selection::Named(vec![
+                battery_variable.clone(),
+                "Total Electric Power (kW)".to_string(),
+            ]),
+            frequency: hares_io::Frequency::Hourly,
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let result = fleet
+            .simulate(&report, 1, chunk(64))
+            .expect("neither home fails on the missing name");
+        assert_eq!(result.n_succeeded, 2, "both homes succeed");
+        for home in &result.homes {
+            assert!(
+                !matches!(home.status, SimStatus::Failed(_)),
+                "a name the home does not declare must not fail it: {:?}",
+                home.status
+            );
+        }
+    }
+
+    /// A selection name no home declares, and a pattern that matches
+    /// nothing in any home, are the unmatched-selection error.
+    #[test]
+    fn selection_matching_no_home_is_an_error() {
+        let dir = tempdir().expect("temp dir");
+        let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 2))
+            .expect("the configs carry no reserved report or shared destination");
+
+        let named = FleetReport {
+            selection: hares_io::Selection::Named(vec!["No Such Variable (kW)".to_string()]),
+            frequency: hares_io::Frequency::Hourly,
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let err = fleet
+            .simulate(&named, 1, chunk(64))
+            .expect_err("no home declares the name");
+        assert!(
+            matches!(err, FleetError::UnmatchedSelection { ref names } if names == &vec!["No Such Variable (kW)".to_string()]),
+            "the error names the unmatched selection: {err}"
+        );
+
+        let pattern = FleetReport {
+            selection: hares_io::Selection::Pattern("NoSuchVariable*".to_string()),
+            frequency: hares_io::Frequency::Hourly,
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let err = fleet
+            .simulate(&pattern, 1, chunk(64))
+            .expect_err("the pattern matches nothing");
+        assert!(
+            matches!(err, FleetError::UnmatchedSelection { ref names } if names.first().map(String::as_str) == Some("NoSuchVariable*")),
+            "the error names the unmatched pattern: {err}"
+        );
+    }
+
+    /// Two homes whose file destinations resolve to the same path are
+    /// rejected at construction, both building ids named.
+    #[test]
+    fn fleet_homes_with_same_file_destination_are_rejected() {
+        let dir = tempdir().expect("temp dir");
+        let shared = dir.path().join("shared.parquet");
+        let report_for = |bldg_id: i64| DwellingConfig {
+            hpxml_path: fixture_hpxml_path(),
+            schedule_path: None,
+            weather_path: dir.path().join("weather.epw"),
+            defaults_path: None,
+            sim_config: SimulationConfig {
+                reports: vec![hares_io::ReportSpec {
+                    name: format!("report-{bldg_id}"),
+                    selection: hares_io::Selection::Verbosity(0),
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Parquet {
+                        path: shared.clone(),
+                        overwrite: false,
+                    },
+                }],
+                ..simulation_config(dir.path().join(format!("unused-{bldg_id}.csv")))
+            },
+            overrides: None,
+            bldg_id,
+            initialization_duration: None,
+            patches: None,
+        };
+        let err = Fleet::from_buildings(vec![report_for(1), report_for(2)])
+            .expect_err("two homes may not write one path");
+        assert!(
+            matches!(
+                err,
+                FleetError::DuplicateDestination {
+                    first: 1,
+                    second: 2,
+                    ..
+                }
+            ),
+            "the error names both building ids: {err}"
+        );
+    }
+
+    /// A home whose own config carries a report named `fleet` is a
+    /// construction error naming its building id.
+    #[test]
+    fn fleet_home_report_named_fleet_is_rejected() {
+        let dir = tempdir().expect("temp dir");
+        let mut config = build_valid_configs(dir.path(), 1).remove(0);
+        config.sim_config.reports.push(hares_io::ReportSpec {
+            name: "fleet".to_string(),
+            selection: hares_io::Selection::Verbosity(0),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Memory,
+        });
+        let err = Fleet::from_buildings(vec![config])
+            .expect_err("the reserved report name is rejected at construction");
+        assert!(
+            matches!(err, FleetError::ReservedReportName { bldg_id: 1 }),
+            "the error names the building: {err}"
         );
     }
 }

@@ -348,48 +348,53 @@ def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.slow
-def test_simulate_resolution_enum_works(tmp_path: Path) -> None:
-    """Verify simulate(resolution=AggregationResolution.Hourly) works."""
-    from hares import AggregationResolution
+def _minutes_15_report():
+    """The fleet report at quarter hours over tier 2 of every home."""
+    from hares import FleetReport, Frequency
 
+    return FleetReport(Selection.verbosity(2), Frequency.minutes(15))
+
+
+def _hourly_report():
+    """The fleet report at calendar hours over tier 2 of every home."""
+    from hares import FleetReport, Frequency
+
+    return FleetReport(Selection.verbosity(2), Frequency.hourly())
+
+
+@pytest.mark.slow
+def test_simulate_minutes_15_report(tmp_path: Path) -> None:
+    """Verify the quarter-hour report: four rows over the hour, one home."""
     fleet = _build_simulatable_fleet(tmp_path, 1)
-    results = fleet.simulate(resolution=AggregationResolution.Hourly)
+    results = fleet.simulate(_minutes_15_report())
     assert results.n_succeeded == 1
+    # One hour at 60 s reduces onto four quarter hours.
+    assert results.aggregate.height == 4
 
 
 @pytest.mark.slow
-def test_simulate_resolution_string_works(tmp_path: Path) -> None:
-    """Verify simulate(resolution="hourly") string convenience works."""
+def test_simulate_hourly_report(tmp_path: Path) -> None:
+    """Verify the hourly report: one row over the hour, one home."""
     fleet = _build_simulatable_fleet(tmp_path, 1)
-    results = fleet.simulate(resolution="hourly")
+    results = fleet.simulate(_hourly_report())
     assert results.n_succeeded == 1
+    assert results.aggregate.height == 1
 
 
 @pytest.mark.slow
-def test_simulate_default_resolution(tmp_path: Path) -> None:
-    """Verify simulate() default uses FifteenMin."""
+def test_no_failed_homes_on_success(tmp_path: Path) -> None:
+    """Verify the homes table carries no failed row on an all-success run."""
     fleet = _build_simulatable_fleet(tmp_path, 1)
-    results = fleet.simulate()
-    assert results.n_succeeded == 1
-    # Default is FifteenMin; aggregate_timeseries should have data
-    df = results.aggregate_timeseries
-    assert df.height > 0
-
-
-@pytest.mark.slow
-def test_failures_property_empty_on_success(tmp_path: Path) -> None:
-    """Verify failures property is empty list on all-success runs."""
-    fleet = _build_simulatable_fleet(tmp_path, 1)
-    results = fleet.simulate()
-    assert results.failures == []
+    results = fleet.simulate(_minutes_15_report())
+    assert results.n_failed == 0
+    assert results.homes["status"].to_list() != ["failed"]
 
 
 @pytest.mark.slow
 def test_n_succeeded_and_n_failed_properties(tmp_path: Path) -> None:
     """Verify n_succeeded and n_failed properties."""
     fleet = _build_simulatable_fleet(tmp_path, 2)
-    results = fleet.simulate()
+    results = fleet.simulate(_minutes_15_report())
     assert results.n_succeeded == 2
     assert results.n_failed == 0
 
@@ -403,7 +408,7 @@ def test_progress_callback_invoked(tmp_path: Path) -> None:
     def on_progress(completed: int, total: int) -> None:
         calls.append((completed, total))
 
-    results = fleet.simulate(progress=on_progress)
+    results = fleet.simulate(_minutes_15_report(), progress=on_progress)
     assert results.n_succeeded == 2
     assert len(calls) == 2
     # All calls should have total == 2
@@ -415,7 +420,9 @@ def test_progress_callback_invoked(tmp_path: Path) -> None:
 
 @pytest.mark.slow
 def test_simulate_raise_on_failure_true_raises(tmp_path: Path) -> None:
-    """Verify simulate(raise_on_failure=True) raises on any failure."""
+    """Verify simulate(raise_on_failure=True) raises naming every failed home."""
+    from hares._hares import HaresSimulationError
+
     # Use invalid paths to force simulation failure
     sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60)
     config = DwellingConfig(
@@ -427,13 +434,13 @@ def test_simulate_raise_on_failure_true_raises(tmp_path: Path) -> None:
     )
     fleet = PyFleet.from_buildings([config])
 
-    with pytest.raises(ValueError, match="failed"):
-        fleet.simulate(raise_on_failure=True)
+    with pytest.raises(HaresSimulationError, match="home 1"):
+        fleet.simulate(_hourly_report(), raise_on_failure=True)
 
 
 @pytest.mark.slow
-def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
-    """Verify default fault-tolerant mode collects failures without raising."""
+def test_simulate_fault_tolerant_lists_failed_homes(tmp_path: Path) -> None:
+    """Verify the default mode lists a failed home as a homes row."""
     hpxml = str(EXAMPLES / "BEopt_example.xml")
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
@@ -454,26 +461,29 @@ def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
     )
     fleet = PyFleet.from_buildings([good, bad])
 
-    results = fleet.simulate(raise_on_failure=False)
+    results = fleet.simulate(_hourly_report())
     assert results.n_succeeded == 1
     assert results.n_failed == 1
-    assert len(results.failures) == 1
-    assert results.failures[0]["bldg_id"] == 2
-    assert isinstance(results.failures[0]["error"], str)
+    statuses = dict(
+        zip(results.homes["bldg_id"].to_list(), results.homes["status"].to_list())
+    )
+    assert statuses[1] != "failed"
+    assert statuses[2] == "failed"
+    reasons = dict(
+        zip(results.homes["bldg_id"].to_list(), results.homes["reason"].to_list())
+    )
+    assert reasons[2], "the failed home's reason is its message"
 
 
 @pytest.mark.slow
-def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
-    """Verify simulate() emits a warning when heterogeneous equipment causes column mismatch.
+def test_heterogeneous_equipment_column_mismatch_empties_the_aggregate() -> None:
+    """Verify the aggregate empties when the homes' column sets differ.
 
     Two dwellings with different equipment types produce different output
-    column sets (e.g., a battery-equipped dwelling has extra battery columns).
-    The fleet aggregator detects the mismatch and returns an empty aggregate
-    batch. The Python guard then emits a warning so callers can detect the
-    condition without inspecting the DataFrame shape.
+    column sets (e.g., a battery-equipped dwelling has extra battery
+    columns). The fold detects the mismatch and returns an empty aggregate
+    until FL-2 unions the columns.
     """
-    import warnings
-
     fixture_dir = ROOT / "tests" / "fixtures" / "hpxml" / "ochre_samples"
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
@@ -503,26 +513,15 @@ def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
     )
     fleet = PyFleet.from_buildings([config1, config2])
 
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        results = fleet.simulate()
+    results = fleet.simulate(_hourly_report())
 
-    # Both dwellings should complete (the guard emits a warning, not an error).
+    # Both dwellings complete (the mismatch empties the aggregate, it does
+    # not fail a home).
     assert results.n_succeeded == 2, (
         f"Expected both dwellings to succeed, got n_succeeded={results.n_succeeded}"
     )
 
-    # The aggregate timeseries is empty because column sets differ across dwellings.
-    assert results.aggregate_timeseries.height == 0
-
-    # The Python guard must emit a warning so callers can detect the condition.
-    assert len(w) >= 1, (
-        f"Expected at least 1 warning for heterogeneous fleet, got {len(w)}"
-    )
-    assert any(
-        "empty timeseries" in str(warning.message).lower()
-        for warning in w
-    ), (
-        f"No 'empty timeseries' warning found; warnings: "
-        f"{[str(x.message) for x in w]}"
-    )
+    # The aggregate is empty because column sets differ across dwellings,
+    # as does the covered weight behind it.
+    assert results.aggregate.height == 0
+    assert results.covered_weight.height == 0

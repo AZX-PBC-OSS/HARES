@@ -6,7 +6,9 @@ from ._hares import Dwelling
 from ._hares import DwellingBlueprint
 from ._hares import Fleet
 from ._hares import SteppableFleet
-from ._hares import FleetResults
+from ._hares import FleetReport
+from ._hares import FleetResult
+from ._hares import Coverage
 from ._hares import SimulationConfig
 from ._hares import HealthPolicy
 from ._hares import SiteLocationOverride
@@ -71,7 +73,6 @@ from ._hares import (
     InverterPriority,
     DutyCycleComponent,
     SimStatus,
-    AggregationResolution,
     ResStockVersion,
     ControlCapabilities,
     LutType,
@@ -157,7 +158,9 @@ __all__ = [
     "DwellingBlueprint",
     "Fleet",
     "SteppableFleet",
-    "FleetResults",
+    "FleetReport",
+    "FleetResult",
+    "Coverage",
     "SimulationConfig",
     "HealthPolicy",
     "SiteLocationOverride",
@@ -215,7 +218,6 @@ __all__ = [
     "InverterPriority",
     "DutyCycleComponent",
     "SimStatus",
-    "AggregationResolution",
     "ResStockVersion",
     "ControlCapabilities",
     "LutType",

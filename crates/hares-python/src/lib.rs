@@ -29,18 +29,18 @@ use py_config::{PyDwellingConfig, PyHealthPolicy, PySimulationConfig, PySiteLoca
 use py_control::PyControlSignal;
 use py_dwelling::{PyDwelling, PyTimestepsIter};
 use py_enums::{
-    PyAggregationResolution, PyBatteryChemistry, PyBatteryProductId, PyBmsAction, PyBmsMode,
-    PyBmsScheduleWindow, PyChargingLevel, PyChargingStrategy, PyControlCapabilities,
-    PyDepartureConstraint, PyDutyCycleComponent, PyEndUse, PyEvArchetypeId, PyEvConnectionState,
-    PyExecutionStage, PyExtrapolationStrategy, PyFluidType, PyFuelType, PyGridExportRule,
-    PyIdealCapacityMode, PyInverterPriority, PyLutType, PyPlugInPolicy, PyResStockVersion,
-    PySimStatus, PyStormWatchTrigger, PyVehicleId, PyVehicleType,
+    PyBatteryChemistry, PyBatteryProductId, PyBmsAction, PyBmsMode, PyBmsScheduleWindow,
+    PyChargingLevel, PyChargingStrategy, PyControlCapabilities, PyDepartureConstraint,
+    PyDutyCycleComponent, PyEndUse, PyEvArchetypeId, PyEvConnectionState, PyExecutionStage,
+    PyExtrapolationStrategy, PyFluidType, PyFuelType, PyGridExportRule, PyIdealCapacityMode,
+    PyInverterPriority, PyLutType, PyPlugInPolicy, PyResStockVersion, PySimStatus,
+    PyStormWatchTrigger, PyVehicleId, PyVehicleType,
 };
 use py_equipment::{
     PyBattery, PyCoreOutput, PyEquipment, PyEquipmentDescriptor, PyEv, PyProtocolBridge, PyPv,
     PyPvSoilingConfig, PyTelemetryField,
 };
-use py_fleet::{PyFleet, PyFleetResults, PySteppableFleet};
+use py_fleet::{PyCoverage, PyFleet, PyFleetReport, PyFleetResult, PySteppableFleet};
 use py_metrics::{
     PyEfficiencyMetrics, PyEnvelopeComponentLoadsKwh, PyGasEnergyMetrics, PyGridInteractionMetrics,
     PyPeakPowerKw, PyRollingPeakKw, PyRunMetrics, PyTotalEnergyKwh,
@@ -93,7 +93,9 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEquipmentDescriptor>()?;
     m.add_class::<PyFleet>()?;
     m.add_class::<PySteppableFleet>()?;
-    m.add_class::<PyFleetResults>()?;
+    m.add_class::<PyFleetReport>()?;
+    m.add_class::<PyFleetResult>()?;
+    m.add_class::<PyCoverage>()?;
     m.add_class::<PyActor>()?;
     m.add_class::<PyDispatchRequest>()?;
     m.add_class::<PyMode>()?;
@@ -108,7 +110,6 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyIdealCapacityMode>()?;
     m.add_class::<PyDutyCycleComponent>()?;
     m.add_class::<PySimStatus>()?;
-    m.add_class::<PyAggregationResolution>()?;
     m.add_class::<PyResStockVersion>()?;
     m.add_class::<PyControlCapabilities>()?;
     m.add_class::<PyLutType>()?;

@@ -4,7 +4,8 @@
 //! defaults directory, optional per-file defaults replacements, a
 //! `SimulationConfig` table verbatim, an optional `[tariff]` table
 //! (dwelling manifests only), and the homes; a fleet manifest also states
-//! each home's weight and the resolution its products are bucketed at.
+//! each home's weight and its `[fleet]` table (the fleet report's request:
+//! the selection, the frequency and the health policy).
 //! Unknown keys are rejected at every level the tool owns, so a typo
 //! cannot silently change what a golden pins.
 
@@ -39,25 +40,6 @@ pub enum ManifestKind {
     Fleet,
     #[serde(rename = "resstock_fleet")]
     ResstockFleet,
-}
-
-/// The resolution a fleet's products are bucketed at, as the manifest
-/// spells it. Any other string is rejected at parse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManifestResolution {
-    FifteenMin,
-    Hourly,
-}
-
-impl ManifestResolution {
-    /// The aggregation resolution the engine folds to.
-    pub fn resolution(self) -> hares_fleet::AggregationResolution {
-        match self {
-            ManifestResolution::Hourly => hares_fleet::AggregationResolution::Hourly,
-            ManifestResolution::FifteenMin => hares_fleet::AggregationResolution::FifteenMin,
-        }
-    }
 }
 
 /// The `[fleet]` table's variable selection, as the manifest spells it:
@@ -102,17 +84,34 @@ impl<'de> Deserialize<'de> for ManifestSelection {
     }
 }
 
-/// The manifest's required `[fleet]` table for kind `resstock_fleet`: the
-/// fleet report's request, a frequency and a variable selection. The
-/// metadata's weight column carries the homes' weights; no `[[home]]`
-/// entries exist for this kind.
+/// The manifest's required `[fleet]` table for the fleet kinds: the fleet
+/// report's request, as the engine spells it. The frequency is a
+/// `hares_io::Frequency` verbatim (`"hourly"`, `{ minutes = 15 }`, and so
+/// on); the selection is the `verbosity-N` spelling; the optional
+/// `health_policy` is a `hares_io::HealthPolicy` verbatim, the default
+/// empty policy left implicit.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FleetReportSpec {
     /// The frequency the fleet's products are bucketed at.
-    pub frequency: ManifestResolution,
+    pub frequency: hares_io::Frequency,
     /// The variable selection the fleet's homes report.
     pub selection: ManifestSelection,
+    /// The fleet's health policy, applied to every home's run.
+    #[serde(default)]
+    pub health_policy: Option<hares_io::HealthPolicy>,
+}
+
+impl FleetReportSpec {
+    /// The engine's fleet report the table states.
+    #[must_use]
+    pub fn fleet_report(&self) -> hares_fleet::FleetReport {
+        hares_fleet::FleetReport {
+            selection: hares_io::Selection::Verbosity(self.selection.verbosity()),
+            frequency: self.frequency,
+            health_policy: self.health_policy.clone().unwrap_or_default(),
+        }
+    }
 }
 
 /// One `[[home]]` entry. Paths are repository-relative; `overrides` is the
@@ -180,11 +179,6 @@ pub struct GoldenManifest {
     /// serde missing-field error.
     #[serde(default)]
     pub home: Vec<HomeEntry>,
-    /// The resolution the fleet's products are bucketed at. Required for
-    /// kind "fleet" and rejected for kind "dwelling"; the validator states
-    /// both rules.
-    #[serde(default)]
-    pub resolution: Option<ManifestResolution>,
     /// The optional `[tariff]` table. `parse` checks its shape (dwelling
     /// manifests only, `file` and `zone` present, no other key) and parses
     /// `zone`; [`GoldenManifest::tariff`] reads and validates the file at
@@ -213,9 +207,9 @@ pub struct GoldenManifest {
     /// start, the step and the output settings.
     #[serde(default)]
     pub duration: Option<u64>,
-    /// The required `[fleet]` table for kind "resstock_fleet": the fleet
-    /// report's frequency and selection. Every other kind rejects the
-    /// table.
+    /// The required `[fleet]` table for the fleet kinds (`fleet` and
+    /// `resstock_fleet`): the fleet report's request. Kind "dwelling"
+    /// rejects the table.
     #[serde(default)]
     pub fleet: Option<FleetReportSpec>,
     /// Where the manifest was parsed from, for error messages; not part
@@ -293,17 +287,16 @@ impl GoldenManifest {
             path: path.to_path_buf(),
             detail,
         };
-        let resstock_keys: [(&str, bool); 6] = [
+        let resstock_only_keys: [(&str, bool); 5] = [
             ("metadata", self.metadata.is_some()),
             ("buildings_dir", self.buildings_dir.is_some()),
             ("weather_dir", self.weather_dir.is_some()),
             ("version", self.version.is_some()),
             ("duration", self.duration.is_some()),
-            ("fleet", self.fleet.is_some()),
         ];
         match self.kind {
             ManifestKind::ResstockFleet => {
-                for (key, present) in resstock_keys {
+                for (key, present) in resstock_only_keys {
                     if !present {
                         return Err(fail(format!(
                             "kind \"resstock_fleet\" requires the key {key:?}"
@@ -316,18 +309,12 @@ impl GoldenManifest {
                             .to_string(),
                     ));
                 }
-                if self.resolution.is_some() {
-                    return Err(fail(format!(
-                        "resolution is accepted for kind \"fleet\" only, found kind {:?}: the [fleet] table's frequency carries it for kind \"resstock_fleet\"",
-                        self.kind
-                    )));
-                }
                 if self.duration == Some(0) {
                     return Err(fail("duration must be positive".to_string()));
                 }
             }
             ManifestKind::Dwelling | ManifestKind::Fleet => {
-                for (key, present) in resstock_keys {
+                for (key, present) in resstock_only_keys {
                     if present {
                         return Err(fail(format!(
                             "{key} is accepted for kind \"resstock_fleet\" only, found kind {:?}",
@@ -336,6 +323,31 @@ impl GoldenManifest {
                     }
                 }
             }
+        }
+        // The [fleet] table: required for both fleet kinds, rejected for
+        // kind "dwelling".
+        match (self.kind, self.fleet.is_some()) {
+            (ManifestKind::Dwelling, true) => {
+                return Err(fail(format!(
+                    "fleet is accepted for the fleet kinds only, found kind {:?}",
+                    self.kind
+                )));
+            }
+            (ManifestKind::Fleet, false) => {
+                return Err(fail(
+                    "kind \"fleet\" requires the [fleet] table: the fleet report's \
+                     selection, frequency and health policy"
+                        .to_string(),
+                ));
+            }
+            (ManifestKind::ResstockFleet, false) => {
+                return Err(fail(
+                    "kind \"resstock_fleet\" requires the [fleet] table: the fleet \
+                     report's selection, frequency and health policy"
+                        .to_string(),
+                ));
+            }
+            (ManifestKind::Dwelling | ManifestKind::Fleet | ManifestKind::ResstockFleet, _) => {}
         }
         match &self.simulation {
             Some(simulation) => {
@@ -402,20 +414,7 @@ impl GoldenManifest {
                 (ManifestKind::Fleet, Some(_)) | (ManifestKind::Dwelling, None) => {}
             }
         }
-        match (self.kind, self.resolution) {
-            (ManifestKind::Fleet, None) => Err(fail(
-                "resolution is required for kind \"fleet\"".to_string(),
-            )),
-            (ManifestKind::Dwelling, Some(_)) | (ManifestKind::ResstockFleet, Some(_)) => {
-                Err(fail(format!(
-                    "resolution is accepted for kind \"fleet\" only, found kind {:?}",
-                    self.kind
-                )))
-            }
-            (ManifestKind::Fleet, Some(_))
-            | (ManifestKind::Dwelling, None)
-            | (ManifestKind::ResstockFleet, None) => Ok(()),
-        }
+        Ok(())
     }
 
     /// The manifest's feature set as strings, in manifest order.
