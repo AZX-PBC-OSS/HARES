@@ -134,7 +134,7 @@ impl LocalInstant {
                     // A snapshot this file wrote always carries the zone's
                     // own offset (the offset the original instant rendered
                     // with), which matches one of the two variants; a
-                    // foreign offset degrades to the earlier occurrence
+                    // foreign offset returns the later occurrence
                     // deterministically.
                     Ok(later)
                 }
@@ -504,6 +504,42 @@ mod tests {
             resolved.offset().fix().local_minus_utc(),
             -25200,
             "the stored offset picks the standard-time variant"
+        );
+    }
+
+    /// The fall-back's daylight-time occurrence resolves to itself by its
+    /// stored offset (the ambiguity's other side, beside the
+    /// standard-time one the test above pins), and a wall clock carrying
+    /// a foreign offset (one the zone never rendered that hour) returns
+    /// the later occurrence, as the resolution's own comment states.
+    #[test]
+    fn local_instant_resolves_the_dst_occurrence_and_a_foreign_offset_to_the_later() {
+        use chrono_tz::America::Denver;
+        // The fall-back hour's daylight-time occurrence (UTC-6): its own
+        // offset picks it back out of the ambiguity.
+        let dst = Denver
+            .with_ymd_and_hms(2023, 11, 5, 1, 30, 0)
+            .earliest()
+            .expect("the daylight-time variant");
+        let instant = LocalInstant::new(&dst);
+        assert_eq!(instant.offset_seconds, -21600);
+        let resolved = instant.resolve(Denver).expect("resolves");
+        assert_eq!(
+            resolved.offset().fix().local_minus_utc(),
+            -21600,
+            "the stored offset picks the daylight-time variant"
+        );
+
+        // A foreign offset: neither variant's, so the later occurrence.
+        let foreign = LocalInstant {
+            wall_clock: "2023-11-05T01:30:00".to_string(),
+            offset_seconds: 3_600,
+        };
+        let resolved = foreign.resolve(Denver).expect("resolves");
+        assert_eq!(
+            resolved.offset().fix().local_minus_utc(),
+            -25200,
+            "a foreign offset returns the later occurrence"
         );
     }
 
