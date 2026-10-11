@@ -1526,7 +1526,7 @@ mod tests {
     use std::sync::Mutex;
     use std::thread;
 
-    use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
+    use arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::arrow_writer::ArrowWriter;
@@ -3673,6 +3673,231 @@ mod tests {
         assert!(
             matches!(err, FleetError::ReservedReportName { bldg_id: 1 }),
             "the error names the building: {err}"
+        );
+    }
+
+    /// A home whose own config carries a callback-destination report fails
+    /// that home at run start, naming the report: the fleet builds its
+    /// dwellings internally, so nothing can attach the report's callback,
+    /// and the run refuses a callback report with nothing attached instead
+    /// of streaming its batches to nowhere. The other homes are unaffected.
+    #[test]
+    fn fleet_home_callback_report_fails_that_home_at_run_start() {
+        let dir = tempdir().expect("temp dir");
+        let mut configs = build_valid_configs(dir.path(), 2);
+        configs[1].sim_config.reports.push(hares_io::ReportSpec {
+            name: "mine".to_string(),
+            selection: hares_io::Selection::Verbosity(0),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Callback,
+        });
+        let fleet = Fleet::from_buildings(configs)
+            .expect("the configs carry no reserved report or shared destination");
+        let report = FleetReport {
+            selection: hares_io::Selection::Verbosity(0),
+            frequency: hares_io::Frequency::Hourly,
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let result = fleet
+            .simulate(&report, 1, chunk(64))
+            .expect("the fleet runs; the refusal is that home's status");
+        assert_eq!(result.homes.len(), 2);
+        assert!(
+            !matches!(result.homes[0].status, SimStatus::Failed(_)),
+            "the home without the callback report is unaffected: {:?}",
+            result.homes[0].status
+        );
+        match &result.homes[1].status {
+            SimStatus::Failed(reason) => {
+                assert!(
+                    reason.contains("mine") && reason.contains("no callback is attached"),
+                    "the refusal names the report and the missing attachment: {reason}"
+                );
+            }
+            status => panic!("expected a failed home, got: {status:?}"),
+        }
+        assert_eq!(result.homes[1].steps, 0, "the home failed at run start");
+        assert_eq!(result.n_succeeded, 1, "only the clean home succeeded");
+    }
+
+    /// Two identical homes at different UTC offsets (one site override),
+    /// starting at the same instant: the fold's periods align on the
+    /// instant, so the aggregate is the full common grid (no intersection
+    /// loss) and the covered weight is the two homes' weight sum in every
+    /// cell, on bits.
+    #[test]
+    fn cross_offset_homes_align_on_the_start_instant() {
+        let examples = repo_root().join("data/examples");
+        let config = |bldg_id: i64,
+                      start: chrono::DateTime<FixedOffset>,
+                      forced: hares_io::SiteLocationOverride| {
+            DwellingConfig {
+                hpxml_path: fixture_hpxml_path(),
+                schedule_path: Some(examples.join("BEopt_example_schedule.csv")),
+                weather_path: examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+                defaults_path: Some(repo_defaults_path()),
+                sim_config: SimulationConfig {
+                    start_time: start,
+                    duration: Duration::hours(2),
+                    time_res: Duration::seconds(900),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: forced,
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                overrides: None,
+                bldg_id,
+                initialization_duration: None,
+                patches: None,
+            }
+        };
+        // The Denver weather resolves UTC-7, and the second home's site
+        // override forces UTC-5. The start instants are equal: local
+        // midnight at -07:00 is 02:00 local at -05:00, so the two homes'
+        // naive local clocks differ by the two hours their offsets do.
+        let utc_minus_7 = FixedOffset::west_opt(7 * 3600).expect("valid offset");
+        let utc_minus_5 = FixedOffset::west_opt(5 * 3600).expect("valid offset");
+        let start_a = utc_minus_7
+            .with_ymd_and_hms(2021, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid start");
+        let start_b = utc_minus_5
+            .with_ymd_and_hms(2021, 1, 1, 2, 0, 0)
+            .single()
+            .expect("valid start");
+        assert_eq!(start_a, start_b, "the two starts name one instant");
+        let forced = hares_io::SiteLocationOverride {
+            utc_offset_h: Some(-5.0),
+            ..hares_io::SiteLocationOverride::default()
+        };
+        let fleet = Fleet::from_buildings(vec![
+            config(1, start_a, hares_io::SiteLocationOverride::default()),
+            config(2, start_b, forced),
+        ])
+        .expect("the homes carry no reserved report or shared destination")
+        .with_sample_weights(vec![1.0, 1.0])
+        .expect("the weights are finite and non-negative");
+
+        let report = FleetReport {
+            selection: hares_io::Selection::Verbosity(2),
+            frequency: hares_io::Frequency::Hourly,
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let result = fleet
+            .simulate(&report, 1, chunk(64))
+            .expect("the fleet runs");
+        for home in &result.homes {
+            assert!(
+                !matches!(home.status, SimStatus::Failed(_)),
+                "both homes run: {:?}",
+                home.status
+            );
+            assert_eq!(home.periods_folded, 2, "every home folds both hours");
+        }
+        assert_eq!(
+            result.aggregate.num_rows(),
+            2,
+            "the homes' hour rows align on the instant: no intersection loss"
+        );
+        let times = result
+            .aggregate
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("a Utf8 Time column");
+        assert_eq!(times.value(0), "2021-01-01T07:00:00Z");
+        assert_eq!(times.value(1), "2021-01-01T08:00:00Z");
+        for slot in 1..result.covered_weight.num_columns() {
+            let weights = result
+                .covered_weight
+                .column(slot)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("a Float64 covered weight column");
+            for row in 0..2 {
+                assert!(
+                    !weights.is_null(row),
+                    "row {row}: every hour is fully covered"
+                );
+                assert_eq!(
+                    weights.value(row).to_bits(),
+                    2.0_f64.to_bits(),
+                    "row {row}: the two homes' weights"
+                );
+            }
+        }
+    }
+
+    /// One home requests the run metrics and one does not: the homes
+    /// table's metrics columns ride (any home's request adds them), and
+    /// the home without the request reads null in both.
+    #[test]
+    fn mixed_metrics_homes_keep_the_columns_and_read_null() {
+        let mut configs = vec![
+            golden_fleet_config(1, "G0600770_2018.csv"),
+            golden_fleet_config(2, "G0600650_2018.csv"),
+        ];
+        configs[1].sim_config.metrics = false;
+        let fleet = Fleet::from_buildings(configs)
+            .expect("the homes carry no reserved report or shared destination")
+            .with_sample_weights(vec![1.0, 1.0])
+            .expect("the weights are finite and non-negative");
+        let result = fleet
+            .simulate(&minutes_15(), 1, chunk(64))
+            .expect("the fleet runs");
+        assert!(
+            result.homes[0].metrics.is_some(),
+            "the first home requested metrics"
+        );
+        assert!(
+            result.homes[1].metrics.is_none(),
+            "the second home did not request them"
+        );
+
+        let table = result.homes_table();
+        let names: Vec<&str> = table
+            .schema_ref()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert!(
+            names.contains(&"total_energy_kwh") && names.contains(&"peak_power_kw"),
+            "the metrics columns ride: {names:?}"
+        );
+        let energy = table
+            .column(
+                names
+                    .iter()
+                    .position(|n| *n == "total_energy_kwh")
+                    .expect("named"),
+            )
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("a Float64 column");
+        let peak = table
+            .column(
+                names
+                    .iter()
+                    .position(|n| *n == "peak_power_kw")
+                    .expect("named"),
+            )
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("a Float64 column");
+        assert!(
+            !energy.is_null(0) && !peak.is_null(0),
+            "the requesting home carries both"
+        );
+        assert!(
+            energy.is_null(1) && peak.is_null(1),
+            "the other home reads null"
         );
     }
 }
