@@ -63,6 +63,64 @@ Facts every entry below relies on, at `ebdb1a17`:
 
 ## FL-1: streaming ordered fold with a deterministic memory bound
 
+**State:** committed `9eb66255` + `b57be63c` (branch `row/r50-fl1`,
+2026-10-11). The first commit captures `fleet_same_offset_300s` on the
+parent code, twice byte-identical. The second commit replaces
+`Fleet::simulate(n_threads)` + `aggregate()` with
+`Fleet::simulate(&FleetReport, n_threads, chunk_size) -> FleetResult`:
+each home runs its own reports plus the fleet's appended `fleet` report
+(the selection restricted to the home's catalogue, `Timestep`, a
+`Callback` destination) whose batches feed a per-home `PeriodReducer`
+and drop, so the home's result in the fold is its reduced period table,
+never its frame; homes run in consecutive chunks of the entry order and
+each finished chunk folds into the running aggregate one home at a time
+in entry order before the next chunk starts. The bound is a
+max-resident-homes bound, the chunk size: `FleetResult.
+peak_live_home_results` reads it (the acceptance test pins exactly 1
+and 2 at chunk sizes 1 and 2), and the bench pair at 10000 homes
+measures it (104 MB at chunk 64 against 158 MB at the one-chunk
+collect shape, wall equal at 12.5 s vs 12.4 s; `02-measurement.md`).
+The ordered-merge correctness: the fold's per-cell accumulation adds
+`v * w` and `w` home by home in entry order and divides a weighted mean
+once after the last home, the parent fold's operations and order; the
+`fleet_same_offset_300s` `aggregate` (36 columns, 192 rows) and the
+`metrics` products of both fleet goldens compare bitwise with the
+parent code's capture, the chunk-1/2/64 by thread-1/2/8 differential
+and the 12-home six-barrier-crossing differential agree on bits, and
+the unit-level fold tests fail on a mutated accumulation order
+(verified by mutation). The fold empties on a variable mismatch
+between homes, as the parent did (until FL-2): `fleet_mixed_offset`'s
+`aggregate` and `covered_weight` stay zero rows. The rules stay
+unit-keyed in `unit_keyed_fleet_rules(Unit) -> (TimeRule, AcrossHomes)`
+(FL-5 deletes it); the null rule is the entry's covered-weight rule (no
+step value is null before B-6, so no number moves). The per-home
+Diagnostics/reports integration rides rows 45 and 46's surfaces: the
+fold keys the reduced periods by the instant of the period start (the
+`Time` column's naive local milliseconds minus the home's
+`hares:utc_offset_s`) and the homes table's metrics columns exist only
+when the home's config requested them. `FleetBuildReport` is the
+construction report's new name (`FleetReport` is the report request's).
+Python: `FleetReport(selection, frequency, health_policy=HealthPolicy())`,
+`Fleet.simulate(report, *, n_threads=None, chunk_size=64,
+raise_on_failure=False, progress=None) -> FleetResult`, `Coverage`,
+the `Frequency` constructors (`minutes`, `hourly`, `daily`, `monthly`,
+`annual`, `run_period`); removed `AggregationResolution`, the
+`resolution=` keyword and `FleetResults` with `per_dwelling_metrics`,
+`aggregate_timeseries` and `failures` (a failed home is a `homes` row
+with status `failed` and its reason); the stub and the docs' changes
+section follow. The goldens: both fleet manifests' `resolution` key
+replaced by the required `[fleet]` table (`fleet_same_offset_300s`:
+`frequency = { minutes = 15 }`; `fleet_mixed_offset`: `frequency =
+"hourly"`; both `selection = "verbosity-2"`); `resstock_2025_fleet`
+re-captured, its `metrics` product to zero rows and its `weights`
+stand-in replaced by the zero-row `covered_weight` (the reason in
+`02-measurement.md`). Full block green on the commit (fmt; clippy
+--workspace --all-targets --all-features -D warnings; nextest
+--workspace --all-features 7901 passed; -F dst 7902 passed; pytest
+1669 passed, 6 xfailed, 0 skipped; pyright 0; compare-all 8 manifests
+identical, `full_year_900s_dst` identical); the wall-time rule held at
+the parent and after (`02-measurement.md`). Review + red team owed.
+
 **Kind:** initiative work (`context.md` item 13). Structural: every fleet
 number equals its parent commit's bitwise. The numeric halves are FL-5
 (declared kinds) and `09-numeric-fixes.md` B-11 (Mode).
