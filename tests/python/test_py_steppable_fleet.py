@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from hares._hares import HaresSimulationError
 from hares import DwellingConfig, SimulationConfig, SteppableFleet
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,3 +55,22 @@ def test_steppable_fleet_step_includes_reactive_power() -> None:
     assert result is not None
     assert "reactive_power_kvar" in result
     assert isinstance(result["reactive_power_kvar"], float)
+
+
+def test_steppable_fleet_step_after_finish_raises() -> None:
+    fleet = SteppableFleet.from_configs([_build_valid_config(bldg_id=1)], n_threads=0)
+
+    while not fleet.is_finished():
+        entries = fleet.step()
+        assert all(entry["ok"] for entry in entries)
+
+    with pytest.raises(HaresSimulationError) as exc_info:
+        fleet.step()
+    assert str(fleet.total_steps()) in str(exc_info.value)
+
+
+def test_steppable_fleet_telemetry_out_of_range_raises_index_error() -> None:
+    fleet = SteppableFleet.from_configs([_build_valid_config(bldg_id=1)], n_threads=0)
+
+    with pytest.raises(IndexError):
+        fleet.telemetry(len(fleet))

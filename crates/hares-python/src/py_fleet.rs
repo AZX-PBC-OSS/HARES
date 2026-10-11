@@ -418,6 +418,25 @@ fn fleet_error_to_py_err(py: Python<'_>, err: hares_fleet::fleet::FleetError) ->
     }
 }
 
+/// The conversion function the SteppableFleet binding uses for a
+/// `FleetError`: `NoSuchHome` is the caller's bad index (`IndexError`), a
+/// failed telemetry snapshot is the simulation's failure
+/// (`HaresSimulationError` naming the home and the cause), and a step
+/// past the fleet's finished end is a `HaresSimulationError` naming the
+/// finished step count.
+fn steppable_error_to_py_err(err: hares_fleet::FleetError) -> PyErr {
+    match &err {
+        hares_fleet::FleetError::NoSuchHome { index, len } => {
+            PyIndexError::new_err(format!("dwelling_index {index} out of range (len={len})"))
+        }
+        hares_fleet::FleetError::Telemetry { .. }
+        | hares_fleet::FleetError::AlreadyFinished { .. } => {
+            HaresSimulationError::new_err(err.to_string())
+        }
+        other => PyValueError::new_err(other.to_string()),
+    }
+}
+
 #[pyclass(name = "SteppableFleet")]
 pub struct PySteppableFleet {
     fleet: Mutex<hares_fleet::SteppableFleet>,
@@ -489,35 +508,49 @@ impl PySteppableFleet {
                  create a new SteppableFleet instance",
             ));
         }
+        enum StepOutcome {
+            Mutex(String),
+            Fleet(hares_fleet::FleetError),
+        }
         let (step_results, bldg_ids, reactive_power_kvar) = py
             .detach(|| {
                 let mut fleet = self.fleet.lock().map_err(|e| {
-                    format!(
+                    StepOutcome::Mutex(format!(
                         "steppable fleet state is corrupted (internal panic: {e}); \
                          create a new SteppableFleet instance"
-                    )
+                    ))
                 })?;
-                let step_results = fleet.step();
-                let bldg_ids = (0..fleet.len())
-                    .map(|idx| fleet.bldg_id(idx).unwrap_or(-1))
-                    .collect::<Vec<_>>();
+                let step_results = fleet.step().map_err(StepOutcome::Fleet)?;
+                // The building ids come from an infallible iterator over
+                // the homes; every home in the fleet has one.
+                let bldg_ids = fleet.bldg_ids();
                 let reactive_power_kvar = (0..fleet.len())
                     .map(|idx| fleet.telemetry(idx).map(|t| t.reactive_power_kvar))
                     .collect::<Vec<_>>();
-                Ok::<_, String>((step_results, bldg_ids, reactive_power_kvar))
+                Ok::<_, StepOutcome>((step_results, bldg_ids, reactive_power_kvar))
             })
-            .map_err(|e| {
-                // If the closure returned an error string because the fleet mutex is
-                // poisoned, mark the fleet as dead so subsequent calls fail fast.
-                self.poisoned.store(true, Ordering::SeqCst);
-                PyRuntimeError::new_err(e)
+            .map_err(|outcome| match outcome {
+                StepOutcome::Mutex(message) => {
+                    // The fleet mutex is poisoned: mark the fleet as dead
+                    // so subsequent calls fail fast.
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    PyRuntimeError::new_err(message)
+                }
+                StepOutcome::Fleet(err) => steppable_error_to_py_err(err),
             })?;
 
         let out = PyList::empty(py);
         for (idx, entry) in step_results.into_iter().enumerate() {
             let item = PyDict::new(py);
-            match entry {
-                Ok(step) => {
+            let outcome = match entry {
+                Ok(step) => match &reactive_power_kvar[idx] {
+                    Ok(reactive_power_kvar) => Ok((step, *reactive_power_kvar)),
+                    Err(err) => Err(err.to_string()),
+                },
+                Err(err) => Err(err.to_string()),
+            };
+            match outcome {
+                Ok((step, reactive)) => {
                     let result = PyDict::new(py);
                     result.set_item(
                         "timestamp",
@@ -527,7 +560,6 @@ impl PySteppableFleet {
                     result.set_item("hvac_heating_w", step.hvac_heating_w)?;
                     result.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
                     result.set_item("gas_power_w", step.gas_power_w)?;
-                    let reactive = reactive_power_kvar.get(idx).and_then(|v| *v).unwrap_or(0.0);
                     result.set_item("reactive_power_kvar", reactive)?;
                     for (zone_id, temp_c) in &step.zone_temperatures_c {
                         let key = if zone_id.0 == 0 {
@@ -541,17 +573,10 @@ impl PySteppableFleet {
                     item.set_item("bldg_id", bldg_ids[idx])?;
                     item.set_item("result", result)?;
                 }
-                Err(err) => {
+                Err(message) => {
                     item.set_item("ok", false)?;
-                    item.set_item("error", err.to_string())?;
-                    let bldg_id = match err {
-                        hares_fleet::SimError::Failed { bldg_id, .. } => bldg_id,
-                        hares_fleet::SimError::Engine { bldg_id, .. } => bldg_id,
-                        hares_fleet::SimError::Panic { bldg_id, .. } => bldg_id,
-                        hares_fleet::SimError::Skipped { bldg_id, .. } => bldg_id,
-                        hares_fleet::SimError::ThreadPoolBuild(_) => -1,
-                    };
-                    item.set_item("bldg_id", bldg_id)?;
+                    item.set_item("error", message)?;
+                    item.set_item("bldg_id", bldg_ids[idx])?;
                 }
             }
             out.append(item)?;
@@ -574,14 +599,9 @@ impl PySteppableFleet {
 
     pub fn set_grid_voltage(&self, dwelling_index: usize, voltage_pu: f64) -> PyResult<()> {
         let mut fleet = self.acquire()?;
-        if dwelling_index >= fleet.len() {
-            return Err(PyIndexError::new_err(format!(
-                "dwelling_index {dwelling_index} out of range (len={})",
-                fleet.len()
-            )));
-        }
-        fleet.set_grid_voltage(dwelling_index, voltage_pu);
-        Ok(())
+        fleet
+            .set_grid_voltage(dwelling_index, voltage_pu)
+            .map_err(steppable_error_to_py_err)
     }
 
     pub fn set_grid_voltage_all(&self, voltage_pu: f64) -> PyResult<()> {
@@ -597,14 +617,9 @@ impl PySteppableFleet {
         signal: &PyControlSignal,
     ) -> PyResult<()> {
         let mut fleet = self.acquire()?;
-        if dwelling_index >= fleet.len() {
-            return Err(PyIndexError::new_err(format!(
-                "dwelling_index {dwelling_index} out of range (len={})",
-                fleet.len()
-            )));
-        }
-        fleet.apply_control(dwelling_index, &name, signal.signal.clone());
-        Ok(())
+        fleet
+            .apply_control(dwelling_index, &name, signal.signal.clone())
+            .map_err(steppable_error_to_py_err)
     }
 
     pub fn telemetry(&self, dwelling_index: usize) -> PyResult<PyTelemetry> {
@@ -612,12 +627,7 @@ impl PySteppableFleet {
         fleet
             .telemetry(dwelling_index)
             .map(PyTelemetry::new)
-            .ok_or_else(|| {
-                PyIndexError::new_err(format!(
-                    "dwelling_index {dwelling_index} out of range (len={})",
-                    fleet.len()
-                ))
-            })
+            .map_err(steppable_error_to_py_err)
     }
 
     pub fn is_finished(&self) -> PyResult<bool> {
@@ -670,5 +680,46 @@ mod tests {
         );
         assert_eq!(normalize_thread_count(Some(2)).expect("positive maps"), 2);
         assert!(normalize_thread_count(Some(-1)).is_err());
+    }
+
+    /// The one conversion function the binding uses maps `NoSuchHome` to
+    /// `IndexError` and a failed snapshot to `HaresSimulationError` whose
+    /// message names the building id and the snapshot error.
+    #[test]
+    fn fleet_error_maps_to_python_exception() {
+        Python::attach(|py| {
+            let no_such_home =
+                steppable_error_to_py_err(hares_fleet::FleetError::NoSuchHome { index: 3, len: 2 });
+            assert!(
+                no_such_home
+                    .get_type(py)
+                    .is_subclass_of::<PyIndexError>()
+                    .expect("subclass check"),
+                "NoSuchHome maps to IndexError, got: {no_such_home:?}"
+            );
+
+            let telemetry = steppable_error_to_py_err(hares_fleet::FleetError::Telemetry {
+                bldg_id: 7,
+                source: Box::<dyn std::error::Error + Send + Sync>::from(
+                    "the snapshot error".to_string(),
+                ),
+            });
+            assert!(
+                telemetry
+                    .get_type(py)
+                    .is_subclass_of::<HaresSimulationError>()
+                    .expect("subclass check"),
+                "Telemetry maps to HaresSimulationError, got: {telemetry:?}"
+            );
+            let message = telemetry.value(py).to_string();
+            assert!(
+                message.contains("7"),
+                "the message names the building id: {message}"
+            );
+            assert!(
+                message.contains("the snapshot error"),
+                "the message names the snapshot error: {message}"
+            );
+        });
     }
 }

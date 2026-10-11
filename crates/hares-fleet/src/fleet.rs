@@ -187,6 +187,18 @@ pub enum FleetError {
         second: i64,
         path: String,
     },
+    #[error(
+        "fleet already finished: all {total_steps} configured steps have run; \
+         stepping past the configured end is an error, not a failure per home"
+    )]
+    AlreadyFinished { total_steps: u64 },
+    #[error("dwelling_index {index} out of range (len={len})")]
+    NoSuchHome { index: usize, len: usize },
+    #[error("dwelling {bldg_id} telemetry snapshot failed: {source}")]
+    Telemetry {
+        bldg_id: i64,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 /// Errors returned by [`Fleet::simulate`].
@@ -1149,19 +1161,21 @@ impl SteppableFleet {
     }
 
     /// Advances all dwellings exactly one timestep in parallel.
-    #[must_use]
-    pub fn step(&mut self) -> Vec<std::result::Result<StepResult, SimError>> {
+    ///
+    /// A step past the fleet's configured end is one fleet-level error,
+    /// [`FleetError::AlreadyFinished`] naming the finished step count: the
+    /// fleet finished, no home failed, and no per-home results are
+    /// returned.
+    ///
+    /// # Errors
+    ///
+    /// [`FleetError::AlreadyFinished`] when every configured step has
+    /// already run.
+    pub fn step(&mut self) -> Result<Vec<std::result::Result<StepResult, SimError>>> {
         if self.is_finished() {
-            return self
-                .dwellings
-                .iter()
-                .map(|dwelling| {
-                    Err(SimError::Failed {
-                        bldg_id: dwelling.bldg_id,
-                        message: "simulation already reached configured end".to_string(),
-                    })
-                })
-                .collect();
+            return Err(FleetError::AlreadyFinished {
+                total_steps: self.total_steps,
+            });
         }
 
         // Invariant: no dwelling that was ALREADY failed before this step had
@@ -1193,16 +1207,26 @@ impl SteppableFleet {
         }
 
         self.current_step = self.current_step.saturating_add(1);
-        results
+        Ok(results)
     }
 
     /// Applies a grid voltage override to one dwelling.
-    pub fn set_grid_voltage(&mut self, dwelling_index: usize, voltage_pu: f64) {
-        if let Some(dwelling) = self.dwellings.get_mut(dwelling_index) {
-            dwelling.set_grid_voltage(voltage_pu);
-        } else {
-            tracing::warn!(dwelling_index, "set_grid_voltage index out of bounds");
-        }
+    ///
+    /// # Errors
+    ///
+    /// [`FleetError::NoSuchHome`] naming the index and the length when the
+    /// index is out of range.
+    pub fn set_grid_voltage(&mut self, dwelling_index: usize, voltage_pu: f64) -> Result<()> {
+        let len = self.dwellings.len();
+        let dwelling = self
+            .dwellings
+            .get_mut(dwelling_index)
+            .ok_or(FleetError::NoSuchHome {
+                index: dwelling_index,
+                len,
+            })?;
+        dwelling.set_grid_voltage(voltage_pu);
+        Ok(())
     }
 
     /// Applies a shared grid voltage override to all dwellings.
@@ -1213,35 +1237,57 @@ impl SteppableFleet {
     }
 
     /// Queues a control signal for one dwelling by equipment name.
-    pub fn apply_control(&mut self, dwelling_index: usize, name: &str, signal: ControlSignal) {
-        if let Some(dwelling) = self.dwellings.get_mut(dwelling_index) {
-            dwelling.apply_control(name, signal);
-        } else {
-            tracing::warn!(dwelling_index, "apply_control index out of bounds");
-        }
+    ///
+    /// # Errors
+    ///
+    /// [`FleetError::NoSuchHome`] naming the index and the length when the
+    /// index is out of range.
+    pub fn apply_control(
+        &mut self,
+        dwelling_index: usize,
+        name: &str,
+        signal: ControlSignal,
+    ) -> Result<()> {
+        let len = self.dwellings.len();
+        let dwelling = self
+            .dwellings
+            .get_mut(dwelling_index)
+            .ok_or(FleetError::NoSuchHome {
+                index: dwelling_index,
+                len,
+            })?;
+        dwelling.apply_control(name, signal);
+        Ok(())
     }
 
-    /// Returns telemetry for one dwelling, or `None` if the index is out of bounds.
+    /// Returns telemetry for one dwelling.
     ///
-    /// A telemetry snapshot that cannot be constructed (non-finite or
-    /// out-of-range state) is reported as `None`, the same signal as an
-    /// out-of-bounds index, with the underlying error logged. Some
+    /// # Errors
+    ///
+    /// [`FleetError::NoSuchHome`] naming the index and the length when the
+    /// index is out of range, and [`FleetError::Telemetry`] naming the
+    /// home and the cause when the snapshot cannot be built: some
     /// snapshot-construction conditions are not step failures, so this is
     /// the only place the error would surface.
-    #[must_use]
-    pub fn telemetry(&self, dwelling_index: usize) -> Option<DwellingTelemetry> {
-        self.dwellings.get(dwelling_index).and_then(|d| {
-            d.telemetry()
-                .map_err(|err| {
-                    tracing::warn!(
-                        dwelling_index,
-                        error = %err,
-                        "dwelling telemetry snapshot failed; reporting None"
-                    );
-                    err
-                })
-                .ok()
+    pub fn telemetry(&self, dwelling_index: usize) -> Result<DwellingTelemetry> {
+        let len = self.dwellings.len();
+        let dwelling = self
+            .dwellings
+            .get(dwelling_index)
+            .ok_or(FleetError::NoSuchHome {
+                index: dwelling_index,
+                len,
+            })?;
+        dwelling.telemetry().map_err(|err| FleetError::Telemetry {
+            bldg_id: dwelling.bldg_id,
+            source: Box::new(err),
         })
+    }
+
+    /// Returns the building ids of every home, in entry order.
+    #[must_use]
+    pub fn bldg_ids(&self) -> Vec<i64> {
+        self.dwellings.iter().map(|d| d.bldg_id).collect()
     }
 
     /// Returns building id for one dwelling index.
@@ -2228,7 +2274,7 @@ mod tests {
         assert!(fleet.total_steps() > 0);
         assert!(fleet.time_res_s() > 0.0);
 
-        let first_step = fleet.step();
+        let first_step = fleet.step().expect("steps run");
         assert_eq!(first_step.len(), 3);
         assert!(first_step.iter().all(|result| result.is_ok()));
         for result in first_step {
@@ -2239,19 +2285,75 @@ mod tests {
         assert!(!fleet.is_finished());
 
         while !fleet.is_finished() {
-            let step = fleet.step();
+            let step = fleet.step().expect("steps run to the end");
             assert_eq!(step.len(), 3);
             assert!(step.iter().all(|result| result.is_ok()));
         }
 
         assert!(fleet.is_finished());
         assert_eq!(fleet.current_step(), fleet.total_steps());
-        let post_end = fleet.step();
-        assert_eq!(post_end.len(), 3);
+    }
+
+    /// Stepping a finished fleet is one fleet-level error naming the
+    /// finished step count, not one failure per home: the fleet did not
+    /// fail, it finished.
+    #[test]
+    fn step_after_finish_is_already_finished_error() {
+        let dir = tempdir().expect("temp dir");
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
+        assert!(build_errors.is_empty());
+
+        while !fleet.is_finished() {
+            let step = fleet.step().expect("steps run to the end");
+            assert!(step.iter().all(|result| result.is_ok()));
+        }
+
+        let total_steps = fleet.total_steps();
+        let err = fleet
+            .step()
+            .expect_err("a step past the end is the fleet's error");
         assert!(
-            post_end
-                .iter()
-                .all(|result| matches!(result, Err(SimError::Failed { .. })))
+            matches!(err, FleetError::AlreadyFinished { total_steps: finished } if finished == total_steps),
+            "got: {err:?}"
+        );
+    }
+
+    /// The per-home accessors reject a missing home with
+    /// `NoSuchHome` naming the index and the length, instead of logging
+    /// and returning or reporting `None`.
+    #[test]
+    fn steppable_fleet_accessors_reject_a_missing_home() {
+        let dir = tempdir().expect("temp dir");
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 2), 2)
+                .expect("build steppable fleet");
+        assert!(build_errors.is_empty());
+        let len = fleet.len();
+
+        let telemetry_err = fleet
+            .telemetry(len)
+            .expect_err("telemetry past the end is an error");
+        assert!(
+            matches!(telemetry_err, FleetError::NoSuchHome { index, len: l } if index == len && l == len),
+            "got: {telemetry_err:?}"
+        );
+
+        let voltage_err = fleet
+            .set_grid_voltage(len, 1.0)
+            .expect_err("set_grid_voltage past the end is an error");
+        assert!(
+            matches!(voltage_err, FleetError::NoSuchHome { index, len: l } if index == len && l == len),
+            "got: {voltage_err:?}"
+        );
+
+        let control_err = fleet
+            .apply_control(len, "grid", ControlSignal::thermal_release())
+            .expect_err("apply_control past the end is an error");
+        assert!(
+            matches!(control_err, FleetError::NoSuchHome { index, len: l } if index == len && l == len),
+            "got: {control_err:?}"
         );
     }
 
@@ -2270,7 +2372,7 @@ mod tests {
         assert_eq!(build_errors[0].bldg_id, 999);
         assert!(!build_errors[0].message.is_empty());
 
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|result| result.is_ok()));
     }
@@ -2310,7 +2412,7 @@ mod tests {
         fleet.dwellings[1].failed = true;
 
         // Step: dwellings 0 and 2 should succeed, dwelling 1 should be skipped.
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 3);
 
         assert!(results[0].is_ok(), "dwelling 0 should succeed");
@@ -2335,7 +2437,7 @@ mod tests {
         );
 
         // Subsequent step also skips the same dwelling.
-        let results2 = fleet.step();
+        let results2 = fleet.step().expect("steps run");
         assert!(
             matches!(results2[1], Err(SimError::Skipped { .. })),
             "dwelling 1 should stay skipped on every subsequent step"
@@ -2360,7 +2462,7 @@ mod tests {
         let mut skipped_steps = [0usize; 3];
 
         while !fleet.is_finished() {
-            let results = fleet.step();
+            let results = fleet.step().expect("steps run");
             assert_eq!(results.len(), 3);
 
             for (i, result) in results.iter().enumerate() {
@@ -2429,7 +2531,7 @@ mod tests {
         // The failed construction never produced a dwelling, so there is
         // no runtime state to be corrupted.  The fleet has only the 2
         // valid dwellings, and both step normally.
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 2);
         assert!(
             results.iter().all(|r| r.is_ok()),
@@ -2462,7 +2564,7 @@ mod tests {
 
         // First step: dwelling 1 panics, the panic is caught by
         // step_dwellings_parallel, failed is set to true.
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 3);
 
         // (a) Panicking dwelling returns Panic.
@@ -2490,7 +2592,7 @@ mod tests {
         assert!(!fleet.dwellings[2].failed);
 
         // (b) Second step: dwelling 1 is now failed → Skipped.
-        let results2 = fleet.step();
+        let results2 = fleet.step().expect("steps run");
         assert_eq!(results2.len(), 3);
 
         match &results2[1] {
@@ -2529,7 +2631,7 @@ mod tests {
 
         fleet.dwellings[1].set_test_assert_panic();
 
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 3);
 
         match &results[1] {
@@ -2581,7 +2683,7 @@ mod tests {
         fleet.dwellings[1].set_test_panic();
 
         // Step 0: dwelling 1 panics, the fleet survives.
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 3);
 
         // Dwelling 1 returns a Panic error.
@@ -2609,7 +2711,7 @@ mod tests {
         // Remaining steps: dwelling 1 is skipped, others complete normally.
         // Fleet simulation must run to completion without aborting.
         while !fleet.is_finished() {
-            let step_results = fleet.step();
+            let step_results = fleet.step().expect("steps run");
             assert_eq!(step_results.len(), 3);
             assert!(step_results[0].is_ok());
             assert!(matches!(step_results[1], Err(SimError::Skipped { .. })));
