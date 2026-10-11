@@ -16312,6 +16312,11 @@ occupancy = 0.0
 
         let mut restoring = cz4a_with_metrics_chunk(true, 900, 4);
         restoring.step().expect("step");
+        let rows_before = restoring.recorded_rows();
+        let rows_fed_before = restoring
+            .metrics_calculator
+            .as_ref()
+            .map(MetricsCalculator::rows_fed);
 
         let err = restoring
             .load_checkpoint(checkpoint)
@@ -16323,6 +16328,19 @@ occupancy = 0.0
         assert_eq!(
             restoring.clock.current_step, 1,
             "the refused restore leaves the clock where the run was"
+        );
+        assert_eq!(
+            restoring.recorded_rows(),
+            rows_before,
+            "the refused restore changes no recorded row"
+        );
+        assert_eq!(
+            restoring
+                .metrics_calculator
+                .as_ref()
+                .map(MetricsCalculator::rows_fed),
+            rows_fed_before,
+            "the refused restore changes no metrics accumulator state"
         );
         restoring.step().expect("the run steps on");
     }
