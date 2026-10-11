@@ -480,6 +480,41 @@ measured again and recorded.
 
 **Kind:** initiative work. Fixes V16, V17.
 
+**State:** committed `74ba20f9` (branch `row/r51-fl2`, worktree of
+`5a9c4ac8`, 2026-10-11). The entry's change landed whole:
+`HomeStatus { Ok, Degraded(String), Failed(String) }` decided by the one
+`home_status` function over the home's run (warnings or any health
+event degrade with the first warning and every non-zero field named;
+an error, panic or `HealthPolicyViolation` fails with the error), the
+degraded and failed homes excluded from the aggregate and the covered
+weight, `Coverage.weight_flagged` renamed `weight_degraded`, the homes
+table's status spelled `ok`/`degraded`/`failed`, `n_succeeded` the ok
+homes' count, the aggregate's columns the union of the ok homes'
+selected variables in first-appearance order (a mismatch no longer
+empties it), and the zero-ok-weight fleet the `NoCoveredWeight` error
+carrying the counts and the homes table, Python's exception carrying
+the table as its `homes` attribute. The acceptance tests landed with
+it, the RED first: `flagged_home_is_not_counted_as_success` failed at
+the parent on the warned home counted a success (status `flagged`,
+`n_succeeded` 2, the aggregate's covered weight 3) and passed after.
+Two goldens re-captured: `fleet_mixed_offset`'s `aggregate` and
+`covered_weight` from zero rows to the 165-row, 46-column union; and
+`resstock_2025_fleet`, where the entry's expected spelling change
+arose in a form the entry's premise paragraph governs: two homes
+(`bldg0162486`, `bldg0352714`) carry cited-default and
+cited-derivation warnings, are degraded with those reasons, and fold
+alone the clean `bldg0019694` (48 rows, its tier-2 columns). The
+mixed_offset homes' `status` values did NOT change spelling: FL-1's
+premise record found every home clean, so the entry's expectation
+yields to the premise record. The `homes` product's change is
+`periods_folded` (0 to 165). The fixture corrections the acceptance
+canaries demanded: `base.xml` and `base-battery.xml` declare
+`ShieldingofHome normal` (the value the cited default applies), and
+`BEopt_example.xml` drops the ignored `SimulationControl`
+`TemperatureCapacitanceMultiplier`; both bitwise neutral, recorded in
+`02-measurement.md`. Every other golden product compares bitwise,
+`fleet_same_offset_300s` included.
+
 **Problem:**
 - A run whose metrics are unavailable or that ends with warnings is
   `CoreSimStatus::Flagged` (`engine.rs:146-150, 276-280`), mapped to
