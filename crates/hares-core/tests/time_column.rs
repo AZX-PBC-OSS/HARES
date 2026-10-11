@@ -33,8 +33,8 @@ fn cz2a_config(
         hpxml_path: fixture.join("building.xml"),
         schedule_path: Some(fixture.join("schedule.csv")),
         weather_path: fixture.join("weather.epw"),
-            sim_config: SimulationConfig {
-                start_time: start,
+        sim_config: SimulationConfig {
+            start_time: start,
             duration: chrono::Duration::seconds(duration_s),
             time_res: chrono::Duration::seconds(step_s),
             reports: vec![ReportSpec {

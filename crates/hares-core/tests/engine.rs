@@ -196,10 +196,7 @@ fn run_success_produces_metrics_and_output_path() {
     let engine = SimulationEngine::new();
     let result = engine.run(config).expect("engine run should succeed");
 
-    let metrics = result
-        .metrics
-        .as_ref()
-        .expect("the run requested metrics");
+    let metrics = result.metrics.as_ref().expect("the run requested metrics");
     assert!(metrics.total_energy_kwh.net_energy_kwh.is_finite());
     assert!(metrics.total_energy_kwh.net_energy_kwh > 0.0);
     assert!(metrics.peak_power_kw.rolling.peak_15min_kw.is_finite());
