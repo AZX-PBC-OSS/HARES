@@ -176,7 +176,7 @@ through daylight saving.
 ```python
 from datetime import datetime
 
-from hares import Dwelling, SimulationConfig
+from hares import Destination, Dwelling, ReportSpec, Selection, SimulationConfig
 
 dw = Dwelling.from_hpxml(
     hpxml="tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/building.xml",
@@ -186,13 +186,14 @@ dw = Dwelling.from_hpxml(
         start_time="2023-01-01T00:00:00-07:00",
         duration=6 * 3600,
         time_res=3600,
+        reports=[ReportSpec("frame", Selection.verbosity(1), Destination.memory())],
     ),
     defaults_path="defaults",
 )
 dw.initialize()
 
-frame = dw.simulate()
-first = frame["Time"][0]  # a naive datetime: the local wall clock
+result = dw.simulate()
+first = result.reports[0].table()["Time"][0]  # a naive datetime: the local wall clock
 assert first == datetime(2023, 1, 1, 0, 0), "the first Time is start_time's wall clock"
 ```
 
@@ -253,6 +254,7 @@ dw = Dwelling.from_hpxml(
         start_time="2019-01-01T00:00:00",
         duration=86400,
         time_res=900,
+        metrics=True,
         reports=[ReportSpec("frame", Selection.verbosity(2), Destination.memory())],
     ),
     defaults_path="path/to/HARES/defaults",
@@ -356,6 +358,8 @@ replacement.
   `memory`, `parquet`, `csv`), `RunResult`, `ReportResult`, `RunMetrics`,
   `RunHealth`, `WarmupOutcome`, `WarmupResiduals`, `Warning`, `Provenance`,
   `EquipmentProvenance`, `SiteLocationOverride`.
+- Added: `HealthPolicy` (with `strict()`), `HaresHealthPolicyError`, and
+  the `SimulationConfig.health_policy` keyword.
 - Added: `Dwelling.finish()`, `Dwelling.health()`,
   `Dwelling.initialize()`, `Dwelling.attach_callback()`,
   `Dwelling.config()`, `Dwelling.dwelling_fatal`,

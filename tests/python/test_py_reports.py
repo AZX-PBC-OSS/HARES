@@ -66,6 +66,7 @@ def test_simulate_without_a_memory_report_has_no_frame(tmp_path) -> None:
             start_time="2023-01-01T00:00:00-07:00",
             duration=86400,
             time_res=900,
+            metrics=True,
             reports=[
                 ReportSpec(
                     "file",
@@ -78,7 +79,7 @@ def test_simulate_without_a_memory_report_has_no_frame(tmp_path) -> None:
     dwelling.initialize()
     result = dwelling.simulate()
 
-    assert result.metrics is not None, "the run has a report, so it has metrics"
+    assert result.metrics is not None, "the run requested metrics, so it carries them"
     with pytest.raises(HaresSimulationError, match="file"):
         result.reports[0].table()
     assert result.reports[0].path == str(target)

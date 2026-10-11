@@ -53,7 +53,8 @@ def test_step_time_is_naive_local() -> None:
     timestamp = step["timestamp"]
     assert isinstance(timestamp, datetime)
     assert timestamp.tzinfo is None, "the step timestamp is naive local"
-    frame = dwelling.simulate()
+    result = dwelling.simulate()
+    frame = result.reports[0].table()
     first_time = frame["Time"][0]
     assert isinstance(first_time, datetime)
     assert timestamp == first_time, "the step timestamp equals the row's Time"
@@ -63,7 +64,8 @@ def test_frame_time_is_naive_millisecond_datetime() -> None:
     """The frame's Time column reads as a polars Datetime at millisecond
     precision with no time zone."""
     dwelling = make_dwelling()
-    frame = dwelling.simulate()
+    result = dwelling.simulate()
+    frame = result.reports[0].table()
     dtype = frame.schema["Time"]
     assert dtype == pl.Datetime("ms"), f"Time dtype moved to Datetime(ms), got {dtype}"
     assert frame.height == 48
