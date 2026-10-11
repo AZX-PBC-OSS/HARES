@@ -772,7 +772,12 @@ offset and fails its run for the same cause, the way the selection's
 per-home restriction treats a home whose inputs fail to parse; the
 committed `cross_offset_homes_align_on_the_start_instant` pin declares
 `Instant(+00:00)` now (its assertions hold verbatim: the same labels,
-the same bits).
+the same bits). One documented behavior, not a defect: a 7 h `time_res`
+at `Daily` under `Instant` drifts the steps across the reference day
+boundaries, so the partial-coverage rule nulls the drifted periods the
+same run folds under `LocalClock`, the alignment's period semantics
+applied to a resolution that does not divide the hour, and realistic
+resolutions divide the hour, so the step grid never drifts like this.
 
 **Kind:** initiative work. The label change (every alignment to a naive
 local `Timestamp`) is the numeric fix B-12 (`09-numeric-fixes.md`), in its

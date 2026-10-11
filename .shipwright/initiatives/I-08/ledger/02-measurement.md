@@ -2697,3 +2697,34 @@ No golden manifest runs either fixture; the dwellings' own paths are
 untouched. The two correction classes are the schedule's recognised
 "fixture correction" outside the numeric block, every other product and
 column bitwise, and the change is this entry.
+### The fleet pre-pass's per-home parse, timed, 2026-10-11 (branch `row/r52-fl3-fl4`, tip `c5c130ec`)
+
+FL-4's alignment pre-pass (`04-fleet.md`) reads every home's HPXML
+through `read_site`, a full document parse whose `Site` extraction runs
+alone, and its weather header through `read_weather_meta`, the format
+detection reading only the first line for a ResStock CSV, before the
+first chunk starts; the fleet pays one extra parse per home that the
+home's built dwelling parses again. Quantity: that per-home pre-pass
+cost, timed directly. Method: a release-built timing harness in the
+fleet crate calling `read_site` and `read_weather_meta` on the three
+`fleet_mixed_offset` homes' fixture inputs, 10 warm-up calls then 500
+timed calls per home per pass, the per-call medians taken over four
+passes, this host, WSL2, load average 2 to 4 (1 min):
+
+- `read_site` per home: 0.168 to 0.329 ms (bldg0000002 about 0.18,
+  bldg0000004 about 0.19, bldg0176227 about 0.28 to 0.33, the largest
+  document).
+- `read_weather_meta` per home: 0.004 to 0.017 ms.
+- The two summed per home: 0.28 to 0.34 ms; the three-home fleet's
+  whole pre-pass: about 0.8 to 1.0 ms.
+
+The same fleet's `frame_golden run tests/fixtures/golden/
+fleet_mixed_offset.toml --repeat 5` at this tip: construct+simulate
+median 0.228 s (0.225 to 0.239), the tool's simulate-only split 0.097 s
+median. The pre-pass is about 1 ms against a 0.23 s wall, under 1% and
+far inside the noise rule's 5% band: nothing measurable on the fleet
+wall at this size, and the direct timing bounds it. The duplicate parse
+is the cost RT-4 names for every input: `06-runtime-memory.md` RT-4's
+input plumbing rework, parsed handles shared between the pre-pass and
+the built dwellings, owns the fix; until it lands this record bounds
+the pre-pass at well under a millisecond per home on these fixtures.

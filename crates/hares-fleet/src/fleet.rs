@@ -542,9 +542,14 @@ impl Fleet {
     /// [`FleetError::ThreadPoolBuild`] when the local pool cannot be
     /// built, [`FleetError::UnmatchedSelection`] when a selection name
     /// matches no home's catalogue, [`FleetError::InvalidAggregationWeight`]
-    /// for a weight that is not finite and non-negative, and
+    /// for a weight that is not finite and non-negative,
     /// [`FleetError::NoCoveredWeight`] when the fleet's ok weight is
-    /// zero: every home failed, degraded, or carried no positive weight.
+    /// zero (every home failed, degraded, or carried no positive
+    /// weight), [`FleetError::AlignmentRequired`] when the
+    /// homes span more than one UTC offset and the fleet declares no
+    /// alignment, and [`FleetError::HeterogeneousTimeGrid`] when a home
+    /// breaks the declared alignment's time grid, the last two raised in
+    /// the pre-pass before any home runs.
     pub fn simulate(
         &self,
         report: &FleetReport,
