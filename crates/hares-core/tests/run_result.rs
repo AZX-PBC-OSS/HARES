@@ -1,4 +1,4 @@
-// Row 43 (OR-6): one RunResult, finish() for every run.
+// One RunResult, finish() for every run.
 //
 // These are the RED tests: they are written against the RunResult and
 // Dwelling::finish() surface before it exists, so this file does not even
@@ -353,7 +353,8 @@ fn gym_drain_sees_warnings_past_run_capacity() {
     assert_eq!(result.warnings_dropped, 102, "the drop count is the rest");
 }
 
-/// `engine_run_preserves_invariant_violation_type` (via the OR-5 seam): an
+/// `engine_run_preserves_invariant_violation_type` (through the engine
+/// seam): an
 /// `InvariantViolation { check_name: "thermal_balance" }` from the run
 /// reaches the engine's caller as that value.
 #[test]
@@ -442,7 +443,7 @@ occupants_present = false
 /// `provenance_carries_equipment_zone_mapping`: for the leap-year inputs,
 /// `Provenance.equipment` holds one entry per equipment whose `zone`,
 /// `zone_type`, `ocv_source` and `notes` equal the preamble lines the
-/// pinned `diagnostics_cz4a.csv` header of OR-4 recorded.
+/// pinned `diagnostics_cz4a.csv` header recorded.
 #[test]
 fn provenance_carries_equipment_zone_mapping() {
     let toml = sim_toml(&memory_report("frame", 2));
@@ -516,7 +517,7 @@ fn provenance_carries_equipment_zone_mapping() {
 }
 
 /// `provenance_records_callback_destination_marker`: a run with a `Callback`
-/// report (the OR-14 test callback attached) records `Destination::Callback`
+/// report (the test callback attached) records `Destination::Callback`
 /// for that report in `Provenance.config.reports`.
 #[test]
 fn provenance_records_callback_destination_marker() {
@@ -591,4 +592,73 @@ fn run_result_warnings_carry_sources() {
     );
     assert_eq!(result.warnings_dropped, 0);
     let _ = StdDuration::ZERO;
+}
+
+/// A finished dwelling that loads a mid-run checkpoint is not stuck: the
+/// restore replaces all of a run's state, the finished-run latch included,
+/// so the dwelling steps again and its `finish()` returns the restored
+/// run's own result, never the pre-restore Arc.
+#[test]
+fn finished_dwelling_loads_a_mid_run_checkpoint_and_finishes_anew() {
+    let toml = sim_toml(&memory_report("frame", 2));
+    let mut dwelling = Dwelling::from_config(dwelling_config(&toml)).expect("dwelling builds");
+    for _ in 0..10 {
+        dwelling.step().expect("step runs");
+    }
+    let checkpoint = dwelling.save_checkpoint().expect("save checkpoint");
+    for _ in 10..96 {
+        dwelling.step().expect("step runs");
+    }
+    let stale = dwelling.finish().expect("finish runs");
+    assert!(
+        dwelling.step().is_err(),
+        "precondition: the finished latch holds before the restore"
+    );
+
+    dwelling
+        .load_checkpoint(checkpoint)
+        .expect("a finished dwelling loads a mid-run checkpoint");
+    dwelling
+        .step()
+        .expect("the restored dwelling steps: the latch is gone");
+    for _ in 11..96 {
+        dwelling.step().expect("step runs");
+    }
+    let fresh = dwelling.finish().expect("finish after the restore runs");
+    assert!(
+        !std::sync::Arc::ptr_eq(&stale, &fresh),
+        "finish() after the restore returns the restored run's own result, not the stale Arc"
+    );
+}
+
+/// The same rule for the partial prior-segment restore: a finished
+/// dwelling accepts `restore_building_state`, steps again from the
+/// segment start and finalises its own result.
+#[test]
+fn finished_dwelling_restores_building_state_and_finishes_anew() {
+    let toml = sim_toml(&memory_report("frame", 2));
+    let mut dwelling = Dwelling::from_config(dwelling_config(&toml)).expect("dwelling builds");
+    for _ in 0..10 {
+        dwelling.step().expect("step runs");
+    }
+    let checkpoint = dwelling.save_checkpoint().expect("save checkpoint");
+    for _ in 10..96 {
+        dwelling.step().expect("step runs");
+    }
+    let stale = dwelling.finish().expect("finish runs");
+
+    dwelling
+        .restore_building_state(&checkpoint)
+        .expect("a finished dwelling accepts the building-state restore");
+    dwelling
+        .step()
+        .expect("the restored dwelling steps: the latch is gone");
+    for _ in 1..96 {
+        dwelling.step().expect("step runs");
+    }
+    let fresh = dwelling.finish().expect("finish after the restore runs");
+    assert!(
+        !std::sync::Arc::ptr_eq(&stale, &fresh),
+        "finish() after the restore returns the re-run's own result, not the stale Arc"
+    );
 }

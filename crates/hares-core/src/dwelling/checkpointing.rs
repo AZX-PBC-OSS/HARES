@@ -116,7 +116,10 @@ impl Dwelling {
     /// The restore replaces all of a run's state, so it also resumes a run
     /// that ended part way through a step (the failure budget): the
     /// half-stepped port contributions are dropped and stepping is allowed
-    /// again once the restore has succeeded.
+    /// again once the restore has succeeded. The finished-run latch is
+    /// part of that state: a restored dwelling's later `finish()`
+    /// finalises the restored run and returns its own result, never a
+    /// result recorded before the restore.
     pub fn load_checkpoint(&mut self, cp: DwellingCheckpoint) -> Result<()> {
         self.validate_building_state(&cp)?;
         let equipment_states = self.matched_equipment_states(&cp)?;
@@ -170,6 +173,11 @@ impl Dwelling {
         self.snapshot_equipment_state();
         self.restored_from_checkpoint = true;
         self.step_failed.fill(false);
+        // The restore replaces all of a run's state, the finished-run latch
+        // included: without this, a finished dwelling that loads a mid-run
+        // checkpoint stays finished forever, every step a typed error and
+        // finish() handing back the pre-restore result.
+        self.run_result = None;
         if self.terminal_error.take().is_some() {
             self.ports.zero();
         }
@@ -186,7 +194,10 @@ impl Dwelling {
     /// `Equipment::init()`. The tariff evaluator's state is not restored
     /// either (the clock resets to step 0; the segment attaches its own
     /// tariff as assembly does). The checkpoint is validated before anything
-    /// changes, so on error the dwelling is left as it was.
+    /// changes, so on error the dwelling is left as it was. The segment
+    /// re-runs its steps from the start, so a finished run's recorded
+    /// result is cleared with the rest of the run's state: the segment's
+    /// own `finish()` finalises the re-run.
     ///
     /// Refused on a run that ended part way through a step: its equipment
     /// is half-stepped and this restore keeps it (`load_checkpoint` resumes
@@ -203,6 +214,7 @@ impl Dwelling {
         self.prior_electrical_summary = cp.prior_electrical_summary.clone();
         self.clock.current_step = 0;
         self.snapshot_equipment_state();
+        self.run_result = None;
         Ok(())
     }
 
