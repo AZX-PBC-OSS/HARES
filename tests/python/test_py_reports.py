@@ -7,6 +7,8 @@ with that report's schema and 96 rows.
 
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 HARES_DEFAULTS = ROOT / "defaults"
 
@@ -45,6 +47,15 @@ def test_python_memory_report_returns_frame() -> None:
     # context column at every tier; the zone temperature needs 2).
     assert "Outdoor Dry Bulb (C)" in df.columns
     assert any(c.startswith("Temperature -") for c in df.columns)
+
+
+def test_frequency_minutes_zero_is_a_value_error_not_a_panic() -> None:
+    """``Frequency.minutes(0)`` is the typed reporting-frequency value
+    error (the rule's own message), never a Rust panic surface."""
+    from hares import Frequency
+
+    with pytest.raises(ValueError, match="must divide the hour"):
+        Frequency.minutes(0)
 
 
 def test_simulate_without_a_memory_report_has_no_frame(tmp_path) -> None:

@@ -57,12 +57,18 @@ impl PyFrequency {
         Self(Frequency::Timestep)
     }
 
-    /// Sub-hourly periods of `n` minutes: `n` divides the hour.
+    /// Sub-hourly periods of `n` minutes: `n` divides the hour. Zero is
+    /// the typed value error, the reporting-frequency rule's own message,
+    /// never a panic.
     #[staticmethod]
-    pub fn minutes(n: u32) -> Self {
-        Self(Frequency::Minutes(
-            n.try_into().expect("minutes must be nonzero"),
-        ))
+    pub fn minutes(n: u32) -> PyResult<Self> {
+        let minutes = std::num::NonZeroU32::new(n).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Frequency.minutes({n}) is not a valid reporting frequency: \
+                 n must divide the hour (60)"
+            ))
+        })?;
+        Ok(Self(Frequency::Minutes(minutes)))
     }
 
     /// Calendar hours in the naive local wall clock.
