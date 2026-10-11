@@ -16211,12 +16211,12 @@ occupancy = 0.0
     fn restore_into_a_run_at_another_chunk_size_is_a_typed_error() {
         let mut source = cz4a_with_metrics_chunk(false, 900, 4);
         for _ in 0..5 {
-            source.run_timestep(false).expect("step");
+            source.step().expect("step");
         }
         let checkpoint = source.save_checkpoint().expect("checkpoint");
 
         let mut restoring = cz4a_with_metrics_chunk(false, 900, 2);
-        restoring.run_timestep(false).expect("step");
+        restoring.step().expect("step");
         let rows_before = restoring.recorded_rows();
 
         let err = restoring
@@ -16238,10 +16238,10 @@ occupancy = 0.0
     }
 
     /// A metrics section written at another time resolution is refused
-    /// before anything changes: the input plan is resolution-free, so the
-    /// refusal is the rolling peak's ring (900 s fills a 4-reading ring,
-    /// 300 s a 12-reading one), and the refusal must land in the
-    /// pre-mutation gate. A restore that got as far as the metrics
+    /// before anything changes: the input plan is resolution-free and two
+    /// resolutions can size the rolling peak's ring identically, so the
+    /// section carries the resolution itself, and the refusal must land
+    /// in the pre-mutation gate. A restore that got as far as the metrics
     /// accumulator would have applied the checkpoint's physics, clock,
     /// RNG and tariff already: the dwelling would be half the
     /// checkpoint's and half its own.
@@ -16249,23 +16249,25 @@ occupancy = 0.0
     fn restore_into_a_run_at_another_time_resolution_changes_nothing() {
         let mut source = cz4a_with_metrics_chunk(true, 900, 4);
         for _ in 0..2 {
-            source.run_timestep(false).expect("step");
+            source.step().expect("step");
         }
         let checkpoint = source.save_checkpoint().expect("checkpoint");
 
         let mut restoring = cz4a_with_metrics_chunk(true, 300, 4);
-        restoring.run_timestep(false).expect("step");
+        restoring.step().expect("step");
         let rows_before = restoring.recorded_rows();
+        let rows_fed_before = restoring
+            .metrics_calculator
+            .as_ref()
+            .map(MetricsCalculator::rows_fed);
 
         let err = restoring
             .load_checkpoint(checkpoint)
             .expect_err("the time resolution refuses the restore");
         let message = err.to_string();
         assert!(
-            message.contains("rolling peak ring")
-                && message.contains("holds 4 readings")
-                && message.contains("needs 12"),
-            "the refusal names both ring lengths: {message}"
+            message.contains("time resolution 900 s") && message.contains("is 300 s"),
+            "the refusal names both resolutions: {message}"
         );
         assert_eq!(
             restoring.clock.current_step, 1,
@@ -16275,6 +16277,14 @@ occupancy = 0.0
             restoring.recorded_rows(),
             rows_before,
             "the refused restore changes no recorded row"
+        );
+        assert_eq!(
+            restoring
+                .metrics_calculator
+                .as_ref()
+                .map(MetricsCalculator::rows_fed),
+            rows_fed_before,
+            "the refused restore changes no metrics accumulator state"
         );
         restoring.run_timestep(false).expect("the run steps on");
     }
@@ -16287,7 +16297,7 @@ occupancy = 0.0
     fn restore_with_a_disagreeing_batch_count_changes_nothing() {
         let mut source = cz4a_with_metrics_chunk(false, 900, 4);
         for _ in 0..5 {
-            source.run_timestep(false).expect("step");
+            source.step().expect("step");
         }
         let mut checkpoint = source.save_checkpoint().expect("checkpoint");
         checkpoint.reports[0].rows.batches_built = 99;
@@ -16298,9 +16308,10 @@ occupancy = 0.0
         let err = restoring
             .load_checkpoint(checkpoint)
             .expect_err("the batch count refuses the restore");
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("99"),
-            "the refusal names the disagreeing count: {err}"
+            message.contains("99") && message.contains("rebuild 1"),
+            "the refusal names the disagreeing count and the rebuilt one: {message}"
         );
         assert_eq!(
             restoring.clock.current_step, 1,

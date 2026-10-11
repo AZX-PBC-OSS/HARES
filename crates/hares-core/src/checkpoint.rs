@@ -70,8 +70,11 @@ use serde::{Deserialize, Serialize};
 /// writing run's recorder flushed at, and a restoring recorder built at
 /// another chunk size is a typed refusal (the same rows would rebuild
 /// into batches of different shapes, so the resumed frames would not be
-/// the writing run's bitwise). Checkpoints written by v15 builds are
-/// rejected by the version gate.
+/// the writing run's bitwise). The metrics section carries the time
+/// resolution it was written at, and a restoring run at another is a
+/// typed refusal (the input plan is resolution-free, and two distinct
+/// resolutions can size the rolling peak's ring identically).
+/// Checkpoints written by v15 builds are rejected by the version gate.
 pub const CHECKPOINT_VERSION: u32 = 16;
 
 /// One equipment's checkpointed state, identity-keyed.
@@ -396,6 +399,7 @@ mod tests {
                 total_export_kwh: 21.5,
             }],
             metrics: Some(hares_io::MetricsSnapshot {
+                time_res_secs: 900,
                 plan: hares_io::MetricsPlanSnapshot {
                     total_electric_power_slot: 0,
                     total_gas_power_slot: Some(1),
@@ -525,7 +529,7 @@ mod tests {
     /// traced before the root so every variant is recorded.
     const PINNED_VERSION: u32 = 16;
     const PINNED_SCHEMA_SHA256: &str =
-        "f196df1bc0c43b3e9d31c3a15508a3410f887a9bc76c6f9bd9bdee0609982c2f";
+        "0a3c663b628492ca03cc9104e777e245b59537df817159b0d655196670fd842e";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the

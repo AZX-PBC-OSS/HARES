@@ -121,6 +121,24 @@ pub struct ReportRowsSnapshot {
     pub chunk_size: usize,
 }
 
+impl ReportRowsSnapshot {
+    /// The batch count the rows rebuild at `chunk_size` (the flushed
+    /// prefix, divided at the chunk boundaries, the final batch short
+    /// only when the rows end mid-chunk): the number a restore's
+    /// batch-count gate expects `batches_built` to name. One formula for
+    /// every checker, so the pre-mutation validators and the restore
+    /// cannot drift apart.
+    #[must_use]
+    pub fn expected_batches(&self, chunk_size: usize) -> u64 {
+        let flushed = self.timestamps.len().saturating_sub(self.buffered_rows);
+        if flushed == 0 {
+            0
+        } else {
+            u64::try_from(flushed.div_ceil(chunk_size)).expect("row count fits u64")
+        }
+    }
+}
+
 impl StreamingRecorder {
     /// The recorder's row stream as a checkpoint section; the counterpart
     /// of [`Self::restore_rows`].
@@ -209,18 +227,14 @@ impl StreamingRecorder {
                 snapshot.buffered_rows
             )));
         }
-        let flushed = rows - snapshot.buffered_rows;
-        let expected_batches = if flushed == 0 {
-            0
-        } else {
-            u64::try_from(flushed.div_ceil(self.chunk_size)).expect("row count fits u64")
-        };
-        if snapshot.batches_built != expected_batches {
+        if snapshot.batches_built != snapshot.expected_batches(self.chunk_size) {
             return Err(OutputError::Snapshot(format!(
                 "the section names {} built batches but its rows rebuild {}",
-                snapshot.batches_built, expected_batches
+                snapshot.batches_built,
+                snapshot.expected_batches(self.chunk_size)
             )));
         }
+        let flushed = rows - snapshot.buffered_rows;
 
         let row_at = |r: usize| -> (i64, &[f64]) {
             (

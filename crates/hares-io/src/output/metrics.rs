@@ -747,17 +747,22 @@ pub struct MetricsRollingPeakSnapshot {
 
 /// The run metrics' checkpoint section: the input plan's resolved slots
 /// and the accumulator state, present exactly when the run requested
-/// metrics.
+/// metrics. The time resolution travels with it: the input plan is
+/// resolution-free and two resolutions can size the rolling peak's ring
+/// identically, so the resolution is the one gate a plan-and-ring
+/// comparison cannot stand in for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     pub plan: MetricsPlanSnapshot,
     pub accumulators: MetricsAccumulatorsSnapshot,
+    pub time_res_secs: u32,
 }
 
 /// Streaming post-processing calculator fed one row per step.
 #[derive(Debug, Clone)]
 pub struct MetricsCalculator {
     timestep_h: f64,
+    time_res_secs: u32,
     plan: MetricsInputPlan,
 
     total_electric_energy_kwh: f64,
@@ -878,6 +883,7 @@ impl MetricsCalculator {
 
         Ok(Self {
             timestep_h,
+            time_res_secs,
             plan,
             total_electric_energy_kwh: 0.0,
             total_gas_energy_therms: 0.0,
@@ -926,6 +932,7 @@ impl MetricsCalculator {
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
             plan: self.plan.snapshot(),
+            time_res_secs: self.time_res_secs,
             accumulators: MetricsAccumulatorsSnapshot {
                 total_electric_energy_kwh: self.total_electric_energy_kwh,
                 total_gas_energy_therms: self.total_gas_energy_therms,
@@ -982,6 +989,13 @@ impl MetricsCalculator {
                     .to_string(),
             ));
         }
+        if snapshot.time_res_secs != self.time_res_secs {
+            return Err(MetricsError::Snapshot(format!(
+                "the checkpoint's metrics were written at time resolution {} s, \
+                 this run's is {} s",
+                snapshot.time_res_secs, self.time_res_secs
+            )));
+        }
         let restored = &snapshot.accumulators;
         // The rolling peak's ring refuses a foreign time resolution before
         // anything changes, so the accumulators below take the
@@ -1030,15 +1044,14 @@ impl MetricsCalculator {
         self.plan.snapshot()
     }
 
-    /// The rolling peak ring's capacity: the length a snapshot's ring
-    /// must have for [`Self::apply_snapshot`] to restore it. The input
-    /// plan is resolution-free, so this is the one state a restore gates
-    /// on that the plan comparison cannot see; a pre-mutation validator
-    /// reads it to refuse a foreign time resolution before any state
-    /// changes (the restore itself refuses too).
+    /// The time resolution the calculator was built at, in seconds: what
+    /// a metrics snapshot carries, and what a restore refuses a mismatch
+    /// with (the input plan is resolution-free, and two distinct
+    /// resolutions can size the rolling peak's ring identically, so the
+    /// resolution itself is what the gate compares).
     #[must_use]
-    pub fn rolling_peak_ring_len(&self) -> usize {
-        self.rolling_peak.buffer.len()
+    pub fn time_res_secs(&self) -> u32 {
+        self.time_res_secs
     }
 
     /// Read the total electric power slot's value, returning `Some` for
@@ -3958,13 +3971,44 @@ mod tests {
         );
     }
 
-    /// A snapshot written at one time resolution refuses to restore into
-    /// a calculator built at another: the plan's slots are
-    /// resolution-free, so the refusal comes from the rolling peak's ring
-    /// (900 s fills a 4-reading ring, 300 s a 12-reading one), and the
-    /// typed error names both lengths. The refusal is the same in debug
-    /// and release: a silent skip would leave the resumed run's rolling
-    /// peaks zeroed.
+    /// A snapshot whose ring does not fit the receiver's resolution is
+    /// refused by the typed error naming both lengths, in debug and
+    /// release alike (a silent skip would leave the resumed run's rolling
+    /// peaks zeroed). The resolutions here agree: the ring check is the
+    /// restore's own backstop behind the resolution gate.
+    #[test]
+    fn metrics_snapshot_rejects_a_ring_that_does_not_fit() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config(None);
+        let mut source = calc_for(&schema, 900, &config);
+        accumulate(
+            &mut source,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![5.0])]),
+        )
+        .unwrap();
+        let mut snapshot = source.snapshot();
+        // A ring one reading longer than the 900 s resolution's 4: the
+        // resolution gate passes it, the ring's own check refuses.
+        snapshot.accumulators.rolling_peak.buffer.push(0.0);
+
+        let mut target = calc_for(&schema, 900, &config);
+        let err = target
+            .apply_snapshot(&snapshot)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("rolling peak ring")
+                && err.contains("holds 5 readings")
+                && err.contains("needs 4"),
+            "the refusal is the typed snapshot error naming both ring \
+             lengths: {err}"
+        );
+    }
+
+    /// A snapshot written at another time resolution is refused, naming
+    /// both resolutions: the input plan is resolution-free, so the
+    /// refusal is the carried resolution itself.
     #[test]
     fn metrics_snapshot_rejects_a_foreign_time_resolution_by_name() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
@@ -3984,11 +4028,37 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("rolling peak ring")
-                && err.contains("holds 4 readings")
-                && err.contains("needs 12"),
-            "the refusal is the typed snapshot error naming both ring \
-             lengths: {err}"
+            err.contains("time resolution 900 s") && err.contains("is 300 s"),
+            "the refusal names both resolutions: {err}"
+        );
+    }
+
+    /// Two resolutions whose rings collide (900 s and 1000 s both fill a
+    /// 4-reading ring) are still distinct: the snapshot carries the time
+    /// resolution and the restore refuses the other one, ring equality
+    /// notwithstanding (a blended ring would mix readings taken at
+    /// different intervals into the same windows).
+    #[test]
+    fn metrics_snapshot_rejects_a_resolution_its_ring_collides_with() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config(None);
+        let mut source = calc_for(&schema, 900, &config);
+        accumulate(
+            &mut source,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![5.0])]),
+        )
+        .unwrap();
+        let snapshot = source.snapshot();
+
+        let mut target = calc_for(&schema, 1000, &config);
+        let err = target
+            .apply_snapshot(&snapshot)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("time resolution 900 s") && err.contains("is 1000 s"),
+            "the refusal names both resolutions: {err}"
         );
     }
 }
