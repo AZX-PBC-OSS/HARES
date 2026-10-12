@@ -1172,6 +1172,17 @@ impl PyDwelling {
         })
     }
 
+    /// The resolved-parameter read-back: the parameters the physics
+    /// actually uses, computed at assembly, after defaults, autosizing and
+    /// overrides and before warm-up. A dict of SI floats and strings: per
+    /// equipment its resolved parameters and the active setpoint sources
+    /// (their provenance labels), the boundaries' effective R, C and
+    /// layers, the resolved windows, the infiltration inputs and the site.
+    pub fn resolved_model(&self) -> PyResult<Py<PyAny>> {
+        let dwelling = self.acquire()?;
+        Python::attach(|py| resolved_model_to_py(py, dwelling.resolved_model()))
+    }
+
     #[getter]
     pub fn dwelling_fatal(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
@@ -2494,6 +2505,107 @@ fn reentry_hares_error() -> HaresError {
 /// the typed callback error carries.
 fn reentry_refusal() -> PyErr {
     to_py_err(reentry_hares_error())
+}
+
+/// The boundary kind's spelling in the read-back dict: the plan's kind
+/// names, lowercased, the parser's `Other` kind carrying its own text.
+fn boundary_kind_label(kind: &hares_io::hpxml::BoundaryType) -> String {
+    match kind {
+        hares_io::hpxml::BoundaryType::Wall => "wall".to_string(),
+        hares_io::hpxml::BoundaryType::Roof => "roof".to_string(),
+        hares_io::hpxml::BoundaryType::Floor => "floor".to_string(),
+        hares_io::hpxml::BoundaryType::Window => "window".to_string(),
+        hares_io::hpxml::BoundaryType::Skylight => "skylight".to_string(),
+        hares_io::hpxml::BoundaryType::Door => "door".to_string(),
+        hares_io::hpxml::BoundaryType::FoundationWall => "foundation wall".to_string(),
+        hares_io::hpxml::BoundaryType::RimJoist => "rim joist".to_string(),
+        hares_io::hpxml::BoundaryType::Slab => "slab".to_string(),
+        hares_io::hpxml::BoundaryType::Other(text) => text.clone(),
+    }
+}
+
+/// The resolved-parameter read-back as a dict of SI floats and strings,
+/// the same values the Rust `resolved_model()` returns.
+fn resolved_model_to_py(py: Python<'_>, model: &hares_core::ResolvedModel) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+
+    let equipment = PyList::empty(py);
+    for eq in &model.equipment {
+        let entry = PyDict::new(py);
+        entry.set_item("name", &eq.name)?;
+        entry.set_item("id", eq.id.0)?;
+        entry.set_item("end_use", eq.end_use.as_str())?;
+        let parameters = PyList::empty(py);
+        for parameter in &eq.parameters {
+            let item = PyDict::new(py);
+            item.set_item("name", parameter.name)?;
+            item.set_item("value", parameter.value)?;
+            item.set_item("unit", parameter.unit.symbol())?;
+            parameters.append(item)?;
+        }
+        entry.set_item("parameters", parameters)?;
+        entry.set_item(
+            "heating_setpoint",
+            eq.heating_setpoint
+                .as_ref()
+                .map(hares_io::SetpointSource::label),
+        )?;
+        entry.set_item(
+            "cooling_setpoint",
+            eq.cooling_setpoint
+                .as_ref()
+                .map(hares_io::SetpointSource::label),
+        )?;
+        equipment.append(entry)?;
+    }
+    dict.set_item("equipment", equipment)?;
+
+    let boundaries = PyList::empty(py);
+    for boundary in &model.boundaries {
+        let entry = PyDict::new(py);
+        entry.set_item("id", &boundary.id)?;
+        entry.set_item("kind", boundary_kind_label(&boundary.kind))?;
+        entry.set_item("area_m2", boundary.area_m2)?;
+        entry.set_item("r_effective_m2k_w", boundary.r_effective_m2k_w)?;
+        entry.set_item("films_m2k_w", boundary.films_m2k_w)?;
+        entry.set_item("c_j_k", boundary.c_j_k)?;
+        let layers = PyList::empty(py);
+        for layer in &boundary.layers {
+            let item = PyDict::new(py);
+            item.set_item("r_m2k_w", layer.r_m2k_w)?;
+            item.set_item("c_j_m2k", layer.c_j_m2k)?;
+            layers.append(item)?;
+        }
+        entry.set_item("layers", layers)?;
+        boundaries.append(entry)?;
+    }
+    dict.set_item("boundaries", boundaries)?;
+
+    let windows = PyList::empty(py);
+    for window in &model.windows {
+        let entry = PyDict::new(py);
+        entry.set_item("id", &window.id)?;
+        entry.set_item("area_m2", window.area_m2)?;
+        entry.set_item("u_w_m2k", window.u_w_m2k)?;
+        entry.set_item("shgc", window.shgc)?;
+        windows.append(entry)?;
+    }
+    dict.set_item("windows", windows)?;
+
+    let infiltration = PyDict::new(py);
+    infiltration.set_item("ach50", model.infiltration.ach50)?;
+    infiltration.set_item("ela_m2", model.infiltration.ela_m2)?;
+    infiltration.set_item("constant_ach", model.infiltration.constant_ach)?;
+    dict.set_item("infiltration", infiltration)?;
+
+    let site = PyDict::new(py);
+    site.set_item("latitude_deg", model.site.latitude_deg)?;
+    site.set_item("longitude_deg", model.site.longitude_deg)?;
+    site.set_item("elevation_m", model.site.elevation_m)?;
+    site.set_item("utc_offset_h", model.site.utc_offset_h)?;
+    dict.set_item("site", site)?;
+
+    Ok(dict.into_any().unbind())
 }
 
 impl PyDwelling {

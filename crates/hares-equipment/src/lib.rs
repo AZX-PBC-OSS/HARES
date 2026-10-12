@@ -142,6 +142,20 @@ pub(crate) fn linear_temp_derate(temp_c: f64, temp_min: f64, temp_max: f64) -> f
     }
 }
 
+/// Kilowatt-hours to joules, the resolved-parameter read-back's kWh → SI
+/// conversion: the config fields still stored in kWh report through this
+/// until the equipment-config row moves them to SI.
+#[inline]
+pub(crate) fn kwh_to_j(kwh: f64) -> f64 {
+    uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(kwh).get::<uom::si::energy::joule>()
+}
+
+/// Kilowatts to watts, the read-back's kW → SI conversion.
+#[inline]
+pub(crate) fn kw_to_w(kw: f64) -> f64 {
+    uom::si::f64::Power::new::<uom::si::power::kilowatt>(kw).get::<uom::si::power::watt>()
+}
+
 /// How an equipment's expected mean real power can be determined for
 /// premise-level ZIP aggregation. See
 /// [`Equipment::expected_mean_power_kw`].
@@ -317,6 +331,13 @@ pub trait Equipment: Send + Sync {
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         None
     }
+
+    /// The resolved parameters the physics uses, read back: the values
+    /// this equipment steps with, after defaults, autosizing and
+    /// overrides, each SI, under the name the resolved model reports it
+    /// by. No default: every implementor states its own, so a class the
+    /// registry knows cannot skip the read-back.
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter>;
 
     /// Whether this equipment can act as an islanding source that keeps the
     /// home bus energized during a utility outage.
@@ -633,6 +654,10 @@ mod tests {
     }
 
     impl Equipment for MockEquipment {
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
         }
@@ -1316,6 +1341,10 @@ mod tests {
         }
 
         impl Equipment for BadSerializingEquipment {
+            fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+                Vec::new()
+            }
+
             fn descriptor(&self) -> &EquipmentDescriptor {
                 &self.descriptor
             }

@@ -62,10 +62,10 @@ use hares_io::{
     PvPanelDefaults, REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
     RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL, SCHEDULE_SUFFIX,
     SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
-    SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, SimulationConfig,
-    StreamingRecorder, WeatherInput, end_use_electric_power_column, equipment_name_to_end_use,
-    has_soc, is_cooling_equipment, is_ev, is_heat_pump_heater, is_hvac_or_wh, is_pv,
-    is_reserved_output_column_name,
+    SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, SetpointSource,
+    SimulationConfig, StreamingRecorder, WeatherInput, end_use_electric_power_column,
+    equipment_name_to_end_use, has_soc, is_cooling_equipment, is_ev, is_heat_pump_heater,
+    is_hvac_or_wh, is_pv, is_reserved_output_column_name,
 };
 
 use hares_physics::constants::{
@@ -2346,6 +2346,10 @@ pub struct Dwelling {
     /// The blueprint the dwelling was built from: the shared parsed-input
     /// handles and the frozen state every build of the blueprint clones.
     blueprint: Arc<DwellingBlueprint>,
+    /// The resolved-parameter read-back: the parameters the physics
+    /// actually uses, computed at assembly after defaults, autosizing and
+    /// overrides and before warm-up, and never mutated afterwards.
+    resolved: crate::resolved::ResolvedModel,
     equipment: Vec<Box<dyn Equipment>>,
     equipment_id_by_name: HashMap<String, EquipmentId>,
     /// Next never-reused equipment id for `add_equipment` /
@@ -3553,6 +3557,53 @@ fn build_from_blueprint_inner_with_seed(
         .max()
         .map_or(1, |max| max.saturating_add(1));
 
+    // The resolved-parameter read-back, computed at assembly: the built
+    // equipment's own resolved values (the physics's parameters, the
+    // autosized capacities included) beside the setpoint sources its spec
+    // carries, the envelope's assembled boundaries and windows, the
+    // infiltration inputs and the resolved site. No step and no warm-up
+    // has run, so this is the model the physics will use.
+    let resolved = {
+        let mut spec_setpoints: HashMap<&str, (&Option<SetpointSource>, &Option<SetpointSource>)> =
+            HashMap::with_capacity(equipment_specs.len());
+        for spec in &equipment_specs {
+            let display = spec.instance_name.as_deref().unwrap_or(&spec.name);
+            spec_setpoints.insert(
+                display,
+                (&spec.heating_setpoint_source, &spec.cooling_setpoint_source),
+            );
+        }
+        let equipment_read_back = equipment
+            .iter()
+            .map(|eq| {
+                let desc = eq.descriptor();
+                let (heating, cooling) = spec_setpoints
+                    .get(desc.name.as_str())
+                    .copied()
+                    .unwrap_or((&None, &None));
+                crate::resolved::ResolvedEquipment {
+                    name: desc.name.clone(),
+                    id: desc.id,
+                    end_use: desc.end_use.clone(),
+                    parameters: eq.resolved_parameters(),
+                    heating_setpoint: heating.clone(),
+                    cooling_setpoint: cooling.clone(),
+                }
+            })
+            .collect();
+        let crate::resolved::ResolvedEnvelope {
+            boundaries: resolved_boundaries,
+            windows: resolved_windows,
+        } = solvers.resolved_envelope;
+        crate::resolved::ResolvedModel {
+            equipment: equipment_read_back,
+            boundaries: resolved_boundaries,
+            windows: resolved_windows,
+            infiltration: crate::resolved::resolved_infiltration(&bp.building),
+            site: bp.site_location,
+        }
+    };
+
     let mut declarations: Vec<PortDeclaration> = Vec::new();
     for eq in &equipment {
         validate_equipment_stage(eq.as_ref())?;
@@ -3586,6 +3637,7 @@ fn build_from_blueprint_inner_with_seed(
     let mut dwelling = Dwelling {
         bldg_id: config.bldg_id,
         blueprint: Arc::clone(bp),
+        resolved,
         failed: false,
         restored_from_checkpoint: false,
         // The site's standard-time offset, resolved with the site location
@@ -4232,6 +4284,18 @@ impl Dwelling {
     #[must_use]
     pub fn setpoints_reconciled(&self) -> &HashMap<String, Option<Vec<SetpointReconciliation>>> {
         &self.setpoints_reconciled_by_equipment
+    }
+
+    /// The resolved-parameter read-back: the parameters the physics
+    /// actually uses, computed at assembly, after defaults, autosizing and
+    /// overrides and before warm-up. Per equipment its resolved values
+    /// (SI) and the active setpoint sources; per boundary the assembled
+    /// RC network's effective R, C and layers; the resolved windows, the
+    /// infiltration inputs and the resolved site. Immutable from build on:
+    /// the value before the first step is the value after a full run.
+    #[must_use]
+    pub fn resolved_model(&self) -> &crate::resolved::ResolvedModel {
+        &self.resolved
     }
 
     /// Set a LUT on a battery equipment by name.
@@ -8853,6 +8917,10 @@ fn cfg_gated_helper() {
             &self.descriptor
         }
 
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
         }
@@ -8991,6 +9059,10 @@ fn cfg_gated_helper() {
             &self.descriptor
         }
 
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
         }
@@ -9110,6 +9182,10 @@ fn cfg_gated_helper() {
     impl Equipment for TestWarningEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
         }
 
         fn rename(&mut self, name: String) {
@@ -9338,6 +9414,10 @@ fn cfg_gated_helper() {
             &self.descriptor
         }
 
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
         }
@@ -9456,6 +9536,10 @@ fn cfg_gated_helper() {
             &self.descriptor
         }
 
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
         }
@@ -9558,6 +9642,10 @@ fn cfg_gated_helper() {
     impl Equipment for DispatchAwareThermalEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
         }
 
         fn rename(&mut self, name: String) {
@@ -9693,6 +9781,10 @@ fn cfg_gated_helper() {
             &self.descriptor
         }
 
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
         }
@@ -9816,6 +9908,10 @@ fn cfg_gated_helper() {
             &self.descriptor
         }
 
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
         }
@@ -9933,6 +10029,10 @@ fn cfg_gated_helper() {
     impl Equipment for CoolingWithLatentEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
         }
 
         fn rename(&mut self, name: String) {
@@ -10917,6 +11017,10 @@ occupancy = 1.0
     impl Equipment for TestIdealEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
         }
 
         fn rename(&mut self, name: String) {
@@ -12327,6 +12431,10 @@ occupancy = 1.0
     impl Equipment for SeedableTestEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             self.inner.descriptor()
+        }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
         }
         fn rename(&mut self, name: String) {
             self.inner.rename(name);
@@ -14742,6 +14850,10 @@ occupancy = 1.0
             fn descriptor(&self) -> &EquipmentDescriptor {
                 &self.descriptor
             }
+
+            fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+                Vec::new()
+            }
             fn rename(&mut self, name: String) {
                 self.descriptor.name = name;
             }
@@ -14909,6 +15021,10 @@ occupancy = 0.0
             &self.descriptor
         }
 
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
         }
@@ -15023,6 +15139,10 @@ occupancy = 0.0
             &self.descriptor
         }
 
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
         }
@@ -15128,6 +15248,10 @@ occupancy = 0.0
     impl Equipment for SpyPortEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
         }
 
         fn rename(&mut self, name: String) {
@@ -15440,6 +15564,10 @@ occupancy = 0.0
     impl Equipment for FlakyPortEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
         }
 
         fn rename(&mut self, name: String) {
@@ -16659,6 +16787,10 @@ destination = "memory"
             &self.descriptor
         }
 
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
         fn rename(&mut self, name: String) {
             self.descriptor.name = name;
         }
@@ -16752,6 +16884,10 @@ destination = "memory"
     impl Equipment for UnknownKeyTelemetryEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
         }
 
         fn rename(&mut self, name: String) {
@@ -16852,6 +16988,10 @@ destination = "memory"
     impl Equipment for NanThermalGainEquipment {
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
         }
 
         fn rename(&mut self, name: String) {
@@ -19058,6 +19198,10 @@ latent_gain_fraction = 0.08
     impl Equipment for PanickingCoreOutput {
         fn descriptor(&self) -> &EquipmentDescriptor {
             self.inner.descriptor()
+        }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
         }
         fn rename(&mut self, name: String) {
             self.inner.rename(name);

@@ -145,6 +145,11 @@ pub struct ScheduledLoad {
     /// Per-month scale factors [0..11] applied after load_fraction, e.g. a
     /// ceiling fan off in winter (divergence D-013).
     month_multipliers: Option<[f64; 12]>,
+    /// The usage multiplier `init` applied to the schedule sources (the
+    /// config's `usage_multiplier`, default 1.0). Kept so the
+    /// resolved-parameter read-back reports the multiplier the physics
+    /// ran under, which the applied scaling no longer shows.
+    usage_multiplier: f64,
     last_non_zero_power_kw: f64,
     last_non_zero_gas_w: f64,
     load_fraction: f64,
@@ -192,6 +197,7 @@ impl ScheduledLoad {
                     .unwrap_or_else(hares_types::zip::ZipLoad::constant_power),
             ),
             month_multipliers: None,
+            usage_multiplier: 1.0,
             last_non_zero_power_kw: 0.0,
             last_non_zero_gas_w: 0.0,
             load_fraction: 1.0,
@@ -249,6 +255,7 @@ impl ScheduledLoad {
         let usage_multiplier = config
             .get_f64(crate::config::KEY_USAGE_MULTIPLIER)
             .unwrap_or(1.0);
+        self.usage_multiplier = usage_multiplier;
         if usage_multiplier != 1.0 {
             scale_schedule_source(&mut self.power_source, usage_multiplier);
             if let Some(gas_source) = &mut self.gas_source {
@@ -295,6 +302,14 @@ impl ScheduledLoad {
 }
 
 impl Equipment for ScheduledLoad {
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![hares_types::ResolvedParameter::new(
+            "usage_multiplier",
+            self.usage_multiplier,
+            hares_types::Unit::Dimensionless,
+        )]
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }

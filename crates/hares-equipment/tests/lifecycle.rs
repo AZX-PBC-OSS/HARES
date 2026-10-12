@@ -1819,3 +1819,106 @@ fn gshp_cooler_pump_power_in_telemetry_and_ports() {
         pump_telemetry * 1_000.0
     );
 }
+
+// ---------------------------------------------------------------------------
+// Resolved-parameter read-back (the resolved_parameters trait method)
+// ---------------------------------------------------------------------------
+
+/// The read-back names the plan's required-parameter table requires for
+/// the class, keyed by class name because the table's rows split the
+/// heating end use by kind (fuel, heat pump, electric resistance) and the
+/// water-heating row adds the tank parameters only tanks report. Classes
+/// whose end use the table gives no row for (the event loads, the
+/// generators, the ventilation units, the dehumidifier, the protocol
+/// bridge) report what their physics uses and require nothing here.
+fn required_read_back(class: &str) -> &'static [&'static str] {
+    match class {
+        // HVAC cooling: capacity, EIR and SHR.
+        "Air Conditioner" | "Room AC" | "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler"
+        | "WSHP Cooler" => &["rated_capacity_w", "rated_eir", "rated_shr"],
+        // Heat pump heating: capacity and EIR.
+        "Heat Pump Heater" | "ASHP Heater" | "MSHP Heater" | "GSHP Heater" | "WSHP Heater" => {
+            &["rated_capacity_w", "rated_eir"]
+        }
+        // Fuel heating: capacity and AFUE.
+        "Gas Furnace" | "Gas Boiler" => &["rated_capacity_w", "afue"],
+        // Electric resistance heating: capacity and efficiency.
+        "Electric Furnace" | "Electric Baseboard" | "Electric Boiler" => {
+            &["rated_capacity_w", "efficiency"]
+        }
+        // The ideal unit's back-calculated capacity is capped at the rated one.
+        "Ideal HVAC" => &["rated_capacity_w"],
+        // Element-heated tanks: the water-heating row plus the tank adds.
+        "Gas Water Heater" | "Electric Resistance Water Heater" | "Resistance Water Heater" => &[
+            "heating_capacity_w",
+            "setpoint_c",
+            "tank_volume_m3",
+            "ua_w_k",
+        ],
+        // Heat pump water heaters add the compressor's rated COP.
+        "Heat Pump Water Heater" | "HPWH" => &[
+            "heating_capacity_w",
+            "setpoint_c",
+            "tank_volume_m3",
+            "ua_w_k",
+            "rated_cop",
+        ],
+        // Tankless units have no tank.
+        "Tankless Water Heater" | "Gas Tankless Water Heater" => {
+            &["heating_capacity_w", "setpoint_c"]
+        }
+        // The indirect tank has no heating element of its own: the boiler
+        // loop heats it through a heat exchanger, whose UA is the capacity
+        // parameter its physics uses, reported beside the tank's.
+        "Indirect Tank" => &["setpoint_c", "tank_volume_m3", "ua_w_k"],
+        "PV" => &["nameplate_w"],
+        "Battery" => &[
+            "energy_capacity_j",
+            "power_capacity_w",
+            "round_trip_efficiency",
+        ],
+        "EV" | "Electric Vehicle" => &["battery_capacity_j", "max_charging_power_w"],
+        // The scheduled loads: the usage multiplier scales their schedule.
+        // "Scheduled EV" is one of them (its physics is the charging
+        // schedule, not a pack model), so it requires the multiplier, not
+        // the EV row's pack parameters.
+        "Lighting" | "Gas Lighting" | "Indoor Lighting" | "Exterior Lighting"
+        | "Basement Lighting" | "Garage Lighting" | "Plug Loads" | "MELs" | "TV" | "Other"
+        | "Refrigerator" | "Freezer" | "Well Pump" | "Pool Pump" | "Pool Heater" | "Spa Pump"
+        | "Spa Heater" | "Gas Grill" | "Gas Fireplace" | "Ceiling Fan" | "Scheduled EV" => {
+            &["usage_multiplier"]
+        }
+        _ => &[],
+    }
+}
+
+/// Every registered class's built equipment reports every read-back name
+/// the plan's required-parameter table requires for it: the resolved
+/// parameters are readable for the whole registry, not hand-picked classes.
+#[test]
+fn every_equipment_class_reports_its_required_parameters() {
+    let registry = EquipmentRegistry::new();
+    for class in registry.known_names() {
+        let cfg = config_for_class(class);
+        let env = env_for_class(class);
+        let mut eq = registry
+            .create(class, cfg.clone())
+            .unwrap_or_else(|e| panic!("create failed for '{class}': {e}"));
+        eq.init(&cfg, &env)
+            .unwrap_or_else(|e| panic!("init failed for '{class}': {e}"));
+
+        let reported: Vec<&str> = eq.resolved_parameters().iter().map(|p| p.name).collect();
+        for required in required_read_back(class) {
+            assert!(
+                reported.contains(required),
+                "'{class}' must report '{required}' in its resolved parameters; got {reported:?}"
+            );
+        }
+        for name in reported {
+            assert!(
+                !name.is_empty(),
+                "'{class}' reported a parameter with an empty name"
+            );
+        }
+    }
+}

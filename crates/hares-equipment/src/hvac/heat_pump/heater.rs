@@ -466,6 +466,41 @@ impl Equipment for HeatPumpHeaterCore {
         self.apply_control_unchecked(signal)
     }
 
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.hvac
+                    .config
+                    .heating_capacities_w
+                    .first()
+                    .copied()
+                    .unwrap_or_default(),
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_eir",
+                self.hvac
+                    .config
+                    .eir_by_stage
+                    .first()
+                    .copied()
+                    .unwrap_or_default(),
+                hares_types::Unit::Dimensionless,
+            ),
+            hares_types::ResolvedParameter::new(
+                "backup_capacity_w",
+                self.backup_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "backup_eir",
+                self.backup_eir,
+                hares_types::Unit::Dimensionless,
+            ),
+        ]
+    }
+
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
         EquipmentHealthCounts {
             curve_index_clamps: self.hvac.take_biquadratic_clamp_count(),

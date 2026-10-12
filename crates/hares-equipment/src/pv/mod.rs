@@ -956,6 +956,14 @@ fn check_lut_location(lut: &PvLut, path: &str, warnings: &mut Vec<Warning>, sour
 }
 
 impl Equipment for PV {
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![hares_types::ResolvedParameter::new(
+            "nameplate_w",
+            crate::kw_to_w(self.total_dc_capacity()),
+            hares_types::Unit::Watt,
+        )]
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }

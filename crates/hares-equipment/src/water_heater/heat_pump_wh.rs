@@ -122,6 +122,10 @@ pub struct HeatPumpWH {
     /// Resistance backup element efficiency (fraction).
     backup_efficiency: f64,
     cop_curve: BiquadraticCurve,
+    /// The rated COP the assembly resolved: the config's COP times its
+    /// performance adjustment, the anchor the curve's scale is computed
+    /// against. Constant after init; the read-back reports it.
+    rated_cop: f64,
     /// Scaling factor applied to the COP biquadratic output.
     /// When HPXML provides a UEF-derived COP, this anchors the curve to that rated value
     /// by computing scale = cop_rated / cop_curve(rated_conditions).
@@ -308,6 +312,7 @@ impl HeatPumpWH {
             },
             cop_scale: 1.0,
             cop_curve_is_normalized: true,
+            rated_cop: DEFAULT_RATED_COP,
             tempering_valve_setpoint_c: None,
             fixture_delivery_temp_c: 40.6,
             capacity_curve: BiquadraticCurve {
@@ -464,6 +469,7 @@ impl HeatPumpWH {
 
         let cop_rated =
             c.cop.unwrap_or(DEFAULT_RATED_COP) * c.performance_adjustment.unwrap_or(1.0);
+        self.rated_cop = cop_rated;
 
         self.cop_curve_is_normalized = c.cop_curve_is_normalized.unwrap_or(true);
 
@@ -727,6 +733,36 @@ impl HeatPumpWH {
 impl Equipment for HeatPumpWH {
     fn checkpoint_version() -> u32 {
         HPWH_CHECKPOINT_VERSION
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "heating_capacity_w",
+                self.compressor_power_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "setpoint_c",
+                self.setpoint_c,
+                hares_types::Unit::Celsius,
+            ),
+            hares_types::ResolvedParameter::new(
+                "tank_volume_m3",
+                self.tank.total_volume_m3(),
+                hares_types::Unit::CubicMeter,
+            ),
+            hares_types::ResolvedParameter::new(
+                "ua_w_k",
+                self.tank.ua_w_per_k(),
+                hares_types::Unit::WattPerKelvin,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_cop",
+                self.rated_cop,
+                hares_types::Unit::Dimensionless,
+            ),
+        ]
     }
 
     fn descriptor(&self) -> &EquipmentDescriptor {

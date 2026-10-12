@@ -791,6 +791,11 @@ pub(crate) struct SolverBundle {
     pub humidity: HumiditySolver,
     pub electrical: ElectricalSolver,
     pub zone_capacitances_j_k: Vec<(ZoneId, f64)>,
+    /// The envelope's resolved-parameter read-back: the assembled
+    /// boundaries' effective R, C and layers, and the resolved windows.
+    /// Computed from the same boundary inputs and RC diagnostics every
+    /// build profile already makes, read by `Dwelling::resolved_model`.
+    pub resolved_envelope: crate::resolved::ResolvedEnvelope,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     pub envelope_diagnostics: EnvelopeDiagnostics,
 }
@@ -1629,11 +1634,24 @@ pub(crate) fn build_default_solvers(
         })
         .collect();
 
+    // The envelope's resolved-parameter read-back: the assembled
+    // boundaries and windows, from the same inputs and diagnostics the RC
+    // network was built from. The solver's config owns the resolved
+    // window properties after construction.
+    let resolved_envelope = crate::resolved::resolved_envelope(
+        building,
+        &boundary_inputs,
+        &envelope_diagnostics.boundaries,
+        &thermal_solver.config().window_properties,
+        &thermal_solver.config().window_ids_sorted,
+    );
+
     Ok(SolverBundle {
         thermal: thermal_solver,
         humidity: humidity_solver,
         electrical: electrical_solver,
         zone_capacitances_j_k: zone_caps,
+        resolved_envelope,
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         envelope_diagnostics,
     })

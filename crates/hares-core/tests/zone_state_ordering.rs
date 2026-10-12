@@ -114,6 +114,10 @@ impl Equipment for ZoneTemperatureSniffer {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        Vec::new()
+    }
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
     }

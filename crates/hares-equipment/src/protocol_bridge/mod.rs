@@ -182,6 +182,12 @@ impl ProtocolBridge {
 }
 
 impl Equipment for ProtocolBridge {
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        // The bridge forwards control payloads; the physics it runs is the
+        // target equipment's, so it carries no resolved parameters of its own.
+        Vec::new()
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }

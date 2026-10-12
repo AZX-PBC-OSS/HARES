@@ -529,6 +529,26 @@ impl Equipment for ElectricFurnace {
         let setpoint = self.hvac.effective_setpoints().heating_c;
         self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.rated_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "efficiency",
+                1.0 / self.eir,
+                hares_types::Unit::Fraction,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_eir",
+                self.eir,
+                hares_types::Unit::Dimensionless,
+            ),
+        ]
+    }
 }
 
 impl GasFurnace {
@@ -975,6 +995,21 @@ impl Equipment for GasFurnace {
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
         self.hvac.config.zone_id.map(|zone| (zone, setpoint))
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.rated_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "afue",
+                self.fuel_efficiency,
+                hares_types::Unit::Fraction,
+            ),
+        ]
     }
 }
 

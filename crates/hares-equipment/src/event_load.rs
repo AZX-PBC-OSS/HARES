@@ -589,6 +589,21 @@ impl Equipment for EventBasedLoad {
         EVENT_LOAD_CHECKPOINT_VERSION
     }
 
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "active_power_w",
+                crate::kw_to_w(self.active_power_kw),
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "active_duration_s",
+                self.active_duration_s,
+                hares_types::Unit::Second,
+            ),
+        ]
+    }
+
     fn uses_rng_stream(&self) -> bool {
         true
     }
@@ -1111,6 +1126,14 @@ impl WetAppliance {
 impl Equipment for WetAppliance {
     fn checkpoint_version() -> u32 {
         EVENT_LOAD_CHECKPOINT_VERSION
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![hares_types::ResolvedParameter::new(
+            "n_units",
+            self.n_units,
+            hares_types::Unit::Count,
+        )]
     }
 
     fn uses_rng_stream(&self) -> bool {

@@ -30,6 +30,7 @@ pub mod invariants;
 pub mod observer;
 #[cfg(feature = "observe")]
 mod observer_capture;
+pub mod resolved;
 pub mod result;
 pub mod rng;
 pub mod scheduler;
@@ -58,6 +59,10 @@ pub use hares_io::{InputRecord, InputRecordSource, InputRecords};
 pub use health::{ActorTiming, ActorTimings};
 pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
 pub use rand_chacha::ChaCha8Rng;
+pub use resolved::{
+    ResolvedBoundary, ResolvedEnvelope, ResolvedEquipment, ResolvedInfiltration, ResolvedLayer,
+    ResolvedModel, ResolvedWindow,
+};
 pub use result::{
     BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
 };

@@ -357,6 +357,10 @@ impl Equipment for AirConditioner {
         self.core.ideal_target()
     }
 
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        self.core.resolved_cooling_parameters()
+    }
+
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
         EquipmentHealthCounts {
             curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
@@ -443,6 +447,10 @@ impl Equipment for RoomAC {
         self.core.ideal_target()
     }
 
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        self.core.resolved_cooling_parameters()
+    }
+
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
         EquipmentHealthCounts {
             curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
@@ -452,6 +460,39 @@ impl Equipment for RoomAC {
 }
 
 impl CoolingCore {
+    /// The resolved cooling parameters the physics steps with: the rated
+    /// capacity and EIR of the first stage (the staging solve's entry
+    /// point) and the rated SHR the latent degradation reads.
+    fn resolved_cooling_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.hvac
+                    .config
+                    .cooling_capacities_w
+                    .first()
+                    .copied()
+                    .unwrap_or_default(),
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_eir",
+                self.hvac
+                    .config
+                    .eir_by_stage
+                    .first()
+                    .copied()
+                    .unwrap_or_default(),
+                hares_types::Unit::Dimensionless,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_shr",
+                self.rated_shr,
+                hares_types::Unit::Fraction,
+            ),
+        ]
+    }
+
     fn select_variable_speed_cooling(
         &mut self,
         requested_capacity_fraction: f64,

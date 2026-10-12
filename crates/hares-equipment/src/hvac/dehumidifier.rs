@@ -512,6 +512,26 @@ impl Equipment for Dehumidifier {
         &self.descriptor
     }
 
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_water_removal_l_day",
+                self.rated_water_removal_l_day,
+                hares_types::Unit::LitrePerDay,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_energy_factor_l_kwh",
+                self.rated_energy_factor_l_kwh,
+                hares_types::Unit::Dimensionless,
+            ),
+            hares_types::ResolvedParameter::new(
+                "fraction_load_served",
+                self.fraction_load_served,
+                hares_types::Unit::Fraction,
+            ),
+        ]
+    }
+
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
     }

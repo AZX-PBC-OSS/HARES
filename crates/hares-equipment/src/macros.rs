@@ -94,6 +94,10 @@ macro_rules! delegate_equipment {
                 self.$inner.ideal_target()
             }
 
+            fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+                self.$inner.resolved_parameters()
+            }
+
             fn island_source_available(&self) -> bool {
                 self.$inner.island_source_available()
             }

@@ -20,13 +20,13 @@ parquet = { workspace = true }
 arrow = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
+uom = { workspace = true }
 
 [features]
 observe = []
 
 [dev-dependencies]
 proptest = { workspace = true }
-uom = { workspace = true }
 regex = { workspace = true }
 syn = { version = "3", features = ["full", "visit"] }
 tempfile = { workspace = true }

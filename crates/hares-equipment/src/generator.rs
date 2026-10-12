@@ -1225,6 +1225,14 @@ impl Generator {
 }
 
 impl Equipment for Generator {
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![hares_types::ResolvedParameter::new(
+            "rated_power_w",
+            crate::kw_to_w(self.rated_power_kw),
+            hares_types::Unit::Watt,
+        )]
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }

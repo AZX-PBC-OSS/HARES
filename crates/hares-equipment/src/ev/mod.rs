@@ -1713,6 +1713,21 @@ impl Ev {
 }
 
 impl Equipment for Ev {
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "battery_capacity_j",
+                crate::kwh_to_j(self.battery_capacity_kwh_rated),
+                hares_types::Unit::Joule,
+            ),
+            hares_types::ResolvedParameter::new(
+                "max_charging_power_w",
+                crate::kw_to_w(self.rated_power_kw),
+                hares_types::Unit::Watt,
+            ),
+        ]
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }

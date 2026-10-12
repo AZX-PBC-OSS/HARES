@@ -1018,6 +1018,21 @@ impl Equipment for IdealHvac {
     fn ideal_target(&self) -> Option<(ZoneId, f64)> {
         self.cached_ideal_target
     }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.rated_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "cooling_capacity_w",
+                self.cooling_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+        ]
+    }
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {

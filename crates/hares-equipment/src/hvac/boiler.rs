@@ -664,6 +664,26 @@ impl Equipment for ElectricBoiler {
         let setpoint = self.hvac.effective_setpoints().heating_c;
         self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.rated_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "efficiency",
+                1.0 / self.eir,
+                hares_types::Unit::Fraction,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_eir",
+                self.eir,
+                hares_types::Unit::Dimensionless,
+            ),
+        ]
+    }
 }
 
 impl GasBoiler {
@@ -1201,6 +1221,28 @@ impl Equipment for GasBoiler {
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
         self.hvac.config.zone_id.map(|zone| (zone, setpoint))
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.rated_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            // The stored form is the EIR (1/AFUE); both faces of the same
+            // resolved parameter, reported so a consumer reads either.
+            hares_types::ResolvedParameter::new(
+                "afue",
+                1.0 / self.eir_max,
+                hares_types::Unit::Fraction,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_eir",
+                self.eir_max,
+                hares_types::Unit::Dimensionless,
+            ),
+        ]
     }
 }
 

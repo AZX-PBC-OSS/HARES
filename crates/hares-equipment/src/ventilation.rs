@@ -551,6 +551,26 @@ impl Ventilation {
 }
 
 impl Equipment for Ventilation {
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "supply_fan_power_w",
+                self.supply_fan_power_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "exhaust_fan_power_w",
+                self.exhaust_fan_power_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "flow_rate_m3_s",
+                self.flow_rate_m3_s,
+                hares_types::Unit::CubicMeterPerSecond,
+            ),
+        ]
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }

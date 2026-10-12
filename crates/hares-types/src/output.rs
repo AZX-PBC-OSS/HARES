@@ -58,10 +58,18 @@ pub enum Unit {
     KilowattHourPerMile,
     /// Kilograms per second.
     KilogramPerSecond,
+    /// Cubic metres per second (volumetric flow).
+    CubicMeterPerSecond,
     /// Kilograms per cubic metre (moist-air density).
     KilogramPerCubicMeter,
     /// Litres per day.
     LitrePerDay,
+    /// Joules.
+    Joule,
+    /// Cubic metres.
+    CubicMeter,
+    /// Watts per kelvin (thermal conductance).
+    WattPerKelvin,
     /// A count of things.
     Count,
     /// A count of bytes.
@@ -103,8 +111,12 @@ impl Unit {
         Self::JoulePerKilogramKelvin,
         Self::KilowattHourPerMile,
         Self::KilogramPerSecond,
+        Self::CubicMeterPerSecond,
         Self::KilogramPerCubicMeter,
         Self::LitrePerDay,
+        Self::Joule,
+        Self::CubicMeter,
+        Self::WattPerKelvin,
         Self::Count,
         Self::Byte,
         Self::Percent,
@@ -146,8 +158,12 @@ impl Unit {
             Self::JoulePerKilogramKelvin => "J/(kg*K)",
             Self::KilowattHourPerMile => "kWh/mi",
             Self::KilogramPerSecond => "kg/s",
+            Self::CubicMeterPerSecond => "m3/s",
             Self::KilogramPerCubicMeter => "kg/m3",
             Self::LitrePerDay => "L/day",
+            Self::Joule => "J",
+            Self::CubicMeter => "m3",
+            Self::WattPerKelvin => "W/K",
             Self::Count => "count",
             Self::Byte => "bytes",
             Self::Percent => "%",

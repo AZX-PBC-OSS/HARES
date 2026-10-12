@@ -1119,6 +1119,26 @@ impl Battery {
 }
 
 impl Equipment for Battery {
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "energy_capacity_j",
+                crate::kwh_to_j(self.capacity_kwh_rated),
+                hares_types::Unit::Joule,
+            ),
+            hares_types::ResolvedParameter::new(
+                "power_capacity_w",
+                crate::kw_to_w(self.max_charge_kw),
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "round_trip_efficiency",
+                self.charge_efficiency * self.discharge_efficiency,
+                hares_types::Unit::Fraction,
+            ),
+        ]
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }

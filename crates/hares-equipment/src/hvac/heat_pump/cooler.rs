@@ -317,6 +317,10 @@ impl Equipment for HpCooler {
         self.inner.ideal_target()
     }
 
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        self.inner.resolved_parameters()
+    }
+
     fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
         self.inner.take_health_counts()
     }
@@ -756,6 +760,10 @@ impl Equipment for GshpCooler {
         self.inner.ideal_target()
     }
 
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        self.inner.resolved_parameters()
+    }
+
     fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
         self.inner.take_health_counts()
     }
@@ -1105,6 +1113,10 @@ impl Equipment for WshpCooler {
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.inner.ideal_target()
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        self.inner.resolved_parameters()
     }
 
     fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {

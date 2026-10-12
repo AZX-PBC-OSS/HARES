@@ -216,6 +216,10 @@ mod tests {
         fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
             &self.descriptor
         }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
         fn ports(&self) -> &[PortDeclaration] {
             unimplemented!()
         }
