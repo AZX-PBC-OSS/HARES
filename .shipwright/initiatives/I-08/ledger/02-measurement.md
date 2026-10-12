@@ -1158,6 +1158,49 @@ compare). The golden is 27,300 B; `flat_tariff.json` is 614 B. The
 existing five goldens bitwise unchanged; the dst fixture identical;
 the pytest census unchanged.
 
+### RT-4, 2026-10-12, commit `2434deb8` (the shared parses)
+
+The fleet construction's wall time at 1000 homes: the measurement test
+`fleet_construction_wall_time` (ignored), 1000 homes in the ResStock
+shape (a unique HPXML and schedule file per home; one weather file and
+one defaults tree shared), `SteppableFleet::from_configs` at
+`n_threads = 0` (the global pool), the canonical release build.
+Before (two runs at the parent): 38.59 s, 37.20 s. After (three runs at
+the commit): 31.07 s, 31.09 s, 32.14 s. About 17% less; the duplicate
+weather parse, the duplicate defaults load and the duplicate profiles
+load per home are the parse work the shared handles remove, and the
+home's own HPXML parse, schedule parse, equipment resolve and the
+dwelling build remain.
+
+The parse counts, the memory proof's instrument (`hares_io::parse_counts`,
+the doc-hidden counters; the tests
+`many_home_construction_parses_each_unique_input_once` and
+`streaming_simulate_parses_each_unique_input_once`): three homes sharing
+one HPXML file, one weather file and one defaults tree, both the
+steppable construction and the streaming simulate, parse hpxml 1,
+weather 1, defaults 1, profiles 1. The parent parses each three times
+(RED: the counter test's first run read weather 3 for 3 homes).
+
+The fit path's per-candidate cost (the measurement test `fit_path_cost`
+(ignored), 50 candidates over the consumer_shape_900s inputs, the
+candidate's own HPXML parse plus the build from the shared weather,
+schedule and defaults handles, against a full parse of every input per
+candidate): the batch's shared parses 6.42 ms once, then 3.20 ms per
+candidate from the shared handles against 11.01 ms per candidate with
+the full parse (about 3.4x less per candidate).
+
+M-3 item 5's three memory-growth readings repeated at the commit (the
+same commands, `--discard-output`, VmRSS from the run's own report):
+500 construct-and-simulate repetitions (1-day runs) 49,112 kB at rep 1,
+52,284 kB at rep 100, 52,284 kB at rep 500 (the file and allocator
+caches warm by rep 100, flat 100 to 500); the long horizon 49,124 kB at
+10^3 steps against 49,044 kB at 10^6 steps (flat; the parent's own
+readings at this head are flat too: 42,640 to 43,292 kB, the retention
+the M-3 record held on 2026-10-02 having been removed by the rows since);
+100 stepped episodes (the consumer_shape_900s dwelling, `reports=[]`,
+`save_state` then 100 times `load_state` plus 96 steps) 112,860 kB at
+episode 1 against 112,872 kB at episode 100 (+12 kB, flat).
+
 ### BR-15, 2026-10-02, commit `50a5c261` (fleet weights + resolution stated)
 
 The fleet golden is byte-unchanged: explicit `weight = 1.0` is the

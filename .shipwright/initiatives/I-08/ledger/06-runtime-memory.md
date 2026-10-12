@@ -707,6 +707,174 @@ to M-3's baseline, with the Python surface of this commit (`duration` and
 `reports=[]` in place of M-3's `duration_s` and `write_output=False`, as
 `03-output-reporting.md` OR-6 states for its own repeat).
 
+**State:** committed `2434deb8` (branch `row/r61-rt4`, cut from `9cc6d578`,
+one code commit; 2026-10-12). The entry landed as designed, with the
+account here.
+
+The types (a new `crates/hares-io/src/inputs.rs`): `InputSource`
+(`Path(PathBuf)`, `Text(Arc<str>)`, `Bytes(Arc<[u8]>)`, with `read()`,
+`read_text()`, `path()` and a `display()` for error messages),
+`WeatherInput` (`Path`, or `Text`/`Bytes` with the `format` required),
+`DefaultsSource { base: Option<PathBuf>, files: BTreeMap<String,
+InputSource> }`, and the parsed handles `ParsedHpxml` (over
+`Arc<Building>`; `from_building` for the synthetic parts),
+`ParsedWeather` (over `Arc<WeatherTimeSeries>` at the file's own step,
+the `resampled(step_secs)` map cache RT-2's tables follow, `from_series`
+for the synthetic parts), `ParsedSchedule` (over
+`Arc<ScheduleTimeSeries>`, `parse(source, weather_meta)` for the CSV and
+`generate(start, duration, interval, profiles)` for the generated one,
+`record()` `None` when generated) and `ParsedDefaults` (the store plus
+the profiles, `with_file(relative_path, source)` re-parsing that one
+group over the store's `Arc`-shared tables). Every handle exposes
+`record()`, the source it was parsed from: the identity the shared-parse
+cache keys on, and the seed the digest record's later row fills.
+`ParsedInputs` holds the four handles plus the effective IECC climate
+zone (the HPXML's declared zone, else the weather station's, the
+OS-HPXML default) resolved once at parse with its warning.
+`ParsedInputs::parse` is the source path, `ParsedInputs::from_handles`
+the assembly the Python constructors and the cache share.
+
+`DwellingSettings` (a new `hares-core` type: the sim config, the
+overrides, the building id, the warm-up duration and the patches) is
+`DwellingConfig` less its four input sources, and `DwellingConfig` holds
+`hpxml: InputSource`, `schedule: Option<InputSource>`,
+`weather: WeatherInput`, `defaults: DefaultsSource`, `settings:
+DwellingSettings`. `DwellingBlueprintBuilder::new(inputs, settings)`
+parses nothing: it resolves the site (`resolve_site_location`), the
+effective zone and the equipment once, and carries the mutators
+(`equipment_names`, `remove_equipment` returning the removed spec,
+`remove_equipment_by_end_use`, `add_equipment_spec`); `freeze()` returns
+the `Arc<DwellingBlueprint>`; `from_config` is `ParsedInputs::parse`
+followed by `new`, and `DwellingBlueprint::from_config` that followed by
+`freeze()`, one construction path. The builder's `build(self)` is the
+mutator tests' sugar for `freeze()` then `build()`. The blueprint holds
+the handles, the resolved `SiteLocation`, the resampled weather and
+schedule `Arc`s, the weather averages over the file's own step, the
+equipment, the warnings and the rng; `build(&self)` clones the rng and
+the equipment specs and shares the rest, `build_with_seed(&self, seed)`
+derives the rng from the seed and carries the seed in the settings it
+builds with. `Dwelling::from_config` is
+`DwellingBlueprint::from_config(..)?.build()` (the duplicate parse path
+in the old `from_config` is gone), and the `Dwelling` keeps the
+`Arc<DwellingBlueprint>` it was built from, readable by
+`Dwelling::blueprint()`.
+
+The shared parse never mutates: `from_parts`' writes are gone. The
+resolved site rides the blueprint and every reader reads it: the duct
+DSE takes the resolved site (or the building's own, the direct resolvers'
+form; the strict no-silent-default error naming `Site/Latitude` kept),
+the solver build takes the resolved elevation (the zone capacitances'
+ISA pressure), the autosize and PV readers read the blueprint's
+`SiteLocation`, and the environment patches its own metadata copy (the
+shared series are never touched) with the resolved values before the
+offset warning and the hemisphere rule read it. The climate zone is no
+longer written into the building either: the parse resolves the zone
+(`climate_zone_resolution` replacing the mutating form, the same message)
+and `resolve_equipment` takes it plus the resolved site as parameters.
+The equipment resolve's water heater hierarchy reads the passed zone;
+the fleet's zone validation is unchanged.
+
+The environment holds `Arc<WeatherTimeSeries>` (the shared resampled
+series; the manager never mutates it) and an owned schedule (the
+assembly's unavailable-period zeroing and the schedule injection write
+the build's own copy, cloned from the blueprint's shared series: the
+same single copy cost the old move from the blueprint paid). The old
+constructors keep their signatures and resample per call; the blueprint
+build goes through `new_shared` with the pre-resampled `Arc` and the
+resolved site. The weather resample happens once per unique weather file
+and resolution, on the handle's cache; the schedule resample once per
+blueprint at freeze.
+
+The defaults store's sixteen tables are `Arc`-shared, so
+`ParsedDefaults::with_file` clones the store (every table shared) and
+re-parses only the replaced file's group; the loaders read through one
+swap helper (`read_defaults_file` / `csv_reader`, the replacement's
+content at the display path, the base's bytes otherwise) and
+`DefaultsStore::load_with_overrides(base, files)` validates every
+replacement against the tree's own file list (the unknown relative path
+error naming the known files, the new `DefaultsError::UnknownDefaultsFile`).
+The default schedule profiles are the schedule side's table:
+`ParsedDefaults` parses them (the content twin
+`parse_default_profiles_str` for a replacement) and the schedule
+injection takes `Option<&DefaultProfiles>` from the handle instead of a
+defaults directory it re-read per build. The generated schedule's order
+is the config path's: the profiles load, the generation fails on the
+profile it is missing, then the store; with a schedule source the store
+loads first. The PV panel map is read by reference (`pv_panel_map()`
+returning the shared `Arc`; the taking accessor is gone) and the
+dwelling's own field is the shared `Arc`.
+
+The fleet's many-home construction (the streaming `simulate` and
+`SteppableFleet::from_configs`) builds every home through
+`hares_io::ParsedInputsCache`: the weather and the defaults are cached
+for the construction (keyed by the source identity: a path, or a
+content source's allocation), the HPXML and the schedule documents for
+one chunk (`evict_documents()` after each chunk's run, the streaming
+memory bound kept), the schedule generated per home when a home carries
+no schedule source (not cached, today's behavior). The construction's
+one build is `fleet::build_dwelling`: the cache's inputs, the builder,
+the frozen blueprint's build. The selection's catalogue probe builds
+through the same cache, so a `Named` or `Pattern` selection's probe and
+its home's run share one parse per unique file. The alignment pre-pass
+is the entry's own form unchanged for paths (`read_site`,
+`read_weather_meta`, `site_offset`) and reads content sources from
+memory (`read_site_input`, `read_weather_meta_input`), its two FL-4
+tests running unchanged.
+
+Python (`crates/hares-python/src/py_inputs.rs`): the frozen pyclasses
+`ParsedHpxml`, `ParsedWeather`, `ParsedSchedule` (each with
+`from_path(path)` and `from_text(text)`; `ParsedWeather.from_text`
+taking the required `format` string: `epw`, `psm3`, `res_stock_csv` or
+`tmy3`) and `ParsedDefaults(base, files=None)` (the per-file
+replacements a relative-path to content dict, `with_file` the one-file
+replacement), each parse running under the released GIL.
+`Dwelling.from_hpxml`, `DwellingBlueprint.from_hpxml` and the
+`DwellingConfig` constructor accept a handle anywhere they accept a
+path (`str | handle` unions, the stub and the changes section updated)
+and share it; the construction's parse-and-assemble runs in the
+detached section (the arguments' Send forms resolved under the GIL
+first), so construction from handles releases the GIL like construction
+from paths. `PyDwelling` keeps the `Arc<DwellingBlueprint>` it was
+built from and `reset_with_seed` calls `build_with_seed` on it (no
+re-parse; the GIL released); `Dwelling.blueprint()` exposes the frozen
+blueprint (`DwellingBlueprintRef`, its `parsed_inputs()` the handles).
+The blueprint wrapper wraps the builder and freezes it on `build()`.
+
+RED first: the duplicate-parse proof's counter tests failed at the
+parent behaviourally (three homes sharing one weather file read it
+three times: the parse counters' delta 3, the assertion expecting 1),
+and the entry's other acceptance tests failed as compile errors on the
+missing API (`blueprint_sharing.rs`), the Python test on the import
+(`ParsedWeather` not exported). All green at the commit:
+`blueprint_build_is_repeatable` (two dwellings from one
+`Arc<DwellingBlueprint>`, the frames bitwise equal),
+`builds_share_parsed_inputs` (`Arc::ptr_eq` over the four handles),
+`blueprints_from_different_hpxml_share_weather` (one weather `Arc`, one
+resampled-series `Arc`, each run bitwise the own-inputs parse's),
+`content_source_run_equals_path_source_run` (HPXML, weather and
+schedule as text, the defaults tree with the envelope materials
+replaced by content, the run bitwise the copied-tree run's),
+`test_parsed_weather_shared_across_dwellings` (the weather file deleted
+after the handle's parse; both dwellings run and equal column by column
+the path-form dwellings), `reset_with_seed_reuses_blueprint` (the
+blueprint `Arc` the same across the reset, the reset run's frame
+bitwise a fresh build with that seed) and
+`unknown_defaults_file_is_an_error`. The full block's gates green:
+fmt clean; clippy `--workspace --all-targets --all-features -D warnings`
+clean; nextest `--workspace --all-features -j 4` 8003/8003 (3 skipped:
+the ignored kind-pin generator and the two hand-run measurement tests);
+`pytest -m ''` 1724 passed, 6 xfailed, 0 failed, 0 errors; pyright 0;
+the goldens bitwise (compare-all 8 identical, `full_year_900s_dst`
+identical, the observe set's 8 identical). The measurement record is in
+the log: the 1000-home construction 37.20-38.59 s before, 31.07-32.14 s
+after; the parse counts 1 per unique input against the parent's one per
+home; the fit path's per-candidate cost 3.20 ms from shared handles
+against 11.01 ms with the full parse; M-3 item 5's three readings flat.
+One test deleted with its premise: the basement-lighting copy-conflict
+probe corrupted the blueprint's public schedule field, and the field is
+private now (a parsed schedule is consistent by construction; the
+injection's own failure paths stay pinned in the schedule tests).
+
 ## RT-5: per-run health state, thread safety and reproducibility
 
 **Kind:** initiative work (`context.md` item 6;
