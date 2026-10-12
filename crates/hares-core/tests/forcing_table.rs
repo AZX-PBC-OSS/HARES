@@ -1,5 +1,6 @@
-//! The surface-independent forcing is computed once per weather file and
-//! time grid and shared across the dwellings on that grid.
+//! The surface-independent forcing is computed once per parsed-weather
+//! handle and time grid and shared across the dwellings built from that
+//! handle.
 //!
 //! These are the RED tests: at the parent the forcing tables and the
 //! grid key do not exist, so the table tests fail to compile, and the
@@ -7,12 +8,17 @@
 //! the forcing on every of its steps).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration as StdDuration;
 
 use arrow::array::{Array, Float64Array, RecordBatch};
 use arrow::compute::concat_batches;
 use chrono::{DateTime, Duration};
-use hares_core::{Dwelling, DwellingConfig, FORCE_PER_STEP_FORCING, SimulationConfig};
+use hares_core::{
+    Dwelling, DwellingBlueprint, DwellingConfig, DwellingSettings, FORCE_PER_STEP_FORCING,
+    SimulationConfig,
+};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -63,15 +69,17 @@ fn cz4a_config(
     civil_timezone: Option<&str>,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: cz4a().join("building.xml"),
-        schedule_path: Some(cz4a().join("schedule.csv")),
-        weather_path: cz4a().join("weather.epw"),
-        defaults_path: Some(repo_root().join("defaults")),
-        sim_config: sim_config(start_time, days, 900, civil_timezone),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: warmup_s.map(std::time::Duration::from_secs),
-        patches: None,
+        hpxml: hares_io::InputSource::Path(cz4a().join("building.xml")),
+        schedule: Some(hares_io::InputSource::Path(cz4a().join("schedule.csv"))),
+        weather: hares_io::WeatherInput::Path(cz4a().join("weather.epw")),
+        defaults: hares_io::DefaultsSource::directory(repo_root().join("defaults")),
+        settings: DwellingSettings {
+            sim_config: sim_config(start_time, days, 900, civil_timezone),
+            overrides: None,
+            bldg_id: 1,
+            initialization_duration: warmup_s.map(StdDuration::from_secs),
+            patches: None,
+        },
     }
 }
 
@@ -147,25 +155,91 @@ fn assert_frames_bitwise_equal(expected: &RecordBatch, actual: &RecordBatch, con
     }
 }
 
+/// One set of shared cz4a handles: the weather, schedule, defaults and
+/// HPXML parsed once, shared by every blueprint the tests build from them.
+struct SharedCz4a {
+    weather: Arc<hares_io::ParsedWeather>,
+    schedule: Arc<hares_io::ParsedSchedule>,
+    defaults: Arc<hares_io::ParsedDefaults>,
+    hpxml: Arc<hares_io::ParsedHpxml>,
+}
+
+impl SharedCz4a {
+    fn new() -> Self {
+        let weather = Arc::new(
+            hares_io::ParsedWeather::parse(&hares_io::WeatherInput::Path(
+                cz4a().join("weather.epw"),
+            ))
+            .expect("weather parses"),
+        );
+        let schedule = Arc::new(
+            hares_io::ParsedSchedule::parse(
+                &hares_io::InputSource::Path(cz4a().join("schedule.csv")),
+                Some(weather.meta()),
+            )
+            .expect("schedule parses"),
+        );
+        let defaults = Arc::new(
+            hares_io::ParsedDefaults::parse(&hares_io::DefaultsSource::directory(
+                repo_root().join("defaults"),
+            ))
+            .expect("defaults load"),
+        );
+        let hpxml = Arc::new(
+            hares_io::ParsedHpxml::parse(&hares_io::InputSource::Path(cz4a().join("building.xml")))
+                .expect("hpxml parses"),
+        );
+        Self {
+            weather,
+            schedule,
+            defaults,
+            hpxml,
+        }
+    }
+
+    /// A blueprint over the shared handles with the settings given: the
+    /// construction whose forcing resolution the tests measure.
+    fn blueprint(&self, settings: DwellingSettings) -> Arc<DwellingBlueprint> {
+        let inputs = hares_io::ParsedInputs::from_handles(
+            Arc::clone(&self.hpxml),
+            Some(Arc::clone(&self.schedule)),
+            Arc::clone(&self.weather),
+            Arc::clone(&self.defaults),
+            None,
+        )
+        .expect("the shared inputs assemble");
+        hares_core::DwellingBlueprintBuilder::new(inputs, settings)
+            .expect("the builder builds")
+            .freeze()
+            .expect("the blueprint freezes")
+    }
+}
+
+/// The cz4a settings at the start and duration given.
+fn cz4a_settings(start_time: DateTime<chrono::FixedOffset>, days: i64) -> DwellingSettings {
+    DwellingSettings {
+        sim_config: sim_config(start_time, days, 900, None),
+        overrides: None,
+        bldg_id: 1,
+        initialization_duration: None,
+        patches: None,
+    }
+}
+
 /// `forcing_computed_once_per_weather_and_time_grid`: three dwellings built
-/// over one weather file on one time grid step ten steps each; the forcing
-/// computation counter moves by one (the shared table built for the grid),
-/// not by the thirty per-step computations the duplicated path performs.
+/// from one parsed-weather handle on one time grid step ten steps each; the
+/// forcing computation counter moves by one (the table resolved once on the
+/// handle), not by the thirty per-step computations the duplicated path
+/// performs.
 #[test]
 fn forcing_computed_once_per_weather_and_time_grid() {
     let before = hares_core::FORCING_COMPUTATIONS.load(Ordering::Relaxed);
 
+    let shared = SharedCz4a::new();
+    let blueprint = shared.blueprint(cz4a_settings(start_at("2024-02-27T00:00:00-07:00"), 1));
     let mut dwellings = Vec::new();
     for _ in 1..=3 {
-        dwellings.push(
-            Dwelling::from_config(cz4a_config(
-                start_at("2024-02-27T00:00:00-07:00"),
-                1,
-                None,
-                None,
-            ))
-            .expect("build"),
-        );
+        dwellings.push(blueprint.build().expect("build"));
     }
     for dwelling in &mut dwellings {
         for _ in 0..10 {
@@ -233,40 +307,42 @@ fn forcing_table_run_equals_uncached_run_across_dst() {
 #[test]
 fn forcing_table_run_equals_uncached_run_consumer_shape() {
     let config = DwellingConfig {
-        hpxml_path: repo_root().join("tests/fixtures/resstock/2025.1/bldg0176227/home.xml"),
-        schedule_path: Some(
-            repo_root().join("tests/fixtures/resstock/2025.1/bldg0176227/in.schedules.csv"),
+        hpxml: hares_io::InputSource::Path(
+            repo_root().join("tests/fixtures/resstock/2025.1/bldg0176227/home.xml"),
         ),
-        weather_path: repo_root().join("tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv"),
-        defaults_path: Some(repo_root().join("defaults")),
-        sim_config: sim_config(start_at("2018-01-01T00:00:00-08:00"), 1, 900, None),
-        overrides: Some(serde_json::json!({"Gas Water Heater": {"ua_w_per_k": 2.0}})),
-        bldg_id: 176_227,
-        initialization_duration: None,
-        patches: None,
+        schedule: Some(hares_io::InputSource::Path(
+            repo_root().join("tests/fixtures/resstock/2025.1/bldg0176227/in.schedules.csv"),
+        )),
+        weather: hares_io::WeatherInput::Path(
+            repo_root().join("tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv"),
+        ),
+        defaults: hares_io::DefaultsSource::directory(repo_root().join("defaults")),
+        settings: DwellingSettings {
+            sim_config: sim_config(start_at("2018-01-01T00:00:00-08:00"), 1, 900, None),
+            overrides: Some(serde_json::json!({"Gas Water Heater": {"ua_w_per_k": 2.0}})),
+            bldg_id: 176_227,
+            initialization_duration: None,
+            patches: None,
+        },
     };
     let (with_table, per_step) = table_and_per_step_frames(config);
     assert_frames_bitwise_equal(&per_step, &with_table, "consumer shape");
 }
 
-/// `forcing_key_differs_by_start_date`: two configurations that differ only
-/// in start date produce different keys and different tables.
+/// `forcing_key_differs_by_start_date`: two blueprints over one
+/// parsed-weather handle that differ only in start date produce different
+/// keys and different tables on that handle.
 #[test]
 fn forcing_key_differs_by_start_date() {
-    let first = Dwelling::from_config(cz4a_config(
-        start_at("2024-02-27T00:00:00-07:00"),
-        1,
-        None,
-        None,
-    ))
-    .expect("build");
-    let second = Dwelling::from_config(cz4a_config(
-        start_at("2024-03-27T00:00:00-07:00"),
-        1,
-        None,
-        None,
-    ))
-    .expect("build");
+    let shared = SharedCz4a::new();
+    let first = shared
+        .blueprint(cz4a_settings(start_at("2024-02-27T00:00:00-07:00"), 1))
+        .build()
+        .expect("build");
+    let second = shared
+        .blueprint(cz4a_settings(start_at("2024-03-27T00:00:00-07:00"), 1))
+        .build()
+        .expect("build");
 
     let first_key = first.environment.forcing_key().clone();
     let second_key = second.environment.forcing_key().clone();
@@ -282,30 +358,35 @@ fn forcing_key_differs_by_start_date() {
     );
 }
 
-/// `forcing_key_differs_by_utc_offset_at_equal_instant`: two runs over one
-/// weather file whose start instants are equal but whose site offsets
-/// differ get different keys and different tables, and each frame equals
-/// its per-step run bitwise; a second pair sharing the naive local start
-/// at two offsets keys the same except in the offset field, and their
-/// tables differ in the solar position rows.
+/// `forcing_key_differs_by_utc_offset_at_equal_instant`: two blueprints
+/// over one parsed-weather handle whose start instants are equal but whose
+/// site offsets differ get different keys and different tables on that
+/// handle, and each frame equals its per-step run bitwise; a second pair
+/// sharing the naive local start at two offsets keys the same except in
+/// the offset field, and their tables differ in the solar position rows.
 #[test]
 #[cfg(feature = "dst")]
 fn forcing_key_differs_by_utc_offset_at_equal_instant() {
-    let config_at_offset = |offset_h: f64, start: &str| {
-        let mut config = cz4a_config(start_at(start), 2, None, None);
-        config.sim_config.site_location = hares_io::SiteLocationOverride {
+    let shared = SharedCz4a::new();
+    let settings_at_offset = |offset_h: f64, start: &str| {
+        let mut settings = cz4a_settings(start_at(start), 2);
+        settings.sim_config.site_location = hares_io::SiteLocationOverride {
             utc_offset_h: Some(offset_h),
             ..hares_io::SiteLocationOverride::default()
         };
-        config
+        settings
     };
 
     // The same instant, two offsets: 2023-01-01T00:00:00-07:00 and
     // 2023-01-01T02:00:00-05:00 are the same moment.
-    let west_config = config_at_offset(-7.0, "2023-01-01T00:00:00-07:00");
-    let mountain_config = config_at_offset(-5.0, "2023-01-01T02:00:00-05:00");
-    let west = Dwelling::from_config(west_config.clone()).expect("build");
-    let mountain = Dwelling::from_config(mountain_config).expect("build");
+    let west = shared
+        .blueprint(settings_at_offset(-7.0, "2023-01-01T00:00:00-07:00"))
+        .build()
+        .expect("build");
+    let mountain = shared
+        .blueprint(settings_at_offset(-5.0, "2023-01-01T02:00:00-05:00"))
+        .build()
+        .expect("build");
     assert_ne!(
         west.environment.forcing_key(),
         mountain.environment.forcing_key(),
@@ -324,18 +405,31 @@ fn forcing_key_differs_by_utc_offset_at_equal_instant() {
     );
 
     // Each offset's run equals its per-step run bitwise.
-    let (west_with_table, west_per_step) = table_and_per_step_frames(west_config);
+    let config_at_offset = |offset_h: f64, start: &str| {
+        let mut config = cz4a_config(start_at(start), 2, None, None);
+        config.settings.sim_config.site_location = hares_io::SiteLocationOverride {
+            utc_offset_h: Some(offset_h),
+            ..hares_io::SiteLocationOverride::default()
+        };
+        config
+    };
+    let (west_with_table, west_per_step) =
+        table_and_per_step_frames(config_at_offset(-7.0, "2023-01-01T00:00:00-07:00"));
     assert_frames_bitwise_equal(&west_per_step, &west_with_table, "west of the instant pair");
-    let east_config = config_at_offset(-5.0, "2023-01-01T02:00:00-05:00");
-    let (east_with_table, east_per_step) = table_and_per_step_frames(east_config);
+    let (east_with_table, east_per_step) =
+        table_and_per_step_frames(config_at_offset(-5.0, "2023-01-01T02:00:00-05:00"));
     assert_frames_bitwise_equal(&east_per_step, &east_with_table, "east of the instant pair");
 
     // The same naive local start, two offsets: two instants two hours
     // apart, whose keys differ only in the offset field.
-    let same_west_config = config_at_offset(-7.0, "2023-01-01T00:00:00-07:00");
-    let same_east_config = config_at_offset(-5.0, "2023-01-01T00:00:00-07:00");
-    let west = Dwelling::from_config(same_west_config).expect("build");
-    let east = Dwelling::from_config(same_east_config).expect("build");
+    let west = shared
+        .blueprint(settings_at_offset(-7.0, "2023-01-01T00:00:00-07:00"))
+        .build()
+        .expect("build");
+    let east = shared
+        .blueprint(settings_at_offset(-5.0, "2023-01-01T00:00:00-07:00"))
+        .build()
+        .expect("build");
     let west_key = west.environment.forcing_key().clone();
     let east_key = east.environment.forcing_key().clone();
     assert_ne!(west_key.utc_offset_secs, east_key.utc_offset_secs);
@@ -394,33 +488,75 @@ impl ForcingKeyFields {
 }
 
 /// `blueprints_from_different_hpxml_share_forcing`: two runs whose HPXML
-/// differs (one with PV, one without) over one weather file hold the same
-/// forcing table.
+/// differs (one with PV, one without) over one parsed-weather handle hold
+/// the same forcing table.
 #[test]
 fn blueprints_from_different_hpxml_share_forcing() {
     let inputs = SharedInputs::new();
-    let base = Dwelling::from_config(base_config(
-        &repo_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
-        &inputs,
-    ))
-    .expect("build");
-    let pv = Dwelling::from_config(base_config(
-        &repo_root().join("tests/fixtures/hpxml/ochre_samples/base-pv.xml"),
-        &inputs,
-    ))
-    .expect("build");
+    let weather = Arc::new(
+        hares_io::ParsedWeather::parse(&hares_io::WeatherInput::Path(
+            inputs.dir.path().join("weather.epw"),
+        ))
+        .expect("weather parses"),
+    );
+    let schedule = Arc::new(
+        hares_io::ParsedSchedule::parse(
+            &hares_io::InputSource::Path(inputs.dir.path().join("schedule.csv")),
+            Some(weather.meta()),
+        )
+        .expect("schedule parses"),
+    );
+    let defaults = Arc::new(
+        hares_io::ParsedDefaults::parse(&hares_io::DefaultsSource::directory(
+            repo_root().join("defaults"),
+        ))
+        .expect("defaults load"),
+    );
+    let settings = DwellingSettings {
+        sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
+        overrides: None,
+        bldg_id: 1,
+        initialization_duration: None,
+        patches: None,
+    };
+
+    let blueprint_for = |hpxml_path: &Path| {
+        let hpxml = Arc::new(
+            hares_io::ParsedHpxml::parse(&hares_io::InputSource::Path(hpxml_path.to_path_buf()))
+                .expect("hpxml parses"),
+        );
+        let parsed = hares_io::ParsedInputs::from_handles(
+            hpxml,
+            Some(Arc::clone(&schedule)),
+            Arc::clone(&weather),
+            Arc::clone(&defaults),
+            None,
+        )
+        .expect("the shared inputs assemble");
+        hares_core::DwellingBlueprintBuilder::new(parsed, settings.clone())
+            .expect("the builder builds")
+            .freeze()
+            .expect("the blueprint freezes")
+    };
+
+    let base = blueprint_for(&repo_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"))
+        .build()
+        .expect("build");
+    let pv = blueprint_for(&repo_root().join("tests/fixtures/hpxml/ochre_samples/base-pv.xml"))
+        .build()
+        .expect("build");
 
     let base_table = base.environment.forcing_table().expect("table").clone();
     let pv_table = pv.environment.forcing_table().expect("table").clone();
     assert!(
         std::sync::Arc::ptr_eq(&base_table, &pv_table),
-        "two HPXMLs over one weather file on one grid share the forcing table"
+        "two HPXMLs over one weather handle on one grid share the forcing table"
     );
 }
 
 /// `azimuth_change_shares_the_table`: two HPXMLs that differ only in a
-/// wall's azimuth, built over one weather file, share one table and
-/// produce different frames, each bitwise equal to its per-step run.
+/// wall's azimuth, built over one parsed-weather handle, share one table
+/// and produce different frames, each bitwise equal to its per-step run.
 #[test]
 fn azimuth_change_shares_the_table() {
     let inputs = SharedInputs::new();
@@ -431,8 +567,53 @@ fn azimuth_change_shares_the_table() {
     let turned_path = inputs.dir.path().join("turned.xml");
     std::fs::write(&turned_path, &turned).expect("write the turned HPXML");
 
-    let straight = Dwelling::from_config(base_config(&base_xml, &inputs)).expect("build");
-    let turned = Dwelling::from_config(base_config(&turned_path, &inputs)).expect("build");
+    let weather = Arc::new(
+        hares_io::ParsedWeather::parse(&hares_io::WeatherInput::Path(
+            inputs.dir.path().join("weather.epw"),
+        ))
+        .expect("weather parses"),
+    );
+    let schedule = Arc::new(
+        hares_io::ParsedSchedule::parse(
+            &hares_io::InputSource::Path(inputs.dir.path().join("schedule.csv")),
+            Some(weather.meta()),
+        )
+        .expect("schedule parses"),
+    );
+    let defaults = Arc::new(
+        hares_io::ParsedDefaults::parse(&hares_io::DefaultsSource::directory(
+            repo_root().join("defaults"),
+        ))
+        .expect("defaults load"),
+    );
+    let settings = DwellingSettings {
+        sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
+        overrides: None,
+        bldg_id: 1,
+        initialization_duration: None,
+        patches: None,
+    };
+    let blueprint_for = |hpxml_path: &Path| {
+        let hpxml = Arc::new(
+            hares_io::ParsedHpxml::parse(&hares_io::InputSource::Path(hpxml_path.to_path_buf()))
+                .expect("hpxml parses"),
+        );
+        let parsed = hares_io::ParsedInputs::from_handles(
+            hpxml,
+            Some(Arc::clone(&schedule)),
+            Arc::clone(&weather),
+            Arc::clone(&defaults),
+            None,
+        )
+        .expect("the shared inputs assemble");
+        hares_core::DwellingBlueprintBuilder::new(parsed, settings.clone())
+            .expect("the builder builds")
+            .freeze()
+            .expect("the blueprint freezes")
+    };
+
+    let straight = blueprint_for(&base_xml).build().expect("build");
+    let turned = blueprint_for(&turned_path).build().expect("build");
 
     let straight_table = straight.environment.forcing_table().expect("table").clone();
     let turned_table = turned.environment.forcing_table().expect("table").clone();
@@ -499,15 +680,19 @@ impl SharedInputs {
 /// schedule.
 fn base_config(hpxml_path: &Path, inputs: &SharedInputs) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: hpxml_path.to_path_buf(),
-        schedule_path: Some(inputs.dir.path().join("schedule.csv")),
-        weather_path: inputs.dir.path().join("weather.epw"),
-        defaults_path: Some(repo_root().join("defaults")),
-        sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: hares_io::InputSource::Path(hpxml_path.to_path_buf()),
+        schedule: Some(hares_io::InputSource::Path(
+            inputs.dir.path().join("schedule.csv"),
+        )),
+        weather: hares_io::WeatherInput::Path(inputs.dir.path().join("weather.epw")),
+        defaults: hares_io::DefaultsSource::directory(repo_root().join("defaults")),
+        settings: DwellingSettings {
+            sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
+            overrides: None,
+            bldg_id: 1,
+            initialization_duration: None,
+            patches: None,
+        },
     }
 }
 
@@ -525,8 +710,13 @@ fn build_schedule_csv() -> String {
 }
 
 /// A synthetic annual EPW whose solar values make the solar position and
-/// the per-surface irradiance matter.
+/// the per-surface irradiance matter. `variant` shifts the dry bulb and
+/// dew point, so two variants are two distinct weather contents.
 fn build_epw_8760() -> String {
+    build_epw_8760_variant(0)
+}
+
+fn build_epw_8760_variant(variant: i32) -> String {
     use chrono::{Datelike, NaiveDate, Timelike};
 
     let mut lines = vec![
@@ -557,7 +747,7 @@ fn build_epw_8760() -> String {
             "0".to_string(),
             "A0A0A0A0*0*0*0*0*0*0*0*0*0*0".to_string(),
             "20.0".to_string(),
-            "10.0".to_string(),
+            (10.0 + f64::from(variant) * 0.25).to_string(),
             "50".to_string(),
             "101325".to_string(),
             "0".to_string(),
@@ -589,4 +779,73 @@ fn build_epw_8760() -> String {
         lines.push(row.join(","));
     }
     lines.join("\n")
+}
+
+/// `dropped_dwellings_drop_their_forcing_tables`: the forcing tables are
+/// the parsed-weather handles' own state, so a dwelling's construction
+/// resolves its table once (one computation), the dwellings built from one
+/// handle share it, and dropping the dwellings and their handles drops the
+/// tables: the live-table count returns to its baseline. N distinct
+/// weather contents, each constructed and dropped, leave no table behind:
+/// the live count during holds exactly one table per live handle, and
+/// after the drops exactly none.
+#[test]
+fn dropped_dwellings_drop_their_forcing_tables() {
+    const DISTINCT_WEATHERS: usize = 40;
+
+    let before_live = hares_io::FORCING_TABLES_LIVE.load(Ordering::Relaxed);
+    let before_computations = hares_core::FORCING_COMPUTATIONS.load(Ordering::Relaxed);
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("schedule.csv"), build_schedule_csv()).expect("write schedule");
+
+    let mut dwellings = Vec::new();
+    for variant in 0..DISTINCT_WEATHERS {
+        let weather_path = dir.path().join(format!("weather_{variant}.epw"));
+        std::fs::write(&weather_path, build_epw_8760_variant(variant as i32))
+            .expect("write weather");
+        let config = DwellingConfig {
+            hpxml: hares_io::InputSource::Path(
+                repo_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+            ),
+            schedule: Some(hares_io::InputSource::Path(dir.path().join("schedule.csv"))),
+            weather: hares_io::WeatherInput::Path(weather_path.clone()),
+            defaults: hares_io::DefaultsSource::directory(repo_root().join("defaults")),
+            settings: DwellingSettings {
+                sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
+                overrides: None,
+                bldg_id: i64::try_from(variant + 1).unwrap_or(1),
+                initialization_duration: None,
+                patches: None,
+            },
+        };
+        dwellings.push(Dwelling::from_config(config).expect("build"));
+    }
+
+    let during_live = hares_io::FORCING_TABLES_LIVE.load(Ordering::Relaxed);
+    assert_eq!(
+        during_live,
+        before_live + DISTINCT_WEATHERS as u64,
+        "one table per live handle while the dwellings are held, got {} \
+         live tables for {DISTINCT_WEATHERS} live dwellings",
+        during_live - before_live,
+    );
+
+    drop(dwellings);
+
+    let after_live = hares_io::FORCING_TABLES_LIVE.load(Ordering::Relaxed);
+    assert_eq!(
+        after_live,
+        before_live,
+        "dropped dwellings must drop their forcing tables with them; {} \
+         tables stayed resident",
+        after_live - before_live,
+    );
+    let after_computations = hares_core::FORCING_COMPUTATIONS.load(Ordering::Relaxed);
+    assert_eq!(
+        after_computations,
+        before_computations + DISTINCT_WEATHERS as u64,
+        "one computation per distinct weather content, got {}",
+        after_computations - before_computations,
+    );
 }

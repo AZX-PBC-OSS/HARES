@@ -328,50 +328,93 @@ change: the numbers go into `02-measurement.md`'s log and the row's state
 is recorded as measured and dropped.
 
 **State:** committed `3fa77b58` (2026-10-12, branch `row/r62-rt2`, based
-on `9cc6d578`). The table is kept: the stepped-episode loop's wall, the
-rule's arbiter, read 5.8% and 7.8% lower with it in two paired sets (the
-exact accumulator under it: the loop's 9600 per-step computations, about
-9 ms of the loop's work, removed; the full-year forcing 2.9% to 0.3% of
+on `9cc6d578`), rebased onto RT-4's fold (`row/r61-rt4`: `2434deb8` +
+`c7098a38`) as `470b0473` + `902d8d60`, and the review fix below on top.
+The table is kept: the stepped-episode loop's wall, the rule's arbiter,
+read 5.8% and 7.8% lower with it in two paired sets (the exact
+accumulator under it: the loop's 9600 per-step computations, about 9 ms
+of the loop's work, removed; the full-year forcing 2.9% to 0.3% of
 `simulate()`); the numbers, the noise verdicts and the fleet step-loop
 figure at `02-measurement.md`'s log entry, raw record
 `.shipwright/runs/r62-rt2-measurement.md`.
 
-The row ran ahead of its dependency: the entry's dependencies name
-RT-4 first and RT-4 has not landed, so two mechanisms are adapted to
-today's tree and recorded here.
+The row first ran ahead of its dependency (the entry's dependencies name
+RT-4 first, which had not landed): its share mechanism was a
+process-global map from a (content digest, grid key) pair to
+`Arc<ForcingTable>`, the interim the paragraph below recorded. RT-4
+landed the parsed-weather handles and the row folded onto them, and the
+independent review found the interim map an unbounded cache the ledger
+disclosed nowhere: N distinct weather contents leave N tables resident
+forever (the reviewer's probe, 300 distinct contents, reaches 300
+resident tables and grows without bound), and a changed-on-disk file's
+key stops hitting but its stale table still stays resident while any
+construction over the old content's digest remains a live entry.
 
-The share mechanism: `ForcingKey` and `ForcingTable` are `hares-io`'s
-(`forcing.rs`), the key exactly the entry's plain values (the resolution
-in seconds, the naive local start, the resolved site UTC offset in
-seconds, the horizon in steps, the resolved latitude, longitude and
-elevation as bit patterns, the civil timezone's IANA name). The map from
-key to `Arc<ForcingTable>` behind a mutex, locked once per construction
-and never on the step path, cannot live on a parsed-weather handle that
-does not exist: it is a process-global map whose key pairs the grid key
-with the content digest of the resampled weather series (every field's
-values plus the meta fields the build reads, hashed by bit pattern), so
-constructions over one weather file on one grid share the winner's table
-(`Arc::ptr_eq`, the acceptance tests prove it) and a changed file keys
-differently and never shares a stale table. When RT-4's parsed handles
-land, the map moves onto them and the identity tuple dissolves. The
-horizon rule is the entry's: `max(duration steps, steps per day)` with
-warm-up on, the duration's steps without, sized once and never read past
-(a step past the horizon, like a stepping clock whose time base is not
-the construction's, reads the per-step computation, whose semantics are
-the parent's own; two existing tests that step such clocks caught the
-first cut indexing blindly and the check is the fix).
+**The review fix: the map moved onto the handles, whole.** The map from
+grid key to `Arc<ForcingTable>` is now a field of the parsed-weather
+handle (`ParsedWeather` in `hares-io/src/inputs.rs`, beside its resample
+cache), resolved by `ParsedWeather::forcing_table` with the same
+lock-once-per-construction pattern. The handle is the weather content's
+identity, so the key's content-digest half is deleted and the key is the
+grid key alone ([`ForcingKey`]; `ForcingCacheKey` is deleted): a table
+belongs to the handle it was built from, every dwelling built from one
+handle shares its table (`Arc`), a dropped handle drops its map and
+every table in it, and a re-parse of a changed file is a new handle with
+its own table, so no stale table survives its content. The resident
+tables are bounded by the handles' lifetimes. The step path is
+unchanged: the manager holds the `Arc` and reads it lock-free.
+
+**The leak-death proof:** the counter `FORCING_TABLES_LIVE` (in
+`forcing.rs`: one increment per table built, one decrement when a
+table's last owner drops it) turns the reviewer's probe into the test
+`dropped_dwellings_drop_their_forcing_tables`
+(`crates/hares-core/tests/forcing_table.rs`): 40 distinct weather
+contents, each a dwelling constructed from its own file and dropped
+(the reviewer ran 300; the growth is linear, the bound the same). RED
+at the pre-fix tip, the process-global map in place: 40 tables stayed
+resident after every dwelling was dropped (the count read 40 and never
+fell). GREEN on the fix: the count sits at exactly one table per live
+handle while the dwellings are held and returns to the baseline (zero
+resident) when they drop, with one computation per distinct content
+(the duplicate-computation probe still reads exactly one build per
+content). A changed-on-disk file is pinned by the same mechanics: a new
+parse is a new handle, its tables its own; the sharing tests build from
+one handle and hold the same table (`Arc::ptr_eq`), the key tests
+resolve two keys on one handle and never one table.
+
+**The fold's found defect, fixed here:** the rebase's auto-merge left
+the table build reading the shared series' raw header while the step
+path reads the manager's resolved metadata copy (the blueprint's
+resolution of the HPXML site, the weather header and the config's
+override). The consumer-shape differential caught it (its ResStock CSV
+weather parses with a placeholder header the site resolution replaces:
+the two paths' solar positions diverged and the bitwise frames
+differed); `build_forcing_table` now takes the resolved metadata and
+the differentials are bitwise green again.
+
+The share mechanism, landed: `ForcingKey` and `ForcingTable` are
+`hares-io`'s (`forcing.rs`), the key exactly the entry's plain values
+(the resolution in seconds, the naive local start, the resolved site
+UTC offset in seconds, the horizon in steps, the resolved latitude,
+longitude and elevation as bit patterns, the civil timezone's IANA
+name). The horizon rule is the entry's: `max(duration steps, steps per
+day)` with warm-up on, the duration's steps without, sized once and
+never read past (a step past the horizon, like a stepping clock whose
+time base is not the construction's, reads the per-step computation,
+whose semantics are the parent's own; two existing tests that step such
+clocks caught the first cut indexing blindly and the check is the fix).
 
 The thread safety: `ForcingTable` is plain data (64-byte `Copy` rows),
-shared as an `Arc`, read-only during stepping; the map's mutex is
-touched only where a manager is constructed. The fleet's parallel steps
-(rayon, one dwelling per thread) read the shared table through their
-own `Arc`s with no lock on the step path, which is the entry's
+shared as an `Arc`, read-only during stepping; each handle's map mutex
+is touched only where a manager is constructed. The fleet's parallel
+steps (rayon, one dwelling per thread) read the shared table through
+their own `Arc`s with no lock on the step path, which is the entry's
 `Send + Sync` requirement verbatim.
 
-RED first: the duplicate-computation proof is the process-global
+RED first (the row's own): the duplicate-computation proof is the
 `FORCING_COMPUTATIONS` counter (kept, documented, one increment per
-computation): at the parent, three dwellings built over one weather file
-and stepped ten steps each moved it by 33 (one per step, plus each
+computation): at the parent, three dwellings built over one weather
+file and stepped ten steps each moved it by 33 (one per step, plus each
 construction's initial state); with the table, by exactly 1. The
 acceptance tests failed to compile at the parent (no `ForcingTable`
 surface) and the differential failed behaviourally once the switch
@@ -384,20 +427,19 @@ comparison and the pin cannot rot).
 The per-surface branch: its condition fires (the measured shares, 7.3%
 to 7.5% of `simulate()` on the full year and 5.7% to 5.8% of the
 stepped-episode loop, at or above the 5% band; a temporary accumulator,
-removed) and its mechanism does not adapt: a per-blueprint table shared
-by every dwelling the blueprint builds, and the
-`per_surface_table_shared_across_builds_of_one_blueprint` test, need the
-blueprint that builds many dwellings, which is RT-4's change. A
-per-dwelling table in today's one-blueprint-one-dwelling tree would pay
-the entry's own size estimate per home with nothing shared. The branch
-lands with RT-4, the shares recorded in the measurement log as the
-measurement that fired it.
+removed) and its mechanism landed with RT-4's blueprint that builds
+many dwellings: a per-blueprint per-surface table shared by every
+dwelling the blueprint builds is the row's follow-up (the shares stand
+in the measurement log as the measurement that fired it).
 
-Gates: fmt clean; clippy --workspace --all-targets --all-features -D
-warnings clean; nextest --workspace --all-features -j 4 8003 passed, 1
-skipped (the ignored kind-pin generator); `-F dst environment::` 62
-passed; pytest -m '' 1723 passed, 6 xfailed, 0 failed, 0 errors; pyright
-0; the nine goldens bitwise (compare-all 8, `full_year_900s_dst` 1).
+Gates (at the review fix, canonical env `uv sync --locked --all-extras
+--all-groups` + `uv run maturin develop`): fmt clean; clippy
+--workspace --all-targets --all-features -D warnings clean; nextest
+--workspace --all-features -j 4 8012 passed, 3 skipped (the ignored
+kind-pin generator and the two hand-run measurement tests); `-F dst
+environment::` 62 passed; pytest -m '' 1724 passed, 6 xfailed, 0
+failed, 0 errors; pyright 0; the goldens bitwise (compare-all 8,
+`full_year_900s_dst` 1, compare-all under `observe` 8).
 
 ## RT-3: thermal solver steps without heap allocation
 

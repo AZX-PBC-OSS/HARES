@@ -13,26 +13,13 @@
 //! A [`ForcingKey`] identifies a grid: it holds plain values (never a
 //! `DateTime<FixedOffset>`, whose `Eq` and `Hash` compare the UTC instant
 //! alone), so two grids that share a start instant but resolve different
-//! site UTC offsets hash differently. The weather content itself is not in
-//! the key: a table belongs to the weather it was built from, so the
-//! shared cache pairs every key with the content digest of the weather
-//! series the table was built from and serves a table only to a
-//! construction over the same weather.
-
-/// The weather content's identity, hashed: [`ForcingKey`] deliberately
-/// excludes the weather, so a shared table is found under a key that pairs
-/// the grid with the content digest of the weather series the table was
-/// built from.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ForcingCacheKey {
-    /// Digest of the resampled weather series (every field's values, plus
-    /// the meta fields the forcing reads). Two constructions over one
-    /// weather file at one resolution hash equal; a changed file hashes
-    /// differently and never shares a stale table.
-    pub content: u64,
-    /// The time grid the table was built for.
-    pub key: ForcingKey,
-}
+//! site UTC offsets hash differently. The weather content is not in the
+//! key and needs no digest beside it: a table belongs to the weather it
+//! was built from, and that identity is the parsed-weather handle the
+//! table is cached on
+//! ([`ParsedWeather::forcing_table`](crate::inputs::ParsedWeather::
+//! forcing_table)), so a handle's drop releases its tables and a re-parse
+//! of a changed file keys nothing stale.
 
 /// Identifies one forcing table's time grid. Plain values only: the naive
 /// local start (the wall clock the forcing reads), the resolved site UTC
@@ -86,6 +73,17 @@ pub struct ForcingRow {
     pub utc_day_of_year: u32,
 }
 
+/// How many times this process computed the surface-independent forcing
+/// (the humidity ratio, wet bulb, enthalpy, day of year, solar position and
+/// mains temperature that depend only on the weather and the time grid).
+/// One increment per forcing table built (a handle resolves one table per
+/// grid key), or per step on the per-step path `FORCE_PER_STEP_FORCING`
+/// selects. The duplicate-computation probe the forcing tests read:
+/// dwellings over one parsed-weather handle and time grid must move it by
+/// one construction in total, not one step each.
+pub static FORCING_COMPUTATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// The surface-independent forcing, one row per step index, built eagerly
 /// in one pass and immutable afterwards. Shared as an `Arc`: every
 /// dwelling on the grid reads the same table concurrently during stepping,
@@ -96,12 +94,25 @@ pub struct ForcingTable {
     rows: Vec<ForcingRow>,
 }
 
+impl Drop for ForcingTable {
+    fn drop(&mut self) {
+        FORCING_TABLES_LIVE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The process's live forcing tables: one increment per table built
+/// ([`ForcingTable::from_rows`]), one decrement when its last owner drops
+/// it. The leak probe the tests read: constructions that outgrow their
+/// owners' lifetimes show up as a count that never falls.
+pub static FORCING_TABLES_LIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl ForcingTable {
     /// Wraps the pass-built rows: one row per step index of the horizon,
     /// in step order. The builder is the forcing step's own computation
     /// run once, so the rows are immutable here and afterwards.
     #[must_use]
     pub fn from_rows(rows: Vec<ForcingRow>) -> Self {
+        FORCING_TABLES_LIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self { rows }
     }
 

@@ -47,7 +47,9 @@ pub use epw::{
     parse_epw_station_wmo, sky_temp_from_emissivity,
 };
 // Re-export canonical physical constants from hares-physics (preserving public API names).
-pub use forcing::{ForcingCacheKey, ForcingKey, ForcingRow, ForcingTable};
+pub use forcing::{
+    FORCING_COMPUTATIONS, FORCING_TABLES_LIVE, ForcingKey, ForcingRow, ForcingTable,
+};
 pub use hares_physics::constants::CELSIUS_TO_KELVIN as KELVIN_OFFSET_C;
 pub use hares_physics::constants::STEFAN_BOLTZMANN;
 pub use hpxml::building::check_foundation_zone_invariant;

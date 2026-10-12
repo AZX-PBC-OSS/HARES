@@ -6,10 +6,11 @@ use std::time::Duration as StdDuration;
 #[cfg(test)]
 use chrono::Duration;
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
-use hares_io::forcing::{ForcingCacheKey, ForcingKey, ForcingRow, ForcingTable};
+use hares_io::forcing::{ForcingKey, ForcingRow, ForcingTable};
 use hares_io::hpxml::building::{BoundaryType, ZoneType};
 use hares_io::{
-    Building, ScheduleTimeSeries, SiteLocation, WeatherMeta, WeatherTimeSeries, monthly_day_counts,
+    Building, ParsedWeather, ScheduleTimeSeries, SiteLocation, WeatherMeta, WeatherTimeSeries,
+    monthly_day_counts,
 };
 use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherField};
 use hares_physics::{
@@ -39,14 +40,14 @@ const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 
 /// How many times this process computed the surface-independent forcing
 /// (the humidity ratio, wet bulb, enthalpy, day of year, solar position and
-/// mains temperature that depend only on the weather and the time grid).
-/// One increment per shared forcing table built, or per step on the
-/// per-step path [`FORCE_PER_STEP_FORCING`] selects. The duplicate
-/// computation probe the forcing tests read: dwellings over one weather
-/// file and time grid must move it by one construction in total, not one
+/// mains temperature that depend only on the weather and the time grid):
+/// [`hares_io::forcing::FORCING_COMPUTATIONS`], re-exported where the
+/// forcing tests read it. One increment per forcing table built (a
+/// parsed-weather handle resolves one table per grid key), or per step on
+/// the per-step path [`FORCE_PER_STEP_FORCING`] selects. Dwellings over
+/// one handle and time grid move it by one construction in total, not one
 /// step each.
-pub static FORCING_COMPUTATIONS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub use hares_io::forcing::FORCING_COMPUTATIONS;
 
 /// The surface-independent forcing's accumulated computation time,
 /// compiled in only with the `profiling` feature (an `Instant::now()` pair
@@ -224,8 +225,9 @@ pub struct EnvironmentManager {
     solar_irradiance_buf: Vec<SurfaceIrradiance>,
     schedule_values_buf: Vec<f64>,
     /// The shared surface-independent forcing for this weather and time
-    /// grid: built once per grid (shared with every other manager over the
-    /// same weather content and key) and read-only afterwards. `None` when
+    /// grid: resolved once per grid on the construction's parsed-weather
+    /// handle (shared with every manager built from that handle, dropped
+    /// with it) and read-only afterwards. `None` when
     /// [`FORCE_PER_STEP_FORCING`] selects the per-step computation.
     forcing: Option<Arc<ForcingTable>>,
     /// The grid key the forcing table was found or built under.
@@ -234,6 +236,18 @@ pub struct EnvironmentManager {
     /// only. The dwelling's snapshot-allocation test reads it.
     #[cfg(test)]
     pub(crate) slot_write_allocations: u64,
+}
+
+/// The weather a manager is constructed from: the blueprint's
+/// parsed-weather handle (the resampled series is the handle's cached one,
+/// and the forcing table resolves on the handle's map, shared with every
+/// construction from that handle and dropped with it), or an owned
+/// resampled series (the test constructor, which builds a private table:
+/// there is no handle to share through, and the table dies with the
+/// manager).
+enum WeatherSource<'a> {
+    Shared(&'a ParsedWeather),
+    Owned(Arc<WeatherTimeSeries>),
 }
 
 impl EnvironmentManager {
@@ -291,7 +305,13 @@ impl EnvironmentManager {
         }
 
         Self::from_resampled(
-            weather, schedule, building, step_secs, start_time, None, options,
+            WeatherSource::Owned(weather),
+            schedule,
+            building,
+            step_secs,
+            start_time,
+            None,
+            options,
         )
     }
 
@@ -301,9 +321,12 @@ impl EnvironmentManager {
     /// metadata copy carries (the shared series are never mutated). The
     /// schedule is the build's own copy, cloned from the blueprint's
     /// shared series: the assembly's unavailable-period zeroing and the
-    /// schedule injection write it.
+    /// schedule injection write it. The forcing table resolves on the
+    /// weather handle the blueprint was built from, so every dwelling the
+    /// blueprint builds on one grid reads one table, and the table's
+    /// lifetime is the handle's.
     pub(crate) fn new_shared(
-        weather: Arc<WeatherTimeSeries>,
+        weather_handle: &ParsedWeather,
         schedule: ScheduleTimeSeries,
         building: &Building,
         time_res: StdDuration,
@@ -316,7 +339,7 @@ impl EnvironmentManager {
             return Err(EnvironmentManagerError::ZeroTimeResolution);
         }
         Self::from_resampled(
-            weather,
+            WeatherSource::Shared(weather_handle),
             schedule,
             building,
             step_secs,
@@ -328,7 +351,7 @@ impl EnvironmentManager {
 
     /// The shared constructor tail: everything after the resample.
     fn from_resampled(
-        weather: Arc<WeatherTimeSeries>,
+        weather: WeatherSource<'_>,
         schedule: ScheduleTimeSeries,
         building: &Building,
         step_secs: u32,
@@ -336,6 +359,10 @@ impl EnvironmentManager {
         site_location: Option<&SiteLocation>,
         options: EnvironmentInitOptions<'_>,
     ) -> Result<Self, EnvironmentManagerError> {
+        let (weather, weather_handle) = match weather {
+            WeatherSource::Shared(handle) => (handle.resampled(step_secs)?, Some(handle)),
+            WeatherSource::Owned(series) => (series, None),
+        };
         if weather.is_empty() {
             return Err(EnvironmentManagerError::EmptyWeather);
         }
@@ -484,23 +511,26 @@ impl EnvironmentManager {
             None
         } else {
             let horizon_steps = forcing_key.horizon_steps;
-            Some(shared_forcing_table(
-                ForcingCacheKey {
-                    content: weather_identity(&weather),
-                    key: forcing_key.clone(),
-                },
-                || {
-                    build_forcing_table(
-                        &weather,
-                        weather_start_offset,
-                        step_secs,
-                        start_time,
-                        horizon_steps,
-                        #[cfg(feature = "dst")]
-                        civil_tz.as_ref(),
-                    )
-                },
-            )?)
+            let build = || {
+                build_forcing_table(
+                    &weather,
+                    &weather_meta,
+                    weather_start_offset,
+                    step_secs,
+                    start_time,
+                    horizon_steps,
+                    #[cfg(feature = "dst")]
+                    civil_tz.as_ref(),
+                )
+            };
+            Some(match weather_handle {
+                Some(handle) => handle.forcing_table(&forcing_key, build)?,
+                None => {
+                    let built = Arc::new(build()?);
+                    FORCING_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    built
+                }
+            })
         };
 
         Ok(Self {
@@ -1241,98 +1271,26 @@ impl EnvironmentManager {
     }
 }
 
-/// The process's shared forcing tables: one entry per (weather content,
-/// time grid). The map is locked once per manager construction to look up
-/// or insert, and never on the step path, where the table is an
-/// `Arc` read-only.
-static SHARED_FORCING_TABLES: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<ForcingCacheKey, Arc<ForcingTable>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
-/// Returns the shared table for the sought key, building it on the first
-/// construction that asks for the grid. Two constructions over one weather
-/// file on one grid share the winner's table; the lock is held only for
-/// the map's own operations, never around the build.
-fn shared_forcing_table(
-    sought: ForcingCacheKey,
-    build: impl FnOnce() -> Result<ForcingTable, HaresError>,
-) -> Result<Arc<ForcingTable>, HaresError> {
-    {
-        let map = SHARED_FORCING_TABLES
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(table) = map.get(&sought) {
-            return Ok(Arc::clone(table));
-        }
-    }
-    let built = Arc::new(build()?);
-    FORCING_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut map = SHARED_FORCING_TABLES
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    Ok(Arc::clone(map.entry(sought).or_insert(built)))
-}
-
-/// Digests the resampled weather series into the content identity a shared
-/// table's cache key pairs with its grid key: every field's values, plus
-/// the meta fields the forcing build reads (the source resolution and the
-/// midpoint offset that shape the annual row offset). f64 values hash by
-/// bit pattern, so a signed-zero or NaN-payload difference keys
-/// differently and never shares a table.
-fn weather_identity(weather: &WeatherTimeSeries) -> u64 {
-    use std::hash::Hash;
-
-    let mut hasher = std::hash::DefaultHasher::new();
-    weather.meta.source_step_secs.hash(&mut hasher);
-    weather.meta.midpoint_offset_secs.hash(&mut hasher);
-    for values in [
-        &weather.dry_bulb_c,
-        &weather.dew_point_c,
-        &weather.rel_humidity_pct,
-        &weather.pressure_kpa,
-        &weather.ghi_w_m2,
-        &weather.dni_w_m2,
-        &weather.dhi_w_m2,
-        &weather.wind_speed_m_s,
-        &weather.wind_dir_deg,
-        &weather.opaque_sky_cover,
-        &weather.horizontal_infrared_w_m2,
-        &weather.sky_temp_c,
-        &weather.ground_temp_c,
-        &weather.liquid_precip_m,
-    ] {
-        values.len().hash(&mut hasher);
-        for &value in values {
-            value.to_bits().hash(&mut hasher);
-        }
-    }
-    match &weather.surface_albedo {
-        None => false.hash(&mut hasher),
-        Some(values) => {
-            true.hash(&mut hasher);
-            values.len().hash(&mut hasher);
-            for &value in values {
-                value.to_bits().hash(&mut hasher);
-            }
-        }
-    }
-    std::hash::Hasher::finish(&hasher)
-}
-
 /// Builds the surface-independent forcing for one weather and time grid in
 /// one pass: the same functions, in the same order, with the same inputs
 /// the step's per-step computation uses, so a row's values are bitwise the
-/// values the per-step computation produces for that step.
+/// values the per-step computation produces for that step. The site is
+/// the manager's resolved metadata copy (the blueprint's resolution of
+/// the HPXML site, the weather header and the config's override), the
+/// values the per-step computation's solar position and hemisphere rule
+/// read (`self.weather_meta`), never the shared series' raw header: the
+/// two paths must read one site.
 #[allow(clippy::too_many_arguments)]
 fn build_forcing_table(
     weather: &WeatherTimeSeries,
+    weather_meta: &WeatherMeta,
     weather_start_offset: usize,
     step_secs: u32,
     local_start: DateTime<FixedOffset>,
     horizon_steps: u64,
     #[cfg(feature = "dst")] civil_tz: Option<&chrono_tz::Tz>,
 ) -> Result<ForcingTable, HaresError> {
-    let is_southern = weather.meta.latitude < 0.0;
+    let is_southern = weather_meta.latitude < 0.0;
     let mains_hemisphere = if is_southern {
         Hemisphere::Southern
     } else {
@@ -1362,8 +1320,8 @@ fn build_forcing_table(
             #[cfg(not(feature = "dst"))]
             let day_of_year = now.ordinal();
             let pos = solar_position(
-                weather.meta.latitude,
-                weather.meta.longitude,
+                weather_meta.latitude,
+                weather_meta.longitude,
                 now,
                 day_of_year,
             );

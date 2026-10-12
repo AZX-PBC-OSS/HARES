@@ -2984,7 +2984,7 @@ fn build_from_blueprint_inner_with_seed(
     }
 
     let mut environment = EnvironmentManager::new_shared(
-        Arc::clone(&bp.resampled_weather),
+        &bp.inputs.weather,
         (*bp.resampled_schedule).clone(),
         &bp.building,
         bp.time_res,

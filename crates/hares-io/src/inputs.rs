@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset};
 
 use crate::defaults::DefaultsStore;
+use crate::forcing::{ForcingKey, ForcingTable};
 use crate::hpxml::Building;
 use crate::schedule::ScheduleTimeSeries;
 use crate::schedule_resolve::{DEFAULT_SCHEDULES_CSV, DefaultProfiles};
@@ -302,11 +303,17 @@ impl ParsedHpxml {
 
 /// One weather file, parsed once and shared by reference; each target
 /// step's resampled series is computed once and cached on the handle, so
-/// blueprints at the same resolution share one copy.
+/// blueprints at the same resolution share one copy, and so is the
+/// surface-independent forcing: one [`ForcingTable`] per time grid,
+/// resolved once per grid key and cached on the handle. The handle is the
+/// weather content's identity, so the tables live and die with it: a
+/// dropped handle drops its tables, and a re-parse of a changed file is a
+/// new handle with its own.
 #[derive(Debug)]
 pub struct ParsedWeather {
     series: Arc<WeatherTimeSeries>,
     resampled: Mutex<HashMap<u32, Arc<WeatherTimeSeries>>>,
+    forcing: Mutex<HashMap<ForcingKey, Arc<ForcingTable>>>,
     source: WeatherInput,
 }
 
@@ -333,6 +340,7 @@ impl ParsedWeather {
         Ok(Self {
             series: Arc::new(series),
             resampled: Mutex::new(HashMap::new()),
+            forcing: Mutex::new(HashMap::new()),
             source: source.clone(),
         })
     }
@@ -344,6 +352,7 @@ impl ParsedWeather {
         Self {
             series: Arc::new(series),
             resampled: Mutex::new(HashMap::new()),
+            forcing: Mutex::new(HashMap::new()),
             source: WeatherInput::Path(PathBuf::new()),
         }
     }
@@ -392,6 +401,38 @@ impl ParsedWeather {
     #[must_use]
     pub fn record(&self) -> &WeatherInput {
         &self.source
+    }
+
+    /// The surface-independent forcing table for one time grid, resolved
+    /// once per grid key and cached on the handle: every dwelling built
+    /// from this handle on that grid reads the same table through its own
+    /// `Arc`. The key is the grid key alone, because this handle is the
+    /// weather content's identity: a table belongs to the weather it was
+    /// built from, and a table built from another handle's weather is that
+    /// handle's, never shared through a process-global map. The lock is
+    /// held only for the map's own operations, once per construction,
+    /// never on the step path, where the table is an `Arc` read-only. A
+    /// dropped handle drops its map and every table in it, so the resident
+    /// tables are bounded by the handles' lifetimes.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the table's build fails.
+    pub fn forcing_table(
+        &self,
+        key: &ForcingKey,
+        build: impl FnOnce() -> Result<ForcingTable, HaresError>,
+    ) -> Result<Arc<ForcingTable>, HaresError> {
+        if let Some(table) = self.forcing.lock().expect("forcing cache").get(key) {
+            return Ok(Arc::clone(table));
+        }
+        let built = Arc::new(build()?);
+        crate::forcing::FORCING_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.forcing
+            .lock()
+            .expect("forcing cache")
+            .insert(key.clone(), Arc::clone(&built));
+        Ok(built)
     }
 }
 
