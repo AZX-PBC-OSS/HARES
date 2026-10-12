@@ -98,6 +98,44 @@ override), built with `build_with_seed(7)` and run 1 h: the result's
 **Measurement:** digest cost per blueprint (bytes hashed and time),
 recorded in `02-measurement.md`.
 
+**State:** committed `9527aa6e` (2026-10-11, branch `row/r63-in1`, cut
+from `9cc6d578`). The digest record lands complete on the surface the row
+was cut against: the shared parsed-inputs row was not folded at the cut,
+so the records are computed where the parse reads the files (both config
+constructors) and carried through the blueprint into `Provenance.inputs`,
+an `Option` whose `None` is the construction that reads no file (the
+synthetic TOML dwellings). The record carries the entry's field list: the
+HPXML, the schedule (`None` when generated: it is a function of the HPXML
+record), the weather, the weather format (the detected one;
+`WeatherFormat` serialises and deserialises snake_case), the defaults
+digest over every file the store loads in load order, each file
+contributing its relative path, a 0x00 separator and its bytes, directory
+reads sorted by name, and the generated schedule's profiles file composed
+after the store's read; `defaults_replacements` stays empty until the
+per-file replacement surface lands. The digest is over the content, never
+the path: the same bytes at a different path hash the same, the path is
+metadata beside the digest, and both halves of that rule are pinned. The
+acceptance on this surface: two runs on the same inputs record equal
+records; editing one input moves exactly that input's digest (the
+schedule edit pinned; the defaults replacement moves only the defaults
+digest); a generated schedule carries no record; the weather record
+carries the detected format; the Python getter's digests equal an
+independent hashlib recomputation and two Python runs record equal dicts.
+The settings-field replacement (config and bldg_id into the settings
+type), the content-source records and the shared-Arc acceptance land with
+the parsed-inputs row's fold; the Python `config` and `bldg_id` getters
+are unchanged on this surface. RED first: the Rust acceptance file failed
+to compile on the missing API and the Python test failed on the missing
+getter, both witnessed at the base with only the tests applied. Gates
+green on the staged change and again on the commit: fmt clean; clippy
+`--workspace --all-targets --all-features -- -D warnings` clean and the
+default, dst, profiling, observe and observe,profiling variants clean;
+nextest `--workspace --all-features -j 4` 8003/8003 and `-F dst`
+7933/7933 (1 skipped each: the ignored kind-pin generator); pytest
+`-m ''` 1724 passed + 6 xfailed, 0 failed, 0 errors, the skip census
+identical; pyright 0 errors; the nine goldens bitwise (compare-all
+8 + dst 1).
+
 ## IN-2: `DwellingBlueprint::validate()`
 
 **Kind:** initiative work (`dl-i08-architecture.new_capability`:

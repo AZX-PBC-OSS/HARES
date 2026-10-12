@@ -2905,3 +2905,19 @@ The row's numbers, the consumer shape (the ResStock bldg0176227 home at
   blueprint that builds many dwellings, which `06-runtime-memory.md`
   RT-4's parsed-input surface owns: the branch lands with that row, the
   shares recorded here as the measurement that fired it.
+
+### Input digests, 2026-10-11, `9527aa6e`
+
+Load average at write time: 19.8 (1 min), the tail of the gate runs.
+
+Quantity: the digest cost per blueprint (bytes hashed and time), on the
+cz4a parity inputs (HPXML 49,302 B, schedule 194,159 B, weather
+1,602,455 B, the defaults store's read set 321,970 B): about 2.2 MB
+hashed per blueprint; a generated schedule adds the profiles file
+(28 KB).
+
+Command: `cat <the input files and the store-read defaults files> |
+sha256sum`, ten passes in a loop: 0.051 s total, about 5 ms per blueprint
+on the warm page cache. The digest cost is negligible against the parse
+it rides (the same blueprint's HPXML parse alone is tens of ms); the
+re-read for the digest touches the same page-cached bytes.
