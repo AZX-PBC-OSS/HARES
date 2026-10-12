@@ -514,17 +514,26 @@ impl PyBuildInfo {
     }
 
     fn __repr__(&self) -> String {
+        let features: Vec<String> = self
+            .inner
+            .features
+            .iter()
+            .map(|feature| format!("'{feature}'"))
+            .collect();
         format!(
-            "BuildInfo(version='{}', commit={}, dirty={:?}, profile='{}', features={:?}, \
+            "BuildInfo(version='{}', commit={}, dirty={}, profile='{}', features=[{}], \
              rustc='{}')",
             self.inner.version,
             self.inner
                 .commit
                 .map(|commit| format!("'{commit}'"))
                 .unwrap_or_else(|| "None".to_string()),
-            self.inner.dirty,
+            self.inner
+                .dirty
+                .map(|dirty| if dirty { "True" } else { "False" })
+                .unwrap_or("None"),
             self.inner.profile,
-            self.inner.features,
+            features.join(", "),
             self.inner.rustc,
         )
     }

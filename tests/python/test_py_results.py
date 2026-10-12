@@ -496,3 +496,16 @@ def test_python_build_info_equals_run_provenance() -> None:
     digest = result.provenance.catalogue_digest
     assert isinstance(digest, str), "the catalogue digest is a hex string"
     assert len(digest) == 64 and int(digest, 16) >= 0, f"a 64 char hex digest: {digest}"
+
+
+def test_python_build_info_repr_is_python() -> None:
+    """repr(BuildInfo) follows the Python repr conventions: Python bool
+    or None for the dirty flag, a list repr for the features, None for
+    an absent commit, never the Rust forms."""
+    import hares
+
+    info = hares.build_info()
+    assert repr(info) == (
+        f"BuildInfo(version={info.version!r}, commit={info.commit!r}, dirty={info.dirty!r}, "
+        f"profile={info.profile!r}, features={list(info.features)!r}, rustc={info.rustc!r})"
+    )
