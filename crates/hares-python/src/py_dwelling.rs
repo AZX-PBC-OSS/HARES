@@ -692,10 +692,11 @@ pub struct PyDwelling {
     equipment_registry: EquipmentRegistry,
     zone_keys: Option<Vec<String>>,
     gas_tariff: Option<crate::py_tariff::PyGasTariff>,
-    /// The attached batch callback's cause slot: the adapter stores the
-    /// callable's exception there and the run-error mapping chains it as
-    /// `__cause__`. Cleared when the dwelling is rebuilt.
-    callback_cause: std::sync::Mutex<Option<crate::py_callback::CallbackCauseSlot>>,
+    /// The attached batch callbacks' cause slot: one slot the dwelling
+    /// owns, shared by every attached callback's adapter. The adapter
+    /// stores the callable's exception there and the run-error mapping
+    /// chains it as `__cause__`. Cleared when the dwelling is rebuilt.
+    callback_cause: crate::py_callback::CallbackCauseSlot,
 }
 
 #[pymethods]
@@ -743,7 +744,7 @@ impl PyDwelling {
             equipment_registry: EquipmentRegistry::new(),
             zone_keys: None,
             gas_tariff: None,
-            callback_cause: std::sync::Mutex::new(None),
+            callback_cause: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -1744,18 +1745,16 @@ impl PyDwelling {
                 "the batch callback must be callable, got {repr}"
             )));
         }
-        let cause: crate::py_callback::CallbackCauseSlot = Arc::new(std::sync::Mutex::new(None));
         let mut dwelling = self.acquire()?;
         dwelling
             .attach_callback(
                 report,
                 Box::new(crate::py_callback::PyBatchCallback::new(
                     callback.unbind(),
-                    Arc::clone(&cause),
+                    Arc::clone(&self.callback_cause),
                 )),
             )
             .map_err(to_py_err)?;
-        *self.callback_cause.lock().expect("cause slot mutex") = Some(cause);
         Ok(())
     }
 
@@ -2230,7 +2229,7 @@ impl PyDwelling {
             equipment_registry: EquipmentRegistry::new(),
             zone_keys: None,
             gas_tariff: None,
-            callback_cause: std::sync::Mutex::new(None),
+            callback_cause: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -2465,20 +2464,23 @@ impl PyDwelling {
     /// callback's stored exception as `__cause__` on a typed callback
     /// error: the adapter stored the callable's `PyErr` when it failed
     /// the run, and the error that carries the failure out of the
-    /// dwelling takes it.
+    /// dwelling chains it. The slot is read without consuming: the
+    /// engine's latch re-raises the ended run's error on every later
+    /// call (a `finish()` after the failing step or close), and each
+    /// re-raise chains the same original exception.
     fn map_run_error(&self, err: HaresError) -> PyErr {
-        let stored = self
-            .callback_cause
-            .lock()
-            .expect("cause slot mutex")
-            .as_ref()
-            .and_then(|slot| slot.lock().expect("cause slot mutex").take());
         let py_err = to_py_err(err);
-        if let Some(cause) = stored {
-            Python::attach(|py| {
+        Python::attach(|py| {
+            let cause = self
+                .callback_cause
+                .lock()
+                .expect("cause slot mutex")
+                .as_ref()
+                .map(|cause| cause.clone_ref(py));
+            if let Some(cause) = cause {
                 let _ = py_err.value(py).setattr("__cause__", cause.value(py));
-            });
-        }
+            }
+        });
         py_err
     }
 }

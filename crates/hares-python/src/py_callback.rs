@@ -8,8 +8,10 @@
 //! engine's step runs with the GIL released, so the call re-acquires it
 //! here; a Python exception surfaces as the typed callback error that
 //! fails the run, never as a panic through the recorder. The exception is
-//! stored in a slot shared with the dwelling wrapper, and the binding
-//! chains it as `__cause__` on the typed error it raises. The
+//! stored in the dwelling wrapper's one cause slot, shared by every
+//! attached callback's adapter (a failure latches the run, so the failing
+//! callback is the last error the slot holds), and the binding chains it
+//! as `__cause__` on the typed error it raises. The
 //! config-side marker constructor is `Destination.callback()`.
 
 use std::cell::Cell;
@@ -71,9 +73,12 @@ pub struct PyBatchInfo {
     pub batch_index: u64,
 }
 
-/// The slot the adapter stores a callable's exception in: the dwelling
-/// wrapper reads it when it maps the run's callback error, chaining the
-/// exception as `__cause__` on the typed error it raises.
+/// The slot an adapter stores its callable's exception in: the dwelling
+/// wrapper owns one and hands clones of it to every attached callback's
+/// adapter, and it reads the slot (without consuming it, so the latched
+/// re-raise chains the same original exception) when it maps the run's
+/// callback error, chaining the exception as `__cause__` on the typed
+/// error it raises.
 pub(crate) type CallbackCauseSlot = Arc<Mutex<Option<PyErr>>>;
 
 /// The Rust sink over a Python callable: the attached object is called

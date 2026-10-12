@@ -118,6 +118,47 @@ def test_callback_exception_fails_run_with_cause_chained(tmp_path):
     assert len(collector.batches) == calls
 
 
+def test_first_attached_callback_failure_chains_its_cause(tmp_path):
+    """Two reports each with an attached callback: the first-attached
+    callback's failure chains its own exception as ``__cause__``. The
+    adapters share the dwelling's one cause slot, so a later attachment
+    cannot take the first one's slot away."""
+    raised = RuntimeError("the store is down")
+    failing = Collector(fail_on=0, exception=raised)
+    quiet = Collector()
+    dw = make_dwelling(
+        sim_config=callback_config(
+            str(tmp_path / "run.parquet"),
+            {REPORT: Destination.memory(), "extra": Destination.memory()},
+        )
+    )
+    dw.attach_callback(REPORT, failing)
+    dw.attach_callback("extra", quiet)
+    with pytest.raises(HaresCallbackError) as excinfo:
+        dw.simulate()
+    assert REPORT in str(excinfo.value)
+    assert excinfo.value.__cause__ is raised, (
+        "the first-attached callback's raised object must be chained"
+    )
+
+
+def test_latched_finish_reraise_chains_the_cause(tmp_path):
+    """The latched run's finish() re-raises the callback error: the
+    re-raise carries the original exception as ``__cause__``, the same
+    one the failing run's error chained."""
+    raised = RuntimeError("the store is down")
+    collector = Collector(fail_on=1, exception=raised)
+    dw = build_dwelling(collector, tmp_path)
+    with pytest.raises(HaresCallbackError) as failing:
+        dw.simulate()
+    assert failing.value.__cause__ is raised
+    with pytest.raises(HaresCallbackError) as reraised:
+        dw.finish()
+    assert reraised.value.__cause__ is raised, (
+        "the latched re-raise must chain the original exception"
+    )
+
+
 def test_callback_not_called_for_other_reports(tmp_path):
     collector = Collector()
     dw = build_dwelling(

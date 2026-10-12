@@ -1265,16 +1265,23 @@ constructor of the serialisable marker; `HaresCallbackError`, a
 engine-exception pickle round trip (the test enumerates every
 exception class the module exports, so the export joins it); the
 `__cause__` chaining per the entry's design: on an exception the
-adapter stores the `PyErr` in a slot shared with the dwelling wrapper
-and returns `CallbackError`, and the binding's step, simulate and
-finish mappings take the stored exception onto the
-`HaresCallbackError` they raise as `__cause__` (the engine's latch
-re-raises an ended run as the simulation error carrying the latched
-message, so the budget pin stays on the base class, as landed);
+adapter stores the `PyErr` in the dwelling wrapper's one cause slot
+(shared by every attached callback's adapter; a failure latches the
+run, so the failing callback is the last error the slot holds) and
+returns `CallbackError`, and the binding's step, simulate and finish
+mappings read the slot without consuming it, chaining the stored
+exception onto the `HaresCallbackError` they raise as `__cause__`, so
+the latched re-raise (a `finish()` after the failing run) chains the
+original exception again (the engine's latch re-raises an ended run to
+a later `step()` as the simulation error carrying the latched message,
+so the budget pin stays on the base class, as landed);
 `callback_exception_fails_run_with_cause_chained`,
+`callback_destination_marker_delivers` (the callback destination
+marker: the report declared with `Destination.callback()` delivers its
+batches to the attached callable and retains nothing),
 `callback_not_called_for_other_reports` and
-`callback_info_carries_bldg_id`, the three acceptance tests the landed
-rows had not named; and the test file renamed to the entry's
+`callback_info_carries_bldg_id`, the four tests the landed rows had
+not named; and the test file renamed to the entry's
 verification path, `tests/python/test_callback.py` (from
 `test_batch_callback.py`, which nothing referenced).
 
@@ -1300,6 +1307,33 @@ generator); `uv run pytest tests/python -m ''` 1687 passed, 6 xfailed,
 8 manifests identical on the default build, `full_year_900s_dst`
 identical on the dst build). The docs' changes section records the
 marker constructor, the exception class and the Arrow batch surface.
+
+Independent review round at tip `4c884c46`, two findings fixed on this
+branch. (1) HIGH: the `__cause__` chaining lost the exception in two
+ways. The wrapper's cause tracking was one `Option` replaced by every
+`attach_callback`, so with two reports each carrying a callback the
+first-attached callback's failure mapped with nothing stored (its
+`__cause__` came out `None`), and the mapping consumed the stored
+exception on the first read, so the engine's latched re-raise through
+`finish()` raised the callback error with `__cause__` unset where
+`docs/python.md` says the latched error carries the original cause.
+Fixed with the dwelling's one cause slot shared by every attached
+callback's adapter (a failure latches the run, so the failing callback
+is the last error the slot holds, and the error's own message names the
+report) and read without consuming, so the latched re-raise chains the
+original exception again; pinned by `first_attached_callback_failure_chains_its_cause`
+(two callbacks, the first attached one fails, its raised object chained)
+and `latched_finish_reraise_chains_the_cause` (the failing run's error
+and the latched `finish()` re-raise chain the same object), both RED on
+the unfixed tree and GREEN on the fixed one. (2) MEDIUM: the added-tests
+enumeration above named three tests where the row added four, the
+marker test `callback_destination_marker_delivers` missing from the
+list; named. The take description above is rewritten to the landed
+shape (one shared slot, read without consuming). Review-fix gates: fmt
+clean; clippy `--workspace --all-targets --all-features -D warnings`
+clean; nextest `--workspace --all-features -j 4` all green; pytest
+`-m ''` 1689 passed, 6 xfailed, 0 failed, 0 errors; pyright 0; the
+goldens bitwise in both profiles.
 
 ## PY-11: Python actors declare their output variables
 
