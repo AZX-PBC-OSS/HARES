@@ -186,6 +186,13 @@ def test_python_actor_enum_without_labels_is_an_error():
         OutputVariable("probe_mode", "code", "enum")
 
 
+def test_python_actor_enum_with_empty_labels_is_an_error():
+    from hares import OutputVariable
+
+    with pytest.raises(ValueError, match="empty"):
+        OutputVariable("probe_mode", "code", "enum", labels=[])
+
+
 def test_python_actor_quantity_without_across_homes_is_an_error():
     from hares import OutputVariable
 

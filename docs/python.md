@@ -449,6 +449,8 @@ replacement.
   unit, kind, aggregation, across homes, sampling, labels, description)
   and publishes their per-step values during `decide()`; the declared
   variables enter the output catalogue as `actor:<name>:<var>` columns.
+  A publication made outside `decide()` lands at the next drain (the
+  next `decide()`'s return); one made after the last drain is dropped.
 
 ## Troubleshooting
 

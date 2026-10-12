@@ -1398,7 +1398,12 @@ the catalogue);
 **Dependencies:** OR-1, OR-5, PY-9, PY-4 (the Python `Variable` the
 tests read).
 
-**State (committed):** the surface landed on this row's branch. The
+**State (committed):** the surface landed on this row's branch with
+PY-4's Catalogue surface not yet folded, so this entry ran ahead of
+that dependency and the Python `Variable` the tests were to read is
+still to come (the landed acceptance tests read the declared unit
+through the schema's field metadata and the declared kinds through the
+Rust catalogue built over the wrapper's declarations). The
 declaration surface: `hares.OutputVariable` (a pyclass whose constructor
 carries every rule of the declaration: the unit parses through
 `Unit::from_symbol` (new in `hares-types`; every variant round-trips its

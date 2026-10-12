@@ -284,6 +284,12 @@ impl PyOutputVariable {
                      codes decode to"
                 )));
             }
+            (Some(list), "enum") if list.is_empty() => {
+                return Err(PyValueError::new_err(format!(
+                    "output variable '{name}': an enum's labels list is empty; a label-less \
+                     enum decodes to nothing"
+                )));
+            }
             (None, _) => None,
             (Some(_), "enum") => labels.clone(),
             (Some(_), other) => {
