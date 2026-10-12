@@ -722,6 +722,108 @@ report's `arrow()` table and `RunResult.catalogue` equals
 (`pyo3-arrow` and `arrow()`), `03-output-reporting.md` OR-15 (the Rust
 `metrics_from_table`).
 
+**State:** committed `06148950` (branch `row/r57-py4`, cut from
+`072722bf`, one commit).
+
+The surface, as built. `Catalogue` (`crates/hares-python/src/py_catalogue.rs`,
+new) is a frozen pyclass over the dwelling's `Arc<Catalogue>`:
+`variables()` returns every `Variable` in schema order, `__getitem__`
+resolves the named column (`KeyError` naming the name when the catalogue
+declares none), `__len__` and `__iter__` iterate them, `__eq__` holds
+when two catalogues' variables read the same, `digest()` is the Rust
+catalogue's digest (the schema metadata's `hares:catalogue_digest`),
+`to_json()` serialises the variables' definitions (a JSON array of
+`VariableDef`) and `from_json` rebuilds through a new public
+`hares_io::Catalogue::from_defs` (the schema-derivation tags default and
+no column reads a telemetry key, the definitions carrying the catalogue's
+variables alone; a duplicate name a `ValueError` naming both sources),
+so the round trip preserves the variables, the digest and the equality.
+`Variable` is a frozen pyclass over the `VariableDef` with the getters
+the entry names: `name`, `unit` (the `Unit::symbol()` string),
+`kind` (`energy`, `power`, `temperature`, `ratio`, `state`, `enum` or
+`quantity`), `aggregation` (`sum`/`mean`/`mode`/`last`), `sampling`
+(`interval-mean`/`instant-at-start`/`instant-at-end`), `nullable`,
+`source` (the lowercase tag: `dwelling`, `zone:<id>`, `equipment:<id>`,
+`actor:<name>`), `labels` (the enum's label table in code order, else
+`None`), `across_homes` (`sum` or `mean` for a quantity, else `None`)
+and `description`. The catalogue is available as `Dwelling.catalogue()`
+(readable before `initialize()`, the method acquiring the dwelling's
+mutex like `telemetry()` does) and as the `RunResult.catalogue` getter:
+the pyclass carries the dwelling's `Arc<Catalogue>` read at the
+finalisation (`simulate()` and `finish()` both; the run never changes
+the catalogue, and the Rust `RunResult` is unchanged).
+
+The binding. `hares.metrics_from_table(table, catalogue, time_res,
+setpoint_deadband_c=None) -> RunMetrics` is a pyfunction: `table` is any
+object with `__arrow_c_stream__`, imported with pyo3-arrow's
+`PyTable::from_arrow_pycapsule` over the object's stream capsule (an
+object without the method is a `TypeError` naming the type); `time_res`
+is int seconds or `datetime.timedelta` through the config's
+`WholeSeconds` extraction; the GIL is released over the feed
+(`py.detach` over the batches and the catalogue's Arc); a
+`MetricsError` surfaces through `HaresSimulationError` carrying its
+Display, so the mismatch's name reaches Python unaltered; the return is
+the `RunMetrics` pyclass. `_hares.pyi` gains the `Catalogue` and
+`Variable` classes, the `Dwelling.catalogue()` and
+`RunResult.catalogue` lines and the function's declaration (its `table`
+the `ArrowStreamExportable` protocol PY-1 defined); `__init__.py`
+re-exports `Catalogue`, `Variable` and `metrics_from_table` (`__all__`
+included); the docs' changes section carries the row's line.
+
+RED first: the eight Python tests
+(`tests/python/test_py_catalogue.py`, new) failed on `ImportError`
+(`metrics_from_table` absent from `hares`) and `AttributeError`
+(`Dwelling.catalogue`, `RunResult.catalogue` missing), and the Rust
+differential failed on the stub's refusal. GREEN with the surface: the
+nine Python tests and the Rust test pass.
+
+The bitwise differential
+(`metrics_from_table_binding_matches_the_rust_path_on_bits`, a
+hares-python Rust test): the cz4a inputs over 24 h at 900 s with
+`metrics = true` and a `Verbosity(8)` memory report; the binding, over
+the report's batches round-tripped through `__arrow_c_stream__` and
+`PyTable::from_arrow_pycapsule` (one chunk per batch pinned) and the
+Python `Catalogue`, computes the same metrics as the crate's own
+`hares_io::metrics_from_table` over the same batches and catalogue, and
+both equal the run's own metrics, field for field, every f64 by
+`to_bits()`.
+
+The acceptance tests: `catalogue_unit_lookup_works_after_polars_import`
+(every value column of the `Verbosity(8)` frame resolves through the
+catalogue to a `Variable` with a unit after polars' import dropped the
+field metadata, the Time column the row index, not a catalogue variable;
+`__len__` and the iteration pinned beside it),
+`enum_codes_decode_to_labels` (the mode column's codes index the
+variable's label list),
+`catalogue_available_before_first_step` (the dwelling built without
+warm-up and not yet stepped carries the catalogue the finished run
+reports, equality and digest),
+`quantity_variables_carry_across_homes`, and
+`metrics_from_table_matches_run_metrics_in_python` (the report's
+`arrow()` table and the run's catalogue equal `RunResult.metrics` field
+for field, the `timedelta` spelling of `time_res` computing the same).
+Beside them: the JSON round trip, the Hourly-reduced table's refusal
+(naming the Timestep mismatch) and the non-stream table's `TypeError`.
+One adaptation: the entry's
+`variable_descriptions_come_from_declarations` named the battery's
+`DECLARED_CAPACITY_KWH` variable. That telemetry key is scope internal
+(`hares-types/src/telemetry_keys.rs`), so it never becomes a catalogue
+column (the verbosity-8 families cover hvac, hp-heater, pv and ev only;
+the all-classes v8 pin agrees), and the cz4a fixture carries no battery;
+the pin runs on what exists: a battery added to the dwelling, every
+catalogue variable's description its declaring site's prose (`Battery
+SOC (-)` carrying `State of charge`) and the declaration itself through
+the battery descriptor's telemetry fields (`declared_capacity_kwh`
+carrying its declared description, `Declared pack capacity from
+config`).
+
+Gates: fmt clean; clippy `--workspace --all-targets --all-features -D
+warnings` clean; nextest `--workspace --all-features -j 4` 7973/7973
+(1 skipped: the ignored kind-pin generator); `pytest -m ''` 1693
+passed, 6 xfailed, 0 failed, 0 errors, 0 skipped; pyright 0; the nine
+goldens bitwise (compare-all 8 identical, `full_year_900s_dst`
+identical).
+
 ## PY-5: one reward contract on the Rust and Python paths
 
 **Kind:** initiative work (V15; RL-5).
