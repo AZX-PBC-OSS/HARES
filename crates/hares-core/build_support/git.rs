@@ -391,6 +391,19 @@ mod tests {
         assert_eq!(info.commit, Some(commit.as_str()));
     }
 
+    /// `build_info_commit_matches_git_rev_parse`: the recorded commit is
+    /// also what git itself resolves for the workspace root, a
+    /// cross-check that does not share the file parser. A git process is
+    /// fine in a test; the constraint is build-script-only.
+    #[test]
+    fn build_info_commit_matches_git_rev_parse() {
+        let root = repo_root();
+        let commit = git(&root, &["rev-parse", "HEAD"]);
+        let commit = commit.trim().to_ascii_lowercase();
+        let info = crate::BuildInfo::get();
+        assert_eq!(info.commit, Some(commit.as_str()));
+    }
+
     /// `a_packed_ref_move_reruns_the_build`: the reviewer's scenario,
     /// end to end, in a gc'd mini-repo (the branch ref packed, no loose
     /// ref file). A ref move that leaves `HEAD` and every source alone
