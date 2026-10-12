@@ -491,16 +491,16 @@ pub(crate) fn log_read(base: &Path, log: &mut DefaultsInputLog, path: &Path) {
 /// replacement's content (the bytes the load actually used), the base
 /// file's bytes otherwise, through [`log_read`].
 pub(crate) fn log_used(base: &Path, log: &mut DefaultsInputLog, path: &Path, swap: Swap<'_>) {
-    if let Some((swapped, content)) = swap {
-        if swapped == path {
-            let relative = path
-                .strip_prefix(base)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .into_owned();
-            log.push((relative, content.as_bytes().to_vec()));
-            return;
-        }
+    if let Some((swapped, content)) = swap
+        && swapped == path
+    {
+        let relative = path
+            .strip_prefix(base)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
+        log.push((relative, content.as_bytes().to_vec()));
+        return;
     }
     log_read(base, log, path);
 }
