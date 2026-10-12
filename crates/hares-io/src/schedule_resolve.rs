@@ -29,6 +29,7 @@ use crate::schedule::{
     ColumnAggregation, ScheduleFormatFamily, ScheduleTimeSeries, resolve_occupancy_column,
     schedule_format_family,
 };
+use crate::setpoint_source::SetpointSource;
 
 // OS-HPXML's manual-thermostat default setpoints
 // (defaults.rb:2827-2848, 6746-6785).
@@ -935,6 +936,32 @@ fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Valu
     }
 }
 
+/// Resolve each HVAC side's thermostat setpoints by the OpenStudio-HPXML
+/// rule and record the active source on the spec.
+///
+/// The rule (OpenStudio-HPXML `HPXMLtoOpenStudio/resources/hvac.rb`
+/// `apply_setpoints`, master `57bd1b88`, lines 1641-1741): per side, a
+/// schedule-file column when present ("permit mixing detailed schedules
+/// with simple schedules", hvac.rb:1665), else the HPXML setpoints
+/// (`get_hvac_setpoints`, hvac.rb:1768-1829: the hourly weekday and
+/// weekend extension arrays when both are declared, else the constant
+/// `SetpointTemp*Season` element with its setback, hvac.rb:1785-1798),
+/// else the default profile: OS-HPXML's manual-thermostat defaults, 68 F
+/// heating and 78 F cooling (`defaults.rb:2827-2848`
+/// `apply_hvac_control`). When a column and HPXML setpoints are both
+/// given, OS-HPXML warns "Both 'heating_setpoint' schedule file and
+/// heating setpoint temperature provided; the latter will be ignored."
+/// (hvac.rb:1669-1675); HARES warns for every ignored input, so no choice
+/// is silent. The schedule-file setpoint columns are degrees Fahrenheit in
+/// OS-HPXML's detailed-schedule convention ("Detailed Schedule Inputs",
+/// converted in `schedules.rb:1465-1484`); the column values here are read
+/// as Celsius, which is their own numeric entry to change.
+///
+/// The resolution is recorded per side in the spec's
+/// `heating_setpoint_source` / `cooling_setpoint_source`, and the source
+/// the engine reads its setpoints from (the config's
+/// `{prefix}_setpoint_source`) always carries the same tier the record
+/// names.
 fn inject_setpoint_schedules(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
@@ -942,60 +969,166 @@ fn inject_setpoint_schedules(
     pre_period_columns: Option<&[Vec<f64>]>,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
+    // The mapping table accepts the column, and no code applies it: a
+    // schedule input that is accepted is applied, so the column stops the
+    // construction naming it. Applying it would be a new water-heater
+    // setpoint schedule, which no decision calls for.
+    if csv_col_map.contains_key("water_heater_setpoint") {
+        return Err(HaresError::Equipment(
+            "schedule CSV column 'water_heater_setpoint': HARES does not apply a \
+             water-heater setpoint column (the tank setpoint comes from the HPXML); \
+             remove the column from the schedule file"
+                .to_string(),
+        ));
+    }
+
     // Store only the column index -- the equipment resolves the value each
     // timestep from the environment's schedule domain payload. No materialization.
     let heating_col = csv_col_map.get("heating_setpoint").copied();
     let cooling_col = csv_col_map.get("cooling_setpoint").copied();
 
+    // One warning per side when the column and the HPXML setpoints are
+    // both given: the overlap is an input property, not a per-unit one.
+    // OS-HPXML warns the same way for the simple SetpointTemp*Season
+    // element (hvac.rb:1669-1675); HARES warns for every ignored HPXML
+    // input, so no choice is silent.
+    let heating_overlap = heating_col.is_some()
+        && specs.iter().any(|spec| {
+            HEATING_EQUIPMENT.contains(&spec.name.as_str())
+                && spec_has_setpoint_source(spec, "heating")
+        });
+    let cooling_overlap = cooling_col.is_some()
+        && specs.iter().any(|spec| {
+            COOLING_EQUIPMENT.contains(&spec.name.as_str())
+                && spec_has_setpoint_source(spec, "cooling")
+        });
+    if heating_overlap {
+        warnings.push(Warning::new(
+            "schedule",
+            "both the 'heating_setpoint' schedule column and the HPXML heating setpoints \
+             (the HVACControl's SetpointTempHeatingSeason element or its \
+             WeekdaySetpointTempsHeatingSeason and WeekendSetpointTempsHeatingSeason \
+             arrays) are provided; the HPXML heating setpoints are ignored",
+        ));
+    }
+    if cooling_overlap {
+        warnings.push(Warning::new(
+            "schedule",
+            "both the 'cooling_setpoint' schedule column and the HPXML cooling setpoints \
+             (the HVACControl's SetpointTempCoolingSeason element or its \
+             WeekdaySetpointTempsCoolingSeason and WeekendSetpointTempsCoolingSeason \
+             arrays) are provided; the HPXML cooling setpoints are ignored",
+        ));
+    }
+
     inject_water_heater_schedule_columns(specs, csv_col_map, schedule, pre_period_columns)?;
 
     for spec in specs.iter_mut() {
         if HEATING_EQUIPMENT.contains(&spec.name.as_str()) {
-            if let Some(col_idx) = heating_col {
+            match heating_col {
                 // Schedule CSV provides a per-timestep heating column.
-                set_typed_setpoint_source(spec, "heating", col_idx);
-            } else if !spec_has_setpoint_source(spec, "heating") {
-                inject_default_setpoint(
-                    spec,
-                    "heating",
-                    OS_HPXML_DEFAULT_HEATING_SETPOINT_F,
-                    warnings,
-                )?;
+                Some(col_idx) => {
+                    if set_typed_setpoint_source(spec, "heating", col_idx) {
+                        spec.heating_setpoint_source = Some(SetpointSource::ScheduleColumn {
+                            column: "heating_setpoint".to_string(),
+                        });
+                    }
+                }
+                None => match hpxml_setpoint_profile(spec, "heating") {
+                    Some((weekday_c, weekend_c)) => {
+                        spec.heating_setpoint_source = Some(SetpointSource::Hpxml {
+                            weekday_c,
+                            weekend_c,
+                        });
+                    }
+                    None => {
+                        inject_default_setpoint(
+                            spec,
+                            "heating",
+                            OS_HPXML_DEFAULT_HEATING_SETPOINT_F,
+                            warnings,
+                        )?;
+                        spec.heating_setpoint_source = Some(SetpointSource::DefaultProfile {
+                            profile: SetpointSource::MANUAL_THERMOSTAT.to_string(),
+                        });
+                    }
+                },
             }
         }
         if COOLING_EQUIPMENT.contains(&spec.name.as_str()) {
-            if let Some(col_idx) = cooling_col {
-                set_typed_setpoint_source(spec, "cooling", col_idx);
-            } else if !spec_has_setpoint_source(spec, "cooling") {
-                inject_default_setpoint(
-                    spec,
-                    "cooling",
-                    OS_HPXML_DEFAULT_COOLING_SETPOINT_F,
-                    warnings,
-                )?;
+            match cooling_col {
+                Some(col_idx) => {
+                    if set_typed_setpoint_source(spec, "cooling", col_idx) {
+                        spec.cooling_setpoint_source = Some(SetpointSource::ScheduleColumn {
+                            column: "cooling_setpoint".to_string(),
+                        });
+                    }
+                }
+                None => match hpxml_setpoint_profile(spec, "cooling") {
+                    Some((weekday_c, weekend_c)) => {
+                        spec.cooling_setpoint_source = Some(SetpointSource::Hpxml {
+                            weekday_c,
+                            weekend_c,
+                        });
+                    }
+                    None => {
+                        inject_default_setpoint(
+                            spec,
+                            "cooling",
+                            OS_HPXML_DEFAULT_COOLING_SETPOINT_F,
+                            warnings,
+                        )?;
+                        spec.cooling_setpoint_source = Some(SetpointSource::DefaultProfile {
+                            profile: SetpointSource::MANUAL_THERMOSTAT.to_string(),
+                        });
+                    }
+                },
             }
         }
     }
     Ok(())
 }
 
-fn set_typed_setpoint_source(spec: &mut EquipmentSpec, prefix: &str, col_idx: usize) {
+/// The HPXML setpoints the spec's typed config carries for one side: the
+/// DailyProfile's 24 weekday and weekend hourly values in Celsius, the
+/// values the engine reads when no schedule column overrides them.
+fn hpxml_setpoint_profile(spec: &EquipmentSpec, prefix: &str) -> Option<(Vec<f64>, Vec<f64>)> {
+    let key = format!("{prefix}_setpoint_source");
+    let typed = spec.typed_config.as_ref()?;
+    let ConfigPayload::Typed { data, .. } = &typed.payload else {
+        return None;
+    };
+    let value = find_setpoint_source(data, &key)?;
+    let ScheduleSourceConfig::DailyProfile {
+        weekday, weekend, ..
+    } = serde_json::from_value(value.clone()).ok()?
+    else {
+        return None;
+    };
+    Some((weekday.to_vec(), weekend.to_vec()))
+}
+
+/// Set the config's `{prefix}_setpoint_source` to the schedule column;
+/// false when the spec's config cannot carry it, in which case the column
+/// is not the spec's active source and nothing records it as one.
+fn set_typed_setpoint_source(spec: &mut EquipmentSpec, prefix: &str, col_idx: usize) -> bool {
     let Some(typed) = spec.typed_config.as_mut() else {
-        return;
+        return false;
     };
     let ConfigPayload::Typed { data, .. } = &mut typed.payload else {
-        return;
+        return false;
     };
     let Some(obj) = data.as_object_mut() else {
-        return;
+        return false;
     };
 
     let source = ScheduleSourceConfig::ColumnRef {
         col_idx,
         boundary: BoundaryPolicy::Clamp,
     };
-    if let Ok(json) = serde_json::to_value(source) {
-        insert_setpoint_into_obj(obj, &format!("{prefix}_setpoint_source"), json);
+    match serde_json::to_value(source) {
+        Ok(json) => insert_setpoint_into_obj(obj, &format!("{prefix}_setpoint_source"), json),
+        Err(_) => false,
     }
 }
 
@@ -2350,6 +2483,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2376,6 +2511,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2948,6 +3085,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -3217,6 +3356,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -3258,6 +3399,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -3597,6 +3740,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
 
         let mut schedule = make_schedule_with_water_heater_columns(
@@ -3638,6 +3783,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
 
         let result = super::water_heater_avg_daily_draw_l(&spec);
@@ -3725,6 +3872,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
 
         let result = determine_max_kw(&spec, mean_fraction);
@@ -4263,6 +4412,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -4459,6 +4610,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
         let mut specs = vec![spec];
 
@@ -4554,6 +4707,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
         let mut specs = vec![spec];
 
@@ -4672,6 +4827,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -5013,6 +5170,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }];
 
         inject_schedule_into_specs(

@@ -78,6 +78,8 @@ fn unreadable_ventilation_config_fails_the_build() {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         })
         .expect("add spec");
     let err = builder

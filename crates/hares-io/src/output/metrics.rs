@@ -2540,6 +2540,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }];
         let schema = crate::output::build_schema_for_specs(&specs, 1, &[]);
         let result = plan_for(&schema, &test_config(None));

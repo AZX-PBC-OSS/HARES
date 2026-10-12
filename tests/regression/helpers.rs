@@ -187,13 +187,17 @@ pub fn write_schedule_csv(path: &PathBuf) {
     // The columns the base fixture's event equipment and wet appliances run
     // on: a schedule file without an appliance's power column is a
     // construction error, and the washer and dishwasher draw their hot water
-    // through their hot-water columns.
+    // through their hot-water columns. No setpoint column: the base
+    // fixture's HPXML declares thermostat setpoints, and a schedule file
+    // that carries a setpoint column next to them is the overlap the
+    // setpoint rule warns (the OS-HPXML convention), which would degrade
+    // every home the fleet status counts.
     let rows = [
-        "Time,occupants,clothes_washer,clothes_dryer,dishwasher,cooking_range,hot_water_clothes_washer,hot_water_dishwasher,heating_setpoint,cooling_setpoint",
-        "2021-01-01T00:00:00-07:00,1.0,0.10,0.10,0.10,0.10,0.10,0.10,20.0,25.0",
-        "2021-01-01T00:15:00-07:00,1.0,0.20,0.20,0.20,0.20,0.20,0.20,20.5,25.5",
-        "2021-01-01T00:30:00-07:00,1.0,0.15,0.15,0.15,0.15,0.15,0.15,21.0,26.0",
-        "2021-01-01T00:45:00-07:00,1.0,0.12,0.12,0.12,0.12,0.12,0.12,20.0,25.0",
+        "Time,occupants,clothes_washer,clothes_dryer,dishwasher,cooking_range,hot_water_clothes_washer,hot_water_dishwasher",
+        "2021-01-01T00:00:00-07:00,1.0,0.10,0.10,0.10,0.10,0.10,0.10",
+        "2021-01-01T00:15:00-07:00,1.0,0.20,0.20,0.20,0.20,0.20,0.20",
+        "2021-01-01T00:30:00-07:00,1.0,0.15,0.15,0.15,0.15,0.15,0.15",
+        "2021-01-01T00:45:00-07:00,1.0,0.12,0.12,0.12,0.12,0.12,0.12",
     ]
     .join("\n");
     fs::write(path, rows).expect("failed to write schedule fixture");

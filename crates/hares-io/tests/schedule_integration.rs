@@ -66,6 +66,8 @@ fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     }
 }
 
@@ -591,6 +593,8 @@ fn hvac_without_setpoints_takes_the_os_hpxml_defaults() {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         },
         EquipmentSpec {
             instance_name: None,
@@ -616,6 +620,8 @@ fn hvac_without_setpoints_takes_the_os_hpxml_defaults() {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         },
     ];
 

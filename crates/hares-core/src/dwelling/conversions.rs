@@ -1043,6 +1043,8 @@ pub(crate) fn merged_equipment_config(
         system_id: spec.system_id.clone(),
         related_hvac_idref: spec.related_hvac_idref.clone(),
         primary_role: spec.primary_role.clone(),
+        heating_setpoint_source: spec.heating_setpoint_source.clone(),
+        cooling_setpoint_source: spec.cooling_setpoint_source.clone(),
     };
     equipment_config_from_spec(&merged_spec)
 }
@@ -1842,6 +1844,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -1931,6 +1935,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2007,6 +2013,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
 
         apply_spec_bag_to_typed_config(&mut spec).expect("the raw-text fuel must land normalized");
@@ -2092,6 +2100,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
 
         let err = apply_spec_bag_to_typed_config(&mut spec)
@@ -2162,6 +2172,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2340,6 +2352,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2368,6 +2382,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2419,6 +2435,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2486,6 +2504,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2687,6 +2707,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -4462,6 +4484,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -4870,6 +4894,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 

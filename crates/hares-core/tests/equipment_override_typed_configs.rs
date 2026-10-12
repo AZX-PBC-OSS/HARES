@@ -245,6 +245,8 @@ fn blueprint_added_pv_applies_the_spec_bag_override() {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
         blueprint.add_equipment_spec(spec).expect("add PV spec");
         let mut dwelling = blueprint.build().expect("the dwelling must build");
@@ -428,6 +430,8 @@ fn unreadable_battery_config_fails_the_build_naming_the_battery() {
             system_id: Some("BAT-1".to_string()),
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         })
         .expect("add the battery spec");
 

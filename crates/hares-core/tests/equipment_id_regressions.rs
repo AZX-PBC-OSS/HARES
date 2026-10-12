@@ -684,6 +684,8 @@ fn dehumidifier_spec(instance: &str, equipment_id: u32) -> hares_io::EquipmentSp
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     }
 }
 

@@ -19,6 +19,7 @@ pub mod resstock_csv;
 pub mod sample_weight;
 pub mod schedule;
 pub mod schedule_resolve;
+pub mod setpoint_source;
 pub mod site_location;
 pub mod tmy3;
 pub mod unavailable_periods;
@@ -105,6 +106,7 @@ pub use schedule_resolve::{DefaultProfiles, DefaultScheduleProfile, load_default
 pub use schedule_resolve::{
     inject_schedule_into_specs, inject_schedule_into_specs_with_pre_period,
 };
+pub use setpoint_source::SetpointSource;
 pub use site_location::{FieldSource, SiteLocation, SiteLocationOverride, resolve_site_location};
 pub use tmy3::parse_tmy3;
 pub use unavailable_periods::{

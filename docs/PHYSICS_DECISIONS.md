@@ -176,3 +176,39 @@ water): the parity homes' washer 27.4 to 9.8 L/d and dishwasher 21.1 to
 old replay drew 39.4 L/d at 3600 s against 17.1 at 900 s. The appliance
 electric energies move with the cycles rule; domestic hot water energy moves
 with the volumes, and space heating or cooling follows the tank gains.
+
+## Thermostat setpoints resolve by the OpenStudio-HPXML rule
+
+Each HVAC side's thermostat setpoints (heating and cooling separately)
+resolve from the first source the OpenStudio-HPXML rule names
+(`HPXMLtoOpenStudio/resources/hvac.rb` `apply_setpoints`, master
+`57bd1b88`, lines 1641-1741): a schedule file's setpoint column when the
+file carries one ("permit mixing detailed schedules with simple
+schedules", hvac.rb:1665); otherwise the HPXML's own setpoints
+(`get_hvac_setpoints`, hvac.rb:1768-1829), which are the hourly
+`WeekdaySetpointTemps*Season` and `WeekendSetpointTemps*Season` extension
+arrays when both are declared, and otherwise the constant
+`SetpointTemp*Season` element expanded with its setback
+(`SetbackTemp*Season` over `TotalSetbackHoursperWeek*` from
+`SetbackStartHour*`, hvac.rb:1785-1798); otherwise the default profile,
+OS-HPXML's manual-thermostat defaults of 68 F heating and 78 F cooling
+(`defaults.rb:2827-2848` `apply_hvac_control`). When a schedule column and
+HPXML setpoints are both given, OS-HPXML warns "Both 'heating_setpoint'
+schedule file and heating setpoint temperature provided; the latter will
+be ignored." (hvac.rb:1669-1675) and the column wins; the warning is an
+expected-warning case in OS-HPXML's own validation suite
+(`test_validation.rb`, the `schedule-file-and-setpoints` case). HARES
+resolves the same precedence and warns for every ignored HPXML input, so
+no choice is silent. The schedule-file setpoint columns are degrees
+Fahrenheit in OS-HPXML's detailed-schedule convention ("Detailed Schedule
+Inputs", <https://openstudio-hpxml.readthedocs.io/en/latest/workflow_inputs.html>;
+converted in `resources/schedules.rb:1465-1484`); HARES reads them as
+Celsius pending the Fahrenheit reading's own numeric entry.
+
+The active source per side is recorded where the setpoints resolve
+(`crates/hares-io/src/setpoint_source.rs`, the equipment spec's
+`heating_setpoint_source` / `cooling_setpoint_source`), so the run's
+provenance names where each thermostat's setpoints came from: the schedule
+column, the HPXML control, or the default profile. OCHRE lets the column
+win silently (`vendors/OCHRE/ochre/utils/schedule.py:408-427`); the
+warning follows OS-HPXML, not OCHRE.

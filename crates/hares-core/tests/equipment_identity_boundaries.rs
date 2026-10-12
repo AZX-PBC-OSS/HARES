@@ -385,6 +385,8 @@ fn malformed_explicit_equipment_id_fails_the_build_loudly() {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     };
     spec.parameters
         .insert("equipment_id".to_string(), json!(-1));
@@ -507,6 +509,8 @@ fn malformed_equipment_id_in_the_typed_payload_fails_the_build_loudly() {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     };
     blueprint.add_equipment_spec(spec).expect("add spec");
 
@@ -581,6 +585,8 @@ fn non_identity_init_failure_is_fatal_after_the_identity_checks() {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     };
     blueprint.add_equipment_spec(spec).expect("add spec");
 

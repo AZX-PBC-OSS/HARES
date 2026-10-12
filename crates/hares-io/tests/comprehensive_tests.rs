@@ -68,6 +68,8 @@ fn make_spec(name: &str, fuel: FuelType) -> hares_io::EquipmentSpec {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     }
 }
 

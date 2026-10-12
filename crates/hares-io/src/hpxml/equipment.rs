@@ -55,6 +55,16 @@ pub struct EquipmentSpec {
     /// equipment types that do not participate in the primary-system mechanism
     /// (heat pumps, water heaters, PV, etc.).
     pub primary_role: Option<String>,
+    /// Where the heating side's thermostat setpoints resolved from, set by
+    /// the schedule resolution for every heating spec and `None` for every
+    /// other (and for a heating spec whose config cannot carry the active
+    /// source).
+    pub heating_setpoint_source: Option<crate::setpoint_source::SetpointSource>,
+    /// Where the cooling side's thermostat setpoints resolved from, set by
+    /// the schedule resolution for every cooling spec and `None` for every
+    /// other (and for a cooling spec whose config cannot carry the active
+    /// source).
+    pub cooling_setpoint_source: Option<crate::setpoint_source::SetpointSource>,
 }
 
 /// The equipment the HPXML building describes, before any override: the
@@ -227,6 +237,8 @@ pub(crate) fn build_spec(
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     }
 }
 
@@ -261,6 +273,8 @@ where
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     })
 }
 

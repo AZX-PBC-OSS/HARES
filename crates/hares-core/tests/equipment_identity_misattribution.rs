@@ -328,6 +328,8 @@ fn malformed_equipment_id_rejection_names_the_received_value() {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     };
     spec.parameters
         .insert("equipment_id".to_string(), serde_json::json!(-1));
@@ -393,6 +395,8 @@ fn equipment_named_total_at_build_time_never_silences_the_aggregate_total() {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         })
         .expect("add spec");
     let mut dwelling = blueprint

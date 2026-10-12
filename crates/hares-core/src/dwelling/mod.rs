@@ -879,6 +879,8 @@ fn equipment_descriptor_specs(equipment: &[&dyn Equipment]) -> Vec<hares_io::Equ
                 system_id: None,
                 related_hvac_idref: None,
                 primary_role: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
             }
         })
         .collect()
@@ -13379,6 +13381,8 @@ occupancy = 1.0
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
 
         let base_cfg = equipment_config_from_spec(&spec).expect("raw spec conversion must succeed");
@@ -21222,6 +21226,8 @@ occupancy = 0.0
                 system_id: None,
                 related_hvac_idref: None,
                 primary_role: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
             },
             hares_io::EquipmentSpec {
                 instance_name: None,
@@ -21234,6 +21240,8 @@ occupancy = 0.0
                 system_id: None,
                 related_hvac_idref: None,
                 primary_role: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
             },
         ];
         let schema = hares_io::build_schema_for_specs(&specs, 7, &[]);
@@ -21306,6 +21314,8 @@ occupancy = 0.0
                 system_id: None,
                 related_hvac_idref: None,
                 primary_role: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
             }];
             let schema = hares_io::build_schema_for_specs(&specs, 1, &[]);
             let column_index = build_output_column_index(&schema);
@@ -21380,6 +21390,8 @@ occupancy = 0.0
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }];
         let schema = hares_io::build_schema_for_specs(&specs, 5, &[]);
         let column_index = build_output_column_index(&schema);
@@ -21433,6 +21445,8 @@ occupancy = 0.0
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }];
         let schema = hares_io::build_schema_for_specs(&specs, 1, &[]);
         let column_index = build_output_column_index(&schema);
@@ -21454,6 +21468,8 @@ occupancy = 0.0
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }];
         let schema = hares_io::build_schema_for_specs(&specs, 7, &[]);
         let column_index = build_output_column_index(&schema);
@@ -21506,6 +21522,8 @@ occupancy = 0.0
                 system_id: None,
                 related_hvac_idref: None,
                 primary_role: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
             },
             // PV
             hares_io::EquipmentSpec {
@@ -21519,6 +21537,8 @@ occupancy = 0.0
                 system_id: None,
                 related_hvac_idref: None,
                 primary_role: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
             },
             // EV
             hares_io::EquipmentSpec {
@@ -21532,6 +21552,8 @@ occupancy = 0.0
                 system_id: None,
                 related_hvac_idref: None,
                 primary_role: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
             },
         ];
         let schema = hares_io::build_schema_for_specs(&specs, 8, &[]);
@@ -21756,6 +21778,8 @@ occupancy = 0.0
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }];
         let zones = vec![(ZoneId(1), "Indoor".to_string())];
         let input = hares_io::CatalogueInput {
