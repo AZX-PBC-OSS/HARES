@@ -141,6 +141,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<py_result::PyWarmupOutcome>()?;
     m.add_class::<py_result::PyWarmupResiduals>()?;
     m.add_class::<py_result::PyWarning>()?;
+    m.add_class::<py_result::PyBuildInfo>()?;
     m.add_class::<py_result::PyProvenance>()?;
     m.add_class::<py_result::PyEquipmentProvenance>()?;
     m.add_class::<PyTotalEnergyKwh>()?;
@@ -191,6 +192,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "MAX_HVAC_THERMOSTAT_BAND_C",
         hares_types::MAX_HVAC_THERMOSTAT_BAND_C,
     )?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add(
         "MAX_TANK_THERMOSTAT_BAND_C",
         hares_types::MAX_TANK_THERMOSTAT_BAND_C,
@@ -205,6 +207,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_gym::field_bounds_py, m)?)?;
     m.add_function(wrap_pyfunction!(py_gym::field_bounds_table_py, m)?)?;
     m.add_function(wrap_pyfunction!(py_catalogue::metrics_from_table, m)?)?;
+    m.add_function(wrap_pyfunction!(py_result::build_info, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_weather, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_epw, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_psm3, m)?)?;

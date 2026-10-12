@@ -101,7 +101,7 @@ use crate::health::{RejectionGate, RunHealth, WarmupOutcome, WarmupResiduals};
 use crate::invariants::InvariantChecker;
 use crate::invariants::check_basement_lighting_foundation;
 use crate::result::{
-    EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
+    BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
 };
 use crate::rng::{advance_dwelling_rng, derive_sub_rng, ev_driver_stream};
 use crate::scheduler::{ExecutionPhase, StepScheduler};
@@ -3901,6 +3901,8 @@ impl Dwelling {
             report.destination = Destination::Callback;
         }
         Provenance {
+            build: BuildInfo::get(),
+            catalogue_digest: crate::result::catalogue_digest_bytes(&self.catalogue()),
             config,
             bldg_id: self.bldg_id,
             site_utc_offset_s: self.clock.start_time.offset().local_minus_utc(),

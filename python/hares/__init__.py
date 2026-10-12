@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ._hares import __version__
 from ._hares import Dwelling
 from ._hares import DwellingBlueprint
 from ._hares import Fleet
@@ -137,6 +138,9 @@ from ._hares import (
     parse_resstock_csv,
     WeatherTimeSeries,
 )
+
+# Build identity
+from ._hares import BuildInfo, build_info
 
 # Standalone PV sizing functions
 from ._hares import (
@@ -290,6 +294,10 @@ __all__ = [
     "required_main_panel_ampacity",
     # Iterator types
     "TimestepsIter",
+    # Build identity
+    "BuildInfo",
+    "build_info",
+    "__version__",
     # Gym / RL
     "batch_step",
     # Multi-segment simulation

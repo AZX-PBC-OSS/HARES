@@ -432,6 +432,13 @@ replacement.
   results table scored through the catalogue with the run's own
   accumulator (`time_res` in whole seconds; a reduced or non-Timestep
   table raises, naming the mismatch).
+- Added: `BuildInfo` (the build's compile-time identity: `version`,
+  `commit`, `dirty`, `profile`, `features`, `rustc`), `build_info()`
+  (the extension build's own record), `hares.__version__` (the build
+  identity's version, the pyproject version), and `Provenance.build` and
+  `Provenance.catalogue_digest` (the catalogue digest as a 64 char hex
+  string): every run's provenance now records what built it and the
+  catalogue the run's reports are typed by.
 
 ## Troubleshooting
 

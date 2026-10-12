@@ -26,6 +26,10 @@ MIN_THERMOSTAT_BAND_C: float
 MAX_HVAC_THERMOSTAT_BAND_C: float
 MAX_TANK_THERMOSTAT_BAND_C: float
 
+# The extension build's version, the build identity's version: the
+# pyproject version.
+__version__: str
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -2696,8 +2700,29 @@ class Warning:
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
 
+class BuildInfo:
+    """The build's compile-time identity: what built the engine the
+    extension wraps, identical to every run's ``Provenance.build``."""
+    @property
+    def version(self) -> str: ...
+    @property
+    def commit(self) -> str | None: ...
+    @property
+    def dirty(self) -> bool | None: ...
+    @property
+    def profile(self) -> str: ...
+    @property
+    def features(self) -> list[str]: ...
+    @property
+    def rustc(self) -> str: ...
+    def __repr__(self) -> str: ...
+
 class Provenance:
     """The run's provenance: what produced it."""
+    @property
+    def build(self) -> BuildInfo: ...
+    @property
+    def catalogue_digest(self) -> str: ...
     @property
     def config(self) -> SimulationConfig: ...
     @property
@@ -3152,3 +3177,10 @@ def metrics_from_table(
     time_res: int | timedelta,
     setpoint_deadband_c: float | None = None,
 ) -> RunMetrics: ...
+
+# Build identity
+# ---------------------------------------------------------------------------
+
+# build_info: the extension build's compile-time identity, the record
+# every run's Provenance.build carries.
+def build_info() -> BuildInfo: ...

@@ -4775,6 +4775,8 @@ mod tests {
             warnings,
             warnings_dropped: 0,
             provenance: Provenance {
+                build: hares_core::BuildInfo::get(),
+                catalogue_digest: [0; 32],
                 config: simulation_config(PathBuf::from("unused.csv")),
                 bldg_id: 1,
                 site_utc_offset_s: 0,

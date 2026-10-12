@@ -11,9 +11,10 @@ use pyo3::prelude::*;
 use pyo3_arrow::PyTable;
 
 use hares_core::{
-    EquipmentProvenance as RustEquipmentProvenance, Provenance as RustProvenance, ReportOutput,
-    ReportResult as RustReportResult, RunResult as RustRunResult,
-    WarmupOutcome as RustWarmupOutcome, WarmupResiduals as RustWarmupResiduals,
+    BuildInfo as RustBuildInfo, EquipmentProvenance as RustEquipmentProvenance,
+    Provenance as RustProvenance, ReportOutput, ReportResult as RustReportResult,
+    RunResult as RustRunResult, WarmupOutcome as RustWarmupOutcome,
+    WarmupResiduals as RustWarmupResiduals,
 };
 use hares_types::Warning as RustWarning;
 
@@ -460,6 +461,84 @@ impl PyWarning {
     }
 }
 
+/// The build's compile-time identity: what built the engine the
+/// extension wraps. Recorded once per build by the crate's build script
+/// and identical to every run's `Provenance.build`.
+#[pyclass(frozen, name = "BuildInfo")]
+pub struct PyBuildInfo {
+    inner: RustBuildInfo,
+}
+
+#[pymethods]
+impl PyBuildInfo {
+    /// The crate version the build compiled.
+    #[getter]
+    fn version(&self) -> &str {
+        self.inner.version
+    }
+
+    /// The git commit the build compiled from; `None` when built without
+    /// a git work tree.
+    #[getter]
+    fn commit(&self) -> Option<&str> {
+        self.inner.commit
+    }
+
+    /// Whether the source tree the build compiled had tracked edits;
+    /// `None` when git or `.git` is absent.
+    #[getter]
+    fn dirty(&self) -> Option<bool> {
+        self.inner.dirty
+    }
+
+    /// The build profile (`debug` or `release`).
+    #[getter]
+    fn profile(&self) -> &str {
+        self.inner.profile
+    }
+
+    /// The features the build enabled, sorted.
+    #[getter]
+    fn features(&self) -> Vec<String> {
+        self.inner
+            .features
+            .iter()
+            .map(|feature| feature.to_string())
+            .collect()
+    }
+
+    /// The compiler's version line (`rustc -V`).
+    #[getter]
+    fn rustc(&self) -> &str {
+        self.inner.rustc
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "BuildInfo(version='{}', commit={}, dirty={:?}, profile='{}', features={:?}, \
+             rustc='{}')",
+            self.inner.version,
+            self.inner
+                .commit
+                .map(|commit| format!("'{commit}'"))
+                .unwrap_or_else(|| "None".to_string()),
+            self.inner.dirty,
+            self.inner.profile,
+            self.inner.features,
+            self.inner.rustc,
+        )
+    }
+}
+
+/// The extension build's identity: the record every run's
+/// `Provenance.build` carries, read once per build.
+#[pyfunction]
+pub fn build_info() -> PyBuildInfo {
+    PyBuildInfo {
+        inner: RustBuildInfo::get(),
+    }
+}
+
 /// The run's provenance: what produced it.
 #[pyclass(frozen, name = "Provenance")]
 pub struct PyProvenance {
@@ -468,6 +547,27 @@ pub struct PyProvenance {
 
 #[pymethods]
 impl PyProvenance {
+    /// The build's compile-time identity: the version, commit, dirty
+    /// flag, profile, features and rustc of the build that produced the
+    /// run.
+    #[getter]
+    fn build(&self) -> PyBuildInfo {
+        PyBuildInfo {
+            inner: self.inner.build.clone(),
+        }
+    }
+
+    /// The output catalogue's digest, the 64 char lowercase hex string
+    /// the schema's `hares:catalogue_digest` metadata carries.
+    #[getter]
+    fn catalogue_digest(&self) -> String {
+        self.inner
+            .catalogue_digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
     /// The validated configuration the run ran under.
     #[getter]
     fn config(&self) -> PySimulationConfig {

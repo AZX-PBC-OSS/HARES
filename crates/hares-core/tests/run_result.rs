@@ -12,8 +12,9 @@ use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use hares_control::DispatchRequest;
 use hares_control::PriorityTier;
+use hares_core::dwelling::DwellingBlueprint;
 use hares_core::{Actor, Dwelling, DwellingConfig, RunResult, SimulationEngine};
-use hares_types::{EnvironmentState, HaresError, TelemetryField, Warning};
+use hares_types::{EnvironmentState, HaresError, Telemetry, TelemetryField, Warning};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -661,4 +662,165 @@ fn finished_dwelling_restores_building_state_and_finishes_anew() {
         !std::sync::Arc::ptr_eq(&stale, &fresh),
         "finish() after the restore returns the re-run's own result, not the stale Arc"
     );
+}
+
+/// The build identity's digest probe: the one-variable actor the
+/// catalogue digest test registers. It declares a single state flag,
+/// exposes the telemetry map built from that declaration and dispatches
+/// nothing.
+struct SingleVariableActor {
+    telemetry: Telemetry,
+}
+
+const DIGEST_PROBE_VARIABLES: &[TelemetryField] = &[TelemetryField::state_flag(
+    "digest_probe_flag",
+    "one declared variable for the catalogue digest probe",
+)];
+
+impl SingleVariableActor {
+    fn new() -> Self {
+        Self {
+            telemetry: Telemetry::from_fields(DIGEST_PROBE_VARIABLES),
+        }
+    }
+}
+
+impl Actor for SingleVariableActor {
+    fn name(&self) -> &str {
+        "digest_probe"
+    }
+
+    fn output_variables(&self) -> &[TelemetryField] {
+        DIGEST_PROBE_VARIABLES
+    }
+
+    fn telemetry(&self) -> Option<&Telemetry> {
+        Some(&self.telemetry)
+    }
+
+    fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {}
+}
+
+/// Decodes the 64 lowercase hex chars of a catalogue digest into the 32
+/// bytes the provenance field records.
+fn hex_digest_bytes(hex: &str) -> [u8; 32] {
+    assert_eq!(hex.len(), 64, "the digest is 64 hex chars: {hex}");
+    let value = |c: u8| -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            other => panic!("the digest is lowercase hex: {other}"),
+        }
+    };
+    let bytes = hex.as_bytes();
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = (value(bytes[index * 2]) << 4) | value(bytes[index * 2 + 1]);
+    }
+    digest
+}
+
+/// `provenance_carries_build_identity`: a finished run's provenance
+/// records the build identity (equal field for field to the compile-time
+/// record) and the catalogue's digest (the hex the catalogue's digest
+/// prints, decoded).
+#[test]
+fn provenance_carries_build_identity() {
+    let toml = sim_toml(&memory_report("frame", 2));
+    let mut dwelling = Dwelling::from_config(dwelling_config(&toml)).expect("dwelling builds");
+    let result = dwelling.simulate().expect("the run finishes");
+
+    let info = hares_core::BuildInfo::get();
+    let build = &result.provenance.build;
+    assert_eq!(build.version, info.version);
+    assert_eq!(build.commit, info.commit);
+    assert_eq!(build.dirty, info.dirty);
+    assert_eq!(build.profile, info.profile);
+    assert_eq!(build.features, info.features);
+    assert_eq!(build.rustc, info.rustc);
+
+    assert_eq!(
+        result.provenance.catalogue_digest,
+        hex_digest_bytes(&dwelling.catalogue().digest()),
+        "the provenance digest is the catalogue's digest"
+    );
+}
+
+/// `provenance_digest_equals_schema_metadata`: the provenance digest,
+/// hex-encoded, equals the report schema's `hares:catalogue_digest`
+/// metadata.
+#[test]
+fn provenance_digest_equals_schema_metadata() {
+    let toml = sim_toml(&memory_report("frame", 2));
+    let mut dwelling = Dwelling::from_config(dwelling_config(&toml)).expect("dwelling builds");
+    let result = dwelling.simulate().expect("the run finishes");
+
+    let batch = result.reports[0]
+        .batches()
+        .first()
+        .expect("the memory report holds batches");
+    let schema = batch.schema();
+    let metadata = schema
+        .metadata
+        .get("hares:catalogue_digest")
+        .expect("the schema carries the catalogue digest metadata");
+    let hex: String = result
+        .provenance
+        .catalogue_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(hex, *metadata);
+}
+
+/// `two_runs_carry_the_same_build_identity`: two runs of one build record
+/// the same identity, field for field.
+#[test]
+fn two_runs_carry_the_same_build_identity() {
+    let toml = sim_toml(&memory_report("frame", 2));
+    let mut first = Dwelling::from_config(dwelling_config(&toml)).expect("dwelling builds");
+    let mut second = Dwelling::from_config(dwelling_config(&toml)).expect("dwelling builds");
+    let first = first.simulate().expect("the run finishes");
+    let second = second.simulate().expect("the run finishes");
+    assert_eq!(first.provenance.build, second.provenance.build);
+    assert_eq!(
+        first.provenance.catalogue_digest, second.provenance.catalogue_digest,
+        "one catalogue per input set: the digests equal too"
+    );
+}
+
+/// `catalogue_digest_changes_when_a_variable_is_added`: a test actor
+/// declaring one variable moves the run's catalogue digest.
+#[test]
+fn catalogue_digest_changes_when_a_variable_is_added() {
+    let toml = sim_toml(&memory_report("frame", 2));
+    let mut plain = Dwelling::from_config(dwelling_config(&toml)).expect("dwelling builds");
+    let plain = plain.simulate().expect("the run finishes");
+
+    let mut extended = Dwelling::from_config(dwelling_config(&toml)).expect("dwelling builds");
+    extended
+        .add_actor(Box::new(SingleVariableActor::new()))
+        .expect("the actor registers");
+    let extended = extended.simulate().expect("the run finishes");
+
+    assert_ne!(
+        plain.provenance.catalogue_digest, extended.provenance.catalogue_digest,
+        "the declared variable is a catalogue change"
+    );
+}
+
+/// `catalogue_digest_equal_for_two_builds_of_one_blueprint`: two builds of
+/// one blueprint record the same catalogue digest.
+#[test]
+fn catalogue_digest_equal_for_two_builds_of_one_blueprint() {
+    let toml = sim_toml(&memory_report("frame", 2));
+    let first = DwellingBlueprint::from_config(dwelling_config(&toml))
+        .expect("blueprint")
+        .build()
+        .expect("the dwelling builds");
+    let second = DwellingBlueprint::from_config(dwelling_config(&toml))
+        .expect("blueprint")
+        .build()
+        .expect("the dwelling builds");
+    assert_eq!(first.catalogue().digest(), second.catalogue().digest());
 }

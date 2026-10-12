@@ -12,6 +12,11 @@ pub mod actor;
 pub mod actor_registry;
 pub mod actors;
 mod ambient_air;
+#[cfg(test)]
+// The build identity's file-based git parsing, included into the test
+// build beside the build script's own include of the same file.
+#[path = "../build_support/git.rs"]
+mod build_support;
 pub mod checkpoint;
 pub mod checksum;
 pub mod clock;
@@ -49,7 +54,7 @@ pub use health::{ActorTiming, ActorTimings};
 pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
 pub use rand_chacha::ChaCha8Rng;
 pub use result::{
-    EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
+    BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
 };
 pub use rng::derive_dwelling_rng;
 pub use telemetry::DwellingTelemetry;

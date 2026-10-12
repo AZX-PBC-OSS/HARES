@@ -191,6 +191,62 @@ impl ReportResult {
     }
 }
 
+/// The build's compile-time identity: what built the engine this run ran
+/// on. Recorded once per build by the crate's build script (the git
+/// resolution is file-based; absent git or `.git` leaves the commit and
+/// the dirty flag `None`, never a guess) and copied into every result's
+/// provenance, so two runs of one build record the same identity.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct BuildInfo {
+    /// The crate version the build compiled (`CARGO_PKG_VERSION`).
+    pub version: &'static str,
+    /// The git commit the build compiled from; `None` when built without
+    /// a git work tree.
+    pub commit: Option<&'static str>,
+    /// Whether the source tree the build compiled had tracked edits;
+    /// `None` when git or `.git` is absent.
+    pub dirty: Option<bool>,
+    /// The build profile (`debug` or `release`).
+    pub profile: &'static str,
+    /// The features the build enabled, sorted.
+    pub features: &'static [&'static str],
+    /// The compiler's version line (`rustc -V`).
+    pub rustc: &'static str,
+}
+
+impl BuildInfo {
+    /// The identity of this build, as the build script recorded it.
+    #[must_use]
+    pub fn get() -> Self {
+        include!(concat!(env!("OUT_DIR"), "/build_info.rs"))
+    }
+}
+
+/// The catalogue's digest as the 32 bytes the hex string
+/// `Catalogue::digest()` prints, decoded: the value every result's
+/// provenance records beside the build identity.
+pub(crate) fn catalogue_digest_bytes(catalogue: &hares_io::Catalogue) -> [u8; 32] {
+    fn hex_value(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            other => panic!("the catalogue digest is lowercase hex: {other}"),
+        }
+    }
+    let hex = catalogue.digest();
+    assert_eq!(
+        hex.len(),
+        64,
+        "the catalogue digest is a 64 char hex string: {hex}"
+    );
+    let bytes = hex.as_bytes();
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = (hex_value(bytes[index * 2]) << 4) | hex_value(bytes[index * 2 + 1]);
+    }
+    digest
+}
+
 /// One equipment's init-time provenance: the diagnostics equipment
 /// preamble's records, one entry per equipment.
 #[derive(Debug, Clone, PartialEq)]
@@ -213,6 +269,14 @@ pub struct EquipmentProvenance {
 /// The run's provenance: what produced it.
 #[derive(Debug, Clone)]
 pub struct Provenance {
+    /// The build's compile-time identity: the version, commit, dirty
+    /// flag, profile, features and rustc of the build that produced the
+    /// run.
+    pub build: BuildInfo,
+    /// The output catalogue's digest, the 32 bytes behind the hex string
+    /// `Catalogue::digest()` prints (the same value the report schema's
+    /// `hares:catalogue_digest` metadata carries).
+    pub catalogue_digest: [u8; 32],
     /// The validated configuration the run ran under (the master seed in
     /// effect). The entries that add fields to the config after this one
     /// are recorded here as the config itself carries them.

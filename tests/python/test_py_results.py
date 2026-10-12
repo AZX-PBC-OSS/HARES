@@ -470,3 +470,29 @@ def test_docs_results_examples() -> None:
         env: dict[str, object] = {"__name__": "__main__"}
         exec(compile(script, f"<docs results {i}>", "exec"), env)  # noqa: S102
         del env
+
+
+def test_python_build_info_equals_run_provenance() -> None:
+    """The package's build_info() equals a run's provenance.build field
+    for field, the provenance catalogue digest is a 64 char hex string,
+    and the package version is the build identity's version."""
+    import hares
+
+    dw = build(result_config(metrics=True))
+    result = dw.simulate()
+
+    info = hares.build_info()
+    provenance = result.provenance.build
+    assert info.version == provenance.version
+    assert info.commit == provenance.commit
+    assert info.dirty == provenance.dirty
+    assert info.profile == provenance.profile
+    assert list(info.features) == list(provenance.features)
+    assert info.rustc == provenance.rustc
+
+    assert info.commit, "the build records the commit it was built from"
+    assert hares.__version__ == info.version
+
+    digest = result.provenance.catalogue_digest
+    assert isinstance(digest, str), "the catalogue digest is a hex string"
+    assert len(digest) == 64 and int(digest, 16) >= 0, f"a 64 char hex digest: {digest}"
