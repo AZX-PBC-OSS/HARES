@@ -58,6 +58,12 @@ fn common_dir(git_dir: &Path) -> PathBuf {
     }
 }
 
+/// Whether a string is a full commit hash: the 40 hex chars of SHA-1 or
+/// the 64 hex chars of SHA-256, the lengths git writes.
+fn is_full_hash(hash: &str) -> bool {
+    (hash.len() == 40 || hash.len() == 64) && hash.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// What a `HEAD` file says: a symbolic ref's name, or a detached hash.
 enum Head {
     Ref(String),
@@ -75,7 +81,7 @@ fn head_file(git_dir: &Path) -> Option<Head> {
         }
         return Some(Head::Ref(name.to_string()));
     }
-    if content.len() == 40 && content.chars().all(|c| c.is_ascii_hexdigit()) {
+    if is_full_hash(content) {
         return Some(Head::Hash(content.to_ascii_lowercase()));
     }
     None
@@ -88,7 +94,7 @@ fn resolve_ref(git_dir: &Path, name: &str) -> Option<String> {
     for base in [git_dir, &common] {
         if let Ok(hash) = fs::read_to_string(base.join(name)) {
             let hash = hash.trim();
-            if hash.len() == 40 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            if is_full_hash(hash) {
                 return Some(hash.to_ascii_lowercase());
             }
         }
@@ -102,8 +108,7 @@ fn resolve_ref(git_dir: &Path, name: &str) -> Option<String> {
                 }
                 if let Some((hash, ref_name)) = line.split_once(' ')
                     && ref_name == name
-                    && hash.len() == 40
-                    && hash.chars().all(|c| c.is_ascii_hexdigit())
+                    && is_full_hash(hash)
                 {
                     return Some(hash.to_ascii_lowercase());
                 }
@@ -198,6 +203,7 @@ mod tests {
     }
 
     const HASH: &str = "0123456789abcdef0123456789abcdef01234567";
+    const SHA256_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// Runs git in `root`, asserting success, and returns its stdout.
     fn git(root: &Path, args: &[&str]) -> String {
@@ -275,6 +281,37 @@ mod tests {
         );
         let git_dir = resolve_git_dir(&root).expect("the .git directory");
         assert_eq!(resolve_head(&git_dir).as_deref(), Some(HASH));
+
+        // A SHA-256 repo's 64 char hashes parse the same way: a
+        // detached HEAD, a loose ref, a packed ref.
+        fs::remove_dir_all(root.join(".git")).expect("the git directory");
+        write(&root.join(".git/HEAD"), &format!("{SHA256_HASH}\n"));
+        let git_dir = resolve_git_dir(&root).expect("the .git directory");
+        assert_eq!(resolve_head(&git_dir).as_deref(), Some(SHA256_HASH));
+
+        write(&root.join(".git/HEAD"), "ref: refs/heads/main\n");
+        write(
+            &root.join(".git/refs/heads/main"),
+            &format!("{SHA256_HASH}\n"),
+        );
+        let git_dir = resolve_git_dir(&root).expect("the .git directory");
+        assert_eq!(resolve_head(&git_dir).as_deref(), Some(SHA256_HASH));
+
+        fs::remove_dir_all(root.join(".git/refs")).expect("the refs tree");
+        write(
+            &root.join(".git/packed-refs"),
+            &format!(
+                "# pack-refs with: peeled fully-peeled sorted \n{SHA256_HASH} refs/heads/main\n"
+            ),
+        );
+        let git_dir = resolve_git_dir(&root).expect("the .git directory");
+        assert_eq!(resolve_head(&git_dir).as_deref(), Some(SHA256_HASH));
+
+        // Not a hash length git writes: none, never a guess.
+        fs::remove_dir_all(root.join(".git")).expect("the git directory");
+        write(&root.join(".git/HEAD"), &format!("{SHA256_HASH}0\n"));
+        let git_dir = resolve_git_dir(&root).expect("the .git directory");
+        assert_eq!(resolve_head(&git_dir), None);
 
         // A worktree's `gitdir:` file: HEAD follows the named directory
         // and the branch ref the common directory its commondir names.
