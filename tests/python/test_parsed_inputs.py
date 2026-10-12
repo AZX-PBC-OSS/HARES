@@ -6,8 +6,10 @@ dwellings are built: construction from a handle reads no file.
 
 import shutil
 
+import pytest
+
 from conftest import HARES_DEFAULTS, HPXML, ROOT, SCHEDULE, WEATHER
-from hares import Destination, Dwelling, ParsedWeather, ReportSpec, Selection, SimulationConfig
+from hares import Destination, Dwelling, ParsedSchedule, ParsedWeather, ReportSpec, Selection, SimulationConfig
 
 
 def _frame(dwelling):
@@ -55,3 +57,44 @@ def test_parsed_weather_shared_across_dwellings(tmp_path):
         f_path = _frame(path_dwelling)
         assert f_handle.columns == f_path.columns
         assert f_handle.equals(f_path), "construction from a handle reads no file"
+
+
+def _naive_schedule_csv(tmp_path):
+    """The example schedule's first day under naive local timestamps: a
+    time column whose values carry no UTC offset."""
+    lines = open(SCHEDULE).read().splitlines()
+    day = lines[:25]
+    rows = ["time," + day[0]]
+    for idx, row in enumerate(day[1:]):
+        rows.append(f"2019-01-01 {idx:02d}:00:00,{row}")
+    csv = tmp_path / "naive_schedule.csv"
+    csv.write_text("\n".join(rows) + "\n")
+    return csv
+
+
+def test_schedule_handle_takes_the_weather_meta_fallback(tmp_path):
+    """A schedule CSV whose timestamps carry no UTC offset parses through
+    the handle with the weather's meta, the same fallback the config path
+    passes; without it the parse fails naming the missing fallback."""
+    csv = _naive_schedule_csv(tmp_path)
+
+    with pytest.raises(Exception, match="no WeatherMeta fallback"):
+        ParsedSchedule.from_path(str(csv))
+
+    weather = ParsedWeather.from_path(WEATHER)
+    handle = ParsedSchedule.from_path(str(csv), weather_meta=weather)
+    from_text = ParsedSchedule.from_text(csv.read_text(), weather_meta=weather)
+
+    from_handle = Dwelling.from_hpxml(
+        HPXML, handle, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=9, config=_config()
+    )
+    from_text_handle = Dwelling.from_hpxml(
+        HPXML, from_text, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=9, config=_config()
+    )
+    from_path = Dwelling.from_hpxml(
+        HPXML, str(csv), WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=9, config=_config()
+    )
+
+    f_handle = _frame(from_handle)
+    assert f_handle.equals(_frame(from_text_handle)), "from_path and from_text parse the same"
+    assert f_handle.equals(_frame(from_path)), "the handle's parse is the config path's parse"

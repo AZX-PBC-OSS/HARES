@@ -119,10 +119,20 @@ pub struct PyParsedSchedule {
 #[pymethods]
 impl PyParsedSchedule {
     /// Parse the schedule CSV at `path`, with the GIL released.
+    /// `weather_meta` is the parsed weather whose meta a schedule's
+    /// offset-less timestamps resolve against, the same fallback the
+    /// config path passes.
     #[classmethod]
-    pub fn from_path(_cls: &Bound<'_, PyType>, py: Python<'_>, path: &str) -> PyResult<Self> {
+    #[pyo3(signature = (path, weather_meta = None))]
+    pub fn from_path(
+        _cls: &Bound<'_, PyType>,
+        py: Python<'_>,
+        path: &str,
+        weather_meta: Option<&PyParsedWeather>,
+    ) -> PyResult<Self> {
+        let meta = weather_meta.map(|weather| weather.inner.meta().clone());
         let source = InputSource::Path(path.into());
-        let inner = construct_detached(py, move || ParsedSchedule::parse(&source, None))
+        let inner = construct_detached(py, move || ParsedSchedule::parse(&source, meta.as_ref()))
             .map_err(to_py_err)?;
         Ok(Self {
             inner: Arc::new(inner),
@@ -130,10 +140,20 @@ impl PyParsedSchedule {
     }
 
     /// Parse the schedule CSV from `text`, with the GIL released.
+    /// `weather_meta` is the parsed weather whose meta a schedule's
+    /// offset-less timestamps resolve against, the same fallback the
+    /// config path passes.
     #[classmethod]
-    pub fn from_text(_cls: &Bound<'_, PyType>, py: Python<'_>, text: &str) -> PyResult<Self> {
+    #[pyo3(signature = (text, weather_meta = None))]
+    pub fn from_text(
+        _cls: &Bound<'_, PyType>,
+        py: Python<'_>,
+        text: &str,
+        weather_meta: Option<&PyParsedWeather>,
+    ) -> PyResult<Self> {
+        let meta = weather_meta.map(|weather| weather.inner.meta().clone());
         let source = InputSource::Text(text.into());
-        let inner = construct_detached(py, move || ParsedSchedule::parse(&source, None))
+        let inner = construct_detached(py, move || ParsedSchedule::parse(&source, meta.as_ref()))
             .map_err(to_py_err)?;
         Ok(Self {
             inner: Arc::new(inner),

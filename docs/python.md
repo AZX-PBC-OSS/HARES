@@ -454,7 +454,10 @@ replacement.
 - Added: the parsed-input handles `ParsedHpxml`, `ParsedWeather` (with
   `from_path(path)` and `from_text(text)`; `ParsedWeather` also taking
   `format=` for content, the format a path detects), `ParsedSchedule`
-  (with `from_path(path)` and `from_text(text)`) and `ParsedDefaults`
+  (with `from_path(path)` and `from_text(text)`, each taking
+  `weather_meta=`: the parsed weather whose meta a schedule's
+  offset-less timestamps resolve against, the same fallback the config
+  path passes) and `ParsedDefaults`
   (`ParsedDefaults(base, files=None)`, the per-file replacements a
   relative-path to content dict, and `with_file(relative_path,
   content)`): parse once, build many dwellings. `Dwelling.from_hpxml`,
