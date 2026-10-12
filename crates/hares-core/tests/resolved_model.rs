@@ -185,14 +185,16 @@ fn resolved_model_reports_autosized_capacity() {
     assert_eq!(capacity.unit, hares_types::Unit::Watt);
 }
 
-/// Every non-slab opaque boundary's layer resistances plus the film
-/// resistances equal the effective resistance to 1e-12 relative: the
-/// read-back's layers are the layers the RC network builds, and the
-/// effective R is films included. Slabs (the F-factor perimeter method)
-/// report no layers. The same-zone surfaces the parser synthesizes (the
-/// interior partition wall, the furniture mass) report the layers their
-/// construction keeps, and their effective R is those layers' series plus
-/// the one interior film, the resistance the physics conducts through.
+/// Every non-slab opaque boundary's effective resistance equals the
+/// network's discrete chain to 1e-12 relative, recomputed from the
+/// read-back's own disclosure. An outside-facing boundary's chain is the
+/// layers' full series plus the films. A same-zone fin's chain is the
+/// kept layers' series minus the half-resistor the network drops: the
+/// precomputed path (which every base.xml same-zone surface takes) pops
+/// the innermost kept layer's inner half, and the one interior film rides
+/// the zone-facing edge. The diagnostic's same-zone total (the full stack
+/// halved plus the film) is a different record and equals neither.
+/// Slabs (the F-factor perimeter method) report no layers.
 #[test]
 fn resolved_layers_sum_to_the_boundary_resistance() {
     let dwelling =
@@ -219,14 +221,23 @@ fn resolved_layers_sum_to_the_boundary_resistance() {
             continue;
         }
         let layers: f64 = boundary.layers.iter().map(|l| l.r_m2k_w).sum();
-        let expected = layers + boundary.films_m2k_w;
+        let expected = if boundary.same_zone {
+            let dropped = boundary
+                .layers
+                .last()
+                .map(|l| l.r_m2k_w / 2.0)
+                .unwrap_or(0.0);
+            layers + boundary.films_m2k_w - dropped
+        } else {
+            layers + boundary.films_m2k_w
+        };
         let relative = ((expected - boundary.r_effective_m2k_w) / boundary.r_effective_m2k_w).abs();
         assert!(
             relative <= 1e-12,
-            "boundary '{}': layers ({layers}) plus films ({}) must equal the \
-             effective resistance {} to 1e-12 relative, got {relative}",
+            "boundary '{}': the network's chain (layers, minus the fin's dropped \
+             half-resistor, plus films) must equal the effective resistance {} \
+             to 1e-12 relative, got {relative}",
             boundary.id,
-            boundary.films_m2k_w,
             boundary.r_effective_m2k_w
         );
         checked += 1;
@@ -234,6 +245,152 @@ fn resolved_layers_sum_to_the_boundary_resistance() {
     assert!(
         checked >= 4,
         "base.xml's outside-facing opaque boundaries must be checked, checked {checked}"
+    );
+}
+
+/// The same-zone fins' effective resistance pinned to the network's
+/// actual chain sums, the values the assembled legs conduct through: the
+/// furniture mass's one kept LUT layer contributes its inner half at the
+/// zone-facing edge, the partition wall's two kept layers drop the
+/// innermost layer's inner half. The read-back these pins replaced
+/// reported the kept layers' full series plus the film (1.645 for the
+/// furniture), two thirds above the network's chain.
+#[test]
+fn same_zone_fin_r_pins_the_network_chain() {
+    let dwelling =
+        Dwelling::from_config(config(&fixture("base.xml"))).expect("the base dwelling builds");
+    let model = dwelling.resolved_model();
+    let fin = |id: &str| {
+        let boundary = model
+            .boundaries
+            .iter()
+            .find(|b| b.id == id)
+            .unwrap_or_else(|| panic!("'{id}' is in the read-back"));
+        assert!(boundary.same_zone, "'{id}' is a same-zone fin");
+        boundary
+    };
+    let furniture = fin("conditioned_furniture");
+    assert!(
+        (furniture.r_effective_m2k_w - 0.985_097_529_258_777_6).abs()
+            < 1e-12 * furniture.r_effective_m2k_w,
+        "the furniture mass's effective R is the network's chain, got {}",
+        furniture.r_effective_m2k_w
+    );
+    let wall = fin("interior_wall");
+    assert!(
+        (wall.r_effective_m2k_w - 0.591_612_529_258_777_6).abs() < 1e-12 * wall.r_effective_m2k_w,
+        "the interior partition wall's effective R is the network's chain, got {}",
+        wall.r_effective_m2k_w
+    );
+}
+
+/// The parity furnace fixture's dwelling, loaded the way the core output
+/// regressions load their parity fixtures: the fixture's own sim config,
+/// the reports dropped (these tests read in-memory state).
+fn parity_furnace_dwelling() -> Dwelling {
+    let root = project_root()
+        .join("tests/fixtures/parity")
+        .join("cz2a_gas_furnace_ac_res_wh");
+    let config_value: toml::Value = toml::from_str(
+        &std::fs::read_to_string(root.join("config.toml")).expect("the fixture config.toml reads"),
+    )
+    .expect("the fixture config.toml parses");
+    let sim_table = config_value
+        .get("simulation")
+        .and_then(|value| value.as_table())
+        .expect("the fixture config.toml has [simulation]");
+    let mut sim_config =
+        SimulationConfig::from_toml(&toml::to_string(sim_table).expect("the table serializes"))
+            .expect("the fixture sim config parses");
+    sim_config.reports = Vec::new();
+    Dwelling::from_config(DwellingConfig {
+        hpxml: InputSource::Path(root.join("building.xml")),
+        schedule: Some(InputSource::Path(root.join("schedule.csv"))),
+        weather: WeatherInput::Path(root.join("weather.epw")),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(sim_config, None, 1, None, None),
+    })
+    .expect("the fixture dwelling builds")
+}
+
+/// The read-back's values are the ones the steps use. At the run's first
+/// full-fire step (pinned at step 4: the furnace comes out of warm-up
+/// partial, then meets a load above its capacity) the furnace's step
+/// telemetry fuel_input_w is the read-back's rated capacity over its
+/// AFUE, bit for bit: the burner burns exactly the resolved values'
+/// ratio.
+#[test]
+fn step_telemetry_uses_the_read_back_furnace_values() {
+    use hares_types::telemetry_keys::{DUTY_CYCLE, FUEL_INPUT_W};
+
+    let mut dwelling = parity_furnace_dwelling();
+    let model = dwelling.resolved_model();
+    let capacity = parameter(model, "Gas Furnace", "rated_capacity_w").value;
+    let afue = parameter(model, "Gas Furnace", "afue").value;
+    let full_fire_fuel_w = capacity / afue;
+
+    let fuel_duty_at = |dwelling: &Dwelling| {
+        let eq = dwelling
+            .equipment()
+            .iter()
+            .find(|eq| eq.descriptor().name == "Gas Furnace")
+            .expect("the fixture carries the gas furnace");
+        let telemetry = eq.telemetry();
+        (
+            telemetry.get(FUEL_INPUT_W).unwrap_or_default(),
+            telemetry.get(DUTY_CYCLE).unwrap_or_default(),
+        )
+    };
+    let mut pinned_step = None;
+    for step in 0..48 {
+        dwelling.step().expect("the fixture steps");
+        let (fuel, duty) = fuel_duty_at(&dwelling);
+        if fuel > 0.0 && duty == 1.0 {
+            pinned_step = Some((step, fuel));
+            break;
+        }
+    }
+    let (step, fuel) =
+        pinned_step.expect("the furnace reaches full fire within the pinned horizon");
+    assert_eq!(step, 4, "the first full-fire step is pinned");
+    assert_eq!(
+        fuel.to_bits(),
+        full_fire_fuel_w.to_bits(),
+        "the step's fuel input is the read-back's capacity over AFUE, bit for bit"
+    );
+}
+
+/// The network's conductance is the reported R's reciprocal for one
+/// envelope case: the diagnostic's per-boundary UA (area over the total
+/// the network was built from) equals area over the read-back's
+/// effective R, bit for bit, for the fixture's first outside-facing
+/// precomputed boundary.
+#[test]
+#[cfg(debug_assertions)]
+fn network_conductance_matches_the_reported_r() {
+    use hares_envelope::boundary_rc::RCPath;
+
+    let dwelling = parity_furnace_dwelling();
+    let model = dwelling.resolved_model();
+    let diagnostics = dwelling.envelope_diagnostics();
+    assert_eq!(
+        model.boundaries.len(),
+        diagnostics.boundaries.len(),
+        "the read-back and the diagnostics list the same boundaries in the same order"
+    );
+    let case = model
+        .boundaries
+        .iter()
+        .zip(&diagnostics.boundaries)
+        .find(|(b, d)| d.path == RCPath::Precomputed && !b.same_zone)
+        .expect("the fixture carries an outside-facing precomputed boundary");
+    let (boundary, diagnostic) = case;
+    let from_read_back = boundary.area_m2 / boundary.r_effective_m2k_w;
+    assert_eq!(
+        diagnostic.ua_w_per_k.to_bits(),
+        from_read_back.to_bits(),
+        "boundary '{}': the network's conductance is the reported R's reciprocal",
+        boundary.id
     );
 }
 

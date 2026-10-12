@@ -3,7 +3,7 @@
 //! before warm-up, and read back through [`crate::Dwelling::resolved_model`]
 //! (the runtime-memory ledger's read-back entry). SI units throughout.
 
-use hares_envelope::boundary_rc::{BoundaryDiagnostic, BoundaryInput, ExteriorTarget};
+use hares_envelope::boundary_rc::{BoundaryDiagnostic, BoundaryInput, ExteriorTarget, RCPath};
 use hares_io::hpxml::BoundaryType;
 use hares_io::{SetpointSource, SiteLocation};
 use hares_types::{EndUse, EquipmentId, ResolvedParameter};
@@ -56,12 +56,18 @@ pub struct ResolvedBoundary {
     pub kind: BoundaryType,
     pub area_m2: f64,
     /// Assembly R, films included: what the network conducts through.
+    /// For a same-zone fin the network's fin chain (see `same_zone`).
     pub r_effective_m2k_w: f64,
     /// Interior plus exterior film resistance (the exterior film zero
     /// where the assembly applies none).
     pub films_m2k_w: f64,
     /// The boundary's assembled thermal capacitance.
     pub c_j_k: f64,
+    /// Whether the boundary faces no outside: the parser's same-zone
+    /// surfaces (the interior partition wall, the furniture mass), whose
+    /// construction the network keeps as a dead-end fin (the interior
+    /// half of the stack). The effective R's convention follows it.
+    pub same_zone: bool,
     pub layers: Vec<ResolvedLayer>,
 }
 
@@ -125,15 +131,26 @@ pub(crate) fn resolved_envelope(
                 diagnostic.r_film_ext_m2_k_w
             };
         let layers = resolved_layers(input, same_zone, &bd.boundary_type);
-        // The effective resistance, films included: the RC diagnostic's
-        // total for every boundary with an outside, where the layers plus
-        // the films are exactly the diagnostic's series. A same-zone
-        // surface faces no outside: its construction keeps the interior
-        // half of the stack as a dead-end fin, so the resistance the
-        // physics conducts through is the kept layers' series plus the one
-        // film, not the diagnostic's full-stack-halved convention.
+        // The read-back's effective resistance, films included, per the
+        // boundary kind:
+        //
+        // - An outside-facing boundary: the full chain, the layers'
+        //   series plus both films. The diagnostic's total is that same
+        //   series, and the network's discrete chain sums to it.
+        // - A same-zone fin (no outside): the network's actual discrete
+        //   chain, which drops one half-resistor from the kept layers'
+        //   series. The precomputed path pops the innermost kept layer's
+        //   inner half (the pad-average's last resistor); the material
+        //   path never wires the cut layer's exterior-facing resistor;
+        //   the one interior film rides the zone-facing edge. This is
+        //   the number the physics conducts through.
+        // - The diagnostic's same-zone total is a different record with
+        //   a different convention (the full stack halved plus the one
+        //   film, the per-component heat-gain tracking's UA): in general
+        //   it equals neither the kept layers' series nor the network's
+        //   chain, and the read-back does not report it.
         let r_effective_m2k_w = if same_zone {
-            films + layers.iter().map(|l| l.r_m2k_w).sum::<f64>()
+            films + same_zone_fin_chain(diagnostic.path, &layers)
         } else {
             diagnostic.r_total_m2_k_w
         };
@@ -144,6 +161,7 @@ pub(crate) fn resolved_envelope(
             r_effective_m2k_w,
             films_m2k_w: films,
             c_j_k: diagnostic.capacitance_j_k,
+            same_zone,
             layers,
         });
     }
@@ -238,6 +256,24 @@ fn resolved_layers(
     }
 }
 
+/// The same-zone fin's network chain (per area, films excluded): the kept
+/// layers' series minus the half-resistor the network's discrete build
+/// drops. The precomputed path's pad-and-average makes the innermost kept
+/// layer's inner half the last resistor and pops it; the material path
+/// skips the cut layer's outer half, leaving its inner half in the last
+/// inter-layer resistor. The fallback path builds no same-zone boundary
+/// (its diagnostic arm is outside-facing only), so its arm is unreachable
+/// for a reported fin and carries nothing to drop.
+fn same_zone_fin_chain(path: RCPath, layers: &[ResolvedLayer]) -> f64 {
+    let kept = layers.iter().map(|l| l.r_m2k_w).sum::<f64>();
+    let dropped = match path {
+        RCPath::Precomputed => layers.last().map(|l| l.r_m2k_w / 2.0).unwrap_or(0.0),
+        RCPath::MaterialLayer => layers.first().map(|l| l.r_m2k_w / 2.0).unwrap_or(0.0),
+        RCPath::FallbackR => 0.0,
+    };
+    kept - dropped
+}
+
 /// The infiltration inputs as the assembly resolved them, from the parsed
 /// building's values (the ACH50 the leakage conversion produced, the ELA
 /// converted from cm², the constant rate the synthetic inputs fix).
@@ -246,5 +282,41 @@ pub(crate) fn resolved_infiltration(building: &hares_io::hpxml::Building) -> Res
         ach50: building.infiltration_ach50,
         ela_m2: building.infiltration_ela_cm2.map(|cm2| cm2 / 10_000.0),
         constant_ach: building.infiltration_constant_ach,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResolvedLayer, same_zone_fin_chain};
+    use hares_envelope::boundary_rc::RCPath;
+
+    fn layers(rs: &[f64]) -> Vec<ResolvedLayer> {
+        rs.iter()
+            .map(|&r| ResolvedLayer {
+                r_m2k_w: r,
+                c_j_m2k: 0.0,
+            })
+            .collect()
+    }
+
+    /// The precomputed path's rule: the innermost kept layer's inner half
+    /// is the popped resistor, so the chain is the kept series minus half
+    /// the last layer.
+    #[test]
+    fn fin_chain_precomputed_drops_the_innermost_kept_half() {
+        let kept = layers(&[0.2269, 0.07923]);
+        let chain = same_zone_fin_chain(RCPath::Precomputed, &kept);
+        let expected: f64 = 0.2269 + 0.07923 / 2.0;
+        assert_eq!(chain.to_bits(), expected.to_bits());
+    }
+
+    /// The material path's rule: the cut layer's outer half is never
+    /// wired, so the chain is the kept series minus half the first layer.
+    #[test]
+    fn fin_chain_material_drops_the_cut_layer_outer_half() {
+        let kept = layers(&[0.5, 0.25, 0.25]);
+        let chain = same_zone_fin_chain(RCPath::MaterialLayer, &kept);
+        let expected: f64 = 0.5 / 2.0 + 0.25 + 0.25;
+        assert_eq!(chain.to_bits(), expected.to_bits());
     }
 }

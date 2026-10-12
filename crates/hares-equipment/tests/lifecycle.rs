@@ -1827,57 +1827,68 @@ fn gshp_cooler_pump_power_in_telemetry_and_ports() {
 /// The read-back names the plan's required-parameter table requires for
 /// the class, keyed by class name because the table's rows split the
 /// heating end use by kind (fuel, heat pump, electric resistance) and the
-/// water-heating row adds the tank parameters only tanks report. Classes
-/// whose end use the table gives no row for (the event loads, the
-/// generators, the ventilation units, the dehumidifier, the protocol
-/// bridge) report what their physics uses and require nothing here.
-fn required_read_back(class: &str) -> &'static [&'static str] {
+/// water-heating row adds the tank parameters only tanks report. The
+/// table carries a row for every registered class and the test fails a
+/// class the table omits; the protocol bridge's row is empty because it
+/// forwards control payloads and its physics is the target equipment's.
+fn required_read_back(class: &str) -> Option<&'static [&'static str]> {
     match class {
         // HVAC cooling: capacity, EIR and SHR.
         "Air Conditioner" | "Room AC" | "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler"
-        | "WSHP Cooler" => &["rated_capacity_w", "rated_eir", "rated_shr"],
+        | "WSHP Cooler" => Some(&["rated_capacity_w", "rated_eir", "rated_shr"]),
         // Heat pump heating: capacity and EIR.
         "Heat Pump Heater" | "ASHP Heater" | "MSHP Heater" | "GSHP Heater" | "WSHP Heater" => {
-            &["rated_capacity_w", "rated_eir"]
+            Some(&["rated_capacity_w", "rated_eir"])
         }
         // Fuel heating: capacity and AFUE.
-        "Gas Furnace" | "Gas Boiler" => &["rated_capacity_w", "afue"],
+        "Gas Furnace" | "Gas Boiler" => Some(&["rated_capacity_w", "afue"]),
         // Electric resistance heating: capacity and efficiency.
         "Electric Furnace" | "Electric Baseboard" | "Electric Boiler" => {
-            &["rated_capacity_w", "efficiency"]
+            Some(&["rated_capacity_w", "efficiency"])
         }
         // The ideal unit's back-calculated capacity is capped at the rated one.
-        "Ideal HVAC" => &["rated_capacity_w"],
+        "Ideal HVAC" => Some(&["rated_capacity_w"]),
+        // The dehumidifier: the rated removal, the energy factor and the
+        // load fraction its control serves.
+        "Dehumidifier" => Some(&[
+            "rated_water_removal_l_day",
+            "rated_energy_factor_l_kwh",
+            "fraction_load_served",
+        ]),
         // Element-heated tanks: the water-heating row plus the tank adds.
-        "Gas Water Heater" | "Electric Resistance Water Heater" | "Resistance Water Heater" => &[
-            "heating_capacity_w",
-            "setpoint_c",
-            "tank_volume_m3",
-            "ua_w_k",
-        ],
+        "Gas Water Heater" | "Electric Resistance Water Heater" | "Resistance Water Heater" => {
+            Some(&[
+                "heating_capacity_w",
+                "setpoint_c",
+                "tank_volume_m3",
+                "ua_w_k",
+            ])
+        }
         // Heat pump water heaters add the compressor's rated COP.
-        "Heat Pump Water Heater" | "HPWH" => &[
+        "Heat Pump Water Heater" | "HPWH" => Some(&[
             "heating_capacity_w",
             "setpoint_c",
             "tank_volume_m3",
             "ua_w_k",
             "rated_cop",
-        ],
+        ]),
         // Tankless units have no tank.
         "Tankless Water Heater" | "Gas Tankless Water Heater" => {
-            &["heating_capacity_w", "setpoint_c"]
+            Some(&["heating_capacity_w", "setpoint_c"])
         }
         // The indirect tank has no heating element of its own: the boiler
         // loop heats it through a heat exchanger, whose UA is the capacity
         // parameter its physics uses, reported beside the tank's.
-        "Indirect Tank" => &["setpoint_c", "tank_volume_m3", "ua_w_k"],
-        "PV" => &["nameplate_w"],
-        "Battery" => &[
+        "Indirect Tank" => Some(&["setpoint_c", "tank_volume_m3", "ua_w_k"]),
+        "PV" => Some(&["nameplate_w"]),
+        "Battery" => Some(&[
             "energy_capacity_j",
             "power_capacity_w",
             "round_trip_efficiency",
-        ],
-        "EV" | "Electric Vehicle" => &["battery_capacity_j", "max_charging_power_w"],
+        ]),
+        "EV" | "Electric Vehicle" => Some(&["battery_capacity_j", "max_charging_power_w"]),
+        // The generators: the rated output the dispatch commits.
+        "Gas Generator" | "Gas Fuel Cell" => Some(&["rated_power_w"]),
         // The scheduled loads: the usage multiplier scales their schedule.
         // "Scheduled EV" is one of them (its physics is the charging
         // schedule, not a pack model), so it requires the multiplier, not
@@ -1886,9 +1897,25 @@ fn required_read_back(class: &str) -> &'static [&'static str] {
         | "Basement Lighting" | "Garage Lighting" | "Plug Loads" | "MELs" | "TV" | "Other"
         | "Refrigerator" | "Freezer" | "Well Pump" | "Pool Pump" | "Pool Heater" | "Spa Pump"
         | "Spa Heater" | "Gas Grill" | "Gas Fireplace" | "Ceiling Fan" | "Scheduled EV" => {
-            &["usage_multiplier"]
+            Some(&["usage_multiplier"])
         }
-        _ => &[],
+        // The event loads: the event window's power and duration.
+        "EventBasedLoad" | "Cooking Range" | "Microwave" => {
+            Some(&["active_power_w", "active_duration_s"])
+        }
+        // The wet appliances report their unit count (the draw is per unit).
+        "Clothes Washer" | "Dishwasher" | "Clothes Dryer" => Some(&["n_units"]),
+        // The ventilation units: the two fans and the flow rate the
+        // balanced exchange moves.
+        "Ventilation Fan" | "HRV" | "ERV" => Some(&[
+            "supply_fan_power_w",
+            "exhaust_fan_power_w",
+            "flow_rate_m3_s",
+        ]),
+        // The bridge forwards control payloads; its physics is the
+        // target equipment's, so it requires nothing here.
+        "Protocol Bridge" => Some(&[]),
+        _ => None,
     }
 }
 
@@ -1908,7 +1935,9 @@ fn every_equipment_class_reports_its_required_parameters() {
             .unwrap_or_else(|e| panic!("init failed for '{class}': {e}"));
 
         let reported: Vec<&str> = eq.resolved_parameters().iter().map(|p| p.name).collect();
-        for required in required_read_back(class) {
+        let required_names = required_read_back(class)
+            .unwrap_or_else(|| panic!("'{class}' is missing from the required-parameter table"));
+        for required in required_names {
             assert!(
                 reported.contains(required),
                 "'{class}' must report '{required}' in its resolved parameters; got {reported:?}"

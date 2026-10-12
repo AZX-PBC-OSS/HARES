@@ -1306,14 +1306,21 @@ building's ACH50, ELA (cm²→m²) and constant ACH.
 
 Found on base.xml's same-zone surfaces: the auto-generated interior
 partition wall and the furniture mass face no outside, and their RC
-construction keeps the interior half of the stack as a dead-end fin, so
-the read-back reports the layers the network keeps and the effective
-resistance that series plus the one interior film. The RC diagnostics'
-same-zone total uses a different convention (the full stack halved),
-which neither the kept layers nor the network's series equals; the
-physics is unaffected (that number feeds only the per-component
-heat-gain tracking), and the read-back reports the network's actual
-resistance.
+construction keeps the interior half of the stack as a dead-end fin.
+Three conventions for the same-zone resistance are in play, and the
+records state them truthfully: the read-back's effective R is the
+network's actual discrete chain (the kept layers' series minus the
+half-resistor the network drops, the precomputed path popping the
+innermost kept layer's inner half and the material path skipping the
+cut layer's outer half, plus the one interior film); an outside-facing
+boundary's effective R is the full chain (the layers' series plus both
+films, the diagnostic's total and the network's chain agreeing); and
+the RC diagnostic's same-zone total is a different record with a
+different convention (the full stack halved plus the one film, the
+per-component heat-gain tracking's UA), which neither the kept layers'
+series nor the network's chain equals in general. The physics is
+unaffected (that number feeds only the per-component heat-gain
+tracking); the read-back reports the network's chain.
 
 RED first: the acceptance file failed to compile at the base with only
 the tests applied (no `ResolvedModel`, no `ResolvedParameter`, no
@@ -1337,11 +1344,54 @@ default profile.
 
 Gates (canonical env `uv sync --locked --all-extras --all-groups` +
 `uv run maturin develop`), on the staged change and again on the commit:
-fmt clean; clippy `--workspace --all-targets --all-features -D warnings`
-clean; nextest `--workspace --all-features -j 4` 8041 passed, 3 skipped
-(the ignored kind-pin generator and the two hand-run measurement tests);
-pytest `-m ''` 1730 passed, 6 xfailed, 0 failed, 0 errors; pyright 0;
-the goldens bitwise (compare-all 8, `full_year_900s_dst` 1).
+fmt clean; clippy `--workspace --all-targets --all-features --
+-D warnings` clean; nextest `--workspace --all-features -j 4` 8041
+passed, 3 skipped (the ignored kind-pin generator and the two hand-run
+measurement tests); pytest `-m ''` 1730 passed, 6 xfailed, 0 failed,
+0 errors; pyright 0; the goldens bitwise (compare-all 8,
+`full_year_900s_dst` 1).
+
+Independent review round at tip `801633e5`, five findings fixed on the
+branch. (1) MAJOR, the same-zone fin disclosure's core claim was false,
+proven by probe: the read-back's `r_effective` reported the kept
+layers' full series plus the interior film (a third convention) while
+the network's discrete chain drops one half-resistor (the precomputed
+path pops the innermost kept layer's inner half; the material path
+skips the cut layer's outer half), up to +67% overstatement (base.xml's
+furniture mass: the read-back 1.645 against the network's 0.985). The
+fix computes the read-back's `r_effective` for a same-zone finned
+boundary from the assembled legs' path rules (the precomputed path
+minus half the last kept layer's R, the material path minus half the
+first kept layer's R), `ResolvedBoundary` carries `same_zone` so a
+record's convention is readable, and the module's comment, the
+acceptance test's doc and the paragraph above state all three
+conventions truthfully: the outside-facing boundaries' full chain, the
+same-zone fins' actual chain, the diagnostic's full-stack-halved total
+named as a different record. The pins updated to the actual values:
+`same_zone_fin_r_pins_the_network_chain` holds the furniture mass to
+0.9850975292587776 and the partition wall to 0.5916125292587776 (the
+network's chain sums), and the sum tests (the Rust acceptance file and
+the Python surface's) apply the fin rule per boundary. RED: the
+reworded sum tests and the pins fail at the old read-back (the
+furniture 1.645, the wall 0.631); GREEN at the fix. (2) the step-use
+pin: `step_telemetry_uses_the_read_back_furnace_values` runs the parity
+furnace fixture and holds the step telemetry's `fuel_input_w` equal to
+the read-back's rated capacity over AFUE, bit for bit, at the first
+full-fire step (pinned at step 4, the duty exactly 1.0);
+`network_conductance_matches_the_reported_r` holds the diagnostic's
+per-boundary UA equal to the area over the read-back's effective R, bit
+for bit, for one envelope case. (3) the every-class test's `_ => &[]`
+fallthrough silently exempted unlisted classes: the table now carries a
+row for every registered class (the event loads' power and duration,
+the wet appliances' unit count, the generators' rated power, the
+dehumidifier's removal, energy factor and load fraction, the
+ventilation units' two fans and flow rate, the protocol bridge an
+explicit empty row) and the test fails a class the table omits. (4) the
+clippy gate string above gains the `--` separator before `-D warnings`.
+(5) the read-back dict's flaky inequality observation:
+`test_resolved_model_reads_identical_twice` builds the Python dict
+twice from one dwelling and holds the reads identical, so a recurrence
+fails in CI.
 
 ## RT-7: the per-step RL observation is built without allocation
 

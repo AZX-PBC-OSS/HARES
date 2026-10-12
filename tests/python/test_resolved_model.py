@@ -44,6 +44,7 @@ def test_resolved_model_is_a_dict_of_si_floats_and_strings():
     for boundary in model["boundaries"]:
         assert isinstance(boundary["id"], str)
         assert isinstance(boundary["kind"], str)
+        assert isinstance(boundary["same_zone"], bool)
         for key in ("area_m2", "r_effective_m2k_w", "films_m2k_w", "c_j_k"):
             assert isinstance(boundary[key], float)
         for layer in boundary["layers"]:
@@ -67,11 +68,25 @@ def test_resolved_model_boundaries_layers_sum_to_the_effective_resistance():
         if boundary["kind"] in ("slab", "window", "skylight"):
             continue
         layers = sum(layer["r_m2k_w"] for layer in boundary["layers"])
-        expected = layers + boundary["films_m2k_w"]
+        # A same-zone fin's network chain drops one half-resistor: the
+        # precomputed path (which the base dwelling's same-zone surfaces
+        # take) pops the innermost kept layer's inner half.
+        dropped = (
+            boundary["layers"][-1]["r_m2k_w"] / 2 if boundary["same_zone"] else 0.0
+        )
+        expected = layers + boundary["films_m2k_w"] - dropped
         relative = abs(expected - boundary["r_effective_m2k_w"]) / boundary["r_effective_m2k_w"]
         assert relative <= 1e-12, (
-            f"boundary {boundary['id']!r}: layers plus films must equal the "
-            f"effective resistance to 1e-12 relative, got {relative}"
+            f"boundary {boundary['id']!r}: the network's chain (layers, minus the "
+            f"fin's dropped half-resistor, plus films) must equal the effective "
+            f"resistance to 1e-12 relative, got {relative}"
         )
         checked += 1
     assert checked > 0, "the base dwelling's opaque boundaries must be checked"
+
+
+def test_resolved_model_reads_identical_twice():
+    dwelling = make_dwelling(duration_s=300, time_res_s=60)
+    first = dwelling.resolved_model()
+    second = dwelling.resolved_model()
+    assert first == second, "the read-back's dict builds identically on every read"
