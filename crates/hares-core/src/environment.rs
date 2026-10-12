@@ -1,12 +1,15 @@
 //! Outdoor environment state (weather, grid signals).
 
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 #[cfg(test)]
 use chrono::Duration;
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use hares_io::hpxml::building::{BoundaryType, ZoneType};
-use hares_io::{Building, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries, monthly_day_counts};
+use hares_io::{
+    Building, ScheduleTimeSeries, SiteLocation, WeatherMeta, WeatherTimeSeries, monthly_day_counts,
+};
 use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherField};
 use hares_physics::{
     psychrometrics::{humidity_ratio_from_tdp, moist_air_enthalpy, wet_bulb_from_humidity_ratio},
@@ -117,7 +120,14 @@ pub struct EnvironmentInitOptions<'a> {
 /// Produces a complete [`EnvironmentState`] at each timestep.
 #[derive(Debug, Clone)]
 pub struct EnvironmentManager {
-    weather: WeatherTimeSeries,
+    /// The weather series at the step resolution, shared with the
+    /// blueprint and every other build of it: the manager never mutates
+    /// it, so the build's `Arc` clone shares the parse and the resample.
+    weather: Arc<WeatherTimeSeries>,
+    /// The schedule at the step resolution, owned per build: the
+    /// assembly's unavailable-period zeroing and the schedule injection
+    /// add columns to the build's own copy, cloned from the blueprint's
+    /// shared series.
     schedule: ScheduleTimeSeries,
     pub(crate) weather_meta: WeatherMeta,
     zone_types: Vec<hares_io::hpxml::ZoneType>,
@@ -228,12 +238,65 @@ impl EnvironmentManager {
             return Err(EnvironmentManagerError::ZeroTimeResolution);
         }
 
-        let weather = weather.resample(step_secs)?;
+        let weather = Arc::new(weather.resample(step_secs)?);
         if weather.is_empty() {
             return Err(EnvironmentManagerError::EmptyWeather);
         }
 
         let schedule = schedule.resample(step_secs)?;
+        if schedule.is_empty() {
+            return Err(EnvironmentManagerError::EmptySchedule);
+        }
+
+        Self::from_resampled(
+            weather, schedule, building, step_secs, start_time, None, options,
+        )
+    }
+
+    /// The blueprint build's constructor: the weather and schedule already
+    /// resampled to the blueprint's step (shared parses, one resample per
+    /// unique input), the resolved site location the manager's own
+    /// metadata copy carries (the shared series are never mutated). The
+    /// schedule is the build's own copy, cloned from the blueprint's
+    /// shared series: the assembly's unavailable-period zeroing and the
+    /// schedule injection write it.
+    pub(crate) fn new_shared(
+        weather: Arc<WeatherTimeSeries>,
+        schedule: ScheduleTimeSeries,
+        building: &Building,
+        time_res: StdDuration,
+        start_time: DateTime<FixedOffset>,
+        site_location: &SiteLocation,
+        options: EnvironmentInitOptions<'_>,
+    ) -> Result<Self, EnvironmentManagerError> {
+        let step_secs = u32::try_from(time_res.as_secs()).unwrap_or(u32::MAX);
+        if step_secs == 0 {
+            return Err(EnvironmentManagerError::ZeroTimeResolution);
+        }
+        Self::from_resampled(
+            weather,
+            schedule,
+            building,
+            step_secs,
+            start_time,
+            Some(site_location),
+            options,
+        )
+    }
+
+    /// The shared constructor tail: everything after the resample.
+    fn from_resampled(
+        weather: Arc<WeatherTimeSeries>,
+        schedule: ScheduleTimeSeries,
+        building: &Building,
+        step_secs: u32,
+        start_time: DateTime<FixedOffset>,
+        site_location: Option<&SiteLocation>,
+        options: EnvironmentInitOptions<'_>,
+    ) -> Result<Self, EnvironmentManagerError> {
+        if weather.is_empty() {
+            return Err(EnvironmentManagerError::EmptyWeather);
+        }
         if schedule.is_empty() {
             return Err(EnvironmentManagerError::EmptySchedule);
         }
@@ -252,19 +315,35 @@ impl EnvironmentManager {
             return Err(EnvironmentManagerError::DstNotEnabled);
         }
 
+        // The manager's own metadata copy: the shared weather series is
+        // never mutated, so the resolved site location (the blueprint's
+        // resolution of the HPXML site, the weather header and the
+        // config's override) is written into this copy, the values every
+        // reader here (the solar position's latitude and longitude, the
+        // hemisphere rule, the barometric elevation, the start-offset
+        // warning) read.
+        let mut weather_meta = weather.meta.clone();
+        if let Some(site_location) = site_location {
+            weather_meta.latitude = site_location.latitude_deg;
+            weather_meta.longitude = site_location.longitude_deg;
+            weather_meta.elevation_m = site_location.elevation_m;
+            weather_meta.timezone_offset_h = site_location.utc_offset_h;
+            weather_meta.has_embedded_location = true;
+        }
+
         // Validate timezone offset: mismatched offset silently produces wrong solar position.
         // The caller is responsible for providing a correctly-offset local time; this
         // warning makes the error detectable without a breaking API change.
         let entry_offset_secs = start_time.offset().local_minus_utc();
-        let weather_offset_secs = (weather.meta.timezone_offset_h * 3600.0).round() as i32;
+        let weather_offset_secs = (weather_meta.timezone_offset_h * 3600.0).round() as i32;
         if (entry_offset_secs - weather_offset_secs).abs() > 1800 {
             tracing::warn!(
                 entry_offset_h = entry_offset_secs as f64 / 3600.0,
-                weather_offset_h = weather.meta.timezone_offset_h,
+                weather_offset_h = weather_meta.timezone_offset_h,
                 "start_time timezone offset ({:.1}h) differs from weather file timezone offset \
                  ({:.1}h) by more than 0.5 hours; solar position will be incorrect",
                 entry_offset_secs as f64 / 3600.0,
-                weather.meta.timezone_offset_h,
+                weather_meta.timezone_offset_h,
             );
         }
 
@@ -275,7 +354,6 @@ impl EnvironmentManager {
         let (mains_t_annual_avg_c, mains_dt_annual_range_c) =
             compute_mains_inputs(&weather, step_secs);
 
-        let weather_meta = weather.meta.clone();
         let is_southern = weather_meta.latitude < 0.0;
         let mains_hemisphere = if is_southern {
             Hemisphere::Southern

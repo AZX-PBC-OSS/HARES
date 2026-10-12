@@ -18,6 +18,8 @@
 //! flow on the public Rust API, and the error text misattributes the cause
 //! to the equipment's setter implementation.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
@@ -41,33 +43,36 @@ fn fixture_dir() -> PathBuf {
 
 fn build_dwelling() -> Dwelling {
     let config = DwellingConfig {
-        hpxml_path: fixture_dir().join("home.xml"),
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: chrono::FixedOffset::west_opt(10 * 3600)
-                .expect("UTC-10 offset is valid")
-                .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
-                .unwrap(),
-            duration: Duration::hours(1),
-            time_res: Duration::seconds(900),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_dir().join("home.xml")),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: chrono::FixedOffset::west_opt(10 * 3600)
+                    .expect("UTC-10 offset is valid")
+                    .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                    .unwrap(),
+                duration: Duration::hours(1),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            100,
+            None,
+            None,
+        ),
     };
     Dwelling::from_config(config).expect("dwelling builds from fixture")
 }

@@ -6,8 +6,6 @@
 //! defaults, so a config built here resolves exactly like one parsed from
 //! TOML.
 
-use std::path::PathBuf;
-
 use chrono::Duration;
 use hares_core::DwellingConfig;
 use hares_io::{HealthPolicy, ReportSpec, SimulationConfig, SiteLocationOverride};
@@ -583,15 +581,18 @@ pub struct PyDwellingConfig(pub DwellingConfig);
 /// constructor shares: the input triple, the one config object and the
 /// dwelling-level keywords. One struct, so the dwelling config's, the
 /// dwelling's and the blueprint's constructors forward one shape instead
-/// of nine arguments.
+/// of nine arguments. Every input argument is either a path/content
+/// source or an already-parsed handle: the handle is shared (its parse is
+/// used as is), the source is parsed in the constructor's detached
+/// section.
 pub(crate) struct DwellingConfigArgs<'a> {
-    pub hpxml: String,
-    pub schedule: Option<String>,
-    pub weather: String,
+    pub hpxml: crate::py_inputs::HpxmlArg,
+    pub schedule: Option<crate::py_inputs::ScheduleArg>,
+    pub weather: crate::py_inputs::WeatherArg,
+    pub defaults: crate::py_inputs::DefaultsArg,
     pub config: PySimulationConfig,
     pub bldg_id: i64,
     pub initialization_duration: Option<i64>,
-    pub defaults_path: Option<String>,
     pub overrides: Option<&'a Bound<'a, PyDict>>,
     pub unexpected: Option<&'a Bound<'a, PyDict>>,
 }
@@ -635,24 +636,27 @@ impl PyDwellingConfig {
     // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        hpxml: String,
-        schedule: Option<String>,
-        weather: String,
+        hpxml: &Bound<'_, PyAny>,
+        schedule: Option<&Bound<'_, PyAny>>,
+        weather: &Bound<'_, PyAny>,
         config: PySimulationConfig,
         bldg_id: i64,
         initialization_duration: Option<i64>,
-        defaults_path: Option<String>,
+        defaults_path: Option<&Bound<'_, PyAny>>,
         overrides: Option<&Bound<'_, PyDict>>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         Self::from_args(DwellingConfigArgs {
-            hpxml,
-            schedule,
-            weather,
+            hpxml: crate::py_inputs::hpxml_arg(hpxml)?,
+            schedule: crate::py_blueprint::schedule_arg_maybe(schedule)?,
+            weather: crate::py_inputs::weather_arg(weather)?,
+            defaults: match defaults_path {
+                Some(path) => crate::py_inputs::defaults_arg(path)?,
+                None => crate::py_inputs::DefaultsArg::Source(hares_io::DefaultsSource::default()),
+            },
             config,
             bldg_id,
             initialization_duration,
-            defaults_path,
             overrides,
             unexpected,
         })
@@ -660,48 +664,52 @@ impl PyDwellingConfig {
 
     #[getter]
     pub fn hpxml(&self) -> String {
-        self.0.hpxml_path.to_string_lossy().to_string()
+        self.0.hpxml.display()
     }
 
     #[getter]
     pub fn schedule(&self) -> Option<String> {
-        self.0
-            .schedule_path
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
+        self.0.schedule.as_ref().map(|source| source.display())
     }
 
     #[getter]
     pub fn weather(&self) -> String {
-        self.0.weather_path.to_string_lossy().to_string()
+        match self.0.weather.path() {
+            Some(path) => path.display().to_string(),
+            None => "<weather content>".to_string(),
+        }
     }
 
     #[getter]
     pub fn config(&self) -> PySimulationConfig {
-        PySimulationConfig(self.0.sim_config.clone())
+        PySimulationConfig(self.0.settings.sim_config.clone())
     }
 
     #[getter]
     pub fn defaults_path(&self) -> Option<String> {
         self.0
-            .defaults_path
+            .defaults
+            .base
             .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
+            .map(|p| p.display().to_string())
     }
 
     #[getter]
     pub fn bldg_id(&self) -> i64 {
-        self.0.bldg_id
+        self.0.settings.bldg_id
     }
 
     #[getter]
     pub fn initialization_duration(&self) -> Option<i64> {
-        self.0.initialization_duration.map(|d| d.as_secs() as i64)
+        self.0
+            .settings
+            .initialization_duration
+            .map(|d| d.as_secs() as i64)
     }
 
     #[getter]
     pub fn overrides(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
-        let Some(serde_json::Value::Object(map)) = self.0.overrides.as_ref() else {
+        let Some(serde_json::Value::Object(map)) = self.0.settings.overrides.as_ref() else {
             return Ok(None);
         };
         let dict = PyDict::new(py);
@@ -726,7 +734,7 @@ impl PyDwellingConfig {
             self.hpxml(),
             schedule,
             self.weather(),
-            self.0.bldg_id
+            self.0.settings.bldg_id
         )
     }
 }
@@ -770,24 +778,87 @@ impl PyDwellingConfig {
         let parsed_overrides = parse_overrides(args.overrides)?;
 
         Ok(Self(DwellingConfig {
-            hpxml_path: PathBuf::from(&args.hpxml),
-            schedule_path: args.schedule.map(PathBuf::from),
-            weather_path: PathBuf::from(&args.weather),
-            defaults_path: args.defaults_path.map(PathBuf::from),
-            sim_config: args.config.0,
-            overrides: parsed_overrides,
-            bldg_id: args.bldg_id,
-            initialization_duration: args
-                .initialization_duration
-                .filter(|&d| d != 0)
-                .map(|d| std::time::Duration::from_secs(d as u64)),
-            patches: None,
+            hpxml: match args.hpxml {
+                crate::py_inputs::HpxmlArg::Source(source) => source,
+                crate::py_inputs::HpxmlArg::Parsed(ref handle) => handle.record().clone(),
+            },
+            schedule: args.schedule.map(|arg| match arg {
+                crate::py_inputs::ScheduleArg::Source(source) => source,
+                crate::py_inputs::ScheduleArg::Parsed(ref handle) => handle
+                    .record()
+                    .cloned()
+                    .unwrap_or_else(|| hares_io::InputSource::Text(std::sync::Arc::from(""))),
+            }),
+            weather: match args.weather {
+                crate::py_inputs::WeatherArg::Source(source) => source,
+                crate::py_inputs::WeatherArg::Parsed(ref handle) => handle.record().clone(),
+            },
+            defaults: match args.defaults {
+                crate::py_inputs::DefaultsArg::Source(source) => source,
+                crate::py_inputs::DefaultsArg::Parsed(ref handle) => handle.record().clone(),
+            },
+            settings: hares_core::DwellingSettings::new(
+                args.config.0,
+                parsed_overrides,
+                args.bldg_id,
+                args.initialization_duration
+                    .filter(|&d| d != 0)
+                    .map(|d| std::time::Duration::from_secs(d as u64)),
+                None,
+            ),
         }))
     }
 
     pub fn to_dwelling_config(&self) -> PyResult<DwellingConfig> {
         Ok(self.0.clone())
     }
+}
+
+/// The constructor's detached-section inputs: every input argument in its
+/// handle-or-source form (Send: no Python object inside), the generated
+/// schedule's span from the sim config. The detached section parses the
+/// sources and assembles the builder's inputs from them.
+pub(crate) struct ConstructorInputs {
+    pub hpxml: crate::py_inputs::HpxmlArg,
+    pub schedule: Option<crate::py_inputs::ScheduleArg>,
+    pub weather: crate::py_inputs::WeatherArg,
+    pub defaults: crate::py_inputs::DefaultsArg,
+    pub generation: Option<hares_io::ScheduleGeneration>,
+}
+
+/// The one dwelling-constructor resolution the Python-facing constructors
+/// share, part one (the GIL held): the config's validation and the
+/// sources' record forms, plus the Send form the constructor's detached
+/// section assembles. A schedule source absent generates from the
+/// defaults handle's profiles over the settings' span.
+///
+/// # Errors
+///
+/// The config's own errors: a removed keyword, a negative
+/// `initialization_duration`, an override that is not a JSON object.
+pub(crate) fn resolve_args(
+    args: DwellingConfigArgs<'_>,
+) -> PyResult<(DwellingConfig, ConstructorInputs)> {
+    let generation = hares_io::ScheduleGeneration {
+        start: args.config.0.start_time,
+        duration: args.config.0.duration,
+        interval: std::time::Duration::from_secs(
+            args.config
+                .0
+                .time_res
+                .num_seconds()
+                .clamp(1, i64::from(u32::MAX)) as u64,
+        ),
+    };
+    let detached = ConstructorInputs {
+        hpxml: args.hpxml.clone(),
+        schedule: args.schedule.clone(),
+        weather: args.weather.clone(),
+        defaults: args.defaults.clone(),
+        generation: Some(generation),
+    };
+    let config = PyDwellingConfig::from_args(args)?.0;
+    Ok((config, detached))
 }
 
 #[cfg(test)]

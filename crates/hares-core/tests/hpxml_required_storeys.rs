@@ -4,6 +4,8 @@
 //! above grade, which OS-HPXML requires. A home without it is an error
 //! naming the element, not a home assumed to be one storey.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -29,29 +31,33 @@ fn ach50_infiltration_without_floors_above_grade_is_an_error() {
         .single()
         .expect("start time");
     let config = DwellingConfig {
-        hpxml_path,
-        schedule_path: None,
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time,
-            duration: Duration::hours(1),
-            time_res: Duration::seconds(3600),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: None,
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time,
+                duration: Duration::hours(1),
+                time_res: Duration::seconds(3600),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            None,
+            None,
+        ),
     };
     let err = match Dwelling::from_config(config) {
         Err(err) => err,

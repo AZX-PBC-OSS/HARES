@@ -16,6 +16,8 @@
 //!    heating setpoint profile instead of riding the gains' bias above it
 //!    and crossing the AC's cooling turn-on. (`boiler_ebm_publishes_and_the_ac_never_cools_in_january`.)
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -55,32 +57,34 @@ fn parse_fips(xml: &str) -> String {
 fn bldg2_january_config() -> DwellingConfig {
     let bldg_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0000002");
     DwellingConfig {
-        hpxml_path: bldg_dir.join("home.xml"),
-        schedule_path: Some(bldg_dir.join("in.schedules.csv")),
-        weather_path: weather_for(&bldg_dir),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::west_opt(5 * 3600)
-                .unwrap()
-                .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
-                .unwrap(),
-            duration: Duration::days(7),
-            time_res: Duration::hours(1),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 2,
-        initialization_duration: Some(std::time::Duration::from_secs(7 * 24 * 3600)),
-        patches: None,
+        hpxml: InputSource::Path(bldg_dir.join("home.xml")),
+        schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather_for(&bldg_dir)),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::west_opt(5 * 3600)
+                    .unwrap()
+                    .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                    .unwrap(),
+                duration: Duration::days(7),
+                time_res: Duration::hours(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            2,
+            Some(std::time::Duration::from_secs(7 * 24 * 3600)),
+            None,
+        ),
     }
 }
 

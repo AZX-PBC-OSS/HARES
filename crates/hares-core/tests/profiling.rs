@@ -9,6 +9,8 @@
 //! `2023-01-01T00:00:00-07:00`, no warm-up, no report configured.
 #![cfg(feature = "profiling")]
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
@@ -48,15 +50,13 @@ fn load_cz2a_fixture() -> Dwelling {
     sim_config.reports = Vec::new();
 
     let config = DwellingConfig {
-        hpxml_path: root.join("building.xml"),
-        schedule_path: Some(root.join("schedule.csv")),
-        weather_path: root.join("weather.epw"),
-        defaults_path: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")),
-        sim_config,
-        overrides: None,
-        bldg_id,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(root.join("building.xml")),
+        schedule: Some(InputSource::Path(root.join("schedule.csv"))),
+        weather: WeatherInput::Path(root.join("weather.epw")),
+        defaults: DefaultsSource::directory(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults"),
+        ),
+        settings: DwellingSettings::new(sim_config, None, bldg_id, None, None),
     };
 
     Dwelling::from_config(config).expect("fixture dwelling must load")
@@ -98,15 +98,13 @@ fn load_cz2a_fixture_with_parquet(path: &std::path::Path) -> Dwelling {
         .and_then(|value| value.as_integer())
         .unwrap_or(1);
     let config = DwellingConfig {
-        hpxml_path: root.join("building.xml"),
-        schedule_path: Some(root.join("schedule.csv")),
-        weather_path: root.join("weather.epw"),
-        defaults_path: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")),
-        sim_config,
-        overrides: None,
-        bldg_id,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(root.join("building.xml")),
+        schedule: Some(InputSource::Path(root.join("schedule.csv"))),
+        weather: WeatherInput::Path(root.join("weather.epw")),
+        defaults: DefaultsSource::directory(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults"),
+        ),
+        settings: DwellingSettings::new(sim_config, None, bldg_id, None, None),
     };
 
     Dwelling::from_config(config).expect("fixture dwelling must load")

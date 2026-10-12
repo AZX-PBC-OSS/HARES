@@ -16,7 +16,9 @@ mod denver_offset;
 mod tests {
     use super::denver_offset::denver_offset;
     use chrono::{Duration, TimeZone};
+    use hares_core::DwellingSettings;
     use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
     use hares_types::ZoneId;
     use std::collections::BTreeMap;
     use std::fs;
@@ -61,41 +63,47 @@ mod tests {
         };
 
         DwellingConfig {
-            hpxml_path,
-            schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
-            // The OCHRE reference's zero-order hold of the weather, prepared
-            // by the Python adapter's hold_weather and committed: this test
-            // compares against OCHRE output, so it reads the held file
-            // instead of asking the engine for an override.
-            weather_path: project_root().join("tests/fixtures/ochre_hold/USA_CO_Denver_60s.epw"),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                start_time,
-                duration,
-                time_res: Duration::minutes(1),
-                reports: vec![hares_io::ReportSpec {
-                    name: "frame".to_string(),
-                    selection: hares_io::Selection::Verbosity(6),
-                    frequency: hares_io::Frequency::default(),
-                    destination: hares_io::Destination::Csv {
-                        path: csv_path,
-                        overwrite: false,
-                    },
-                }],
-                diagnostics: false,
-                metrics: false,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id: 1,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(hpxml_path),
+            schedule: Some(InputSource::Path(
+                examples_dir().join("BEopt_example_schedule.csv"),
+            )),
+            weather: WeatherInput::Path(
+                // The OCHRE reference's zero-order hold of the weather, prepared
+                // by the Python adapter's hold_weather and committed: this test
+                // compares against OCHRE output, so it reads the held file
+                // instead of asking the engine for an override.
+                project_root().join("tests/fixtures/ochre_hold/USA_CO_Denver_60s.epw"),
+            ),
+            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time,
+                    duration,
+                    time_res: Duration::minutes(1),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(6),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path,
+                            overwrite: false,
+                        },
+                    }],
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                1,
+                None,
+                None,
+            ),
         }
     }
 
@@ -130,8 +138,8 @@ mod tests {
         .expect("write fixed-window HPXML");
 
         let config = beopt_freefloat_config(scenario, files.path().join("output.csv"), hpxml_path);
-        let n_steps = (config.sim_config.duration.num_seconds()
-            / config.sim_config.time_res.num_seconds()) as usize;
+        let n_steps = (config.settings.sim_config.duration.num_seconds()
+            / config.settings.sim_config.time_res.num_seconds()) as usize;
         let mut dwelling = Dwelling::from_config(config).expect("Dwelling::from_config");
         assert!(
             dwelling

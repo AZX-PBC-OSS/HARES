@@ -46,8 +46,15 @@ fn wrap_systems(systems_xml: &str) -> String {
 
 fn resolve_ok(xml: &str) -> Vec<hares_io::hpxml::EquipmentSpec> {
     let building = parse_building(xml).expect("HPXML must parse");
-    resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment must succeed")
+    resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment must succeed")
 }
 
 fn find_spec<'a>(

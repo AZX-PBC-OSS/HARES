@@ -1,6 +1,8 @@
 mod corpus;
 mod tolerance;
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -285,17 +287,23 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
                 continue;
             }
         };
-        let equipment =
-            match resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()) {
-                Ok(specs) => specs,
-                Err(err) => {
-                    failures.push(format!(
-                        "fixture={} equipment resolution failed: {err}",
-                        fixture_id
-                    ));
-                    continue;
-                }
-            };
+        let equipment = match resolve_equipment(
+            &building,
+            building.climate_zone_iecc.as_deref(),
+            None,
+            &DefaultsStore::empty(),
+            None,
+            &mut Vec::new(),
+        ) {
+            Ok(specs) => specs,
+            Err(err) => {
+                failures.push(format!(
+                    "fixture={} equipment resolution failed: {err}",
+                    fixture_id
+                ));
+                continue;
+            }
+        };
         let equipment_names: Vec<String> = equipment.iter().map(|spec| spec.name.clone()).collect();
         let conditioned = building
             .zones
@@ -511,30 +519,34 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
 
     let defaults_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
     let dwelling_config = DwellingConfig {
-        hpxml_path: fixture.building_xml.clone(),
-        schedule_path: Some(fixture.schedule_csv.clone()),
-        // The weather the engine reads is the case's hourly file held at the
-        // case's step by the Python adapter's OCHRE hold (committed beside
-        // the source): the OCHRE comparison's zero-order hold now lives in
-        // the adapter, not in an engine override.
-        weather_path: fixture.weather_ochre_hold.clone(),
-        sim_config,
-        defaults_path: Some(defaults_path),
-        // The fixture's `[overrides]` table (the battery fixtures declare
-        // their control there) with the EV override merged in: see
-        // `ev_override`. Every EV fixture models the heaterless vehicle
-        // its OCHRE reference models, and charging fixtures (`[ev]`
-        // section) additionally pin the deterministic discharged-at-start
-        // scenario both simulators charge identically (the reference's
-        // event file pins the OCHRE side; initial SOC, a warm pack, and an
-        // Immediate strategy pin the HARES side).
-        overrides: dwelling_overrides(&config, &fixture.building_xml)?,
-        bldg_id: config.bldg_id.unwrap_or(1),
-        initialization_duration: config
-            .initialization_duration_seconds
-            .and_then(|seconds| u64::try_from(seconds).ok())
-            .map(StdDuration::from_secs),
-        patches: None,
+        hpxml: InputSource::Path(fixture.building_xml.clone()),
+        schedule: Some(InputSource::Path(fixture.schedule_csv.clone())),
+        weather: WeatherInput::Path(
+            // The weather the engine reads is the case's hourly file held at the
+            // case's step by the Python adapter's OCHRE hold (committed beside
+            // the source): the OCHRE comparison's zero-order hold now lives in
+            // the adapter, not in an engine override.
+            fixture.weather_ochre_hold.clone(),
+        ),
+        defaults: DefaultsSource::directory(defaults_path),
+        settings: DwellingSettings::new(
+            sim_config,
+            // The fixture's `[overrides]` table (the battery fixtures declare
+            // their control there) with the EV override merged in: see
+            // `ev_override`. Every EV fixture models the heaterless vehicle
+            // its OCHRE reference models, and charging fixtures (`[ev]`
+            // section) additionally pin the deterministic discharged-at-start
+            // scenario both simulators charge identically (the reference's
+            // event file pins the OCHRE side; initial SOC, a warm pack, and an
+            // Immediate strategy pin the HARES side).
+            dwelling_overrides(&config, &fixture.building_xml)?,
+            config.bldg_id.unwrap_or(1),
+            config
+                .initialization_duration_seconds
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .map(StdDuration::from_secs),
+            None,
+        ),
     };
 
     // A pinned start must still be the temperature HARES starts from, or the

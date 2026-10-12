@@ -12,7 +12,7 @@ use crate::epw::DesignConditions;
 use crate::epw::{SkyTempModel, compute_sky_temp_c};
 
 /// Supported weather file formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WeatherFormat {
     /// EnergyPlus Weather file (.epw), hourly data.
     Epw,

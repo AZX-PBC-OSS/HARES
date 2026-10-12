@@ -1,5 +1,7 @@
 //! Row 34: the config validation runs on the Rust construction path too.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -29,17 +31,15 @@ fn sim_config(duration_secs: i64, time_res_secs: i64) -> SimulationConfig {
 
 fn dwelling_config(root: &Path, sim_config: SimulationConfig) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: root.join("tests/fixtures/resstock/2025.1/bldg0000007/home.xml"),
-        schedule_path: Some(
+        hpxml: InputSource::Path(root.join("tests/fixtures/resstock/2025.1/bldg0000007/home.xml")),
+        schedule: Some(InputSource::Path(
             root.join("tests/fixtures/resstock/2025.1/bldg0000007/in.schedules.csv"),
+        )),
+        weather: WeatherInput::Path(
+            root.join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         ),
-        weather_path: root.join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
-        defaults_path: Some(root.join("defaults")),
-        sim_config,
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        defaults: DefaultsSource::directory(root.join("defaults")),
+        settings: DwellingSettings::new(sim_config, None, 100, None, None),
     }
 }
 

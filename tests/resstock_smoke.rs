@@ -24,7 +24,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use chrono::{Duration, TimeZone};
-    use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
+    use hares_core::{DwellingConfig, DwellingSettings, SimulationConfig, SimulationEngine};
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
     use sha2::{Digest, Sha256};
 
     fn project_root() -> PathBuf {
@@ -178,39 +179,41 @@ mod tests {
 
         let engine = SimulationEngine::new();
         let config = DwellingConfig {
-            hpxml_path,
-            schedule_path,
-            weather_path,
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                start_time: denver_offset()
-                    .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(1),
-                time_res: Duration::minutes(1),
-                reports: vec![hares_io::ReportSpec {
-                    name: "frame".to_string(),
-                    selection: hares_io::Selection::Verbosity(1),
-                    frequency: hares_io::Frequency::default(),
-                    destination: hares_io::Destination::Csv {
-                        path: csv_path.clone(),
-                        overwrite: false,
-                    },
-                }],
-                diagnostics: false,
-                metrics: true,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id: 100,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(hpxml_path),
+            schedule: schedule_path.map(InputSource::Path),
+            weather: WeatherInput::Path(weather_path),
+            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: denver_offset()
+                        .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
+                        .unwrap(),
+                    duration: Duration::hours(1),
+                    time_res: Duration::minutes(1),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(1),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path.clone(),
+                            overwrite: false,
+                        },
+                    }],
+                    diagnostics: false,
+                    metrics: true,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                100,
+                None,
+                None,
+            ),
         };
 
         let result = engine.run(config).expect("engine.run should succeed");
@@ -372,39 +375,41 @@ mod tests {
         let csv_path = output_dir.path().join("winter_crankcase_pin.csv");
 
         let config = DwellingConfig {
-            hpxml_path: bldg_dir.join("home.xml"),
-            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
-            weather_path: weather_path("2024.2", &bldg_dir),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                start_time: denver_offset()
-                    .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(72),
-                time_res: Duration::minutes(60),
-                reports: vec![hares_io::ReportSpec {
-                    name: "frame".to_string(),
-                    selection: hares_io::Selection::Verbosity(1),
-                    frequency: hares_io::Frequency::default(),
-                    destination: hares_io::Destination::Csv {
-                        path: csv_path.clone(),
-                        overwrite: false,
-                    },
-                }],
-                diagnostics: false,
-                metrics: true,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id: 200,
-            initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
-            patches: None,
+            hpxml: InputSource::Path(bldg_dir.join("home.xml")),
+            schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
+            weather: WeatherInput::Path(weather_path("2024.2", &bldg_dir)),
+            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: denver_offset()
+                        .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
+                        .unwrap(),
+                    duration: Duration::hours(72),
+                    time_res: Duration::minutes(60),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(1),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path.clone(),
+                            overwrite: false,
+                        },
+                    }],
+                    diagnostics: false,
+                    metrics: true,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                200,
+                Some(std::time::Duration::from_secs(24 * 3600)),
+                None,
+            ),
         };
 
         let engine = SimulationEngine::new();
@@ -478,39 +483,41 @@ mod tests {
         csv_path: &Path,
     ) -> DwellingConfig {
         DwellingConfig {
-            hpxml_path: bldg_dir.join("home.xml"),
-            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
-            weather_path: weather_path(version, bldg_dir),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                start_time: denver_offset()
-                    .with_ymd_and_hms(2018, month, day, 0, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(72),
-                time_res: Duration::minutes(60),
-                reports: vec![hares_io::ReportSpec {
-                    name: "frame".to_string(),
-                    selection: hares_io::Selection::Verbosity(1),
-                    frequency: hares_io::Frequency::default(),
-                    destination: hares_io::Destination::Csv {
-                        path: csv_path.to_path_buf(),
-                        overwrite: false,
-                    },
-                }],
-                diagnostics: false,
-                metrics: true,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id: 200,
-            initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
-            patches: None,
+            hpxml: InputSource::Path(bldg_dir.join("home.xml")),
+            schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
+            weather: WeatherInput::Path(weather_path(version, bldg_dir)),
+            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: denver_offset()
+                        .with_ymd_and_hms(2018, month, day, 0, 0, 0)
+                        .unwrap(),
+                    duration: Duration::hours(72),
+                    time_res: Duration::minutes(60),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(1),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path.to_path_buf(),
+                            overwrite: false,
+                        },
+                    }],
+                    diagnostics: false,
+                    metrics: true,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                200,
+                Some(std::time::Duration::from_secs(24 * 3600)),
+                None,
+            ),
         }
     }
 

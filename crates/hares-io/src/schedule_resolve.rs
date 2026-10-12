@@ -466,6 +466,7 @@ impl ProfileRow<'_> {
 /// `weekday_fractions` / `weekend_fractions` / `month_multipliers` rows are
 /// all errors naming the file, the line, the profile and the element.
 pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, HaresError> {
+    crate::parse_counts::bump_profiles();
     let csv_path = defaults_dir.join(DEFAULT_SCHEDULES_CSV);
     let content = std::fs::read_to_string(&csv_path).map_err(|e| {
         HaresError::Io(format!(
@@ -473,7 +474,21 @@ pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, Har
             csv_path.display()
         ))
     })?;
+    parse_default_profiles_str(&content, &csv_path)
+}
 
+/// The default schedule profiles parsed from the file's content: the
+/// content twin of [`load_default_profiles`] for a defaults source whose
+/// profiles file is a replacement. The same strictness, the file named the
+/// same way.
+pub fn parse_default_profiles_str(
+    content: &str,
+    csv_path: &Path,
+) -> Result<DefaultProfiles, HaresError> {
+    parse_profiles_csv(content, csv_path)
+}
+
+fn parse_profiles_csv(content: &str, csv_path: &Path) -> Result<DefaultProfiles, HaresError> {
     // Intermediate: the values and source line per (ochre_name, element_kind)
     let mut weekday_map: HashMap<String, (usize, [f64; 24])> = HashMap::new();
     let mut weekend_map: HashMap<String, (usize, [f64; 24])> = HashMap::new();
@@ -521,7 +536,7 @@ pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, Har
             ))
         };
         let row = ProfileRow {
-            csv_path: &csv_path,
+            csv_path,
             profile: profile_name,
             element,
             line_no,
@@ -604,7 +619,7 @@ pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, Har
     // test `shipped_default_occupancy_has_distinct_weekend`.
     Ok(DefaultProfiles {
         profiles,
-        csv_path: Some(csv_path),
+        csv_path: Some(csv_path.to_path_buf()),
     })
 }
 
@@ -655,21 +670,19 @@ fn annual_mean_fraction(profile: &DefaultScheduleProfile) -> f64 {
 }
 
 /// Inject resolved power/event schedule metadata into equipment specs.
+///
+/// `profiles` are the default schedule profiles, parsed once by the
+/// caller's defaults handle: the injection reads the shared handle's
+/// table, never the file again. `None` runs with no default profiles (the
+/// config's no-defaults-directory rule).
 pub fn inject_schedule_into_specs(
     specs: &mut Vec<EquipmentSpec>,
     schedule: &mut ScheduleTimeSeries,
-    defaults_path: Option<&Path>,
+    profiles: Option<&DefaultProfiles>,
     defaults: &DefaultsStore,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
-    inject_schedule_into_specs_with_pre_period(
-        specs,
-        schedule,
-        None,
-        defaults_path,
-        defaults,
-        warnings,
-    )
+    inject_schedule_into_specs_with_pre_period(specs, schedule, None, profiles, defaults, warnings)
 }
 
 /// [`inject_schedule_into_specs`] with the schedule's pre-period columns:
@@ -684,7 +697,7 @@ pub fn inject_schedule_into_specs_with_pre_period(
     specs: &mut Vec<EquipmentSpec>,
     schedule: &mut ScheduleTimeSeries,
     pre_period_columns: Option<&[Vec<f64>]>,
-    defaults_path: Option<&Path>,
+    profiles: Option<&DefaultProfiles>,
     defaults: &DefaultsStore,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
@@ -743,9 +756,13 @@ pub fn inject_schedule_into_specs_with_pre_period(
 
     ensure_specs_for_csv_columns(specs, &csv_col_map, defaults, warnings);
 
-    let profiles = match defaults_path {
-        Some(dir) => load_default_profiles(dir)?,
-        None => DefaultProfiles::default(),
+    let loaded_profiles;
+    let profiles = match profiles {
+        Some(shared) => shared,
+        None => {
+            loaded_profiles = DefaultProfiles::default();
+            &loaded_profiles
+        }
     };
 
     let schedule_family = schedule_format_family(&csv_col_map);
@@ -787,7 +804,7 @@ pub fn inject_schedule_into_specs_with_pre_period(
                     mapping,
                     &csv_col_map,
                     schedule,
-                    &profiles,
+                    profiles,
                     pre_period_columns,
                 )?;
             }
@@ -795,7 +812,7 @@ pub fn inject_schedule_into_specs_with_pre_period(
                 inject_event_schedule(spec, mapping, &csv_col_map, schedule)?;
             }
             ScheduleCategory::Occupancy => {
-                inject_occupancy_schedule(spec, schedule, &profiles);
+                inject_occupancy_schedule(spec, schedule, profiles);
             }
             ScheduleCategory::Setpoint | ScheduleCategory::WaterHeater => {}
             ScheduleCategory::NotUsed { .. } => {}
@@ -2400,7 +2417,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -2438,7 +2455,7 @@ mod tests {
         let err = inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -2473,7 +2490,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -2639,7 +2656,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -2757,7 +2774,7 @@ mod tests {
         let err = inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -3889,7 +3906,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut warnings,
         )
@@ -4055,7 +4072,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -4282,7 +4299,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -4344,7 +4361,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -4403,7 +4420,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -4448,7 +4465,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -4482,7 +4499,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -4543,7 +4560,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -5408,7 +5425,14 @@ mod tests {
             // the weather site or patches its own test supplies) has no
             // census here: it is counted in `unresolved`, pinned below, so a
             // resolve failure is never silently eaten.
-            let specs = match crate::resolve_equipment(&building, &defaults, None, &mut warnings) {
+            let specs = match crate::resolve_equipment(
+                &building,
+                building.climate_zone_iecc.as_deref(),
+                None,
+                &defaults,
+                None,
+                &mut warnings,
+            ) {
                 Ok(specs) => specs,
                 Err(_) => {
                     unresolved.push(

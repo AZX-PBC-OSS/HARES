@@ -667,6 +667,8 @@ impl PyEquipmentProvenance {
 
 #[cfg(test)]
 mod tests {
+    use hares_core::DwellingSettings;
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
     use std::path::PathBuf;
     use std::sync::OnceLock;
 
@@ -698,21 +700,26 @@ mod tests {
         sim.output_chunk_size = output_chunk_size;
         let home = &manifest.home[0];
         let config = DwellingConfig {
-            hpxml_path: frame_golden::manifest::repo_path(&root, &home.hpxml),
-            schedule_path: Some(frame_golden::manifest::repo_path(&root, &home.schedule)),
-            weather_path: frame_golden::manifest::repo_path(&root, &home.weather),
-            defaults_path: Some(root.join(&manifest.defaults)),
-            sim_config: sim.clone(),
-            overrides: Some(home.overrides.clone()),
-            bldg_id: home.bldg_id,
-            initialization_duration: if home.initialization_duration_s == 0 {
-                None
-            } else {
-                Some(std::time::Duration::from_secs(
-                    home.initialization_duration_s,
-                ))
-            },
-            patches: None,
+            hpxml: InputSource::Path(frame_golden::manifest::repo_path(&root, &home.hpxml)),
+            schedule: Some(InputSource::Path(frame_golden::manifest::repo_path(
+                &root,
+                &home.schedule,
+            ))),
+            weather: WeatherInput::Path(frame_golden::manifest::repo_path(&root, &home.weather)),
+            defaults: DefaultsSource::directory(root.join(&manifest.defaults)),
+            settings: DwellingSettings::new(
+                sim.clone(),
+                Some(home.overrides.clone()),
+                home.bldg_id,
+                if home.initialization_duration_s == 0 {
+                    None
+                } else {
+                    Some(std::time::Duration::from_secs(
+                        home.initialization_duration_s,
+                    ))
+                },
+                None,
+            ),
         };
         let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
         let result = SimulationEngine::new()

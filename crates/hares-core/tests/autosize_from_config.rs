@@ -1,3 +1,5 @@
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -178,29 +180,31 @@ fn build_minimal_dwelling(hpxml_xml: &str) -> Dwelling {
     let start_time = fixture_start::fixture_start();
 
     let config = DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(schedule_path),
-        weather_path,
-        defaults_path: Some(hares_core::shipped_defaults_dir()),
-        sim_config: SimulationConfig {
-            start_time,
-            duration: Duration::hours(1),
-            time_res: Duration::minutes(1),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 128,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 42,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(schedule_path)),
+        weather: WeatherInput::Path(weather_path),
+        defaults: DefaultsSource::directory(hares_core::shipped_defaults_dir()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time,
+                duration: Duration::hours(1),
+                time_res: Duration::minutes(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 128,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            42,
+            None,
+            None,
+        ),
     };
 
     Dwelling::from_config(config).expect(

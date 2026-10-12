@@ -702,7 +702,13 @@ pub fn read_site(path: &Path) -> Result<Site, HpxmlError> {
         path: path.display().to_string(),
         source,
     })?;
-    let root = parse_xml_document(&xml)?;
+    read_site_str(&xml)
+}
+
+/// [`read_site`] from the document's own text: the content twin, for an
+/// in-memory HPXML input.
+pub fn read_site_str(xml: &str) -> Result<Site, HpxmlError> {
+    let root = parse_xml_document(xml)?;
     extract_site(&root)
 }
 

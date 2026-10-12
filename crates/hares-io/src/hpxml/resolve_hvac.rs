@@ -183,9 +183,9 @@ impl DuctDseParams {
 /// 152 DSE: conditioned volume, site latitude, site longitude.
 pub fn compute_duct_dse_params(
     building: &Building,
+    site: Option<&crate::SiteLocation>,
 ) -> std::result::Result<DuctDseParams, HpxmlError> {
     use super::building::DuctType;
-
     // Aggregate supply vs return duct data from unconditioned zones.
     let mut supply_leakage = 0.0_f64;
     let mut supply_cfm25 = 0.0_f64;
@@ -257,24 +257,29 @@ pub fn compute_duct_dse_params(
     }
 
     let house_volume_m3 = building.conditioned_volume_m3;
-    let latitude_deg = building.site.latitude_deg.ok_or_else(|| {
-        HpxmlError::MissingField {
-            path: "Site/Latitude",
-            system_kind: "Building",
-            system_id: "site".to_string(),
-            reason:
-                "site latitude (°) is required for ASHRAE 152 duct DSE; no silent default permitted",
-        }
-    })?;
-    let longitude_deg = building.site.longitude_deg.ok_or_else(|| {
-        HpxmlError::MissingField {
-            path: "Site/Longitude",
-            system_kind: "Building",
-            system_id: "site".to_string(),
-            reason:
-                "site longitude (°) is required for ASHRAE 152 duct DSE; no silent default permitted",
-        }
-    })?;
+    // The site latitude and longitude the duct lookup reads, in one form:
+    // the caller's resolved site (the blueprint's resolution of the HPXML
+    // site, the weather header and the config's override — the pipeline's,
+    // never absent), or the building's own `Site` (a direct resolve's).
+    // Neither carries one and the resolve is the strict error: no silent
+    // default stands in for the site.
+    let (latitude_deg, longitude_deg) = site
+        .map(|resolved| (resolved.latitude_deg, resolved.longitude_deg))
+        .or_else(|| {
+            building
+                .site
+                .latitude_deg
+                .zip(building.site.longitude_deg)
+        })
+        .ok_or_else(|| {
+            HpxmlError::MissingField {
+                path: "Site/Latitude",
+                system_kind: "Building",
+                system_id: "site".to_string(),
+                reason:
+                    "site latitude (°) is required for ASHRAE 152 duct DSE; no silent default permitted",
+            }
+        })?;
 
     let zone_idx = duct_zone_idx.unwrap_or(0);
     let zone_id = (zone_idx as u16) + 1;
@@ -2072,6 +2077,7 @@ fn check_primary_designation_invariant(
 
 pub(super) fn resolve_hvac(
     building: &Building,
+    site: Option<&crate::SiteLocation>,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
     warnings: &mut Vec<Warning>,
@@ -2093,7 +2099,7 @@ pub(super) fn resolve_hvac(
         .and_then(|n| n.attrs.get("idref").cloned());
 
     let setpoint_params = parse_hvac_setpoint_params(details)?;
-    let duct_params = compute_duct_dse_params(building)?;
+    let duct_params = compute_duct_dse_params(building, site)?;
 
     // Track parsed system IDs for primary-system invariant checks.
     let mut heating_sys_ids: Vec<String> = Vec::new();
@@ -4172,7 +4178,7 @@ mod tests {
         building.site.latitude_deg = Some(40.0);
         building.site.longitude_deg = Some(-105.0);
         building.conditioned_volume_m3 = 400.0;
-        let params = compute_duct_dse_params(&building)
+        let params = compute_duct_dse_params(&building, None)
             .expect("duct DSE params must resolve when lat/lon/volume are set");
         let supply_r = params.supply_r_m2_k_w;
         assert!(
@@ -4191,7 +4197,7 @@ mod tests {
         building.site.latitude_deg = Some(40.0);
         building.site.longitude_deg = Some(-105.0);
         building.conditioned_volume_m3 = 400.0;
-        let err = compute_duct_dse_params(&building).unwrap_err();
+        let err = compute_duct_dse_params(&building, None).unwrap_err();
         assert!(
             err.to_string().contains("other housing unit"),
             "the error names the zone type, got: {err}"
@@ -4209,7 +4215,7 @@ mod tests {
         building.site.latitude_deg = Some(40.0);
         building.site.longitude_deg = Some(-105.0);
         building.conditioned_volume_m3 = 400.0;
-        let params = compute_duct_dse_params(&building)
+        let params = compute_duct_dse_params(&building, None)
             .expect("duct DSE params must resolve when lat/lon/volume are set");
         let return_r = params.return_r_m2_k_w;
         assert!(
@@ -5934,7 +5940,7 @@ mod tests {
 
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+        resolve_hvac(&building, None, &defaults, &mut specs, &mut Vec::new())
             .expect("resolve_hvac must succeed");
 
         let gas_furnace = specs
@@ -5978,6 +5984,7 @@ mod tests {
         };
         let err = resolve_hvac(
             &building,
+            None,
             &DefaultsStore::empty(),
             &mut Vec::new(),
             &mut Vec::new(),
@@ -6573,7 +6580,7 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+        resolve_hvac(&building, None, &defaults, &mut specs, &mut Vec::new())
             .expect("resolve_hvac must succeed");
         assert_eq!(specs.len(), 1, "expected one heating spec");
         let aux_w = specs[0]
@@ -6626,7 +6633,7 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+        resolve_hvac(&building, None, &defaults, &mut specs, &mut Vec::new())
             .expect("resolve_hvac must succeed");
         assert_eq!(specs.len(), 1, "expected one heating spec");
         let aux_w = specs[0]
@@ -6781,7 +6788,7 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+        resolve_hvac(&building, None, &defaults, &mut specs, &mut Vec::new())
             .expect("resolve_hvac must succeed");
 
         // The split produces two specs: ASHP Heater and ASHP Cooler.
@@ -6873,7 +6880,7 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+        resolve_hvac(&building, None, &defaults, &mut specs, &mut Vec::new())
             .expect("resolve_hvac must succeed");
 
         assert_eq!(specs.len(), 2, "expected heater + cooler specs");
@@ -6967,7 +6974,7 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new()).ok()?;
+        resolve_hvac(&building, None, &defaults, &mut specs, &mut Vec::new()).ok()?;
         let heater = specs.iter().find(|s| s.name.contains("Heater"))?;
         heater.parameters.get("backup_eir").and_then(Value::as_f64)
     }
@@ -7072,7 +7079,7 @@ mod tests {
         building.details_xml = details.clone();
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())?;
+        resolve_hvac(&building, None, &defaults, &mut specs, &mut Vec::new())?;
         let heater = specs
             .iter()
             .find(|s| s.name.contains("Heater"))
@@ -7608,7 +7615,7 @@ mod tests {
 
         let defaults = DefaultsStore::empty();
         let mut specs = Vec::new();
-        resolve_hvac(&building, &defaults, &mut specs, &mut Vec::new())
+        resolve_hvac(&building, None, &defaults, &mut specs, &mut Vec::new())
             .expect("the flagged furnace stays pending for autosizing");
         let spec = specs
             .iter()
@@ -7638,6 +7645,7 @@ mod tests {
         };
         let err = resolve_hvac(
             &building,
+            None,
             &DefaultsStore::empty(),
             &mut Vec::new(),
             &mut Vec::new(),

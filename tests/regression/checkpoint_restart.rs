@@ -46,6 +46,7 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     // state travels in a checkpoint), so the resume scenarios run on the
     // memory report; the step digests below are what they compare.
     config
+        .settings
         .sim_config
         .reports
         .retain(|report| report.name != "file");
@@ -394,6 +395,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     // state travels in a checkpoint), so the resume scenario runs on the
     // memory report.
     config
+        .settings
         .sim_config
         .reports
         .retain(|report| report.name != "file");

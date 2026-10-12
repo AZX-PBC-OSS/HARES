@@ -6,6 +6,8 @@
 //! so a schema-conformant skylight reaches the build through its
 //! AttachedToRoof reference alone.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -177,29 +179,31 @@ fn dwelling_config(hpxml_xml: &str) -> (DwellingConfig, tempfile::TempDir) {
     let weather_path = write_file(dir.path(), "weather.epw", &build_minimal_epw());
 
     let config = DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(schedule_path),
-        weather_path,
-        defaults_path: Some(hares_core::shipped_defaults_dir()),
-        sim_config: SimulationConfig {
-            start_time: fixture_start::fixture_start(),
-            duration: Duration::hours(1),
-            time_res: Duration::minutes(1),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 128,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 7,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(schedule_path)),
+        weather: WeatherInput::Path(weather_path),
+        defaults: DefaultsSource::directory(hares_core::shipped_defaults_dir()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: fixture_start::fixture_start(),
+                duration: Duration::hours(1),
+                time_res: Duration::minutes(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 128,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            7,
+            None,
+            None,
+        ),
     };
     (config, dir)
 }

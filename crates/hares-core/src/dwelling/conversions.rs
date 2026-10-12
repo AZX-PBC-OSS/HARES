@@ -1,7 +1,7 @@
 //! Conversion helpers between I/O types and envelope/equipment types.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, FixedOffset};
@@ -1071,7 +1071,7 @@ const BATTERY_TYPE_NAME: &str = "Battery";
 pub(crate) fn validate_battery_controls(
     specs: &[hares_io::EquipmentSpec],
     overrides: &Value,
-    hpxml_path: &Path,
+    hpxml_display: &str,
 ) -> Result<()> {
     for spec in specs {
         let Some(typed) = &spec.typed_config else {
@@ -1094,7 +1094,7 @@ pub(crate) fn validate_battery_controls(
             HaresError::Equipment(format!(
                 "battery '{display}' (SystemIdentifier '{system}', input '{}'): \
                  its typed config cannot be read: {err}",
-                hpxml_path.display()
+                hpxml_display
             ))
         })?;
         if battery.bms_mode.is_some() {
@@ -1108,7 +1108,7 @@ pub(crate) fn validate_battery_controls(
              `bms_mode` on the battery's override (\"Manual\" follows \
              commands) or add a `BatteryManagement` actor targeting \
              '{display}'",
-            hpxml_path.display()
+            hpxml_display
         )));
     }
     Ok(())

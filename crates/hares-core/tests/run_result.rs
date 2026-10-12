@@ -5,6 +5,8 @@
 // compile against the parent commit, and every test here fails while the
 // surface is missing.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
@@ -48,15 +50,17 @@ fn memory_report(name: &str, verbosity: u8) -> String {
 fn dwelling_config(sim_toml: &str) -> DwellingConfig {
     let home = repo_root().join("tests/fixtures/parity/cz4a_ashp_hpwh");
     DwellingConfig {
-        hpxml_path: home.join("building.xml"),
-        schedule_path: Some(home.join("schedule.csv")),
-        weather_path: home.join("weather.epw"),
-        defaults_path: Some(repo_root().join("defaults")),
-        sim_config: hares_io::SimulationConfig::from_toml(sim_toml).expect("sim config parses"),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(home.join("building.xml")),
+        schedule: Some(InputSource::Path(home.join("schedule.csv"))),
+        weather: WeatherInput::Path(home.join("weather.epw")),
+        defaults: DefaultsSource::directory(repo_root().join("defaults")),
+        settings: DwellingSettings::new(
+            hares_io::SimulationConfig::from_toml(sim_toml).expect("sim config parses"),
+            None,
+            1,
+            None,
+            None,
+        ),
     }
 }
 

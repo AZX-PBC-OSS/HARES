@@ -195,6 +195,7 @@ pub fn parse_hpxml(path: &Path) -> Result<Building> {
 
 /// Parse HPXML from a string input.
 pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
+    crate::parse_counts::bump_hpxml();
     let root = parse_xml_document(xml)?;
 
     let schema_warnings =

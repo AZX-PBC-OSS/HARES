@@ -193,7 +193,7 @@ fn equipment_without_any_schedule_source_is_an_error() {
     let err = inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(dir.path()),
+        Some(&hares_io::load_default_profiles(dir.path()).expect("the profiles load")),
         &DefaultsStore::empty(),
         &mut Vec::new(),
     )
@@ -270,7 +270,7 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(defaults_dir.path()),
+        Some(&hares_io::load_default_profiles(defaults_dir.path()).expect("the profiles load")),
         &DefaultsStore::empty(),
         &mut Vec::new(),
     )
@@ -473,8 +473,15 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
 "#;
 
     let building = parse_building(xml).expect("HPXML should parse");
-    let mut specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment should succeed");
+    let mut specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment should succeed");
 
     let ref_spec = specs.iter().find(|s| s.name == "Refrigerator").expect(
         "resolve_equipment should produce a Refrigerator spec from the HPXML Appliances section",
@@ -616,7 +623,7 @@ fn hvac_without_setpoints_takes_the_os_hpxml_defaults() {
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&defaults_dir),
+        Some(&hares_io::load_default_profiles(&defaults_dir).expect("the profiles load")),
         &DefaultsStore::empty(),
         &mut Vec::new(),
     )
@@ -719,7 +726,7 @@ fn daily_profile_produces_different_weekday_vs_weekend_power_at_noon() {
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(dir.path()),
+        Some(&hares_io::load_default_profiles(dir.path()).expect("the profiles load")),
         &DefaultsStore::empty(),
         &mut Vec::new(),
     )

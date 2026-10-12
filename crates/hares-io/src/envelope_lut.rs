@@ -18,6 +18,28 @@ use crate::hpxml::building::{BoundaryType, ZoneType};
 
 // ── Error type ──────────────────────────────────────────────────────────────
 
+/// The CSV reader for one LUT file: the replacement's content when the
+/// path is the swapped one, else the base file.
+fn csv_reader(
+    path: &Path,
+    swap: Option<(&Path, &str)>,
+) -> Result<csv::Reader<Box<dyn std::io::Read>>, EnvelopeLutError> {
+    match swap {
+        Some((swapped, content)) if swapped == path => Ok(csv::Reader::from_reader(Box::new(
+            std::io::Cursor::new(content.to_string()),
+        ))),
+        _ => csv::Reader::from_path(path)
+            .map_err(|e| EnvelopeLutError::CsvParse {
+                path: path.to_path_buf(),
+                reason: e.to_string(),
+            })
+            .map(|rdr| {
+                let inner: Box<dyn std::io::Read> = Box::new(rdr.into_inner());
+                csv::Reader::from_reader(inner)
+            }),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum EnvelopeLutError {
     #[error("CSV parse error in {path}: {reason}")]
@@ -210,21 +232,33 @@ impl EnvelopeLookup {
     /// `Envelope Boundaries.csv` is optional — when absent, boundary name
     /// resolution falls back to the built-in hardcoded mapping.
     pub fn load(dir: &Path) -> Result<Self, EnvelopeLutError> {
+        Self::load_with_swap(dir, None)
+    }
+
+    /// [`Self::load`] with one CSV's content substituted: the replacement
+    /// file's content is parsed instead of the base file's bytes, every
+    /// other file loads from the directory as today. The per-file
+    /// replacement path in the defaults store's overrides.
+    pub fn load_with_swap(
+        dir: &Path,
+        swap: Option<(&Path, &str)>,
+    ) -> Result<Self, EnvelopeLutError> {
         let bt_path = dir.join("Envelope Boundary Types.csv");
         let mat_path = dir.join("Envelope Materials.csv");
         let boundaries_path = dir.join("Envelope Boundaries.csv");
 
-        if !bt_path.exists() {
+        let is_swapped = |path: &Path| swap.is_some_and(|(p, _)| p == path);
+        if !bt_path.exists() && !is_swapped(&bt_path) {
             return Err(EnvelopeLutError::MissingFile(bt_path));
         }
-        if !mat_path.exists() {
+        if !mat_path.exists() && !is_swapped(&mat_path) {
             return Err(EnvelopeLutError::MissingFile(mat_path));
         }
 
-        let boundary_types = Self::load_boundary_types(&bt_path)?;
-        let materials = Self::load_materials(&mat_path)?;
-        let boundary_names = if boundaries_path.exists() {
-            Self::load_boundaries(&boundaries_path)?
+        let boundary_types = Self::load_boundary_types(&bt_path, swap)?;
+        let materials = Self::load_materials(&mat_path, swap)?;
+        let boundary_names = if boundaries_path.exists() || is_swapped(&boundaries_path) {
+            Self::load_boundaries(&boundaries_path, swap)?
         } else {
             tracing::warn!(
                 path = %boundaries_path.display(),
@@ -615,11 +649,9 @@ impl EnvelopeLookup {
 
     fn load_boundary_types(
         path: &Path,
+        swap: Option<(&Path, &str)>,
     ) -> Result<HashMap<String, Vec<BoundaryTypeRow>>, EnvelopeLutError> {
-        let mut rdr = csv::Reader::from_path(path).map_err(|e| EnvelopeLutError::CsvParse {
-            path: path.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+        let mut rdr = csv_reader(path, swap)?;
 
         let mut map: HashMap<String, Vec<BoundaryTypeRow>> = HashMap::new();
         for result in rdr.deserialize() {
@@ -634,11 +666,9 @@ impl EnvelopeLookup {
 
     fn load_materials(
         path: &Path,
+        swap: Option<(&Path, &str)>,
     ) -> Result<HashMap<(String, String), Vec<MaterialRow>>, EnvelopeLutError> {
-        let mut rdr = csv::Reader::from_path(path).map_err(|e| EnvelopeLutError::CsvParse {
-            path: path.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+        let mut rdr = csv_reader(path, swap)?;
 
         let mut map: HashMap<(String, String), Vec<MaterialRow>> = HashMap::new();
         for result in rdr.deserialize() {
@@ -655,11 +685,9 @@ impl EnvelopeLookup {
     /// Parse `Envelope Boundaries.csv` into a `(BoundaryType, ZoneType, ZoneType) → boundary_name` map.
     fn load_boundaries(
         path: &Path,
+        swap: Option<(&Path, &str)>,
     ) -> Result<HashMap<(BoundaryType, ZoneType, ZoneType), String>, EnvelopeLutError> {
-        let mut rdr = csv::Reader::from_path(path).map_err(|e| EnvelopeLutError::CsvParse {
-            path: path.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+        let mut rdr = csv_reader(path, swap)?;
 
         let mut map: HashMap<(BoundaryType, ZoneType, ZoneType), String> = HashMap::new();
         for result in rdr.deserialize() {

@@ -108,6 +108,7 @@ pub fn parse_resstock_csv_str(
     longitude: f64,
     timezone_offset_h: f64,
 ) -> Result<WeatherTimeSeries, WeatherError> {
+    crate::parse_counts::bump_weather();
     let mut lines = contents.lines();
 
     // Parse header row to find column indices.

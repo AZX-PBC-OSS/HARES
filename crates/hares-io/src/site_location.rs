@@ -195,6 +195,31 @@ pub struct SiteLocation {
     pub utc_offset_source: FieldSource,
 }
 
+impl SiteLocation {
+    /// The site the building's own `Site` resolves to against no weather
+    /// location and no override: a direct resolver's form (the standalone
+    /// equipment resolves'), whose values are the building's own fields
+    /// with the resolution's fallbacks. The shared parse's building is
+    /// immutable, so a resolver that reads the resolved site takes it as
+    /// a parameter; this builds the same value from the building alone.
+    #[must_use]
+    pub fn from_site(site: &crate::hpxml::building::Site) -> SiteLocation {
+        let weather = crate::WeatherMeta {
+            location: String::new(),
+            latitude: 0.0,
+            longitude: 0.0,
+            timezone_offset_h: 0.0,
+            elevation_m: 0.0,
+            wf_allows_leap_years: true,
+            source_step_secs: 3600,
+            midpoint_offset_secs: 1800,
+            has_embedded_location: false,
+            station_wmo: None,
+        };
+        resolve_site_location(site, &weather, &SiteLocationOverride::default())
+    }
+}
+
 /// The three explicit value sources for a field, highest precedence first.
 /// Shared by coordinate and UTC-offset resolution so the disagreement-warning
 /// and precedence-selection logic lives in exactly one place.

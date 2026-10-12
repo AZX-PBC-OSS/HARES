@@ -8,6 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::Duration;
 use hares_core::{DwellingConfig, SimulationConfig};
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
+
 #[path = "../tests/support/fixture_start.rs"]
 mod fixture_start;
 
@@ -120,37 +123,41 @@ pub fn build_dwelling_config(
     duration: Duration,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(schedule_path),
-        weather_path,
-        sim_config: SimulationConfig {
-            start_time: fixture_start::fixture_start(),
-            duration,
-            time_res: Duration::minutes(1),
-            reports: vec![hares_io::ReportSpec {
-                name: "file".to_string(),
-                selection: hares_io::Selection::Verbosity(0),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Csv {
-                    path: numbered_path(dir, "hares-bench-output", "csv"),
-                    overwrite: true,
-                },
-            }],
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        defaults_path,
-        overrides: None,
-        bldg_id,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(schedule_path)),
+        weather: WeatherInput::Path(weather_path),
+        defaults: defaults_path
+            .map(DefaultsSource::directory)
+            .unwrap_or_default(),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: fixture_start::fixture_start(),
+                duration,
+                time_res: Duration::minutes(1),
+                reports: vec![hares_io::ReportSpec {
+                    name: "file".to_string(),
+                    selection: hares_io::Selection::Verbosity(0),
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Csv {
+                        path: numbered_path(dir, "hares-bench-output", "csv"),
+                        overwrite: true,
+                    },
+                }],
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            bldg_id,
+            None,
+            None,
+        ),
     }
 }
 

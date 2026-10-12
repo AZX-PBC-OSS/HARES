@@ -351,8 +351,9 @@ mod tests {
     use arrow::array::Float64Array;
     use arrow::datatypes::Field;
     use arrow::record_batch::{RecordBatch, RecordBatchIterator};
-    use hares_core::{Dwelling, DwellingConfig, RunMetrics, SimulationEngine};
+    use hares_core::{Dwelling, DwellingConfig, DwellingSettings, RunMetrics, SimulationEngine};
     use hares_io::Catalogue;
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
     use pyo3::Py;
     use pyo3::Python;
     use pyo3::types::{PyAnyMethods, PyCapsule};
@@ -381,15 +382,11 @@ mod tests {
         let home = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
         let sim = hares_io::SimulationConfig::from_toml(&sim_toml()).expect("sim config parses");
         let config = DwellingConfig {
-            hpxml_path: home.join("building.xml"),
-            schedule_path: Some(home.join("schedule.csv")),
-            weather_path: home.join("weather.epw"),
-            defaults_path: Some(root.join("defaults")),
-            sim_config: sim.clone(),
-            overrides: None,
-            bldg_id: 1,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(home.join("building.xml")),
+            schedule: Some(InputSource::Path(home.join("schedule.csv"))),
+            weather: WeatherInput::Path(home.join("weather.epw")),
+            defaults: DefaultsSource::directory(root.join("defaults")),
+            settings: DwellingSettings::new(sim.clone(), None, 1, None, None),
         };
         let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
         let catalogue = dwelling.catalogue();

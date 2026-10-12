@@ -7,7 +7,9 @@ pub mod envelope_lut;
 pub mod epw;
 pub mod hpxml;
 pub mod hpxml_schedule;
+pub mod inputs;
 pub mod output;
+pub mod parse_counts;
 pub mod psm3;
 pub mod pv_sizing;
 pub mod resstock;
@@ -51,6 +53,11 @@ pub use hpxml::{
     Building, EquipmentSpec, HpxmlDataPatches, ValidationReport, parse_hpxml,
     parse_iecc_climate_zone, resolve_equipment,
 };
+pub use inputs::{
+    DefaultsSource, InputSource, ParsedDefaults, ParsedHpxml, ParsedInputs, ParsedInputsCache,
+    ParsedSchedule, ParsedWeather, ScheduleGeneration, WeatherInput, read_site_input,
+    read_weather_meta_input,
+};
 pub use output::{
     CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX, Catalogue,
     CatalogueActor, CatalogueEquipment, CatalogueError, CatalogueInput, DEFROST_STATE_SUFFIX,
@@ -87,6 +94,7 @@ pub use sample_weight::{SampleWeightClass, classify_sample_weight};
 pub use schedule::resolve_occupancy_column;
 pub use schedule::{ColumnAggregation, ScheduleTimeSeries, parse_schedule_csv};
 pub use schedule_resolve::check_hvac_setpoint_invariants;
+pub use schedule_resolve::parse_default_profiles_str;
 pub use schedule_resolve::{DefaultProfiles, DefaultScheduleProfile, load_default_profiles};
 pub use schedule_resolve::{
     inject_schedule_into_specs, inject_schedule_into_specs_with_pre_period,

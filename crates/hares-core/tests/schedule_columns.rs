@@ -5,6 +5,8 @@
 //! and stepped reports no warning with source `schedule` (and the
 //! `consumer_shape_900s` golden inputs report none at all).
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -153,15 +155,21 @@ fn built_consumer_shape_home() -> (Dwelling, tempfile::TempDir) {
         .unwrap_or(serde_json::Value::Null);
 
     let config = DwellingConfig {
-        hpxml_path: project_root().join(home["hpxml"].as_str().expect("hpxml path")),
-        schedule_path: Some(project_root().join(home["schedule"].as_str().expect("schedule path"))),
-        weather_path: project_root().join(home["weather"].as_str().expect("weather path")),
-        defaults_path: Some(defaults_dir),
-        sim_config: sim,
-        overrides: Some(overrides_json),
-        bldg_id: home["bldg_id"].as_integer().expect("bldg id"),
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(project_root().join(home["hpxml"].as_str().expect("hpxml path"))),
+        schedule: Some(InputSource::Path(
+            project_root().join(home["schedule"].as_str().expect("schedule path")),
+        )),
+        weather: WeatherInput::Path(
+            project_root().join(home["weather"].as_str().expect("weather path")),
+        ),
+        defaults: DefaultsSource::directory(defaults_dir),
+        settings: DwellingSettings::new(
+            sim,
+            Some(overrides_json),
+            home["bldg_id"].as_integer().expect("bldg id"),
+            None,
+            None,
+        ),
     };
     let dwelling = Dwelling::from_config(config).expect("dwelling builds from the golden inputs");
     (dwelling, defaults_guard)
@@ -306,16 +314,13 @@ fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
         health_policy: hares_io::HealthPolicy::default(),
     };
     let config = DwellingConfig {
-        hpxml_path: bldg.join("home.xml"),
-        schedule_path: Some(schedule_path.to_path_buf()),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G3400270_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: None,
-        bldg_id: 176_775,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(bldg.join("home.xml")),
+        schedule: Some(InputSource::Path(schedule_path.to_path_buf())),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G3400270_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(sim, None, 176_775, None, None),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds from bldg0176775");
     dwelling.step().expect("a step of the ResStock home runs");

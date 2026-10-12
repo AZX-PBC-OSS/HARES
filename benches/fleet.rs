@@ -70,8 +70,8 @@ fn run_fleet_fold_once() {
             // The production fleet shape: the homes write no own files, so
             // the fleet report is the only report and the fold reads only
             // it.
-            config.sim_config.reports.clear();
-            config.sim_config.time_res = chrono::Duration::seconds(900);
+            config.settings.sim_config.reports.clear();
+            config.settings.sim_config.time_res = chrono::Duration::seconds(900);
             config
         })
         .collect::<Vec<_>>();
@@ -189,8 +189,8 @@ fn bench_fleet_fold(c: &mut Criterion) {
                                     // The production fleet shape: the homes write
                                     // no own files, so the fleet report is the
                                     // only report and the fold reads only it.
-                                    config.sim_config.reports.clear();
-                                    config.sim_config.time_res = chrono::Duration::seconds(900);
+                                    config.settings.sim_config.reports.clear();
+                                    config.settings.sim_config.time_res = chrono::Duration::seconds(900);
                                     config
                                 })
                                 .collect::<Vec<_>>();

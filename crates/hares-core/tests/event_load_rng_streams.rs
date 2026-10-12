@@ -7,10 +7,12 @@
 //! sequence; identical configs make any difference between two patterns
 //! attributable to the streams alone.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, FixedOffset, TimeZone};
-use hares_core::dwelling::DwellingBlueprint;
+use hares_core::dwelling::DwellingBlueprintBuilder;
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_types::{FuelType, HaresError, telemetry_keys as tk};
 use serde_json::json;
@@ -29,33 +31,36 @@ fn fixture_dir() -> PathBuf {
 
 fn dwelling_config(hpxml: &Path) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::west_opt(10 * 3600)
-                .expect("UTC-10 offset is valid")
-                .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
-                .unwrap(),
-            duration: Duration::days(2),
-            time_res: Duration::seconds(900),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 7,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::west_opt(10 * 3600)
+                    .expect("UTC-10 offset is valid")
+                    .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                    .unwrap(),
+                duration: Duration::days(2),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 7,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            100,
+            None,
+            None,
+        ),
     }
 }
 
@@ -90,7 +95,8 @@ fn try_build_from(
     hpxml: &Path,
     specs: Vec<hares_io::EquipmentSpec>,
 ) -> Result<Dwelling, HaresError> {
-    let mut blueprint = DwellingBlueprint::from_config(dwelling_config(hpxml)).expect("blueprint");
+    let mut blueprint =
+        DwellingBlueprintBuilder::from_config(dwelling_config(hpxml)).expect("blueprint");
     for spec in specs {
         blueprint.add_equipment_spec(spec).expect("add probe spec");
     }

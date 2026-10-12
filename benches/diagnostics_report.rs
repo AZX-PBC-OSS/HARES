@@ -16,6 +16,9 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use hares_core::{DwellingConfig, SimulationEngine};
 use hares_io::{Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride};
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
+
 fn cz4a_config(diagnostics: bool, output: &Path) -> DwellingConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let fixture = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
@@ -25,37 +28,39 @@ fn cz4a_config(diagnostics: bool, output: &Path) -> DwellingConfig {
         .single()
         .expect("start");
     DwellingConfig {
-        hpxml_path: fixture.join("building.xml"),
-        schedule_path: Some(fixture.join("schedule.csv")),
-        weather_path: fixture.join("weather.epw"),
-        sim_config: SimulationConfig {
-            start_time: start,
-            duration: chrono::Duration::hours(24),
-            time_res: chrono::Duration::minutes(1),
-            reports: vec![ReportSpec {
-                name: "file".to_string(),
-                selection: Selection::Verbosity(2),
-                frequency: hares_io::Frequency::default(),
-                destination: Destination::Csv {
-                    path: output.to_path_buf(),
-                    overwrite: true,
-                },
-            }],
-            diagnostics,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        defaults_path: Some(root.join("defaults")),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture.join("building.xml")),
+        schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
+        weather: WeatherInput::Path(fixture.join("weather.epw")),
+        defaults: DefaultsSource::directory(root.join("defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: start,
+                duration: chrono::Duration::hours(24),
+                time_res: chrono::Duration::minutes(1),
+                reports: vec![ReportSpec {
+                    name: "file".to_string(),
+                    selection: Selection::Verbosity(2),
+                    frequency: hares_io::Frequency::default(),
+                    destination: Destination::Csv {
+                        path: output.to_path_buf(),
+                        overwrite: true,
+                    },
+                }],
+                diagnostics,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            None,
+            None,
+        ),
     }
 }
 

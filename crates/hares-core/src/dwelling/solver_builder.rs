@@ -830,6 +830,7 @@ pub(crate) fn build_default_solvers(
     defaults: &DefaultsStore,
     weather_avgs: &WeatherAverages,
     equipment_specs: &[EquipmentSpec],
+    site_elevation_m: f64,
 ) -> Result<SolverBundle> {
     use hares_envelope::state_space::{OutputMapping, StateSpaceModel};
     use nalgebra::DMatrix;
@@ -851,12 +852,12 @@ pub(crate) fn build_default_solvers(
     )?;
 
     // Zone air node capacitances [J/K].
-    // Use ISA standard atmosphere pressure from building site elevation.
-    // Falls back to sea-level pressure when elevation is unknown.
+    // Use ISA standard atmosphere pressure from the resolved site
+    // elevation (the blueprint's resolution of the HPXML site, the
+    // weather header and the config's override; the shared parse's
+    // building carries its own site only).
     // Cite: ASHRAE HoF 2021 §1.8 Eq.28; ISA 1976 / ICAO Doc 7488.
-    let site_pressure_pa = hares_physics::air_properties::standard_pressure_pa(
-        building.site.elevation_m.unwrap_or(0.0),
-    );
+    let site_pressure_pa = hares_physics::air_properties::standard_pressure_pa(site_elevation_m);
     let zone_capacitances = derive_zone_capacitances(&zone_inputs, site_pressure_pa)
         .map_err(|e| HaresError::Envelope(e.to_string()))?;
 
@@ -2038,6 +2039,7 @@ mod tests {
             &hares_io::DefaultsStore::empty(),
             &weather_avgs,
             &[],
+            0.0,
         ) {
             Err(err) => err,
             Ok(_) => panic!("a zone without an environment zone must fail assembly"),
@@ -2100,6 +2102,7 @@ mod tests {
             &hares_io::DefaultsStore::empty(),
             &weather_avgs,
             &[],
+            0.0,
         ) {
             Err(err) => err,
             Ok(_) => panic!(

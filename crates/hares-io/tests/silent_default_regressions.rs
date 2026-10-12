@@ -41,7 +41,14 @@ fn wrap_systems(systems_xml: &str) -> String {
 
 fn resolve(xml: &str) -> Result<Vec<hares_io::hpxml::EquipmentSpec>, HpxmlError> {
     let building = parse_building(xml).expect("HPXML must parse");
-    resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
+    resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
 }
 
 fn expect_missing(

@@ -61,8 +61,15 @@ fn wet_appliance_daily_hot_water_matches_openstudio_hpxml() {
         "tests/fixtures/parity/cz4a_ashp_hpwh/building.xml",
     ))
     .expect("cz4a building parses");
-    let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("cz4a equipment resolves");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("cz4a equipment resolves");
     let washer = wet_appliance_spec(&specs, "Clothes Washer");
     let dishwasher = wet_appliance_spec(&specs, "Dishwasher");
     assert_eq!(
@@ -82,8 +89,15 @@ fn wet_appliance_daily_hot_water_matches_openstudio_hpxml() {
         "tests/fixtures/resstock/2025.1/bldg0176227/home.xml",
     ))
     .expect("bldg0176227 home parses");
-    let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("bldg0176227 equipment resolves");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("bldg0176227 equipment resolves");
     let washer = wet_appliance_spec(&specs, "Clothes Washer");
     let dishwasher = wet_appliance_spec(&specs, "Dishwasher");
     assert_eq!(
@@ -159,8 +173,15 @@ fn adjusted_annual_kwh_is_not_adjusted_twice() {
         r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">{OCCUPANCY_XML}</HPXML>"#
     );
     let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
-    let specs =
-        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("equipment resolves");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("equipment resolves");
     let washer = wet_appliance_spec(&specs, "Clothes Washer");
     let dishwasher = wet_appliance_spec(&specs, "Dishwasher");
     // `AdjustedAnnualkWh` is the adjusted annual energy: it is the resolved
@@ -237,8 +258,15 @@ fn missing_appliance_power_column_is_an_error() {
         "tests/fixtures/parity/cz4a_ashp_hpwh/building.xml",
     ))
     .expect("cz4a building parses");
-    let mut specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("cz4a equipment resolves");
+    let mut specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("cz4a equipment resolves");
 
     // The fixture schedule without its `clothes_washer` column: the header
     // names every column, so the rewritten file drops it from the header and
@@ -280,7 +308,10 @@ fn missing_appliance_power_column_is_an_error() {
     let err = hares_io::inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&project_root().join("defaults")),
+        Some(
+            &hares_io::load_default_profiles(&project_root().join("defaults"))
+                .expect("the profiles load"),
+        ),
         &defaults,
         &mut warnings,
     )
@@ -301,8 +332,15 @@ fn appliance_hot_water_draw_rides_the_schedule_columns_with_the_peak_flow_rule()
         "tests/fixtures/parity/cz4a_ashp_hpwh/building.xml",
     ))
     .expect("cz4a building parses");
-    let mut specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("cz4a equipment resolves");
+    let mut specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("cz4a equipment resolves");
     let washer_daily_m3 = spec_f64(
         wet_appliance_spec(&specs, "Clothes Washer"),
         "daily_hot_water_m3",
@@ -322,7 +360,10 @@ fn appliance_hot_water_draw_rides_the_schedule_columns_with_the_peak_flow_rule()
     hares_io::inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&project_root().join("defaults")),
+        Some(
+            &hares_io::load_default_profiles(&project_root().join("defaults"))
+                .expect("the profiles load"),
+        ),
         &defaults,
         &mut Vec::new(),
     )
@@ -429,8 +470,15 @@ fn combi_boiler_indirect_tank_receives_the_appliance_draw() {
         r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">{COMBI_BOILER_XML}</HPXML>"#
     );
     let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
-    let mut specs =
-        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("equipment resolves");
+    let mut specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("equipment resolves");
     let washer_daily_m3 = spec_f64(
         wet_appliance_spec(&specs, "Clothes Washer"),
         "daily_hot_water_m3",
@@ -448,7 +496,10 @@ fn combi_boiler_indirect_tank_receives_the_appliance_draw() {
     hares_io::inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&project_root().join("defaults")),
+        Some(
+            &hares_io::load_default_profiles(&project_root().join("defaults"))
+                .expect("the profiles load"),
+        ),
         &defaults,
         &mut Vec::new(),
     )
@@ -517,8 +568,15 @@ fn generated_schedule_produces_appliance_hot_water_columns_for_a_home_without_a_
     // must be produced for the generated schedule.
     let occupied = occupied_bldg0527060();
     let building = hares_io::hpxml::parse_hpxml_str(&occupied).expect("parses");
-    let mut specs =
-        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("equipment resolves");
+    let mut specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("equipment resolves");
     assert!(
         spec_f64(
             wet_appliance_spec(&specs, "Clothes Washer"),
@@ -530,7 +588,10 @@ fn generated_schedule_produces_appliance_hot_water_columns_for_a_home_without_a_
     hares_io::inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&project_root().join("defaults")),
+        Some(
+            &hares_io::load_default_profiles(&project_root().join("defaults"))
+                .expect("the profiles load"),
+        ),
         &defaults,
         &mut Vec::new(),
     )
@@ -566,8 +627,15 @@ fn vacant_home_generated_appliance_hot_water_columns_are_zero() {
     let occupied = occupied_bldg0527060();
     let building = hares_io::hpxml::parse_hpxml_str(&occupied).expect("parses");
     assert_eq!(building.unavailable_periods.len(), 1);
-    let mut specs =
-        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("equipment resolves");
+    let mut specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("equipment resolves");
 
     let mut schedule = generated_schedule_7d();
     hares_io::apply_unavailable_periods(&mut schedule, &building.unavailable_periods)
@@ -575,7 +643,10 @@ fn vacant_home_generated_appliance_hot_water_columns_are_zero() {
     hares_io::inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&project_root().join("defaults")),
+        Some(
+            &hares_io::load_default_profiles(&project_root().join("defaults"))
+                .expect("the profiles load"),
+        ),
         &defaults,
         &mut Vec::new(),
     )
@@ -780,8 +851,15 @@ fn leap_year_schedule_flags_mar_1_and_dec_31_on_their_own_days() {
 fn half_year_vacancy_removes_volume_instead_of_redistributing_it() {
     let defaults = repo_defaults();
     let building = hares_io::hpxml::parse_hpxml_str(&occupied_bldg0527060()).expect("parses");
-    let mut specs =
-        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("equipment resolves");
+    let mut specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("equipment resolves");
     assert!(
         spec_f64(
             wet_appliance_spec(&specs, "Clothes Washer"),
@@ -802,12 +880,22 @@ fn half_year_vacancy_removes_volume_instead_of_redistributing_it() {
 
     // The no-period run sets the daily volume the active days must keep.
     let mut baseline_schedule = synthetic_schedule_8760_rows();
-    let mut baseline_specs =
-        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("equipment resolves");
+    let mut baseline_specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("equipment resolves");
     hares_io::inject_schedule_into_specs(
         &mut baseline_specs,
         &mut baseline_schedule,
-        Some(&project_root().join("defaults")),
+        Some(
+            &hares_io::load_default_profiles(&project_root().join("defaults"))
+                .expect("the profiles load"),
+        ),
         &defaults,
         &mut Vec::new(),
     )
@@ -820,7 +908,10 @@ fn half_year_vacancy_removes_volume_instead_of_redistributing_it() {
         &mut specs,
         &mut schedule,
         pre_period_columns.as_deref(),
-        Some(&project_root().join("defaults")),
+        Some(
+            &hares_io::load_default_profiles(&project_root().join("defaults"))
+                .expect("the profiles load"),
+        ),
         &defaults,
         &mut Vec::new(),
     )
@@ -899,8 +990,15 @@ fn multi_water_heater_homes_apportion_the_wet_appliance_draw() {
         "tests/fixtures/hpxml/ochre_samples/base-dhw-multiple.xml",
     ))
     .expect("base-dhw-multiple parses");
-    let mut specs =
-        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("equipment resolves");
+    let mut specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("equipment resolves");
     let washer_daily_l = hares_physics::units::volume_m3_to_l(spec_f64(
         wet_appliance_spec(&specs, "Clothes Washer"),
         "daily_hot_water_m3",
@@ -915,7 +1013,10 @@ fn multi_water_heater_homes_apportion_the_wet_appliance_draw() {
     hares_io::inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&project_root().join("defaults")),
+        Some(
+            &hares_io::load_default_profiles(&project_root().join("defaults"))
+                .expect("the profiles load"),
+        ),
         &defaults,
         &mut Vec::new(),
     )
@@ -982,8 +1083,15 @@ fn eri_version_selects_the_asset_cycles_branch() {
     };
     let washer_gal = |version: &str| {
         let building = hares_io::hpxml::parse_hpxml_str(&with_version(version)).expect("parses");
-        let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
-            .expect("equipment resolves");
+        let specs = resolve_equipment(
+            &building,
+            building.climate_zone_iecc.as_deref(),
+            None,
+            &repo_defaults(),
+            None,
+            &mut Vec::new(),
+        )
+        .expect("equipment resolves");
         spec_f64(
             wet_appliance_spec(&specs, "Clothes Washer"),
             "daily_hot_water_m3",
@@ -1006,8 +1114,15 @@ fn eri_version_selects_the_asset_cycles_branch() {
 
     // An unknown version fails the resolve naming the value.
     let building = hares_io::hpxml::parse_hpxml_str(&with_version("1999Z")).expect("parses");
-    let err = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
-        .expect_err("an unknown ERI version must fail the resolve");
+    let err = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &repo_defaults(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect_err("an unknown ERI version must fail the resolve");
     assert!(
         err.to_string().contains("1999Z"),
         "the error must name the version, got: {err}"
@@ -1025,14 +1140,28 @@ fn washer_with_rated_kwh_requires_the_whole_label_set() {
     );
     // The full label set resolves.
     let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("the full label set parses");
-    resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
-        .expect("a washer with the whole label set resolves");
+    resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &repo_defaults(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("a washer with the whole label set resolves");
 
     // A missing field fails the resolve naming it.
     let partial = xml.replacen("<LabelGasRate>1.09</LabelGasRate>", "", 1);
     let building = hares_io::hpxml::parse_hpxml_str(&partial).expect("parses");
-    let err = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
-        .expect_err("a washer with RatedAnnualkWh but no LabelGasRate must fail the resolve");
+    let err = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &repo_defaults(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect_err("a washer with RatedAnnualkWh but no LabelGasRate must fail the resolve");
     assert!(
         err.to_string().contains("LabelGasRate"),
         "the error must name the missing label field, got: {err}"
@@ -1065,16 +1194,30 @@ fn pre2019_washer_needs_only_the_fields_its_algebra_reads() {
     // The full label set on 2019 resolves.
     let building = hares_io::hpxml::parse_hpxml_str(&occupancy_xml_with_eri_version("2019"))
         .expect("the full label set parses");
-    resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("a washer with the whole label set resolves on 2019");
+    resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("a washer with the whole label set resolves on 2019");
 
     // The washer without LabelUsage (the field the pre-2019 algebra never
     // reads) resolves too.
     let xml =
         occupancy_xml_with_eri_version("2019").replacen("<LabelUsage>6.0</LabelUsage>", "", 1);
     let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
-    let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("the pre-2019 washer algebra never reads LabelUsage, so the washer resolves");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("the pre-2019 washer algebra never reads LabelUsage, so the washer resolves");
     let washer = wet_appliance_spec(&specs, "Clothes Washer");
     assert!(
         spec_f64(washer, "daily_hot_water_m3") > 0.0,
@@ -1086,8 +1229,15 @@ fn pre2019_washer_needs_only_the_fields_its_algebra_reads() {
     let xml =
         occupancy_xml_with_eri_version("latest").replacen("<LabelUsage>6.0</LabelUsage>", "", 1);
     let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
-    let err = resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect_err("the modern branch reads LabelUsage, so its absence must fail the resolve");
+    let err = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect_err("the modern branch reads LabelUsage, so its absence must fail the resolve");
     assert!(
         err.to_string().contains("LabelUsage"),
         "the error must name LabelUsage, got: {err}"
@@ -1106,8 +1256,15 @@ fn pre2019_dishwasher_needs_only_the_fields_its_algebra_reads() {
     // The full label set on 2019 resolves.
     let building = hares_io::hpxml::parse_hpxml_str(&occupancy_xml_with_eri_version("2019"))
         .expect("the full label set parses");
-    resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("a dishwasher with the whole label set resolves on 2019");
+    resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("a dishwasher with the whole label set resolves on 2019");
 
     // The dishwasher without any label field resolves: the pre-2019
     // algebra reads none of them.
@@ -1121,8 +1278,15 @@ fn pre2019_dishwasher_needs_only_the_fields_its_algebra_reads() {
         1,
     );
     let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
-    let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("the pre-2019 dishwasher algebra reads no label field, so the dishwasher resolves");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("the pre-2019 dishwasher algebra reads no label field, so the dishwasher resolves");
     let dishwasher = wet_appliance_spec(&specs, "Dishwasher");
     assert!(
         spec_f64(dishwasher, "daily_hot_water_m3") > 0.0,
@@ -1141,7 +1305,15 @@ fn pre2019_dishwasher_needs_only_the_fields_its_algebra_reads() {
         1,
     );
     let building = hares_io::hpxml::parse_hpxml_str(&xml).expect("parses");
-    let err = resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect_err(
+    let err = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect_err(
         "the modern dishwasher reads the label fields, so their absence must fail the resolve",
     );
     assert!(
@@ -1220,7 +1392,15 @@ fn multi_water_heater_fractions_sum_to_one_and_cannot_be_negative() {
         Box<dyn std::error::Error>,
     > {
         let building = hares_io::hpxml::parse_hpxml_str(xml).expect("the xml parses");
-        resolve_equipment(&building, &defaults, None, &mut Vec::new()).map_err(Into::into)
+        resolve_equipment(
+            &building,
+            building.climate_zone_iecc.as_deref(),
+            None,
+            &defaults,
+            None,
+            &mut Vec::new(),
+        )
+        .map_err(Into::into)
     };
 
     // 0.6/0.6 sums to 1.2: the resolve fails naming the systems and the sum.

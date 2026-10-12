@@ -9,6 +9,8 @@
 //! `r_film = rad_res·A/(1 − rad_frac)` and `r_beyond = rad_res·A/rad_frac`
 //! must both recover as finite positive resistances.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::fs;
 use std::path::PathBuf;
 
@@ -113,32 +115,34 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
     let (_inputs, schedule_path, weather_path) = write_inputs();
 
     let config = DwellingConfig {
-        hpxml_path: PathBuf::from(config_path),
-        schedule_path: Some(schedule_path.clone()),
-        weather_path: weather_path.clone(),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::east_opt(0)
-                .expect("UTC offset")
-                .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
-                .unwrap(),
-            duration: Duration::hours(1),
-            time_res: Duration::minutes(1),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 128,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(PathBuf::from(config_path)),
+        schedule: Some(InputSource::Path(schedule_path.clone())),
+        weather: WeatherInput::Path(weather_path.clone()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::east_opt(0)
+                    .expect("UTC offset")
+                    .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
+                    .unwrap(),
+                duration: Duration::hours(1),
+                time_res: Duration::minutes(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 128,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            None,
+            None,
+        ),
     };
 
     let engine = SimulationEngine::new();
@@ -149,32 +153,34 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
     // inspect the assembled solver (the structural properties are
     // construction-invariant).
     let config2 = DwellingConfig {
-        hpxml_path: PathBuf::from(config_path),
-        schedule_path: Some(schedule_path.clone()),
-        weather_path: weather_path.clone(),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::east_opt(0)
-                .expect("UTC offset")
-                .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
-                .unwrap(),
-            duration: Duration::hours(1),
-            time_res: Duration::minutes(1),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 128,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(PathBuf::from(config_path)),
+        schedule: Some(InputSource::Path(schedule_path.clone())),
+        weather: WeatherInput::Path(weather_path.clone()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::east_opt(0)
+                    .expect("UTC offset")
+                    .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
+                    .unwrap(),
+                duration: Duration::hours(1),
+                time_res: Duration::minutes(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 128,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            None,
+            None,
+        ),
     };
     let dwelling = hares_core::Dwelling::from_config(config2).expect("dwelling builds");
     let solver = dwelling.thermal_solver();
@@ -283,32 +289,34 @@ fn indoor_zone_has_exactly_one_beam_receiving_floor_on_ochre_base() {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/hpxml/ochre_samples/base.xml");
     let config = DwellingConfig {
-        hpxml_path: base,
-        schedule_path: Some(schedule_path.clone()),
-        weather_path: weather_path.clone(),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::east_opt(0)
-                .expect("UTC offset")
-                .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
-                .unwrap(),
-            duration: Duration::hours(1),
-            time_res: Duration::minutes(1),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 128,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(base),
+        schedule: Some(InputSource::Path(schedule_path.clone())),
+        weather: WeatherInput::Path(weather_path.clone()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::east_opt(0)
+                    .expect("UTC offset")
+                    .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
+                    .unwrap(),
+                duration: Duration::hours(1),
+                time_res: Duration::minutes(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 128,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            None,
+            None,
+        ),
     };
 
     let dwelling = hares_core::Dwelling::from_config(config).expect("dwelling builds");
@@ -413,32 +421,34 @@ fn attic_floor_never_takes_the_exterior_sky_exposed_path() {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/hpxml/ochre_samples/base.xml");
     let config = DwellingConfig {
-        hpxml_path: base,
-        schedule_path: Some(schedule_path.clone()),
-        weather_path: weather_path.clone(),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::east_opt(0)
-                .expect("UTC offset")
-                .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
-                .unwrap(),
-            duration: Duration::hours(1),
-            time_res: Duration::minutes(1),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 128,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(base),
+        schedule: Some(InputSource::Path(schedule_path.clone())),
+        weather: WeatherInput::Path(weather_path.clone()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::east_opt(0)
+                    .expect("UTC offset")
+                    .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
+                    .unwrap(),
+                duration: Duration::hours(1),
+                time_res: Duration::minutes(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 128,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            None,
+            None,
+        ),
     };
 
     let dwelling = hares_core::Dwelling::from_config(config).expect("dwelling builds");

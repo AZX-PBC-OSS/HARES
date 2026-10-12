@@ -1,3 +1,5 @@
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::fs;
 use std::path::PathBuf;
 
@@ -182,15 +184,11 @@ fn run_success_produces_metrics_and_output_path() {
     let csv_path = scratch.path("output.csv");
 
     let config = DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config: simulation_config(csv_path.clone()),
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(simulation_config(csv_path.clone()), None, 123, None, None),
     };
 
     let engine = SimulationEngine::new();
@@ -225,15 +223,17 @@ fn run_success_produces_metrics_and_output_path() {
 fn run_returns_err_for_missing_hpxml_path() {
     let scratch = Scratch::with_inputs();
     let config = DwellingConfig {
-        hpxml_path: scratch.path("does-not-exist.xml"),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config: simulation_config(scratch.path("output.csv")),
-        defaults_path: None,
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(scratch.path("does-not-exist.xml")),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::default(),
+        settings: DwellingSettings::new(
+            simulation_config(scratch.path("output.csv")),
+            None,
+            1,
+            None,
+            None,
+        ),
     };
 
     let engine = SimulationEngine::new();
@@ -248,15 +248,17 @@ fn run_returns_err_for_missing_weather_path() {
     let engine = SimulationEngine::new();
     let scratch = Scratch::with_inputs();
     let weather_missing = DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.path("does-not-exist.epw"),
-        sim_config: simulation_config(scratch.path("output.csv")),
-        defaults_path: None,
-        overrides: None,
-        bldg_id: 2,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.path("does-not-exist.epw")),
+        defaults: DefaultsSource::default(),
+        settings: DwellingSettings::new(
+            simulation_config(scratch.path("output.csv")),
+            None,
+            2,
+            None,
+            None,
+        ),
     };
     let weather_err = engine
         .run(weather_missing)
@@ -273,18 +275,17 @@ fn run_with_streaming_output_computes_metrics() {
     let scratch = Scratch::with_inputs();
 
     let build_config = |retain: bool| DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config: simulation_config_with_frame(
-            scratch.path(&format!("retain_{retain}.csv")),
-            retain,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            simulation_config_with_frame(scratch.path(&format!("retain_{retain}.csv")), retain),
+            None,
+            123,
+            None,
+            None,
         ),
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        patches: None,
     };
 
     let engine = SimulationEngine::new();
@@ -341,22 +342,24 @@ fn memory_batches(result: &hares_core::RunResult) -> Vec<arrow::record_batch::Re
 fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
     let scratch = Scratch::with_inputs();
     let build_config = |retain: bool| DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config: {
-            let csv_path = scratch.path(&format!("retain_{retain}.csv"));
-            let mut cfg = simulation_config_with_frame(csv_path, retain);
-            for report in &mut cfg.reports {
-                report.selection = hares_io::Selection::Verbosity(6);
-            }
-            cfg
-        },
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            {
+                let csv_path = scratch.path(&format!("retain_{retain}.csv"));
+                let mut cfg = simulation_config_with_frame(csv_path, retain);
+                for report in &mut cfg.reports {
+                    report.selection = hares_io::Selection::Verbosity(6);
+                }
+                cfg
+            },
+            None,
+            123,
+            None,
+            None,
+        ),
     };
 
     let engine = SimulationEngine::new();
@@ -403,15 +406,11 @@ fn run_with_zero_duration_is_a_validate_error() {
     sim_config.duration = Duration::zero();
 
     let config = DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config,
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(sim_config, None, 123, None, None),
     };
 
     let engine = SimulationEngine::new();
@@ -433,19 +432,21 @@ fn run_without_metrics_request_returns_none_metrics() {
     let scratch = Scratch::with_inputs();
 
     let config = DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config: SimulationConfig {
-            reports: Vec::new(),
-            metrics: false,
-            ..simulation_config(scratch.path("output.csv"))
-        },
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                reports: Vec::new(),
+                metrics: false,
+                ..simulation_config(scratch.path("output.csv"))
+            },
+            None,
+            123,
+            None,
+            None,
+        ),
     };
 
     let engine = SimulationEngine::new();

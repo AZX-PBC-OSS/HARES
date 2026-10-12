@@ -2,6 +2,8 @@
 //! that cannot be created fails construction, and rejects a later roster
 //! change without touching the dwelling.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, TimeZone};
@@ -25,39 +27,47 @@ fn config(csv_path: &Path) -> DwellingConfig {
 /// run with its working recorder buffers only).
 fn config_with_chunk(csv_path: &Path, config_chunk_size: usize) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
-        schedule_path: Some(project_root().join("data/examples/BEopt_example_schedule.csv")),
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: denver_offset::denver_offset()
-                .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
-                .unwrap(),
-            duration: Duration::hours(1),
-            time_res: Duration::seconds(900),
-            reports: vec![hares_io::ReportSpec {
-                name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(3),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Csv {
-                    path: csv_path.to_path_buf(),
-                    overwrite: false,
-                },
-            }],
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: config_chunk_size,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(
+            project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+        ),
+        schedule: Some(InputSource::Path(
+            project_root().join("data/examples/BEopt_example_schedule.csv"),
+        )),
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: denver_offset::denver_offset()
+                    .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
+                    .unwrap(),
+                duration: Duration::hours(1),
+                time_res: Duration::seconds(900),
+                reports: vec![hares_io::ReportSpec {
+                    name: "frame".to_string(),
+                    selection: hares_io::Selection::Verbosity(3),
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Csv {
+                        path: csv_path.to_path_buf(),
+                        overwrite: false,
+                    },
+                }],
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: config_chunk_size,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            100,
+            None,
+            None,
+        ),
     }
 }
 

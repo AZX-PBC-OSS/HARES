@@ -9,14 +9,14 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{
-    Dwelling, DwellingConfig, DwellingTelemetry, RunResult, SimulationEngine, StepResult,
-    WarmupOutcome,
+    Dwelling, DwellingBlueprintBuilder, DwellingConfig, DwellingSettings, DwellingTelemetry,
+    RunResult, SimulationEngine, StepResult, WarmupOutcome,
 };
 use hares_io::Frequency;
 use hares_io::output::reduce::PeriodCalendar;
 use hares_io::{
-    ResStockBuilding, ResStockVersion, SampleWeightClass, Selection, SimulationConfig,
-    classify_sample_weight, parse_resstock_metadata,
+    DefaultsSource, InputSource, ResStockBuilding, ResStockVersion, SampleWeightClass, Selection,
+    SimulationConfig, WeatherInput, classify_sample_weight, parse_resstock_metadata,
 };
 use hares_types::ControlSignal;
 use hares_types::HaresError;
@@ -367,19 +367,21 @@ impl Fleet {
                 validate_fleet_building_zone(&building.hpxml_path, &weather_path, building.bldg_id);
                 FleetEntry {
                     config: DwellingConfig {
-                        hpxml_path: building.hpxml_path,
-                        schedule_path: Some(building.schedule_path),
-                        weather_path,
-                        defaults_path: defaults_path.map(Path::to_path_buf),
-                        sim_config: sim_config.clone(),
-                        overrides: None,
-                        bldg_id: building.bldg_id,
-                        initialization_duration: Some(std::time::Duration::from_secs(
-                            7 * 24 * 3600,
-                        )),
-                        patches: Some(hares_io::HpxmlDataPatches::from_resstock_characteristics(
-                            &building.characteristics,
-                        )),
+                        hpxml: InputSource::Path(building.hpxml_path),
+                        schedule: Some(InputSource::Path(building.schedule_path)),
+                        weather: WeatherInput::Path(weather_path),
+                        defaults: defaults_path
+                            .map(DefaultsSource::directory)
+                            .unwrap_or_default(),
+                        settings: DwellingSettings::new(
+                            sim_config.clone(),
+                            None,
+                            building.bldg_id,
+                            Some(std::time::Duration::from_secs(7 * 24 * 3600)),
+                            Some(hares_io::HpxmlDataPatches::from_resstock_characteristics(
+                                &building.characteristics,
+                            )),
+                        ),
                     },
                     sample_weight: building.sample_weight,
                 }
@@ -439,7 +441,7 @@ impl Fleet {
     pub fn bldg_ids(&self) -> Vec<i64> {
         self.entries
             .iter()
-            .map(|entry| entry.config.bldg_id)
+            .map(|entry| entry.config.settings.bldg_id)
             .collect()
     }
 
@@ -485,18 +487,18 @@ impl Fleet {
             match classify_sample_weight(weight) {
                 SampleWeightClass::Invalid => {
                     tracing::error!(
-                        bldg_id = entry.config.bldg_id,
+                        bldg_id = entry.config.settings.bldg_id,
                         sample_weight = weight,
                         "dwelling has invalid sample_weight (NaN, infinite, or negative)"
                     );
                     return Err(FleetError::InvalidSampleWeight {
-                        bldg_id: entry.config.bldg_id,
+                        bldg_id: entry.config.settings.bldg_id,
                         value: weight,
                     });
                 }
                 SampleWeightClass::Zero => {
                     tracing::warn!(
-                        bldg_id = entry.config.bldg_id,
+                        bldg_id = entry.config.settings.bldg_id,
                         "dwelling has zero sample_weight"
                     );
                 }
@@ -598,7 +600,7 @@ impl Fleet {
                     Ok(offset) => Some(offset),
                     Err(err) => {
                         tracing::debug!(
-                            bldg_id = entry.config.bldg_id,
+                            bldg_id = entry.config.settings.bldg_id,
                             error = %err,
                             "the fleet's site-offset pre-pass could not resolve the home; \
                              its run fails for the same cause"
@@ -640,8 +642,13 @@ impl Fleet {
         let mut peak_live = 0usize;
         let mut chunk_start = 0usize;
 
+        // The construction's shared parses: one parse per unique input.
+        // The weather and the defaults are the fleet's (the homes share
+        // them), the HPXML and the schedule documents one chunk's.
+        let shared_parses = hares_io::ParsedInputsCache::new();
+
         for chunk in self.entries.chunks(chunk_size.get()) {
-            let restrictions = matcher.restrictions(chunk);
+            let restrictions = matcher.restrictions(chunk, &shared_parses);
             let is_last_chunk = chunk_start + chunk.len() >= total;
             if is_last_chunk && let Some(names) = matcher.unmatched() {
                 return Err(FleetError::UnmatchedSelection { names });
@@ -657,12 +664,16 @@ impl Fleet {
                         report,
                         &restriction,
                         alignment,
-                        progress.as_ref(),
-                        &completed,
-                        total,
+                        &shared_parses,
+                        &ProgressTracker {
+                            callback: progress.as_ref(),
+                            completed: &completed,
+                            total,
+                        },
                     )
                 })
                 .collect();
+            shared_parses.evict_documents();
 
             peak_live = peak_live.max(outcomes.len());
             for (offset, outcome) in outcomes.drain(..).enumerate() {
@@ -787,7 +798,11 @@ impl SelectionMatcher {
     /// restricts to itself (the run resolves the home's own tier); a
     /// `Named` or `Pattern` selection probes the home's catalogue, which
     /// exists only once the home's inputs are parsed.
-    fn restrictions(&mut self, chunk: &[FleetEntry]) -> Vec<Restricted> {
+    fn restrictions(
+        &mut self,
+        chunk: &[FleetEntry],
+        shared_parses: &hares_io::ParsedInputsCache,
+    ) -> Vec<Restricted> {
         match &self.selection {
             Selection::Verbosity(verbosity) => chunk
                 .iter()
@@ -801,7 +816,7 @@ impl SelectionMatcher {
                 .collect(),
             Selection::Named(_) | Selection::Pattern(_) => chunk
                 .iter()
-                .map(|entry| self.restrict_entry(entry))
+                .map(|entry| self.restrict_entry(entry, shared_parses))
                 .collect(),
         }
     }
@@ -809,8 +824,12 @@ impl SelectionMatcher {
     /// Probes one home's catalogue: builds the home's inputs, restricts
     /// the selection to it, and drops the home. A home whose inputs fail
     /// to parse declares nothing; its run fails for the same cause.
-    fn restrict_entry(&mut self, entry: &FleetEntry) -> Restricted {
-        let dwelling = match Dwelling::from_config(entry.config.clone()) {
+    fn restrict_entry(
+        &mut self,
+        entry: &FleetEntry,
+        shared_parses: &hares_io::ParsedInputsCache,
+    ) -> Restricted {
+        let dwelling = match build_dwelling(&entry.config, shared_parses) {
             Ok(dwelling) => dwelling,
             Err(_) => return Restricted::NotApplicable,
         };
@@ -918,7 +937,7 @@ fn home_fold_alignment(
     alignment: Option<Alignment>,
     home_offset: Option<FixedOffset>,
 ) -> HomeFoldAlignment {
-    let step_ms = config.sim_config.time_res.num_milliseconds();
+    let step_ms = config.settings.sim_config.time_res.num_milliseconds();
     let home_offset_s = home_offset.map_or(0, |offset| offset.local_minus_utc());
     match alignment {
         Some(Alignment::Instant(origin)) => {
@@ -985,21 +1004,26 @@ fn check_time_grid(
         let Some(offset) = offset else {
             continue;
         };
-        let sim = &entry.config.sim_config;
-        if sim.duration != reference_entry.config.sim_config.duration
-            || sim.time_res != reference_entry.config.sim_config.time_res
+        let sim = &entry.config.settings.sim_config;
+        if sim.duration != reference_entry.config.settings.sim_config.duration
+            || sim.time_res != reference_entry.config.settings.sim_config.time_res
         {
             return Err(FleetError::HeterogeneousTimeGrid {
-                bldg_id: entry.config.bldg_id,
+                bldg_id: entry.config.settings.bldg_id,
             });
         }
         match instant_alignment {
             None => {
                 if sim.start_time.naive_local()
-                    != reference_entry.config.sim_config.start_time.naive_local()
+                    != reference_entry
+                        .config
+                        .settings
+                        .sim_config
+                        .start_time
+                        .naive_local()
                 {
                     return Err(FleetError::HeterogeneousTimeGrid {
-                        bldg_id: entry.config.bldg_id,
+                        bldg_id: entry.config.settings.bldg_id,
                     });
                 }
             }
@@ -1022,13 +1046,13 @@ fn check_time_grid(
                 let from_midnight = (wall_start.naive_local() - midnight).num_seconds();
                 if step_s <= 0 || from_midnight % step_s != 0 {
                     return Err(FleetError::HeterogeneousTimeGrid {
-                        bldg_id: entry.config.bldg_id,
+                        bldg_id: entry.config.settings.bldg_id,
                     });
                 }
                 // The runs share at least one whole reference period at
                 // the report's frequency, here against the reference
                 // home's run.
-                let reference_sim = &reference_entry.config.sim_config;
+                let reference_sim = &reference_entry.config.settings.sim_config;
                 let reference_offset_s = reference_offset.expect("checked").local_minus_utc();
                 let reference_start = reference_sim.start_time.naive_local()
                     - FixedOffset::east_opt(reference_offset_s).expect("a resolved offset");
@@ -1045,7 +1069,7 @@ fn check_time_grid(
                 );
                 if !shares {
                     return Err(FleetError::HeterogeneousTimeGrid {
-                        bldg_id: entry.config.bldg_id,
+                        bldg_id: entry.config.settings.bldg_id,
                     });
                 }
             }
@@ -1196,24 +1220,24 @@ fn configured_steps(config: &SimulationConfig) -> u64 {
 fn check_home_configs(configs: &[DwellingConfig]) -> Result<()> {
     let mut seen: HashMap<String, i64> = HashMap::new();
     for config in configs {
-        for spec in &config.sim_config.reports {
+        for spec in &config.settings.sim_config.reports {
             if spec.name == FLEET_REPORT_NAME {
                 return Err(FleetError::ReservedReportName {
-                    bldg_id: config.bldg_id,
+                    bldg_id: config.settings.bldg_id,
                 });
             }
             if let Some(path) = spec.destination.path() {
                 let key = path.to_string_lossy().to_string();
                 match seen.get(&key).copied() {
-                    Some(first) if first != config.bldg_id => {
+                    Some(first) if first != config.settings.bldg_id => {
                         return Err(FleetError::DuplicateDestination {
                             first,
-                            second: config.bldg_id,
+                            second: config.settings.bldg_id,
                             path: key,
                         });
                     }
                     _ => {
-                        seen.insert(key, config.bldg_id);
+                        seen.insert(key, config.settings.bldg_id);
                     }
                 }
             }
@@ -1243,14 +1267,35 @@ struct HomeRun {
 /// status; every other home's run completes and is classified by
 /// [`home_status`] (`Ok`, or `Degraded` with its reason). The progress
 /// callback fires once per completed home, whatever the outcome.
+/// The fleet's progress reporting for one simulation: the callback, the
+/// completed counter and the total, one struct so the per-home runner
+/// takes one progress argument.
+struct ProgressTracker<'a> {
+    callback: Option<&'a ProgressCallback>,
+    completed: &'a AtomicUsize,
+    total: usize,
+}
+
+impl ProgressTracker<'_> {
+    fn record_one(&self) {
+        if let Some(cb) = self.callback {
+            let done = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
+            cb(done, self.total);
+        }
+    }
+
+    fn is_installed(&self) -> bool {
+        self.callback.is_some()
+    }
+}
+
 fn run_home(
     entry: &FleetEntry,
     report: &FleetReport,
     restriction: &Restricted,
     fold_alignment: &HomeFoldAlignment,
-    progress: Option<&ProgressCallback>,
-    completed: &AtomicUsize,
-    total: usize,
+    shared_parses: &hares_io::ParsedInputsCache,
+    progress: &ProgressTracker<'_>,
 ) -> HomeRun {
     let caught = panic::catch_unwind(AssertUnwindSafe(|| {
         run_home_inner(
@@ -1258,9 +1303,8 @@ fn run_home(
             report,
             restriction,
             fold_alignment,
+            shared_parses,
             progress,
-            completed,
-            total,
         )
     }));
     match caught {
@@ -1269,11 +1313,11 @@ fn run_home(
             // Guard against double-panic: the message construction
             // allocates, and the progress callback's completion counter
             // is a relaxed add.
-            if progress.is_some() {
-                completed.fetch_add(1, Ordering::Relaxed);
+            if progress.is_installed() {
+                progress.completed.fetch_add(1, Ordering::Relaxed);
             }
             let handler = panic::catch_unwind(AssertUnwindSafe(|| HomeRun {
-                bldg_id: entry.config.bldg_id,
+                bldg_id: entry.config.settings.bldg_id,
                 weight: entry.sample_weight,
                 status: HomeStatus::Failed(format!(
                     "panicked: {}",
@@ -1289,12 +1333,12 @@ fn run_home(
                 Err(_) => {
                     record_double_panic_prevented();
                     tracing::error!(
-                        bldg_id = entry.config.bldg_id,
+                        bldg_id = entry.config.settings.bldg_id,
                         "CRITICAL: error handling panicked \
                          (double-panic prevented) in fleet::run_home"
                     );
                     HomeRun {
-                        bldg_id: entry.config.bldg_id,
+                        bldg_id: entry.config.settings.bldg_id,
                         weight: entry.sample_weight,
                         status: HomeStatus::Failed(
                             "panic handling failed (double-panic prevented)".into(),
@@ -1315,16 +1359,42 @@ fn run_home_inner(
     report: &FleetReport,
     restriction: &Restricted,
     fold_alignment: &HomeFoldAlignment,
-    progress: Option<&ProgressCallback>,
-    completed: &AtomicUsize,
-    total: usize,
+    shared_parses: &hares_io::ParsedInputsCache,
+    progress: &ProgressTracker<'_>,
 ) -> HomeRun {
-    let run = run_home_body(entry, report, restriction, fold_alignment);
-    if let Some(cb) = progress {
-        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-        cb(done, total);
-    }
+    let run = run_home_body(entry, report, restriction, fold_alignment, shared_parses);
+    progress.record_one();
     run
+}
+
+/// The many-home construction's one build: the config's blueprint through
+/// the shared parses, one parse per unique input, and the dwelling built
+/// from the frozen blueprint.
+fn build_dwelling(
+    config: &DwellingConfig,
+    shared_parses: &hares_io::ParsedInputsCache,
+) -> std::result::Result<Dwelling, HaresError> {
+    let generation = hares_io::ScheduleGeneration {
+        start: config.settings.sim_config.start_time,
+        duration: config.settings.sim_config.duration,
+        interval: std::time::Duration::from_secs(
+            config
+                .settings
+                .sim_config
+                .time_res
+                .num_seconds()
+                .clamp(1, i64::from(u32::MAX)) as u64,
+        ),
+    };
+    let inputs = shared_parses.parsed_inputs(
+        &config.hpxml,
+        config.schedule.as_ref(),
+        &config.weather,
+        &config.defaults,
+        Some(generation),
+    )?;
+    let builder = DwellingBlueprintBuilder::new(inputs, config.settings.clone())?;
+    builder.freeze()?.build()
 }
 
 fn run_home_body(
@@ -1332,9 +1402,10 @@ fn run_home_body(
     report: &FleetReport,
     restriction: &Restricted,
     fold_alignment: &HomeFoldAlignment,
+    shared_parses: &hares_io::ParsedInputsCache,
 ) -> HomeRun {
     let failed = |message: String| HomeRun {
-        bldg_id: entry.config.bldg_id,
+        bldg_id: entry.config.settings.bldg_id,
         weight: entry.sample_weight,
         status: HomeStatus::Failed(message),
         steps: 0,
@@ -1345,17 +1416,18 @@ fn run_home_body(
 
     let mut config = entry.config.clone();
     // The fleet's health policy is applied to every home's run.
-    config.sim_config.health_policy = report.health_policy.clone();
+    config.settings.sim_config.health_policy = report.health_policy.clone();
     if let Some(spec) = fleet_report_spec(restriction) {
-        config.sim_config.reports.push(spec);
+        config.settings.sim_config.reports.push(spec);
     }
-    let steps = configured_steps(&config.sim_config);
+    let steps = configured_steps(&config.settings.sim_config);
 
-    let mut dwelling = match Dwelling::from_config(config.clone()) {
+    let mut dwelling = match build_dwelling(&config, shared_parses) {
         Ok(dwelling) => dwelling,
         Err(err) => return failed(err.to_string()),
     };
     let has_fleet_report = config
+        .settings
         .sim_config
         .reports
         .iter()
@@ -1373,7 +1445,7 @@ fn run_home_body(
     // health-policy violation are all `Failed` with the error; a run
     // that finished carries its warnings and health into the status.
     let run: std::result::Result<RunResult, HaresError> = engine
-        .run_dwelling(&mut dwelling, &config.sim_config)
+        .run_dwelling(&mut dwelling, &config.settings.sim_config)
         .map(Arc::unwrap_or_clone);
     let status = home_status(&run);
     let result = match run {
@@ -1385,7 +1457,7 @@ fn run_home_body(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .finish();
     HomeRun {
-        bldg_id: entry.config.bldg_id,
+        bldg_id: entry.config.settings.bldg_id,
         weight: entry.sample_weight,
         status,
         steps,
@@ -1452,10 +1524,14 @@ impl SteppableFleet {
             );
         }
 
+        // The construction's shared parses: one parse per unique input
+        // across the whole steppable fleet.
+        let shared_parses = hares_io::ParsedInputsCache::new();
+
         for config in configs {
-            let bldg_id = config.bldg_id;
+            let bldg_id = config.settings.bldg_id;
             let build_result =
-                panic::catch_unwind(AssertUnwindSafe(|| Dwelling::from_config(config)));
+                panic::catch_unwind(AssertUnwindSafe(|| build_dwelling(&config, &shared_parses)));
             match build_result {
                 Ok(Ok(dwelling)) => dwellings.push(dwelling),
                 Ok(Err(err)) => build_errors.push(DwellingBuildError {
@@ -2190,15 +2266,17 @@ mod tests {
 
         (0..count)
             .map(|idx| DwellingConfig {
-                hpxml_path: fixture_hpxml_path(),
-                schedule_path: Some(schedule_path.clone()),
-                weather_path: weather_path.clone(),
-                sim_config: simulation_config(dir.join(format!("output-{idx}.csv"))),
-                defaults_path: Some(repo_defaults_path()),
-                overrides: None,
-                bldg_id: idx as i64 + 1,
-                initialization_duration: None,
-                patches: None,
+                hpxml: InputSource::Path(fixture_hpxml_path()),
+                schedule: Some(InputSource::Path(schedule_path.clone())),
+                weather: WeatherInput::Path(weather_path.clone()),
+                defaults: DefaultsSource::directory(repo_defaults_path()),
+                settings: DwellingSettings::new(
+                    simulation_config(dir.join(format!("output-{idx}.csv"))),
+                    None,
+                    idx as i64 + 1,
+                    None,
+                    None,
+                ),
             })
             .collect()
     }
@@ -2206,17 +2284,19 @@ mod tests {
     fn build_missing_configs(count: usize) -> Vec<DwellingConfig> {
         (0..count)
             .map(|idx| DwellingConfig {
-                hpxml_path: Path::new(MISSING_ROOT).join("hpxml.xml"),
-                schedule_path: Some(Path::new(MISSING_ROOT).join("schedule.csv")),
-                weather_path: Path::new(MISSING_ROOT).join("weather.epw"),
-                sim_config: simulation_config(
-                    Path::new(MISSING_ROOT).join(format!("output-{idx}.csv")),
+                hpxml: InputSource::Path(Path::new(MISSING_ROOT).join("hpxml.xml")),
+                schedule: Some(InputSource::Path(
+                    Path::new(MISSING_ROOT).join("schedule.csv"),
+                )),
+                weather: WeatherInput::Path(Path::new(MISSING_ROOT).join("weather.epw")),
+                defaults: DefaultsSource::default(),
+                settings: DwellingSettings::new(
+                    simulation_config(Path::new(MISSING_ROOT).join(format!("output-{idx}.csv"))),
+                    None,
+                    idx as i64 + 1,
+                    None,
+                    None,
                 ),
-                defaults_path: None,
-                overrides: None,
-                bldg_id: idx as i64 + 1,
-                initialization_duration: None,
-                patches: None,
             })
             .collect()
     }
@@ -2406,7 +2486,7 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         let mut configs = build_valid_configs(dir.path(), 64);
         for config in &mut configs {
-            for spec in &mut config.sim_config.reports {
+            for spec in &mut config.settings.sim_config.reports {
                 if let hares_io::Destination::Csv { overwrite, .. } = &mut spec.destination {
                     *overwrite = true;
                 }
@@ -2755,7 +2835,7 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         let mut configs = build_valid_configs(dir.path(), 2);
         let mut bad = build_missing_configs(1);
-        bad[0].bldg_id = 999;
+        bad[0].settings.bldg_id = 999;
         configs.extend(bad);
 
         let (mut fleet, build_errors) =
@@ -2904,7 +2984,7 @@ mod tests {
         // prevents fleet inclusion.
         let mut configs = build_valid_configs(dir.path(), 2);
         let mut bad = build_missing_configs(1);
-        bad[0].bldg_id = 999;
+        bad[0].settings.bldg_id = 999;
         configs.extend(bad);
 
         let (mut fleet, build_errors) =
@@ -3370,15 +3450,11 @@ mod tests {
     #[test]
     fn from_buildings_carries_no_construction_report() {
         let config = DwellingConfig {
-            hpxml_path: PathBuf::from("no.xml"),
-            schedule_path: None,
-            weather_path: PathBuf::from("no.epw"),
-            defaults_path: None,
-            sim_config: resstock_sim_config(None),
-            overrides: None,
-            bldg_id: 1,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(PathBuf::from("no.xml")),
+            schedule: None,
+            weather: WeatherInput::Path(PathBuf::from("no.epw")),
+            defaults: DefaultsSource::default(),
+            settings: DwellingSettings::new(resstock_sim_config(None), None, 1, None, None),
         };
         let fleet = Fleet::from_buildings(vec![config])
             .expect("the configs carry no reserved report or shared destination");
@@ -3410,7 +3486,7 @@ mod tests {
         );
         for entry in &fleet.entries {
             assert_eq!(
-                entry.config.sim_config.duration,
+                entry.config.settings.sim_config.duration,
                 Duration::hours(24),
                 "default duration should be 24 hours"
             );
@@ -3445,13 +3521,12 @@ mod tests {
 
         let defaults = repo_defaults_path();
         let with_defaults = fleet.entries[0].config.clone();
-        assert_eq!(
-            with_defaults.defaults_path.as_deref(),
-            None,
+        assert!(
+            with_defaults.defaults.base.is_none(),
             "the constructor without a defaults_path must leave it unset"
         );
         let with_defaults = DwellingConfig {
-            defaults_path: Some(defaults.clone()),
+            defaults: DefaultsSource::directory(defaults.clone()),
             ..with_defaults
         };
         if let Err(err) = Dwelling::from_config(with_defaults) {
@@ -3493,7 +3568,7 @@ mod tests {
         );
         for entry in &fleet.entries {
             assert_eq!(
-                entry.config.sim_config.duration,
+                entry.config.settings.sim_config.duration,
                 Duration::days(365),
                 "custom duration should be {d} days",
                 d = 365
@@ -3524,12 +3599,15 @@ mod tests {
         assert_eq!(fleet.entries.len(), 1);
 
         let config = &fleet.entries[0].config;
-        assert_eq!(config.hpxml_path, fixtures.join("bldg0019694/home.xml"));
         assert_eq!(
-            config.schedule_path.as_deref(),
+            config.hpxml.path(),
+            Some(fixtures.join("bldg0019694/home.xml").as_path())
+        );
+        assert_eq!(
+            config.schedule.as_ref().and_then(|source| source.path()),
             Some(fixtures.join("bldg0019694/in.schedules.csv").as_path())
         );
-        let weather = config.weather_path.as_path();
+        let weather = config.weather.path().expect("the weather path resolves");
         assert_eq!(
             weather,
             fixtures.join("weather/G5300330_2018.csv").as_path(),
@@ -3644,38 +3722,42 @@ mod tests {
     /// `with_sample_weights` after construction.
     fn golden_fleet_config(bldg_id: i64, weather: &str) -> DwellingConfig {
         DwellingConfig {
-            hpxml_path: resstock_fixture("bldg0176227/home.xml"),
-            schedule_path: Some(resstock_fixture("bldg0176227/in.schedules.csv")),
-            weather_path: resstock_fixture("weather").join(weather),
-            defaults_path: Some(repo_defaults_path()),
-            sim_config: SimulationConfig {
-                start_time: FixedOffset::east_opt(-8 * 3600)
-                    .expect("valid offset")
-                    .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
-                    .single()
-                    .expect("valid start"),
-                duration: Duration::days(2),
-                time_res: Duration::seconds(300),
-                reports: vec![hares_io::ReportSpec {
-                    name: "frame".to_string(),
-                    selection: hares_io::Selection::Verbosity(2),
-                    frequency: hares_io::Frequency::default(),
-                    destination: hares_io::Destination::Memory,
-                }],
-                diagnostics: false,
-                metrics: true,
-                output_chunk_size: 10_000,
-                setpoint_deadband_c: None,
-                master_seed: 0,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id,
-            initialization_duration: Some(std::time::Duration::ZERO),
-            patches: None,
+            hpxml: InputSource::Path(resstock_fixture("bldg0176227/home.xml")),
+            schedule: Some(InputSource::Path(resstock_fixture(
+                "bldg0176227/in.schedules.csv",
+            ))),
+            weather: WeatherInput::Path(resstock_fixture("weather").join(weather)),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: FixedOffset::east_opt(-8 * 3600)
+                        .expect("valid offset")
+                        .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                        .single()
+                        .expect("valid start"),
+                    duration: Duration::days(2),
+                    time_res: Duration::seconds(300),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(2),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Memory,
+                    }],
+                    diagnostics: false,
+                    metrics: true,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                bldg_id,
+                Some(std::time::Duration::ZERO),
+                None,
+            ),
         }
     }
 
@@ -3870,7 +3952,7 @@ mod tests {
         // The first home's own Timestep memory report of the same
         // selection, run standalone.
         let mut home_config = golden_fleet_config(1, "G0600770_2018.csv");
-        home_config.sim_config.reports = vec![hares_io::ReportSpec {
+        home_config.settings.sim_config.reports = vec![hares_io::ReportSpec {
             name: "frame".to_string(),
             selection: hares_io::Selection::Verbosity(2),
             frequency: hares_io::Frequency::Timestep,
@@ -3938,29 +4020,31 @@ mod tests {
     fn fleet_minutes_15_reduces_one_minute_steps() {
         let examples = repo_root().join("data/examples");
         let home = |bldg_id: i64, schedule: PathBuf| DwellingConfig {
-            hpxml_path: fixture_hpxml_path(),
-            schedule_path: Some(schedule),
-            weather_path: examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-            defaults_path: Some(repo_defaults_path()),
-            sim_config: SimulationConfig {
-                start_time: fixture_start::fixture_start(),
-                duration: Duration::hours(2),
-                time_res: Duration::minutes(1),
-                reports: Vec::new(),
-                diagnostics: false,
-                metrics: false,
-                output_chunk_size: 10_000,
-                setpoint_deadband_c: None,
-                master_seed: 0,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(fixture_hpxml_path()),
+            schedule: Some(InputSource::Path(schedule)),
+            weather: WeatherInput::Path(examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw")),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: fixture_start::fixture_start(),
+                    duration: Duration::hours(2),
+                    time_res: Duration::minutes(1),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                bldg_id,
+                None,
+                None,
+            ),
         };
 
         // Each home's own Timestep memory report, for the hand-computed
@@ -3969,7 +4053,7 @@ mod tests {
         // partition by seed and building id.
         let standalone = |bldg_id: i64, schedule: PathBuf| {
             let mut config = home(bldg_id, schedule);
-            config.sim_config.reports = vec![hares_io::ReportSpec {
+            config.settings.sim_config.reports = vec![hares_io::ReportSpec {
                 name: "frame".to_string(),
                 selection: hares_io::Selection::Verbosity(2),
                 frequency: hares_io::Frequency::Timestep,
@@ -4116,15 +4200,17 @@ mod tests {
         write_temp_file(&dir.path().join("weather.epw"), &build_epw_8760());
         let fixtures = repo_root().join("tests/fixtures/hpxml/ochre_samples");
         let battery_home = DwellingConfig {
-            hpxml_path: fixtures.join("base-battery.xml"),
-            schedule_path: Some(dir.path().join("schedule.csv")),
-            weather_path: dir.path().join("weather.epw"),
-            defaults_path: Some(repo_defaults_path()),
-            sim_config: simulation_config(dir.path().join("battery.csv")),
-            overrides: Some(serde_json::json!({"Battery": {"bms_mode": "\"Manual\""}})),
-            bldg_id: 2,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(fixtures.join("base-battery.xml")),
+            schedule: Some(InputSource::Path(dir.path().join("schedule.csv"))),
+            weather: WeatherInput::Path(dir.path().join("weather.epw")),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                simulation_config(dir.path().join("battery.csv")),
+                Some(serde_json::json!({"Battery": {"bms_mode": "\"Manual\""}})),
+                2,
+                None,
+                None,
+            ),
         };
         // A battery variable's name, from the battery home's own catalogue.
         let catalogue = Dwelling::from_config(battery_home.clone())
@@ -4137,15 +4223,17 @@ mod tests {
             .find(|name| name.contains("Battery"))
             .expect("the battery home declares battery variables");
         let plain_home = DwellingConfig {
-            hpxml_path: fixture_hpxml_path(),
-            schedule_path: Some(dir.path().join("schedule.csv")),
-            weather_path: dir.path().join("weather.epw"),
-            defaults_path: Some(repo_defaults_path()),
-            sim_config: simulation_config(dir.path().join("plain.csv")),
-            overrides: None,
-            bldg_id: 1,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(fixture_hpxml_path()),
+            schedule: Some(InputSource::Path(dir.path().join("schedule.csv"))),
+            weather: WeatherInput::Path(dir.path().join("weather.epw")),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                simulation_config(dir.path().join("plain.csv")),
+                None,
+                1,
+                None,
+                None,
+            ),
         };
 
         let fleet = Fleet::from_buildings(vec![plain_home, battery_home])
@@ -4213,26 +4301,28 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         let shared = dir.path().join("shared.parquet");
         let report_for = |bldg_id: i64| DwellingConfig {
-            hpxml_path: fixture_hpxml_path(),
-            schedule_path: None,
-            weather_path: dir.path().join("weather.epw"),
-            defaults_path: None,
-            sim_config: SimulationConfig {
-                reports: vec![hares_io::ReportSpec {
-                    name: format!("report-{bldg_id}"),
-                    selection: hares_io::Selection::Verbosity(0),
-                    frequency: hares_io::Frequency::default(),
-                    destination: hares_io::Destination::Parquet {
-                        path: shared.clone(),
-                        overwrite: false,
-                    },
-                }],
-                ..simulation_config(dir.path().join(format!("unused-{bldg_id}.csv")))
-            },
-            overrides: None,
-            bldg_id,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(fixture_hpxml_path()),
+            schedule: None,
+            weather: WeatherInput::Path(dir.path().join("weather.epw")),
+            defaults: DefaultsSource::default(),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    reports: vec![hares_io::ReportSpec {
+                        name: format!("report-{bldg_id}"),
+                        selection: hares_io::Selection::Verbosity(0),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Parquet {
+                            path: shared.clone(),
+                            overwrite: false,
+                        },
+                    }],
+                    ..simulation_config(dir.path().join(format!("unused-{bldg_id}.csv")))
+                },
+                None,
+                bldg_id,
+                None,
+                None,
+            ),
         };
         let err = Fleet::from_buildings(vec![report_for(1), report_for(2)])
             .expect_err("two homes may not write one path");
@@ -4255,12 +4345,16 @@ mod tests {
     fn fleet_home_report_named_fleet_is_rejected() {
         let dir = tempdir().expect("temp dir");
         let mut config = build_valid_configs(dir.path(), 1).remove(0);
-        config.sim_config.reports.push(hares_io::ReportSpec {
-            name: "fleet".to_string(),
-            selection: hares_io::Selection::Verbosity(0),
-            frequency: hares_io::Frequency::default(),
-            destination: hares_io::Destination::Memory,
-        });
+        config
+            .settings
+            .sim_config
+            .reports
+            .push(hares_io::ReportSpec {
+                name: "fleet".to_string(),
+                selection: hares_io::Selection::Verbosity(0),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Memory,
+            });
         let err = Fleet::from_buildings(vec![config])
             .expect_err("the reserved report name is rejected at construction");
         assert!(
@@ -4278,12 +4372,16 @@ mod tests {
     fn fleet_home_callback_report_fails_that_home_at_run_start() {
         let dir = tempdir().expect("temp dir");
         let mut configs = build_valid_configs(dir.path(), 2);
-        configs[1].sim_config.reports.push(hares_io::ReportSpec {
-            name: "mine".to_string(),
-            selection: hares_io::Selection::Verbosity(0),
-            frequency: hares_io::Frequency::default(),
-            destination: hares_io::Destination::Callback,
-        });
+        configs[1]
+            .settings
+            .sim_config
+            .reports
+            .push(hares_io::ReportSpec {
+                name: "mine".to_string(),
+                selection: hares_io::Selection::Verbosity(0),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Callback,
+            });
         let fleet = Fleet::from_buildings(configs)
             .expect("the configs carry no reserved report or shared destination");
         let report = FleetReport {
@@ -4328,29 +4426,34 @@ mod tests {
                       start: chrono::DateTime<FixedOffset>,
                       forced: hares_io::SiteLocationOverride| {
             DwellingConfig {
-                hpxml_path: fixture_hpxml_path(),
-                schedule_path: Some(examples.join("BEopt_example_schedule.csv")),
-                weather_path: examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-                defaults_path: Some(repo_defaults_path()),
-                sim_config: SimulationConfig {
-                    start_time: start,
-                    duration: Duration::hours(2),
-                    time_res: Duration::seconds(900),
-                    reports: Vec::new(),
-                    diagnostics: false,
-                    metrics: false,
-                    output_chunk_size: 10_000,
-                    setpoint_deadband_c: None,
-                    master_seed: 0,
-                    civil_timezone: None,
-                    site_location: forced,
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                },
-                overrides: None,
-                bldg_id,
-                initialization_duration: None,
-                patches: None,
+                hpxml: InputSource::Path(fixture_hpxml_path()),
+                schedule: Some(InputSource::Path(
+                    examples.join("BEopt_example_schedule.csv"),
+                )),
+                weather: WeatherInput::Path(examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw")),
+                defaults: DefaultsSource::directory(repo_defaults_path()),
+                settings: DwellingSettings::new(
+                    SimulationConfig {
+                        start_time: start,
+                        duration: Duration::hours(2),
+                        time_res: Duration::seconds(900),
+                        reports: Vec::new(),
+                        diagnostics: false,
+                        metrics: false,
+                        output_chunk_size: 10_000,
+                        setpoint_deadband_c: None,
+                        master_seed: 0,
+                        civil_timezone: None,
+                        site_location: forced,
+                        max_consecutive_step_failures:
+                            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                        health_policy: hares_io::HealthPolicy::default(),
+                    },
+                    None,
+                    bldg_id,
+                    None,
+                    None,
+                ),
             }
         };
         // The Denver weather resolves UTC-7, and the second home's site
@@ -4442,7 +4545,7 @@ mod tests {
             golden_fleet_config(1, "G0600770_2018.csv"),
             golden_fleet_config(2, "G0600650_2018.csv"),
         ];
-        configs[1].sim_config.metrics = false;
+        configs[1].settings.sim_config.metrics = false;
         let fleet = Fleet::from_buildings(configs)
             .expect("the homes carry no reserved report or shared destination")
             .with_sample_weights(vec![1.0, 1.0])
@@ -4568,29 +4671,33 @@ mod tests {
     /// unread-load copy, weights 1 and 2, folded at the hour.
     fn fl2_fleet(unread_schedule: &Path, metrics: bool) -> Fleet {
         let home = |bldg_id: i64, schedule: &Path| DwellingConfig {
-            hpxml_path: fixture_hpxml_path(),
-            schedule_path: Some(schedule.to_path_buf()),
-            weather_path: repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-            defaults_path: Some(repo_defaults_path()),
-            sim_config: SimulationConfig {
-                start_time: fixture_start::fixture_start(),
-                duration: Duration::hours(24),
-                time_res: Duration::seconds(900),
-                reports: Vec::new(),
-                diagnostics: false,
-                metrics,
-                output_chunk_size: 10_000,
-                setpoint_deadband_c: None,
-                master_seed: 0,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(fixture_hpxml_path()),
+            schedule: Some(InputSource::Path(schedule.to_path_buf())),
+            weather: WeatherInput::Path(
+                repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: fixture_start::fixture_start(),
+                    duration: Duration::hours(24),
+                    time_res: Duration::seconds(900),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                bldg_id,
+                None,
+                None,
+            ),
         };
         Fleet::from_buildings(vec![
             home(
@@ -4618,31 +4725,35 @@ mod tests {
     /// mean dividing once, in bucket order.
     fn standalone_hourly_power_means(bldg_id: i64, schedule: &Path) -> Vec<f64> {
         let mut config = DwellingConfig {
-            hpxml_path: fixture_hpxml_path(),
-            schedule_path: Some(schedule.to_path_buf()),
-            weather_path: repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-            defaults_path: Some(repo_defaults_path()),
-            sim_config: SimulationConfig {
-                start_time: fixture_start::fixture_start(),
-                duration: Duration::hours(24),
-                time_res: Duration::seconds(900),
-                reports: Vec::new(),
-                diagnostics: false,
-                metrics: false,
-                output_chunk_size: 10_000,
-                setpoint_deadband_c: None,
-                master_seed: 0,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(fixture_hpxml_path()),
+            schedule: Some(InputSource::Path(schedule.to_path_buf())),
+            weather: WeatherInput::Path(
+                repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: fixture_start::fixture_start(),
+                    duration: Duration::hours(24),
+                    time_res: Duration::seconds(900),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                bldg_id,
+                None,
+                None,
+            ),
         };
-        config.sim_config.reports = vec![hares_io::ReportSpec {
+        config.settings.sim_config.reports = vec![hares_io::ReportSpec {
             name: "frame".to_string(),
             selection: hares_io::Selection::Verbosity(2),
             frequency: hares_io::Frequency::Timestep,
@@ -4896,29 +5007,34 @@ mod tests {
         let fixtures = repo_root().join("tests/fixtures/hpxml/ochre_samples");
         let home =
             |bldg_id: i64, hpxml: PathBuf, overrides: Option<serde_json::Value>| DwellingConfig {
-                hpxml_path: hpxml,
-                schedule_path: Some(examples.join("BEopt_example_schedule.csv")),
-                weather_path: examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-                defaults_path: Some(repo_defaults_path()),
-                sim_config: SimulationConfig {
-                    start_time: fixture_start::fixture_start(),
-                    duration: Duration::hours(24),
-                    time_res: Duration::seconds(900),
-                    reports: Vec::new(),
-                    diagnostics: false,
-                    metrics,
-                    output_chunk_size: 10_000,
-                    setpoint_deadband_c: None,
-                    master_seed: 0,
-                    civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                },
-                overrides,
-                bldg_id,
-                initialization_duration: None,
-                patches: None,
+                hpxml: InputSource::Path(hpxml),
+                schedule: Some(InputSource::Path(
+                    examples.join("BEopt_example_schedule.csv"),
+                )),
+                weather: WeatherInput::Path(examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw")),
+                defaults: DefaultsSource::directory(repo_defaults_path()),
+                settings: DwellingSettings::new(
+                    SimulationConfig {
+                        start_time: fixture_start::fixture_start(),
+                        duration: Duration::hours(24),
+                        time_res: Duration::seconds(900),
+                        reports: Vec::new(),
+                        diagnostics: false,
+                        metrics,
+                        output_chunk_size: 10_000,
+                        setpoint_deadband_c: None,
+                        master_seed: 0,
+                        civil_timezone: None,
+                        site_location: hares_io::SiteLocationOverride::default(),
+                        max_consecutive_step_failures:
+                            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                        health_policy: hares_io::HealthPolicy::default(),
+                    },
+                    overrides,
+                    bldg_id,
+                    None,
+                    None,
+                ),
             };
         let plain = home(1, fixtures.join("base.xml"), None);
         let battery = home(
@@ -4994,7 +5110,7 @@ mod tests {
     /// column names alongside.
     fn standalone_home_hourly(config: &DwellingConfig) -> (Vec<String>, Vec<Vec<f64>>) {
         let mut config = config.clone();
-        config.sim_config.reports = vec![hares_io::ReportSpec {
+        config.settings.sim_config.reports = vec![hares_io::ReportSpec {
             name: "frame".to_string(),
             selection: hares_io::Selection::Verbosity(2),
             frequency: hares_io::Frequency::Timestep,
@@ -5090,34 +5206,41 @@ mod tests {
         let examples = repo_root().join("data/examples");
         let fixtures = repo_root().join("tests/fixtures/hpxml/ochre_samples");
         let plain_config = DwellingConfig {
-            hpxml_path: fixtures.join("base.xml"),
-            schedule_path: Some(examples.join("BEopt_example_schedule.csv")),
-            weather_path: examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-            defaults_path: Some(repo_defaults_path()),
-            sim_config: SimulationConfig {
-                start_time: fixture_start::fixture_start(),
-                duration: Duration::hours(24),
-                time_res: Duration::seconds(900),
-                reports: Vec::new(),
-                diagnostics: false,
-                metrics: false,
-                output_chunk_size: 10_000,
-                setpoint_deadband_c: None,
-                master_seed: 0,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id: 1,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(fixtures.join("base.xml")),
+            schedule: Some(InputSource::Path(
+                examples.join("BEopt_example_schedule.csv"),
+            )),
+            weather: WeatherInput::Path(examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw")),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: fixture_start::fixture_start(),
+                    duration: Duration::hours(24),
+                    time_res: Duration::seconds(900),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                1,
+                None,
+                None,
+            ),
         };
         let battery_config = DwellingConfig {
-            hpxml_path: fixtures.join("base-battery.xml"),
-            overrides: Some(serde_json::json!({"Battery": {"bms_mode": "\"Manual\""}})),
-            bldg_id: 2,
+            hpxml: InputSource::Path(fixtures.join("base-battery.xml")),
+            settings: DwellingSettings {
+                overrides: Some(serde_json::json!({"Battery": {"bms_mode": "\"Manual\""}})),
+                bldg_id: 2,
+                ..plain_config.settings.clone()
+            },
             ..plain_config.clone()
         };
         let (plain_names, plain_columns) = standalone_home_hourly(&plain_config);
@@ -5268,29 +5391,33 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         let unread = schedule_with_unread_column(dir.path());
         let home = |bldg_id: i64| DwellingConfig {
-            hpxml_path: fixture_hpxml_path(),
-            schedule_path: Some(unread.clone()),
-            weather_path: repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-            defaults_path: Some(repo_defaults_path()),
-            sim_config: SimulationConfig {
-                start_time: fixture_start::fixture_start(),
-                duration: Duration::hours(24),
-                time_res: Duration::seconds(900),
-                reports: Vec::new(),
-                diagnostics: false,
-                metrics: false,
-                output_chunk_size: 10_000,
-                setpoint_deadband_c: None,
-                master_seed: 0,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(fixture_hpxml_path()),
+            schedule: Some(InputSource::Path(unread.clone())),
+            weather: WeatherInput::Path(
+                repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: fixture_start::fixture_start(),
+                    duration: Duration::hours(24),
+                    time_res: Duration::seconds(900),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                bldg_id,
+                None,
+                None,
+            ),
         };
         let fleet = Fleet::from_buildings(vec![home(1), home(2)])
             .expect("the homes carry no reserved report or shared destination");
@@ -5352,33 +5479,37 @@ mod tests {
         local_start_hour: u32,
     ) -> DwellingConfig {
         DwellingConfig {
-            hpxml_path: resstock_fixture(&format!("{home}/home.xml")),
-            schedule_path: Some(resstock_fixture(&format!("{home}/in.schedules.csv"))),
-            weather_path: resstock_fixture("weather").join(weather),
-            defaults_path: Some(repo_defaults_path()),
-            sim_config: SimulationConfig {
-                start_time: FixedOffset::east_opt(0)
-                    .expect("valid offset")
-                    .with_ymd_and_hms(2018, 1, 1, local_start_hour, 0, 0)
-                    .single()
-                    .expect("valid start"),
-                duration: Duration::days(7),
-                time_res: Duration::seconds(3600),
-                reports: Vec::new(),
-                diagnostics: false,
-                metrics: false,
-                output_chunk_size: 10_000,
-                setpoint_deadband_c: None,
-                master_seed: 0,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id,
-            initialization_duration: Some(std::time::Duration::ZERO),
-            patches: None,
+            hpxml: InputSource::Path(resstock_fixture(&format!("{home}/home.xml"))),
+            schedule: Some(InputSource::Path(resstock_fixture(&format!(
+                "{home}/in.schedules.csv"
+            )))),
+            weather: WeatherInput::Path(resstock_fixture("weather").join(weather)),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: FixedOffset::east_opt(0)
+                        .expect("valid offset")
+                        .with_ymd_and_hms(2018, 1, 1, local_start_hour, 0, 0)
+                        .single()
+                        .expect("valid start"),
+                    duration: Duration::days(7),
+                    time_res: Duration::seconds(3600),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                bldg_id,
+                Some(std::time::Duration::ZERO),
+                None,
+            ),
         }
     }
 
@@ -5471,14 +5602,16 @@ mod tests {
 
         let dir = tempdir().expect("temp dir");
         let weather_path = dir.path().join("G0900090_2018.csv");
-        let original = std::fs::read_to_string(&config.weather_path).expect("weather read");
+        let original =
+            std::fs::read_to_string(config.weather.path().expect("the weather path resolves"))
+                .expect("weather read");
         let header = original.lines().next().expect("a header line");
         write_temp_file(&weather_path, header);
 
         let stripped = DwellingConfig {
-            weather_path: weather_path.clone(),
-            schedule_path: Some(dir.path().join("missing_schedule.csv")),
-            defaults_path: Some(dir.path().join("missing_defaults")),
+            weather: WeatherInput::Path(weather_path.clone()),
+            schedule: Some(InputSource::Path(dir.path().join("missing_schedule.csv"))),
+            defaults: DefaultsSource::directory(dir.path().join("missing_defaults")),
             ..config
         };
         let offset = hares_core::dwelling::site_offset(&stripped)
@@ -5551,7 +5684,7 @@ mod tests {
         ];
         // Break the UTC-8 home's start to 00:30 local: its start instant
         // lands a half hour off the declared offset's step grid.
-        configs[2].sim_config.start_time = FixedOffset::west_opt(8 * 3600)
+        configs[2].settings.sim_config.start_time = FixedOffset::west_opt(8 * 3600)
             .expect("valid offset")
             .with_ymd_and_hms(2018, 1, 1, 0, 30, 0)
             .single()
@@ -5700,29 +5833,33 @@ mod tests {
     fn heterogeneous_time_grid_is_an_error() {
         let examples = repo_root().join("data/examples");
         let config = |bldg_id: i64, start: DateTime<FixedOffset>| DwellingConfig {
-            hpxml_path: fixture_hpxml_path(),
-            schedule_path: Some(examples.join("BEopt_example_schedule.csv")),
-            weather_path: examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-            defaults_path: Some(repo_defaults_path()),
-            sim_config: SimulationConfig {
-                start_time: start,
-                duration: Duration::hours(2),
-                time_res: Duration::seconds(900),
-                reports: Vec::new(),
-                diagnostics: false,
-                metrics: false,
-                output_chunk_size: 10_000,
-                setpoint_deadband_c: None,
-                master_seed: 0,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(fixture_hpxml_path()),
+            schedule: Some(InputSource::Path(
+                examples.join("BEopt_example_schedule.csv"),
+            )),
+            weather: WeatherInput::Path(examples.join("USA_CO_Denver.Intl.AP.725650_TMY3.epw")),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: start,
+                    duration: Duration::hours(2),
+                    time_res: Duration::seconds(900),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                bldg_id,
+                None,
+                None,
+            ),
         };
         let offset = FixedOffset::west_opt(7 * 3600).expect("valid offset");
         let fleet = Fleet::from_buildings(vec![
@@ -5751,6 +5888,84 @@ mod tests {
         assert!(
             matches!(&err, FleetError::HeterogeneousTimeGrid { bldg_id } if *bldg_id == 2),
             "got: {err:?}"
+        );
+    }
+
+    /// The many-home construction parses each unique input once: three
+    /// homes sharing one HPXML file, one weather file and one defaults
+    /// tree produce one weather parse, one defaults load and one profile
+    /// load, and one HPXML parse per unique file. The parse counts are the
+    /// proof instrument (`hares_io::parse_counts`).
+    #[test]
+    fn many_home_construction_parses_each_unique_input_once() {
+        let dir = tempdir().expect("temp dir");
+        let configs = build_valid_configs(dir.path(), 3);
+        let before = hares_io::parse_counts::parse_counts();
+        let (fleet, errors) =
+            SteppableFleet::from_configs(configs, 0).expect("at least one home builds");
+        assert!(errors.is_empty(), "no home errors: {errors:?}");
+        drop(fleet);
+        let after = hares_io::parse_counts::parse_counts();
+
+        assert_eq!(
+            after.weather - before.weather,
+            1,
+            "three homes share one weather file: one parse, not one per home"
+        );
+        assert_eq!(
+            after.defaults - before.defaults,
+            1,
+            "three homes share one defaults tree: one load, not one per home"
+        );
+        assert_eq!(
+            after.profiles - before.profiles,
+            1,
+            "three homes share one profile file: one load, not one per home"
+        );
+        assert_eq!(
+            after.hpxml - before.hpxml,
+            1,
+            "the three homes share one HPXML file: one parse, not one per home"
+        );
+    }
+
+    /// The streaming simulate shares the parses the same way: a fleet whose
+    /// homes share every input parses each unique input once for the whole
+    /// fleet, not once per home.
+    #[test]
+    fn streaming_simulate_parses_each_unique_input_once() {
+        let dir = tempdir().expect("temp dir");
+        let configs = build_valid_configs(dir.path(), 3);
+        let before = hares_io::parse_counts::parse_counts();
+        let fleet = Fleet::from_buildings(configs)
+            .expect("the configs carry no reserved report or shared destination");
+        let result = fleet
+            .simulate(&test_report(), 0, chunk(3))
+            .expect("the fleet runs");
+        let after = hares_io::parse_counts::parse_counts();
+        for home in &result.homes {
+            assert_eq!(
+                home.status,
+                HomeStatus::Ok,
+                "no home errors: {:?}",
+                home.status
+            );
+        }
+
+        assert_eq!(
+            after.weather - before.weather,
+            1,
+            "three homes share one weather file: one parse, not one per home"
+        );
+        assert_eq!(
+            after.defaults - before.defaults,
+            1,
+            "three homes share one defaults tree: one load, not one per home"
+        );
+        assert_eq!(
+            after.hpxml - before.hpxml,
+            1,
+            "the three homes share one HPXML file: one parse, not one per home"
         );
     }
 }

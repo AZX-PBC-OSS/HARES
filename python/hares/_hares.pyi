@@ -2479,14 +2479,14 @@ class SiteLocationOverride:
 class DwellingConfig:
     def __init__(
         self,
-        hpxml: str,
-        schedule: str | None,
-        weather: str,
+        hpxml: str | ParsedHpxml,
+        schedule: str | ParsedSchedule | None,
+        weather: str | ParsedWeather,
         config: SimulationConfig,
         *,
         bldg_id: int = ...,
         initialization_duration: int | None = ...,
-        defaults_path: str | None = ...,
+        defaults_path: str | ParsedDefaults | None = ...,
         overrides: dict[str, Any] | None = ...,
         **unexpected: object,
     ) -> None: ...
@@ -3000,6 +3000,47 @@ class HaresCallbackError(HaresSimulationError):
     attached."""
 
 # ---------------------------------------------------------------------------
+# Parsed-input handles: parse once, share across dwellings
+# ---------------------------------------------------------------------------
+
+class ParsedHpxml:
+    @classmethod
+    def from_path(cls, path: str) -> ParsedHpxml: ...
+    @classmethod
+    def from_text(cls, text: str) -> ParsedHpxml: ...
+
+class ParsedWeather:
+    @classmethod
+    def from_path(cls, path: str) -> ParsedWeather: ...
+    @classmethod
+    def from_text(cls, text: str, format: str) -> ParsedWeather: ...
+
+class ParsedSchedule:
+    @classmethod
+    def from_path(cls, path: str) -> ParsedSchedule: ...
+    @classmethod
+    def from_text(cls, text: str) -> ParsedSchedule: ...
+
+class ParsedDefaults:
+    def __init__(self, base: str | None = ..., files: dict[str, str] | None = ...) -> None: ...
+    def with_file(self, relative_path: str, content: str) -> ParsedDefaults: ...
+
+class ParsedInputs:
+    """The parsed-input handles one blueprint is built from."""
+    @property
+    def hpxml(self) -> ParsedHpxml: ...
+    @property
+    def weather(self) -> ParsedWeather: ...
+    @property
+    def schedule(self) -> ParsedSchedule: ...
+    @property
+    def defaults(self) -> ParsedDefaults: ...
+
+class DwellingBlueprintRef:
+    """The frozen blueprint a dwelling was built from."""
+    def parsed_inputs(self) -> ParsedInputs: ...
+
+# ---------------------------------------------------------------------------
 # DwellingBlueprint
 # ---------------------------------------------------------------------------
 
@@ -3007,14 +3048,14 @@ class DwellingBlueprint:
     @classmethod
     def from_hpxml(
         cls,
-        hpxml: str,
-        schedule: str | None,
-        weather: str,
+        hpxml: str | ParsedHpxml,
+        schedule: str | ParsedSchedule | None,
+        weather: str | ParsedWeather,
         config: SimulationConfig,
         *,
         bldg_id: int = ...,
         initialization_duration: int | None = ...,
-        defaults_path: str | None = ...,
+        defaults_path: str | ParsedDefaults | None = ...,
         overrides: dict[str, Any] | None = ...,
         **unexpected: object,
     ) -> DwellingBlueprint: ...
@@ -3048,17 +3089,18 @@ class Dwelling:
     @classmethod
     def from_hpxml(
         cls,
-        hpxml: str,
-        schedule: str | None,
-        weather: str,
+        hpxml: str | ParsedHpxml,
+        schedule: str | ParsedSchedule | None,
+        weather: str | ParsedWeather,
         config: SimulationConfig,
         *,
         bldg_id: int = ...,
         initialization_duration: int | None = ...,
-        defaults_path: str | None = ...,
+        defaults_path: str | ParsedDefaults | None = ...,
         overrides: dict[str, Any] | None = ...,
         **unexpected: object,
     ) -> Dwelling: ...
+    def blueprint(self) -> DwellingBlueprintRef: ...
     def initialize(self) -> None: ...
     def timesteps(self) -> TimestepsIter: ...
     def catalogue(self) -> Catalogue: ...

@@ -4,6 +4,8 @@
 //! error names the equipment. The `let _ =` around the step loop's
 //! `update_control` discards only the operating mode, never the error.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, TimeZone};
@@ -29,29 +31,33 @@ fn config(hpxml: &Path, overrides: Option<serde_json::Value>) -> DwellingConfig 
         .single()
         .expect("valid start time");
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        schedule_path: None,
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: hares_io::SimulationConfig {
-            start_time,
-            duration: Duration::hours(24),
-            time_res: Duration::seconds(3600),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: None,
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            hares_io::SimulationConfig {
+                start_time,
+                duration: Duration::hours(24),
+                time_res: Duration::seconds(3600),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            overrides,
+            1,
+            None,
+            None,
+        ),
     }
 }
 

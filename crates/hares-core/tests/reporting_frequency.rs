@@ -2,6 +2,8 @@
 //! period rows at minute to run-period frequency, each variable reduced by
 //! its declared aggregation, fed from the frozen row plan's step stream.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use arrow::array::{Float64Array, RecordBatch};
@@ -65,15 +67,17 @@ fn cz4a_dwelling(
 ) -> Dwelling {
     let fixture = project_root().join("tests/fixtures/parity/cz4a_ashp_hpwh");
     let config = DwellingConfig {
-        hpxml_path: fixture.join("building.xml"),
-        schedule_path: Some(fixture.join("schedule.csv")),
-        weather_path: fixture.join("weather.epw"),
-        sim_config: sim_config(start, duration_s, step_s, verbosity, chunk),
-        defaults_path: Some(project_root().join("defaults")),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture.join("building.xml")),
+        schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
+        weather: WeatherInput::Path(fixture.join("weather.epw")),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            sim_config(start, duration_s, step_s, verbosity, chunk),
+            None,
+            1,
+            None,
+            None,
+        ),
     };
     Dwelling::from_config(config).expect("cz4a dwelling builds")
 }

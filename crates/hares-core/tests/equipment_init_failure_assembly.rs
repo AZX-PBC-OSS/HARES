@@ -7,10 +7,12 @@
 //! the cause. The census pins that every checked-in HPXML fixture builds
 //! holding one equipment per resolved spec.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, TimeZone};
-use hares_core::dwelling::DwellingBlueprint;
+use hares_core::dwelling::{DwellingBlueprint, DwellingBlueprintBuilder};
 use hares_core::{Dwelling, DwellingConfig};
 use serde_json::{Map, Value, json};
 
@@ -33,30 +35,33 @@ fn config(hpxml: &Path) -> DwellingConfig {
         .single()
         .expect("valid start time");
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        // No schedule file: the generated schedule is the test's condition.
-        schedule_path: None,
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: hares_io::SimulationConfig {
-            start_time,
-            duration: Duration::hours(24),
-            time_res: Duration::seconds(3600),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: None, // No schedule file: the generated schedule is the test's condition.
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            hares_io::SimulationConfig {
+                start_time,
+                duration: Duration::hours(24),
+                time_res: Duration::seconds(3600),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            None,
+            None,
+        ),
     }
 }
 
@@ -78,10 +83,20 @@ fn gain_fraction_override(equipment_name: &str, sensible_gain_fraction: f64) -> 
 /// parameters the HVAC, water-heating, EV, battery, and PV resolvers do
 /// not inject.
 fn first_scheduled_load_name(hpxml: &Path) -> String {
-    let blueprint =
-        DwellingBlueprint::from_config(config(hpxml)).expect("the fixture's blueprint must build");
-    blueprint
-        .equipment_specs
+    let building = hares_io::parse_hpxml(hpxml).expect("the fixture's HPXML must parse");
+    let defaults =
+        hares_io::DefaultsStore::load(&project_root().join("defaults")).expect("the defaults load");
+    let mut warnings = Vec::new();
+    let specs = hares_io::hpxml::equipment::resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut warnings,
+    )
+    .expect("the fixture's equipment must resolve");
+    specs
         .iter()
         .find(|spec| {
             spec.name != "Occupancy" && spec.parameters.contains_key("sensible_gain_fraction")
@@ -100,7 +115,7 @@ fn equipment_init_failure_fails_assembly() {
     let mut cfg = config(&fixture("base.xml"));
     // sensible 1.5 plus the declared latent fraction exceeds 1.0, which
     // the scheduled load's init rejects.
-    cfg.overrides = Some(gain_fraction_override(&load_name, 1.5));
+    cfg.settings.overrides = Some(gain_fraction_override(&load_name, 1.5));
 
     let err = Dwelling::from_config(cfg).err().unwrap_or_else(|| {
         panic!(
@@ -208,9 +223,9 @@ fn every_fixture_builds_every_equipment() {
             .to_string();
 
         let mut cfg = config(&fixture_path);
-        cfg.overrides = corpus_overrides(&fixture_path);
-        let blueprint = match DwellingBlueprint::from_config(cfg) {
-            Ok(blueprint) => blueprint,
+        cfg.settings.overrides = corpus_overrides(&fixture_path);
+        let builder = match DwellingBlueprintBuilder::from_config(cfg) {
+            Ok(builder) => builder,
             Err(err) => {
                 let not_building = fixture_path.file_name().is_some_and(|name| {
                     NOT_BUILDING_FIXTURES.contains(&name.to_string_lossy().as_ref())
@@ -224,14 +239,14 @@ fn every_fixture_builds_every_equipment() {
         };
         // equipment_names() already excludes the occupancy handled outside
         // the registry; every name it resolves must join the dwelling.
-        let mut expected: Vec<String> = blueprint
+        let mut expected: Vec<String> = builder
             .equipment_names()
             .into_iter()
             .map(str::to_string)
             .collect();
         expected.sort();
 
-        match blueprint.build() {
+        match builder.build() {
             Ok(dwelling) => {
                 let mut actual: Vec<String> = dwelling
                     .equipment()
@@ -313,7 +328,7 @@ fn a_wildcard_override_builds_every_corpus_fixture_or_fails_typed() {
         {
             map.extend(battery_obj.clone());
         }
-        cfg.overrides = Some(override_map);
+        cfg.settings.overrides = Some(override_map);
         let outcome = match DwellingBlueprint::from_config(cfg) {
             Ok(blueprint) => blueprint.build().map(|_| ()),
             Err(err) => Err(err),

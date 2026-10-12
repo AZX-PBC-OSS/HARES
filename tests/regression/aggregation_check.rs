@@ -39,7 +39,7 @@ fn standalone_home_periods(
         duration,
         seed,
     );
-    config.sim_config.reports = vec![hares_io::ReportSpec {
+    config.settings.sim_config.reports = vec![hares_io::ReportSpec {
         name: "frame".to_string(),
         selection: Selection::Verbosity(2),
         frequency: Frequency::Timestep,
@@ -153,7 +153,9 @@ pub fn run_aggregation_check() -> Result<(), Vec<String>> {
         .collect();
     // The fourth home's schedule does not exist: the home fails.
     configs.push(hares_core::DwellingConfig {
-        schedule_path: Some(scratch.path().join("no-such-schedule.csv")),
+        schedule: Some(hares_io::InputSource::Path(
+            scratch.path().join("no-such-schedule.csv"),
+        )),
         ..helpers::build_dwelling_config(
             scratch.path(),
             4,

@@ -7,6 +7,8 @@
 //! by water heaters, tankless units and wet appliances, never named in any
 //! spec), and loops declared only by equipment added at runtime.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -58,15 +60,11 @@ fn dwelling_config(
     sim: SimulationConfig,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(schedule_path),
-        weather_path,
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(schedule_path)),
+        weather: WeatherInput::Path(weather_path),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(sim, None, 100, None, None),
     }
 }
 

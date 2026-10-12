@@ -18,8 +18,9 @@ use std::time::{Duration as StdDuration, Instant};
 
 use arrow::array::{Float64Builder, Int64Array, RecordBatch, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
-use hares_core::{Dwelling, DwellingConfig, SimulationEngine};
+use hares_core::{Dwelling, DwellingConfig, DwellingSettings, SimulationEngine};
 use hares_fleet::{Fleet, FleetBuildReport};
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 
 use crate::defaults;
 use crate::error::{FrameGoldenError, FrameGoldenResult};
@@ -170,15 +171,17 @@ fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
     let defaults_digest = defaults::digest_used(&defaults_tree)?;
 
     let config = DwellingConfig {
-        hpxml_path: repo_path(req.repo_root, &home.hpxml),
-        schedule_path: Some(repo_path(req.repo_root, &home.schedule)),
-        weather_path: repo_path(req.repo_root, &home.weather),
-        defaults_path: Some(defaults_tree.dir().to_path_buf()),
-        sim_config: sim.clone(),
-        overrides: Some(home.overrides.clone()),
-        bldg_id: home.bldg_id,
-        initialization_duration: initialization_duration(home.initialization_duration_s),
-        patches: None,
+        hpxml: InputSource::Path(repo_path(req.repo_root, &home.hpxml)),
+        schedule: Some(InputSource::Path(repo_path(req.repo_root, &home.schedule))),
+        weather: WeatherInput::Path(repo_path(req.repo_root, &home.weather)),
+        defaults: DefaultsSource::directory(defaults_tree.dir().to_path_buf()),
+        settings: DwellingSettings::new(
+            sim.clone(),
+            Some(home.overrides.clone()),
+            home.bldg_id,
+            initialization_duration(home.initialization_duration_s),
+            None,
+        ),
     };
 
     let construct_start = Instant::now();
@@ -262,15 +265,17 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         .map(|home| {
             let sim = base_sim.clone();
             DwellingConfig {
-                hpxml_path: repo_path(req.repo_root, &home.hpxml),
-                schedule_path: Some(repo_path(req.repo_root, &home.schedule)),
-                weather_path: repo_path(req.repo_root, &home.weather),
-                defaults_path: Some(defaults_tree.dir().to_path_buf()),
-                sim_config: sim,
-                overrides: Some(home.overrides.clone()),
-                bldg_id: home.bldg_id,
-                initialization_duration: initialization_duration(home.initialization_duration_s),
-                patches: None,
+                hpxml: InputSource::Path(repo_path(req.repo_root, &home.hpxml)),
+                schedule: Some(InputSource::Path(repo_path(req.repo_root, &home.schedule))),
+                weather: WeatherInput::Path(repo_path(req.repo_root, &home.weather)),
+                defaults: DefaultsSource::directory(defaults_tree.dir().to_path_buf()),
+                settings: DwellingSettings::new(
+                    sim,
+                    Some(home.overrides.clone()),
+                    home.bldg_id,
+                    initialization_duration(home.initialization_duration_s),
+                    None,
+                ),
             }
         })
         .collect();

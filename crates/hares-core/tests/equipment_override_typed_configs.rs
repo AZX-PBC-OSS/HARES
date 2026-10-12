@@ -9,6 +9,8 @@
 //! the typed schema rejects fails the build at the point the override is
 //! applied, before any equipment init runs.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, TimeZone};
@@ -36,30 +38,33 @@ fn config(hpxml: &Path, overrides: Option<Value>, start_hour: u32) -> DwellingCo
         .single()
         .expect("valid start time");
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        // No schedule file: the generated schedule is the test's condition.
-        schedule_path: None,
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: hares_io::SimulationConfig {
-            start_time,
-            duration: Duration::hours(24),
-            time_res: Duration::seconds(3600),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: None, // No schedule file: the generated schedule is the test's condition.
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            hares_io::SimulationConfig {
+                start_time,
+                duration: Duration::hours(24),
+                time_res: Duration::seconds(3600),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            overrides,
+            1,
+            None,
+            None,
+        ),
     }
 }
 
@@ -112,7 +117,7 @@ fn water_heater_setpoint_override_changes_behaviour() {
 fn battery_control_override_makes_the_pack_cycle() {
     fn max_observed_soc(overrides: Option<Value>, csv: &PathBuf) -> f64 {
         let mut cfg = config(&fixture("base-battery.xml"), overrides, 10);
-        cfg.sim_config.reports = vec![hares_io::ReportSpec {
+        cfg.settings.sim_config.reports = vec![hares_io::ReportSpec {
             name: "frame".to_string(),
             selection: hares_io::Selection::Verbosity(0),
             frequency: hares_io::Frequency::default(),
@@ -190,7 +195,7 @@ fn dehumidifier_invalid_override_value_fails_the_build() {
 #[test]
 fn blueprint_added_pv_applies_the_spec_bag_override() {
     fn pv_generation_kw(bag_capacity_kw: f64) -> f64 {
-        let mut blueprint = hares_core::dwelling::DwellingBlueprint::from_config(config(
+        let mut blueprint = hares_core::dwelling::DwellingBlueprintBuilder::from_config(config(
             &fixture("base.xml"),
             None,
             10,
@@ -397,7 +402,7 @@ fn bms_observed_soc(dwelling: &Dwelling) -> f64 {
 /// missing-control error carries, not an anonymous deserialization failure.
 #[test]
 fn unreadable_battery_config_fails_the_build_naming_the_battery() {
-    let mut blueprint = hares_core::dwelling::DwellingBlueprint::from_config(config(
+    let mut blueprint = hares_core::dwelling::DwellingBlueprintBuilder::from_config(config(
         &fixture("base.xml"),
         None,
         10,

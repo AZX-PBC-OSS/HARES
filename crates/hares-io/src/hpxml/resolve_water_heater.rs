@@ -126,15 +126,17 @@ fn has_surface_adjacent_to(building: &Building, location: &str) -> bool {
 /// defaults.rb:6104-6132 (`get_water_heater_location`, v1.12.0, after
 /// ANSI/RESNET/ICC 301-2022C), called from defaults.rb:3401-3406 with the
 /// building's first IECC climate zone: the HPXML's, else the one OS-HPXML
-/// derives from the weather station (`Building::climate_zone_iecc`). The
-/// first location of the zone's hierarchy the building has surfaces in
-/// wins. Conditioned space, last in every hierarchy, is present in every
-/// HPXML building (the schema requires conditioned floor area; HARES always
-/// builds the conditioned zone), and older files spell it "living space".
+/// derives from the weather station (the blueprint's effective zone
+/// resolution). The first location of the zone's hierarchy the building
+/// has surfaces in wins. Conditioned space, last in every hierarchy, is
+/// present in every HPXML building (the schema requires conditioned floor
+/// area; HARES always builds the conditioned zone), and older files spell
+/// it "living space".
 fn default_water_heater_location(
     building: &Building,
+    climate_zone_iecc: Option<&str>,
 ) -> std::result::Result<&'static str, super::HpxmlError> {
-    let hierarchy: &[&'static str] = match building.climate_zone_iecc.as_deref() {
+    let hierarchy: &[&'static str] = match climate_zone_iecc {
         Some("1A" | "1B" | "1C" | "2A" | "2B" | "2C" | "3A" | "3B" | "3C") => {
             &["garage", "conditioned space"]
         }
@@ -176,6 +178,7 @@ fn default_water_heater_location(
 
 pub(super) fn resolve_water_heaters(
     building: &Building,
+    climate_zone_iecc: Option<&str>,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
     data_patches: Option<&HpxmlDataPatches>,
@@ -197,7 +200,7 @@ pub(super) fn resolve_water_heaters(
         let location = match child_text(wh, "Location") {
             Some(location) => location,
             None => {
-                let location = default_water_heater_location(building)?;
+                let location = default_water_heater_location(building, climate_zone_iecc)?;
                 warnings.push(Warning::new(
                     "hpxml",
                     format!(
@@ -1692,6 +1695,7 @@ mod tests {
         let log = captured_warnings(|| {
             resolve_water_heaters(
                 &building,
+                building.climate_zone_iecc.as_deref(),
                 &DefaultsStore::empty(),
                 &mut specs,
                 None,
@@ -1875,6 +1879,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -1945,6 +1950,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2014,6 +2020,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             Some(&patches),
@@ -2080,6 +2087,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2150,6 +2158,7 @@ mod tests {
         let mut specs = Vec::new();
         let err = resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2203,6 +2212,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2312,6 +2322,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             Some(&patches),
@@ -2378,6 +2389,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2480,6 +2492,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2537,6 +2550,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2599,6 +2613,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2840,6 +2855,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2901,6 +2917,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2971,6 +2988,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -3026,6 +3044,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -3104,6 +3123,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -3297,6 +3317,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -3371,6 +3392,7 @@ mod tests {
         let mut specs = Vec::new();
         let err = resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,

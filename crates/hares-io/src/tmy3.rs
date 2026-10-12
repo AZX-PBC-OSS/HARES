@@ -53,6 +53,7 @@ pub fn parse_tmy3(path: impl AsRef<Path>) -> Result<WeatherTimeSeries, WeatherEr
 
 /// Parse a TMY3 CSV from an in-memory string (useful for testing).
 pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
+    crate::parse_counts::bump_weather();
     let mut lines = contents.lines();
 
     // --- Line 1: station metadata ---
@@ -267,6 +268,12 @@ fn parse_station_header(line: &str) -> Result<WeatherMeta, WeatherError> {
 pub(crate) fn read_meta(path: &std::path::Path) -> Result<WeatherMeta, WeatherError> {
     let meta_line = crate::epw::read_first_line(path)?;
     parse_station_header(&meta_line)
+}
+
+/// The TMY3 station header's metadata, read from the header line itself:
+/// the content twin of [`read_meta`] for an in-memory weather input.
+pub(crate) fn read_meta_str(station_line: &str) -> Result<WeatherMeta, WeatherError> {
+    parse_station_header(station_line)
 }
 
 /// Column index mapping for TMY3 data fields.

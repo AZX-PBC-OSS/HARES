@@ -1,7 +1,11 @@
-//! Python bindings for pre-build dwelling blueprint (equipment swapping).
+//! Python bindings for pre-build dwelling blueprint: the builder mutates
+//! equipment, and `build()` freezes it and builds the dwelling from the
+//! frozen, shared blueprint.
 
-use hares_core::dwelling::DwellingBlueprint;
-use hares_io::EquipmentSpec;
+use std::sync::Arc;
+
+use hares_core::{DwellingBlueprint, DwellingBlueprintBuilder, DwellingConfig};
+use hares_io::{ParsedDefaults, ParsedHpxml, ParsedSchedule, ParsedWeather};
 use hares_types::EndUse;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -16,6 +20,10 @@ use crate::py_hvac::{
     electric_boiler_spec_from_py, electric_furnace_spec_from_py, gas_boiler_spec_from_py,
     gas_furnace_spec_from_py, ideal_hvac_spec_from_py,
 };
+use crate::py_inputs::{
+    DefaultsArg, HpxmlArg, PyParsedDefaults, PyParsedHpxml, PyParsedSchedule, PyParsedWeather,
+    ScheduleArg, WeatherArg, defaults_arg, hpxml_arg, schedule_arg, weather_arg,
+};
 use crate::py_water_heater::{
     PyElectricResistanceWH, PyGasWaterHeater, PyHeatPumpWH, PyIndirectTank, PyTanklessWaterHeater,
     elec_res_wh_spec_from_py, gas_wh_spec_from_py, hpwh_spec_from_py, indirect_tank_spec_from_py,
@@ -25,49 +33,58 @@ use crate::py_water_heater::{
 #[pyclass(name = "DwellingBlueprint")]
 #[doc = "A two-phase dwelling blueprint: first inspect and swap equipment, then build."]
 pub struct PyDwellingBlueprint {
-    inner: Option<DwellingBlueprint>,
-    config: hares_core::DwellingConfig,
+    builder: Option<DwellingBlueprintBuilder>,
+    config: DwellingConfig,
 }
 
 #[pymethods]
 impl PyDwellingBlueprint {
-    /// Create a DwellingBlueprint from HPXML, schedule, and weather file paths.
+    /// Create a DwellingBlueprint from HPXML, schedule, and weather file paths
+    /// or parsed handles. A handle is shared: its parse is used as is, a
+    /// path is parsed here.
     #[classmethod]
     #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, initialization_duration = None, defaults_path = None, overrides = None, **unexpected))]
     // PyO3 #[classmethod] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     pub fn from_hpxml(
         _cls: &Bound<'_, PyType>,
-        hpxml: String,
-        schedule: Option<String>,
-        weather: String,
+        hpxml: &Bound<'_, PyAny>,
+        schedule: Option<&Bound<'_, PyAny>>,
+        weather: &Bound<'_, PyAny>,
         config: crate::py_config::PySimulationConfig,
         bldg_id: i64,
         initialization_duration: Option<i64>,
-        defaults_path: Option<String>,
+        defaults_path: Option<&Bound<'_, PyAny>>,
         overrides: Option<&Bound<'_, PyDict>>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         // The dwelling-level keywords are the config's own; every simulation
-        // setting rides on the one SimulationConfig object.
-        let py_config =
-            crate::py_config::PyDwellingConfig::from_args(crate::py_config::DwellingConfigArgs {
-                hpxml,
-                schedule,
-                weather,
+        // setting rides on the one SimulationConfig object. Every handle
+        // argument is shared: its parse is used as is. The sources' parses
+        // and the assembly run in the detached section, the GIL released.
+        let (config, inputs) =
+            crate::py_config::resolve_args(crate::py_config::DwellingConfigArgs {
+                hpxml: hpxml_arg(hpxml)?,
+                schedule: schedule_arg_maybe(schedule)?,
+                weather: weather_arg(weather)?,
+                defaults: match defaults_path {
+                    Some(path) => defaults_arg(path)?,
+                    None => DefaultsArg::Source(hares_io::DefaultsSource::default()),
+                },
                 config,
                 bldg_id,
                 initialization_duration,
-                defaults_path,
                 overrides,
                 unexpected,
             })?;
-        let config = py_config.to_dwelling_config()?;
-        let inner =
-            construct_detached(_cls.py(), || DwellingBlueprint::from_config(config.clone()))
-                .map_err(to_py_err)?;
+        let settings = config.settings.clone();
+        let builder = construct_detached(_cls.py(), move || {
+            let inputs = builder_inputs(&inputs)?;
+            DwellingBlueprintBuilder::new(inputs, settings)
+        })
+        .map_err(to_py_err)?;
         Ok(Self {
-            inner: Some(inner),
+            builder: Some(builder),
             config,
         })
     }
@@ -75,7 +92,7 @@ impl PyDwellingBlueprint {
     /// Return the list of equipment names currently in the blueprint.
     pub fn equipment_names(&self) -> PyResult<Vec<String>> {
         let bp = self
-            .inner
+            .builder
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("DwellingBlueprint has already been built"))?;
         Ok(bp.equipment_names().into_iter().map(String::from).collect())
@@ -84,17 +101,18 @@ impl PyDwellingBlueprint {
     /// Remove equipment by its instance name.
     pub fn remove_equipment(&mut self, name: &str) -> PyResult<()> {
         let bp = self
-            .inner
+            .builder
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("DwellingBlueprint has already been built"))?;
-        bp.remove_equipment(name).map_err(to_py_err)
+        let _removed = bp.remove_equipment(name).map_err(to_py_err)?;
+        Ok(())
     }
 
     /// Remove all equipment serving the given end-use(s).
     /// Accepts a single EndUse or a list[EndUse].
     pub fn remove_equipment_by_end_use(&mut self, end_uses: &Bound<'_, PyAny>) -> PyResult<usize> {
         let bp = self
-            .inner
+            .builder
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("DwellingBlueprint has already been built"))?;
         let rust_uses: Vec<EndUse> = if let Ok(single) = end_uses.extract::<PyEndUse>() {
@@ -112,7 +130,7 @@ impl PyDwellingBlueprint {
     /// Add a typed equipment config object (GasFurnace, ASHPHeater, etc.).
     pub fn add_equipment(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<()> {
         let bp = self
-            .inner
+            .builder
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("DwellingBlueprint has already been built"))?;
         let spec = py_any_to_equipment_spec(obj)?;
@@ -123,23 +141,145 @@ impl PyDwellingBlueprint {
     /// Finalise the blueprint and return a PyDwelling ready for simulation.
     /// Consumes the blueprint; calling build() a second time will error.
     pub fn build(&mut self, py: Python<'_>) -> PyResult<PyDwelling> {
-        let bp = self
-            .inner
+        let builder = self
+            .builder
             .take()
             .ok_or_else(|| PyValueError::new_err("DwellingBlueprint has already been built"))?;
+        let blueprint = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            construct_detached(py, move || builder.freeze())
+        }))
+        .map_err(|_| PyValueError::new_err("DwellingBlueprint::build() panicked"))?
+        .map_err(to_py_err)?;
         let dwelling = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            construct_detached(py, || bp.build())
+            construct_detached(py, {
+                let blueprint = Arc::clone(&blueprint);
+                move || blueprint.build()
+            })
         }))
         .map_err(|_| PyValueError::new_err("DwellingBlueprint::build() panicked"))?
         .map_err(to_py_err)?;
         Ok(PyDwelling::from_blueprint_build(
             dwelling,
             self.config.clone(),
+            blueprint,
         ))
     }
 }
 
-fn py_any_to_equipment_spec(obj: &Bound<'_, PyAny>) -> PyResult<EquipmentSpec> {
+/// The shared-parse assembly every Python-facing dwelling constructor
+/// runs in its detached section: handles used as is, sources parsed
+/// there, the schedule generated from the defaults handle's profiles when
+/// the schedule argument is absent, and the effective climate zone
+/// resolved once from the HPXML building and the weather header.
+pub(crate) fn builder_inputs(
+    inputs: &crate::py_config::ConstructorInputs,
+) -> Result<hares_io::ParsedInputs, hares_types::HaresError> {
+    let defaults_handle: Arc<ParsedDefaults> = match &inputs.defaults {
+        DefaultsArg::Parsed(handle) => Arc::clone(handle),
+        DefaultsArg::Source(source) => Arc::new(ParsedDefaults::parse(source)?),
+    };
+    let weather_handle: Arc<ParsedWeather> = match &inputs.weather {
+        WeatherArg::Parsed(handle) => Arc::clone(handle),
+        WeatherArg::Source(source) => Arc::new(ParsedWeather::parse(source)?),
+    };
+    let hpxml_handle: Arc<ParsedHpxml> = match &inputs.hpxml {
+        HpxmlArg::Parsed(handle) => Arc::clone(handle),
+        HpxmlArg::Source(source) => Arc::new(ParsedHpxml::parse(source)?),
+    };
+    let schedule_handle: Option<Arc<ParsedSchedule>> = match &inputs.schedule {
+        Some(ScheduleArg::Parsed(handle)) => Some(Arc::clone(handle)),
+        Some(ScheduleArg::Source(source)) => Some(Arc::new(ParsedSchedule::parse(
+            source,
+            Some(weather_handle.meta()),
+        )?)),
+        None => None,
+    };
+    hares_io::ParsedInputs::from_handles(
+        hpxml_handle,
+        schedule_handle,
+        weather_handle,
+        defaults_handle,
+        inputs.generation,
+    )
+}
+
+/// A read-only reference to the frozen blueprint a dwelling was built
+/// from: the parsed-input handles it shares.
+#[pyclass(name = "DwellingBlueprintRef")]
+#[doc = "The frozen blueprint a dwelling was built from."]
+pub struct PyDwellingBlueprintRef {
+    pub(crate) inner: Arc<DwellingBlueprint>,
+}
+
+#[pymethods]
+impl PyDwellingBlueprintRef {
+    /// The blueprint's parsed-input handles, shared: the same `Arc`s every
+    /// build of the blueprint holds.
+    pub fn parsed_inputs(&self) -> ParsedInputsRef {
+        ParsedInputsRef {
+            hpxml: Arc::clone(&self.inner.inputs().hpxml),
+            weather: Arc::clone(&self.inner.inputs().weather),
+            schedule: Arc::clone(&self.inner.inputs().schedule),
+            defaults: Arc::clone(&self.inner.inputs().defaults),
+        }
+    }
+}
+
+/// The parsed-input handles' read surface.
+#[pyclass(frozen, name = "ParsedInputs")]
+#[doc = "The parsed-input handles one blueprint is built from."]
+pub struct ParsedInputsRef {
+    hpxml: Arc<ParsedHpxml>,
+    weather: Arc<ParsedWeather>,
+    schedule: Arc<ParsedSchedule>,
+    defaults: Arc<ParsedDefaults>,
+}
+
+#[pymethods]
+impl ParsedInputsRef {
+    /// The shared HPXML handle.
+    #[getter]
+    pub fn hpxml(&self) -> PyParsedHpxml {
+        PyParsedHpxml {
+            inner: Arc::clone(&self.hpxml),
+        }
+    }
+
+    /// The shared weather handle.
+    #[getter]
+    pub fn weather(&self) -> PyParsedWeather {
+        PyParsedWeather {
+            inner: Arc::clone(&self.weather),
+        }
+    }
+
+    /// The shared schedule handle.
+    #[getter]
+    pub fn schedule(&self) -> PyParsedSchedule {
+        PyParsedSchedule {
+            inner: Arc::clone(&self.schedule),
+        }
+    }
+
+    /// The shared defaults handle.
+    #[getter]
+    pub fn defaults(&self) -> PyParsedDefaults {
+        PyParsedDefaults {
+            inner: Arc::clone(&self.defaults),
+        }
+    }
+}
+
+/// The `schedule` argument that may be absent entirely: `None` means no
+/// schedule argument, `Some(arg)` the path/handle resolution.
+pub(crate) fn schedule_arg_maybe(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<ScheduleArg>> {
+    match obj {
+        None => Ok(None),
+        Some(obj) => schedule_arg(obj),
+    }
+}
+
+fn py_any_to_equipment_spec(obj: &Bound<'_, PyAny>) -> PyResult<hares_io::EquipmentSpec> {
     if let Ok(f) = obj.extract::<PyRef<'_, PyGasFurnace>>() {
         return gas_furnace_spec_from_py(&f);
     }

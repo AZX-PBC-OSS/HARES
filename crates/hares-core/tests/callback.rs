@@ -8,6 +8,8 @@
 //! several; the notes in `crates/hares-io/src/output/callback.rs` mark
 //! where each piece plugs in.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -94,15 +96,17 @@ fn config(retain_batches: bool, output_path: &std::path::Path) -> SimulationConf
 fn dwelling(sim_config: SimulationConfig, bldg_id: i64) -> Dwelling {
     let fixture = project_root().join("tests/fixtures/parity/cz4a_ashp_hpwh");
     Dwelling::from_config(DwellingConfig {
-        hpxml_path: fixture.join("building.xml"),
-        schedule_path: Some(fixture.join("schedule.csv")),
-        weather_path: fixture.join("weather.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config,
-        overrides: None,
-        bldg_id,
-        initialization_duration: Some(std::time::Duration::from_secs(7 * 24 * 3600)),
-        patches: None,
+        hpxml: InputSource::Path(fixture.join("building.xml")),
+        schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
+        weather: WeatherInput::Path(fixture.join("weather.epw")),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            sim_config,
+            None,
+            bldg_id,
+            Some(std::time::Duration::from_secs(7 * 24 * 3600)),
+            None,
+        ),
     })
     .expect("the fixture dwelling builds")
 }

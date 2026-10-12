@@ -215,19 +215,23 @@ fn emit_dwelling_profiling_summary(summary: &DwellingProfilingSummary) {
 }
 
 fn validate_input_paths(config: &DwellingConfig) -> Result<(), HaresError> {
-    validate_path_exists(&config.hpxml_path, "hpxml_path")?;
-    validate_path_exists(&config.weather_path, "weather_path")?;
+    // The pre-flight checks the path sources only: a content source has no
+    // file to miss, and its read failure surfaces at the parse.
+    validate_path_exists(config.hpxml.path(), "hpxml_path")?;
+    validate_path_exists(config.weather.path(), "weather_path")?;
     Ok(())
 }
 
-fn validate_path_exists(path: &Path, field_name: &str) -> Result<(), HaresError> {
-    if path.exists() {
-        return Ok(());
+fn validate_path_exists(path: Option<&Path>, field_name: &str) -> Result<(), HaresError> {
+    match path {
+        Some(path) if path.exists() => Ok(()),
+        Some(path) => Err(HaresError::Io(format!(
+            "missing `{field_name}`: {}",
+            path.display()
+        ))),
+        // A content source: nothing to check.
+        None => Ok(()),
     }
-    Err(HaresError::Io(format!(
-        "missing `{field_name}`: {}",
-        path.display()
-    )))
 }
 
 #[derive(Debug, Default)]

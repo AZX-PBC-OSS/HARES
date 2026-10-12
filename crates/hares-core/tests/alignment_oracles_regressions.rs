@@ -3,6 +3,8 @@ mod bestest_cases;
 #[path = "../../../tests/bestest/reference_bands.rs"]
 mod bestest_reference_bands;
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -140,7 +142,7 @@ impl ParityFixture {
 fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
     let fixture = ParityFixture::new("cz4a_battery_only");
     let dwelling_config = build_dwelling_config(&fixture);
-    let expected_start_time = dwelling_config.sim_config.start_time.naive_local();
+    let expected_start_time = dwelling_config.settings.sim_config.start_time.naive_local();
 
     let Some(reference_time) =
         read_reference_time_axis_local_opt(&fixture.reference_output_parquet())
@@ -576,7 +578,7 @@ fn run_fixture_to_columns_with_verbosity(
     verbosity_override: Option<u8>,
 ) -> BTreeMap<String, Vec<f64>> {
     let mut dwelling_config = build_dwelling_config(fixture);
-    let mut sim_config = dwelling_config.sim_config.clone();
+    let mut sim_config = dwelling_config.settings.sim_config.clone();
     let output_dir = tempfile::tempdir().expect("temp dir");
     let csv_path = output_dir.path().join(format!("{}.parquet", fixture.id));
     // The helper reads the run back from the Parquet file, so a report is
@@ -598,7 +600,7 @@ fn run_fixture_to_columns_with_verbosity(
             overwrite: false,
         },
     }];
-    dwelling_config.sim_config = sim_config;
+    dwelling_config.settings.sim_config = sim_config;
 
     let engine = SimulationEngine::new();
     let outcome = engine
@@ -621,7 +623,7 @@ fn simulate_fixture_steps(
     // no file is written). The step history is gone: the horizon's step
     // results are what the stepping loop itself collects.
     let mut dwelling_config = build_dwelling_config(fixture);
-    dwelling_config.sim_config.reports = Vec::new();
+    dwelling_config.settings.sim_config.reports = Vec::new();
     let mut dwelling = Dwelling::from_config(dwelling_config).expect("fixture dwelling must load");
     if let Some(actor) = actor {
         dwelling.add_actor(actor).unwrap();
@@ -692,28 +694,32 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
     sim_config.reports = Vec::new();
 
     DwellingConfig {
-        hpxml_path: fixture.building_xml(),
-        schedule_path: Some(fixture.schedule_csv()),
-        // These tests compare against OCHRE reference output, so the weather
-        // is the fixture's hourly file held at the fixture's step by the
-        // Python adapter's OCHRE hold (committed beside the source): the
-        // comparison's zero-order hold lives in the adapter, not in an
-        // engine override.
-        weather_path: fixture.weather_ochre_hold(),
-        sim_config,
-        defaults_path: Some(defaults_path),
-        // The fixture's `[overrides]` table, verbatim: the battery
-        // fixtures declare their control here, and a fixture with none
-        // carries no overrides.
-        overrides: config
-            .overrides
-            .map(|table| serde_json::to_value(&table).expect("overrides table serializes")),
-        bldg_id: config.bldg_id.unwrap_or(1),
-        initialization_duration: config
-            .initialization_duration_seconds
-            .and_then(|seconds| u64::try_from(seconds).ok())
-            .map(StdDuration::from_secs),
-        patches: None,
+        hpxml: InputSource::Path(fixture.building_xml()),
+        schedule: Some(InputSource::Path(fixture.schedule_csv())),
+        weather: WeatherInput::Path(
+            // These tests compare against OCHRE reference output, so the weather
+            // is the fixture's hourly file held at the fixture's step by the
+            // Python adapter's OCHRE hold (committed beside the source): the
+            // comparison's zero-order hold lives in the adapter, not in an
+            // engine override.
+            fixture.weather_ochre_hold(),
+        ),
+        defaults: DefaultsSource::directory(defaults_path),
+        settings: DwellingSettings::new(
+            sim_config,
+            // The fixture's `[overrides]` table, verbatim: the battery
+            // fixtures declare their control here, and a fixture with none
+            // carries no overrides.
+            config
+                .overrides
+                .map(|table| serde_json::to_value(&table).expect("overrides table serializes")),
+            config.bldg_id.unwrap_or(1),
+            config
+                .initialization_duration_seconds
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .map(StdDuration::from_secs),
+            None,
+        ),
     }
 }
 

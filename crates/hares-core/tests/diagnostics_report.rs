@@ -8,6 +8,8 @@
 //! the CSV the pre-change writer produced for the same fixture (pinned at
 //! `fixtures/diagnostics_cz4a.csv`).
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -21,15 +23,11 @@ fn project_root() -> PathBuf {
 fn cz4a_config(sim: SimulationConfig) -> DwellingConfig {
     let fixture = project_root().join("tests/fixtures/parity/cz4a_ashp_hpwh");
     DwellingConfig {
-        hpxml_path: fixture.join("building.xml"),
-        schedule_path: Some(fixture.join("schedule.csv")),
-        weather_path: fixture.join("weather.epw"),
-        sim_config: sim,
-        defaults_path: Some(project_root().join("defaults")),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture.join("building.xml")),
+        schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
+        weather: WeatherInput::Path(fixture.join("weather.epw")),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(sim, None, 1, None, None),
     }
 }
 

@@ -7,8 +7,9 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::PriceSignal;
 use hares_core::{
-    ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingCheckpoint, DwellingConfig,
-    PremiseZip, environment::SurfaceGeometry,
+    ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingBlueprint,
+    DwellingBlueprintBuilder, DwellingCheckpoint, DwellingConfig, PremiseZip,
+    environment::SurfaceGeometry,
 };
 use hares_equipment::{
     BatteryConfig, BatteryLutType, EquipmentConfig, EquipmentRegistry, EvConfig,
@@ -687,6 +688,9 @@ pub struct PyDwelling {
     pub(crate) poisoned: AtomicBool,
     pub(crate) mutex_poison_events: std::sync::atomic::AtomicU64,
     pub(crate) config: DwellingConfig,
+    /// The blueprint the dwelling was built from: the shared parses and
+    /// the state every `reset_with_seed` rebuild clones.
+    pub(crate) blueprint: Arc<DwellingBlueprint>,
     initialized: bool,
     registry: ActorRegistry,
     equipment_registry: EquipmentRegistry,
@@ -707,38 +711,52 @@ impl PyDwelling {
     #[allow(clippy::too_many_arguments)]
     pub fn from_hpxml(
         _cls: &Bound<'_, PyType>,
-        hpxml: String,
-        schedule: Option<String>,
-        weather: String,
+        hpxml: &Bound<'_, PyAny>,
+        schedule: Option<&Bound<'_, PyAny>>,
+        weather: &Bound<'_, PyAny>,
         config: crate::py_config::PySimulationConfig,
         bldg_id: i64,
         initialization_duration: Option<i64>,
-        defaults_path: Option<String>,
+        defaults_path: Option<&Bound<'_, PyAny>>,
         overrides: Option<&Bound<'_, PyDict>>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         // The dwelling-level keywords are the config's own; every simulation
-        // setting rides on the one SimulationConfig object.
-        let config =
-            crate::py_config::PyDwellingConfig::from_args(crate::py_config::DwellingConfigArgs {
-                hpxml,
-                schedule,
-                weather,
+        // setting rides on the one SimulationConfig object. Every handle
+        // argument is shared: its parse is used as is. The sources' parses
+        // and the assembly run in the detached section, the GIL released.
+        let (config, inputs) =
+            crate::py_config::resolve_args(crate::py_config::DwellingConfigArgs {
+                hpxml: crate::py_inputs::hpxml_arg(hpxml)?,
+                schedule: crate::py_blueprint::schedule_arg_maybe(schedule)?,
+                weather: crate::py_inputs::weather_arg(weather)?,
+                defaults: match defaults_path {
+                    Some(path) => crate::py_inputs::defaults_arg(path)?,
+                    None => {
+                        crate::py_inputs::DefaultsArg::Source(hares_io::DefaultsSource::default())
+                    }
+                },
                 config,
                 bldg_id,
                 initialization_duration,
-                defaults_path,
                 overrides,
                 unexpected,
             })?;
-        let config = config.to_dwelling_config()?;
-        let dwelling = construct_detached(_cls.py(), || Dwelling::from_config(config.clone()))
-            .map_err(to_py_err)?;
+        let settings = config.settings.clone();
+        let (dwelling, blueprint) = construct_detached(_cls.py(), move || {
+            let inputs = crate::py_blueprint::builder_inputs(&inputs)?;
+            let builder = DwellingBlueprintBuilder::new(inputs, settings)?;
+            builder
+                .freeze()
+                .and_then(|blueprint| blueprint.build().map(|dwelling| (dwelling, blueprint)))
+        })
+        .map_err(to_py_err)?;
         Ok(Self {
             dwelling: Mutex::new(dwelling),
             poisoned: AtomicBool::new(false),
             mutex_poison_events: std::sync::atomic::AtomicU64::new(0),
-            config,
+            config: config.clone(),
+            blueprint,
             initialized: false,
             registry: ActorRegistry::new(),
             equipment_registry: EquipmentRegistry::new(),
@@ -748,10 +766,18 @@ impl PyDwelling {
         })
     }
 
+    /// The blueprint the dwelling was built from: the shared parses (one
+    /// per unique input) and the state every build clones.
+    pub fn blueprint(&self) -> crate::py_blueprint::PyDwellingBlueprintRef {
+        crate::py_blueprint::PyDwellingBlueprintRef {
+            inner: Arc::clone(&self.blueprint),
+        }
+    }
+
     fn config(&self) -> PySimulationConfig {
         // Read through the dwelling's config, so a rebuilt one (a new seed)
         // is the config the object reports.
-        PySimulationConfig(self.config.sim_config.clone())
+        PySimulationConfig(self.config.settings.sim_config.clone())
     }
 
     pub fn initialize(&mut self) -> PyResult<()> {
@@ -1759,11 +1785,17 @@ impl PyDwelling {
     }
 
     pub fn reset_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<()> {
+        // The reset reuses the blueprint: the shared parses are the same
+        // `Arc`s, the rng derives from the seed, and the settings carry
+        // the seed the config reports.
         let mut config = self.config.clone();
-        config.sim_config.master_seed = seed;
+        config.settings.sim_config.master_seed = seed;
 
-        let dwelling =
-            construct_detached(py, || Dwelling::from_config(config.clone())).map_err(to_py_err)?;
+        let dwelling = construct_detached(py, {
+            let blueprint = Arc::clone(&self.blueprint);
+            move || blueprint.build_with_seed(seed).map_err(to_py_err)
+        })
+        .map_err(|_| PyRuntimeError::new_err("reset_with_seed panicked"))?;
         self.dwelling = Mutex::new(dwelling);
         self.poisoned.store(false, Ordering::SeqCst);
         self.mutex_poison_events.store(0, Ordering::SeqCst);
@@ -1806,7 +1838,7 @@ impl PyDwelling {
     fn __repr__(&self) -> String {
         format!(
             "Dwelling(bldg_id={}, initialized={})",
-            self.config.bldg_id, self.initialized
+            self.config.settings.bldg_id, self.initialized
         )
     }
 
@@ -2051,7 +2083,7 @@ impl PyDwelling {
     ) -> PyResult<()> {
         let tz_str = timezone
             .map(|s| s.to_string())
-            .or_else(|| self.config.sim_config.civil_timezone.clone())
+            .or_else(|| self.config.settings.sim_config.civil_timezone.clone())
             .unwrap_or_else(|| "UTC".to_string());
         let tz: chrono_tz::Tz = tz_str
             .parse()
@@ -2218,12 +2250,17 @@ fn ev_driver_params(
 }
 
 impl PyDwelling {
-    pub(crate) fn from_blueprint_build(dwelling: Dwelling, config: DwellingConfig) -> Self {
+    pub(crate) fn from_blueprint_build(
+        dwelling: Dwelling,
+        config: DwellingConfig,
+        blueprint: Arc<DwellingBlueprint>,
+    ) -> Self {
         Self {
             dwelling: Mutex::new(dwelling),
             poisoned: AtomicBool::new(false),
             mutex_poison_events: std::sync::atomic::AtomicU64::new(0),
             config,
+            blueprint,
             initialized: false,
             registry: ActorRegistry::new(),
             equipment_registry: EquipmentRegistry::new(),
@@ -3168,33 +3205,35 @@ mod tests {
 
     #[test]
     fn pypv_invalid_sam_lut_path_fails_init() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let bad_lut_path = dir.path().join("bad_pv_lut.txt");
-        fs::write(&bad_lut_path, "not,a,valid,lut\n1,2,3,4").expect("write test file");
-        let pv = PyPv {
-            name: "PV Bad LUT".to_string(),
-            capacity_kw: 5.0,
-            tilt: 30.0,
-            azimuth: 180.0,
-            sam_lut_path: Some(bad_lut_path.to_string_lossy().into_owned()),
-            soiling: None,
-        };
-        let config = pv_config_from_py(&pv).expect("PV config");
-        let env = pv_env(30.0, 180.0);
-        let registry = EquipmentRegistry::new();
-        let mut eq = registry
-            .create("PV", config.clone())
-            .expect("PV should be registered");
-        let err = eq
-            .init(&config, &env)
-            .expect_err("init should fail for invalid LUT extension/content");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unsupported PV SAM LUT format")
-                || msg.contains("failed to")
-                || msg.contains("missing one of required columns"),
-            "unexpected error: {msg}"
-        );
+        Python::attach(|_py| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let bad_lut_path = dir.path().join("bad_pv_lut.txt");
+            fs::write(&bad_lut_path, "not,a,valid,lut\n1,2,3,4").expect("write test file");
+            let pv = PyPv {
+                name: "PV Bad LUT".to_string(),
+                capacity_kw: 5.0,
+                tilt: 30.0,
+                azimuth: 180.0,
+                sam_lut_path: Some(bad_lut_path.display().to_string()),
+                soiling: None,
+            };
+            let config = pv_config_from_py(&pv).expect("PV config");
+            let env = pv_env(30.0, 180.0);
+            let registry = EquipmentRegistry::new();
+            let mut eq = registry
+                .create("PV", config.clone())
+                .expect("PV should be registered");
+            let err = eq
+                .init(&config, &env)
+                .expect_err("init should fail for invalid LUT extension/content");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unsupported PV SAM LUT format")
+                    || msg.contains("failed to")
+                    || msg.contains("missing one of required columns"),
+                "unexpected error: {msg}"
+            );
+        });
     }
 
     // --------------------------------------------------------------------
@@ -3743,7 +3782,7 @@ mod profiling_summary_tests {
     use hares_core::Actor;
     use hares_types::EnvironmentState;
     use pyo3::Python;
-    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods};
+    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods, PyString};
 
     use super::{PyDwelling, to_py_err};
 
@@ -3794,13 +3833,16 @@ mod profiling_summary_tests {
 
             let mut dwelling = PyDwelling::from_hpxml(
                 &py.get_type::<PyDwelling>(),
-                fixture.join("building.xml").to_string_lossy().into_owned(),
-                Some(fixture.join("schedule.csv").to_string_lossy().into_owned()),
-                fixture.join("weather.epw").to_string_lossy().into_owned(),
+                PyString::new(py, fixture.join("building.xml").to_str().expect("utf8")).as_any(),
+                Some(
+                    PyString::new(py, fixture.join("schedule.csv").to_str().expect("utf8"))
+                        .as_any(),
+                ),
+                PyString::new(py, fixture.join("weather.epw").to_str().expect("utf8")).as_any(),
                 sim_config,
                 1,
                 None,
-                Some(defaults.to_string_lossy().into_owned()),
+                Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
                 None,
                 None,
             )
@@ -3915,13 +3957,16 @@ mod profiling_summary_tests {
 
             let mut dwelling = PyDwelling::from_hpxml(
                 &py.get_type::<PyDwelling>(),
-                fixture.join("building.xml").to_string_lossy().into_owned(),
-                Some(fixture.join("schedule.csv").to_string_lossy().into_owned()),
-                fixture.join("weather.epw").to_string_lossy().into_owned(),
+                PyString::new(py, fixture.join("building.xml").to_str().expect("utf8")).as_any(),
+                Some(
+                    PyString::new(py, fixture.join("schedule.csv").to_str().expect("utf8"))
+                        .as_any(),
+                ),
+                PyString::new(py, fixture.join("weather.epw").to_str().expect("utf8")).as_any(),
                 sim_config,
                 1,
                 None,
-                Some(defaults.to_string_lossy().into_owned()),
+                Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
                 None,
                 None,
             )
@@ -3971,10 +4016,13 @@ mod profiling_summary_tests {
 #[cfg(test)]
 mod construction_gil_tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::Instant;
 
+    use arrow::array::{Float64Array, RecordBatch};
     use pyo3::Python;
+    use pyo3::types::PyString;
 
     use crate::py_blueprint::PyDwellingBlueprint;
     use crate::py_config::{PySimulationConfig, WholeSeconds};
@@ -4023,13 +4071,13 @@ mod construction_gil_tests {
             let cls = py.get_type::<PyDwelling>();
             PyDwelling::from_hpxml(
                 &cls,
-                hpxml.to_string_lossy().into_owned(),
-                Some(schedule.to_string_lossy().into_owned()),
-                weather.to_string_lossy().into_owned(),
+                PyString::new(py, hpxml.to_str().expect("utf8")).as_any(),
+                Some(PyString::new(py, schedule.to_str().expect("utf8")).as_any()),
+                PyString::new(py, weather.to_str().expect("utf8")).as_any(),
                 sim_config_1h_900s(),
                 1,
                 None,
-                Some(defaults.to_string_lossy().into_owned()),
+                Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
                 None,
                 None,
             )
@@ -4096,17 +4144,23 @@ mod construction_gil_tests {
 
         Python::attach(|py| {
             let recorded = || CONSTRUCT_GIL_STATE.load(Ordering::SeqCst);
+            let (hp, sc, we, de) = (
+                PyString::new(py, &hpxml),
+                PyString::new(py, &schedule),
+                PyString::new(py, &weather),
+                PyString::new(py, &defaults),
+            );
 
             CONSTRUCT_GIL_STATE.store(-1, Ordering::SeqCst);
             let mut dwelling = PyDwelling::from_hpxml(
                 &py.get_type::<PyDwelling>(),
-                hpxml.clone(),
-                Some(schedule.clone()),
-                weather.clone(),
+                hp.as_any(),
+                Some(sc.as_any()),
+                we.as_any(),
                 sim_config_1h_900s(),
                 1,
                 None,
-                Some(defaults.clone()),
+                Some(de.as_any()),
                 None,
                 None,
             )
@@ -4130,13 +4184,13 @@ mod construction_gil_tests {
             CONSTRUCT_GIL_STATE.store(-1, Ordering::SeqCst);
             let mut blueprint = PyDwellingBlueprint::from_hpxml(
                 &py.get_type::<PyDwellingBlueprint>(),
-                hpxml.clone(),
-                Some(schedule.clone()),
-                weather.clone(),
+                hp.as_any(),
+                Some(sc.as_any()),
+                we.as_any(),
                 sim_config_1h_900s(),
                 1,
                 None,
-                Some(defaults.clone()),
+                Some(de.as_any()),
                 None,
                 None,
             )
@@ -4156,6 +4210,101 @@ mod construction_gil_tests {
                 0,
                 "DwellingBlueprint.build must build with the GIL released"
             );
+        });
+    }
+
+    /// The reset reuses the blueprint: the `Arc<DwellingBlueprint>` the
+    /// dwelling was built from is the same before and after
+    /// `reset_with_seed`, and the reset run's frame equals a fresh build
+    /// with that seed, so no input was re-parsed.
+    #[test]
+    fn reset_with_seed_reuses_blueprint() {
+        let (hpxml, schedule, weather, defaults) = fixture_paths();
+        Python::attach(|py| {
+            let (hpxml_bound, schedule_bound, weather_bound, defaults_bound) = (
+                PyString::new(py, hpxml.to_str().expect("utf8")),
+                PyString::new(py, schedule.to_str().expect("utf8")),
+                PyString::new(py, weather.to_str().expect("utf8")),
+                PyString::new(py, defaults.to_str().expect("utf8")),
+            );
+            let (hpxml, schedule, weather, defaults) = (
+                hpxml_bound.as_any(),
+                schedule_bound.as_any(),
+                weather_bound.as_any(),
+                defaults_bound.as_any(),
+            );
+            let cls = py.get_type::<PyDwelling>();
+            let mut dwelling = PyDwelling::from_hpxml(
+                &cls,
+                hpxml,
+                Some(schedule),
+                weather,
+                sim_config_1h_900s(),
+                1,
+                None,
+                Some(defaults),
+                None,
+                None,
+            )
+            .expect("the cz4a fixture must construct");
+            let blueprint_before = Arc::clone(&dwelling.blueprint);
+            dwelling
+                .reset_with_seed(py, 7)
+                .expect("the reset must rebuild the dwelling");
+            let blueprint_after = Arc::clone(&dwelling.blueprint);
+            assert!(
+                Arc::ptr_eq(&blueprint_before, &blueprint_after),
+                "reset_with_seed must reuse the blueprint, not re-parse"
+            );
+
+            // The reset run's frame equals a fresh build with that seed.
+            let mut fresh = PyDwelling::from_hpxml(
+                &cls,
+                hpxml,
+                Some(schedule),
+                weather,
+                sim_config_1h_900s(),
+                1,
+                None,
+                Some(defaults),
+                None,
+                None,
+            )
+            .expect("the cz4a fixture must construct");
+            fresh.reset_with_seed(py, 7).expect("the fresh reset");
+            let reset_run = dwelling.simulate(py).expect("the reset dwelling runs");
+            let fresh_run = fresh.simulate(py).expect("the fresh dwelling runs");
+            let reset_batches: Vec<RecordBatch> = reset_run
+                .inner
+                .reports
+                .iter()
+                .flat_map(|report| report.batches().to_vec())
+                .collect();
+            let fresh_batches: Vec<RecordBatch> = fresh_run
+                .inner
+                .reports
+                .iter()
+                .flat_map(|report| report.batches().to_vec())
+                .collect();
+            assert_eq!(reset_batches.len(), fresh_batches.len(), "batch count");
+            for (x, y) in reset_batches.iter().zip(fresh_batches.iter()) {
+                assert_eq!(x.num_rows(), y.num_rows(), "row count");
+                for (cx, cy) in x.columns().iter().zip(y.columns()) {
+                    let (xa, ya) = (
+                        cx.as_any().downcast_ref::<Float64Array>(),
+                        cy.as_any().downcast_ref::<Float64Array>(),
+                    );
+                    if let (Some(xa), Some(ya)) = (xa, ya) {
+                        for row in 0..x.num_rows() {
+                            assert_eq!(
+                                xa.value(row).to_bits(),
+                                ya.value(row).to_bits(),
+                                "the reset run's frame must equal a fresh build's"
+                            );
+                        }
+                    }
+                }
+            }
         });
     }
 }

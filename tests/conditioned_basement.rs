@@ -15,6 +15,8 @@ mod denver_offset;
 
 #[cfg(test)]
 mod tests {
+    use hares_core::DwellingSettings;
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
     use std::path::{Path, PathBuf};
 
     use chrono::{Duration, TimeZone};
@@ -48,30 +50,35 @@ mod tests {
         let denver = denver_offset();
         let start_time = denver.with_ymd_and_hms(2019, 1, 15, 0, 0, 0).unwrap();
         DwellingConfig {
-            hpxml_path: hpxml_path.to_path_buf(),
-            schedule_path: Some(project_root().join("data/examples/BEopt_example_schedule.csv")),
-            weather_path: project_root()
-                .join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                start_time,
-                duration: Duration::hours(24),
-                time_res: Duration::minutes(1),
-                reports: Vec::new(),
-                diagnostics: false,
-                metrics: false,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id: 1,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(hpxml_path.to_path_buf()),
+            schedule: Some(InputSource::Path(
+                project_root().join("data/examples/BEopt_example_schedule.csv"),
+            )),
+            weather: WeatherInput::Path(
+                project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time,
+                    duration: Duration::hours(24),
+                    time_res: Duration::minutes(1),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                1,
+                None,
+                None,
+            ),
         }
     }
 

@@ -775,6 +775,7 @@ pub fn field_bounds_table_py() -> HashMap<String, (f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pyo3::types::PyString;
 
     /// A stepable base.xml dwelling for the batch health tests.
     fn base_dwelling(py: Python<'_>) -> Py<PyDwelling> {
@@ -801,21 +802,33 @@ mod tests {
         .expect("the sim config builds");
         let mut dwelling = PyDwelling::from_hpxml(
             &py.get_type::<PyDwelling>(),
-            root.join("tests/fixtures/hpxml/ochre_samples/base.xml")
-                .to_string_lossy()
-                .into_owned(),
+            PyString::new(
+                py,
+                root.join("tests/fixtures/hpxml/ochre_samples/base.xml")
+                    .to_str()
+                    .expect("utf8"),
+            )
+            .as_any(),
             Some(
-                root.join("data/examples/BEopt_example_schedule.csv")
-                    .to_string_lossy()
-                    .into_owned(),
+                PyString::new(
+                    py,
+                    root.join("data/examples/BEopt_example_schedule.csv")
+                        .to_str()
+                        .expect("utf8"),
+                )
+                .as_any(),
             ),
-            root.join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
-                .to_string_lossy()
-                .into_owned(),
+            PyString::new(
+                py,
+                root.join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+                    .to_str()
+                    .expect("utf8"),
+            )
+            .as_any(),
             sim_config,
             0,
             None,
-            Some(root.join("defaults").to_string_lossy().into_owned()),
+            Some(PyString::new(py, root.join("defaults").to_str().expect("utf8")).as_any()),
             None,
             None,
         )

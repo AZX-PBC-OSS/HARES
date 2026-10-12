@@ -33,21 +33,28 @@ fn wmo_iecc_zones() -> &'static HashMap<&'static str, &'static str> {
 
 /// OS-HPXML's IECC zone for the weather station `wmo`, or `None` when its
 /// table has no such station.
-pub(crate) fn iecc_zone_for_wmo(wmo: &str) -> Option<&'static str> {
+pub fn iecc_zone_for_wmo(wmo: &str) -> Option<&'static str> {
     wmo_iecc_zones().get(wmo.trim()).copied()
 }
 
 /// Give a building with no `ClimateZoneIECC` the zone of its weather
 /// station, as OS-HPXML does before any climate-dependent default
-/// (defaults.rb:974-983, `apply_climate_and_risk_zones`). The derived zone,
-/// or its absence when the station is unknown or the weather format names
-/// none (OS-HPXML then leaves the zone unset), is recorded as a warning.
-pub fn apply_climate_zone_default(building: &mut Building, station_wmo: Option<&str>) {
+/// (defaults.rb:974-983, `apply_climate_and_risk_zones`): the effective
+/// zone and the resolution's warning, without mutating the building (a
+/// shared parse's building is immutable; the blueprint's builder resolves
+/// the effective zone per blueprint and records the warning). The derived
+/// zone, or its absence when the station is unknown or the weather format
+/// names none (OS-HPXML then leaves the zone unset), is the warning.
+#[must_use]
+pub fn climate_zone_resolution(
+    building: &Building,
+    station_wmo: Option<&str>,
+) -> (Option<String>, Option<Warning>) {
     if building.climate_zone_iecc.is_some() {
-        return;
+        return (building.climate_zone_iecc.clone(), None);
     }
-    let zone = station_wmo.and_then(iecc_zone_for_wmo);
-    let message = match (station_wmo, zone) {
+    let zone = resolve_iecc_climate_zone(None, station_wmo);
+    let message = match (station_wmo, zone.as_deref()) {
         (Some(wmo), Some(zone)) => format!(
             "the HPXML has no ClimateZoneIECC; IECC zone {zone} derived from weather \
              station WMO {wmo} as OS-HPXML does"
@@ -60,8 +67,7 @@ pub fn apply_climate_zone_default(building: &mut Building, station_wmo: Option<&
                       station; climate-dependent defaults take their no-zone rule"
             .to_string(),
     };
-    building.climate_zone_iecc = zone.map(str::to_string);
-    building.parse_warnings.push(Warning::new("hpxml", message));
+    (zone, Some(Warning::new("hpxml", message)))
 }
 
 /// The building's effective IECC zone for a path-based reader: the HPXML's

@@ -26,6 +26,8 @@
 //!    slow (roughly 0.13 SOC per driving day), so short-horizon tests pass
 //!    while the long run still fails.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -126,16 +128,13 @@ fn dwelling_config(
     overrides: Option<serde_json::Value>,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides,
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(sim, overrides, 100, None, None),
     }
 }
 
@@ -305,15 +304,17 @@ fn fixture_dwelling_config(
     };
     (
         DwellingConfig {
-            hpxml_path,
-            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
-            weather_path: weather_for(bldg_dir),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: sim_config(Duration::hours(1), None, 0),
-            overrides,
-            bldg_id: 100,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(hpxml_path),
+            schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
+            weather: WeatherInput::Path(weather_for(bldg_dir)),
+            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            settings: DwellingSettings::new(
+                sim_config(Duration::hours(1), None, 0),
+                overrides,
+                100,
+                None,
+                None,
+            ),
         },
         tmp,
     )
@@ -695,7 +696,7 @@ fn assembly_rejects_duplicate_explicit_equipment_ids() {
     let hpxml = write_fixture_hpxml(tmp.path());
     let config = dwelling_config(&hpxml, sim_config(Duration::hours(1), None, 0), None);
     let mut blueprint =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint");
     blueprint
         .add_equipment_spec(dehumidifier_spec("Humid Fighter A", 5000))
         .expect("add spec");
@@ -726,7 +727,7 @@ fn assembly_rejects_unassigned_equipment_id_zero() {
     let hpxml = write_fixture_hpxml(tmp.path());
     let config = dwelling_config(&hpxml, sim_config(Duration::hours(1), None, 0), None);
     let mut blueprint =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint");
     blueprint
         .add_equipment_spec(dehumidifier_spec("Humid Fighter Zero", 0))
         .expect("add spec");
@@ -857,15 +858,17 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
         "Battery": { "bms_mode": bms_mode.to_string() }
     });
     let config = DwellingConfig {
-        hpxml_path: hpxml,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather_for(&fixture_dir()),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(2), Some(csv_path.clone()), 5),
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather_for(&fixture_dir())),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            sim_config(Duration::days(2), Some(csv_path.clone()), 5),
+            Some(overrides),
+            100,
+            None,
+            None,
+        ),
     };
     SimulationEngine::new().run(config).expect("engine.run");
 
@@ -976,15 +979,19 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
         "EV": { "charging_strategy": nightly.to_string() }
     });
     let config = DwellingConfig {
-        hpxml_path: hpxml,
-        schedule_path: Some(second_fixture_dir().join("in.schedules.csv")),
-        weather_path: weather_for(&second_fixture_dir()),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(45), Some(csv_path.clone()), 5),
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml),
+        schedule: Some(InputSource::Path(
+            second_fixture_dir().join("in.schedules.csv"),
+        )),
+        weather: WeatherInput::Path(weather_for(&second_fixture_dir())),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            sim_config(Duration::days(45), Some(csv_path.clone()), 5),
+            Some(overrides),
+            100,
+            None,
+            None,
+        ),
     };
     SimulationEngine::new()
         .run(config)
@@ -1022,12 +1029,21 @@ fn checkpoint_restore_rejects_spec_reorder_with_named_error() {
     }
     let checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
 
-    // Same config, same equipment set, rotated spec order: the id-injection
-    // pass assigns ids from spec order, so every equipment's id shifts.
-    let mut blueprint_b =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint B");
-    blueprint_b.equipment_specs.rotate_left(1);
-    let mut dwelling_b = blueprint_b.build().expect("build dwelling B");
+    // Same config, same equipment set, reordered: the first equipment is
+    // removed and re-added last, so the id-injection pass assigns ids from
+    // spec order and every equipment's id shifts (the mutators are the
+    // builder's, the blueprints are immutable).
+    let mut builder_b =
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint B");
+    let mut names = builder_b.equipment_names();
+    let first_name = names.remove(0).to_string();
+    let first_spec = builder_b
+        .remove_equipment(&first_name)
+        .expect("the first equipment removes");
+    builder_b
+        .add_equipment_spec(first_spec)
+        .expect("the first equipment re-adds last");
+    let mut dwelling_b = builder_b.build().expect("build dwelling B");
 
     let err = dwelling_b
         .load_checkpoint(checkpoint)
@@ -1798,15 +1814,17 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
         "Battery": { "bms_mode": bms_mode.to_string() },
     });
     let config = DwellingConfig {
-        hpxml_path: hpxml,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather_for(&fixture_dir()),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(2), Some(csv_path.clone()), 5),
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather_for(&fixture_dir())),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            sim_config(Duration::days(2), Some(csv_path.clone()), 5),
+            Some(overrides),
+            100,
+            None,
+            None,
+        ),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
 
@@ -1925,12 +1943,10 @@ fn checkpoint_restore_rejects_a_shrunk_equipment_set() {
     // Same config minus the injected EV spec (proven to assemble — the
     // structural tests above read its equipment): the dwelling is smaller
     // than the checkpoint.
-    let mut blueprint_b =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint B");
-    blueprint_b
-        .equipment_specs
-        .retain(|s| s.instance_name.clone().unwrap_or_else(|| s.name.clone()) != "EV");
-    let mut dwelling_b = blueprint_b.build().expect("build dwelling B");
+    let mut builder_b =
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint B");
+    builder_b.remove_equipment("EV").expect("the EV removes");
+    let mut dwelling_b = builder_b.build().expect("build dwelling B");
     assert!(
         !dwelling_b
             .equipment()
@@ -2166,15 +2182,17 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
         "Battery": { "bms_mode": bms_mode.to_string() }
     });
     let config = DwellingConfig {
-        hpxml_path: hpxml,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather_for(&fixture_dir()),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(2), Some(csv_path.clone()), 5),
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather_for(&fixture_dir())),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            sim_config(Duration::days(2), Some(csv_path.clone()), 5),
+            Some(overrides),
+            100,
+            None,
+            None,
+        ),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
 
@@ -2381,15 +2399,17 @@ fn user_added_actor_resolves_its_equipment_binding_on_add() {
     // Manual declaration seeds no auto-registered BMS, which the
     // duplicate-name check below still proves.
     let config = DwellingConfig {
-        hpxml_path: hpxml,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather_for(&fixture_dir()),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::hours(6), None, 0),
-        overrides: Some(serde_json::json!({ "Battery": { "bms_mode": "\"Manual\"" } })),
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather_for(&fixture_dir())),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            sim_config(Duration::hours(6), None, 0),
+            Some(serde_json::json!({ "Battery": { "bms_mode": "\"Manual\"" } })),
+            100,
+            None,
+            None,
+        ),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
 
@@ -2422,7 +2442,7 @@ fn actor_binding_recovers_when_its_equipment_arrives_later() {
     // equipment does not exist. Two hours of horizon: one blind step before
     // the battery joins, then the recovery steps.
     let (mut config, _tmp) = fixture_dwelling_config(&fixture_dir(), true, None);
-    config.sim_config.duration = Duration::hours(2);
+    config.settings.sim_config.duration = Duration::hours(2);
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
     dwelling
         .add_actor(user_bms_actor())

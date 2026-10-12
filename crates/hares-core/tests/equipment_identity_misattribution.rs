@@ -6,6 +6,8 @@
 //! (the exact-membership `in_schema` predicate's blind spot), and the
 //! diagnostic content of the malformed-`equipment_id` rejection.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
@@ -73,16 +75,13 @@ fn sim_config(
 
 fn dwelling_config(hpxml: &Path, sim: hares_core::SimulationConfig) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(sim, None, 100, None, None),
     }
 }
 
@@ -317,7 +316,7 @@ fn malformed_equipment_id_rejection_names_the_received_value() {
     let config = dwelling_config(&hpxml, sim_config(Duration::days(1), None, 0));
 
     let mut blueprint =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint");
     let mut spec = hares_io::EquipmentSpec {
         name: "Dehumidifier".to_string(),
         instance_name: None,
@@ -334,7 +333,8 @@ fn malformed_equipment_id_rejection_names_the_received_value() {
         .insert("equipment_id".to_string(), serde_json::json!(-1));
     blueprint.add_equipment_spec(spec).expect("add spec");
 
-    let err = hares_core::dwelling::DwellingBlueprint::build(blueprint)
+    let err = blueprint
+        .build()
         .map(|_| ())
         .expect_err("a malformed explicit equipment_id must fail the build");
     let msg = err.to_string();
@@ -366,11 +366,12 @@ fn equipment_named_total_at_build_time_never_silences_the_aggregate_total() {
     let hpxml = write_fixture_hpxml(tmp.path());
     let csv_path = tmp.path().join("total_at_birth.csv");
 
-    let mut blueprint = hares_core::dwelling::DwellingBlueprint::from_config(dwelling_config(
-        &hpxml,
-        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
-    ))
-    .expect("blueprint");
+    let mut blueprint =
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(dwelling_config(
+            &hpxml,
+            sim_config(Duration::days(2), Some(csv_path.clone()), 1),
+        ))
+        .expect("blueprint");
     let typed = hares_equipment::EquipmentConfig::with_payload(
         "Dehumidifier".to_string(),
         "Dehumidifier".to_string(),
@@ -394,7 +395,8 @@ fn equipment_named_total_at_build_time_never_silences_the_aggregate_total() {
             primary_role: None,
         })
         .expect("add spec");
-    let mut dwelling = hares_core::dwelling::DwellingBlueprint::build(blueprint)
+    let mut dwelling = blueprint
+        .build()
         .expect("a dwelling with an equipment named 'Total' must build");
 
     // Precondition: the shadowing equipment is really in the vector.

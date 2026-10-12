@@ -16,6 +16,8 @@
 //! capacity where the heater init demands one value per speed, a separate
 //! defect from the cooling-side contract violation fixed here.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, TimeZone};
@@ -63,31 +65,35 @@ fn build_sample(sample: &str, month: u32) -> Dwelling {
         .single()
         .expect("valid start time");
     let config = DwellingConfig {
-        hpxml_path,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: None,
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            hares_io::SimulationConfig {
+                start_time,
+                duration: Duration::hours(24),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            None,
+            None,
+        ),
         // No schedule file: the dwelling generates the schedule from the
-        // HPXML, the sweep's generated-schedule condition.
-        schedule_path: None,
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: hares_io::SimulationConfig {
-            start_time,
-            duration: Duration::hours(24),
-            time_res: Duration::seconds(900),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        // defaults profiles, the sweep's generated-schedule condition.
     };
     Dwelling::from_config(config)
         .unwrap_or_else(|err| panic!("{sample} must build with autosized capacities: {err}"))

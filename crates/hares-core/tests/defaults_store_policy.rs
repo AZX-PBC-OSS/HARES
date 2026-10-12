@@ -5,6 +5,8 @@
 //! the envelope LUT) would silently fall to class tables and the run
 //! would report success on different numbers.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, FixedOffset};
@@ -18,30 +20,34 @@ fn project_root() -> PathBuf {
 fn config_with_defaults(defaults: PathBuf) -> DwellingConfig {
     let fixture = project_root().join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
     DwellingConfig {
-        hpxml_path: fixture.join("building.xml"),
-        schedule_path: Some(fixture.join("schedule.csv")),
-        weather_path: fixture.join("weather.epw"),
-        defaults_path: Some(defaults),
-        sim_config: SimulationConfig {
-            start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2023-01-01T00:00:00-07:00")
+        hpxml: InputSource::Path(fixture.join("building.xml")),
+        schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
+        weather: WeatherInput::Path(fixture.join("weather.epw")),
+        defaults: DefaultsSource::directory(defaults),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: DateTime::<FixedOffset>::parse_from_rfc3339(
+                    "2023-01-01T00:00:00-07:00",
+                )
                 .expect("start time parses"),
-            duration: Duration::hours(1),
-            time_res: Duration::seconds(900),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+                duration: Duration::hours(1),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            None,
+            None,
+        ),
     }
 }
 

@@ -360,12 +360,13 @@ pub fn parse_schedule_csv<P: AsRef<Path>>(
     parse_schedule_csv_str(&contents, required_columns, weather_meta, coverage_period)
 }
 
-fn parse_schedule_csv_str(
+pub(crate) fn parse_schedule_csv_str(
     contents: &str,
     required_columns: &[&str],
     weather_meta: Option<&WeatherMeta>,
     coverage_period: Option<(DateTime<FixedOffset>, DateTime<FixedOffset>)>,
 ) -> Result<ScheduleTimeSeries, ScheduleError> {
+    crate::parse_counts::bump_schedule();
     let mut lines = contents.lines().filter(|line| !line.trim().is_empty());
 
     let header_line = lines

@@ -1,6 +1,8 @@
 //! Regression tests for checkpoint fidelity: the restored dwelling resumes
 //! with the state the checkpointed one held.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,6 +17,7 @@ use hares_equipment::ev::Ev;
 use hares_equipment::scheduled_load::ScheduledLoad;
 use hares_equipment::{Equipment, EquipmentConfig};
 use hares_types::EndUse;
+
 /// Write a minimal synthetic-TOML dwelling (no equipment, just envelope).
 fn write_minimal_toml(path: &Path) {
     let content = r#"building_id = 9001
@@ -507,40 +510,45 @@ fn resume_home_dir() -> PathBuf {
 fn resumable_dwelling_config(case: &ResumeCase) -> DwellingConfig {
     let root = repo_root();
     DwellingConfig {
-        hpxml_path: case.hpxml_path.clone(),
-        schedule_path: Some(resume_home_dir().join("in.schedules.csv")),
-        weather_path: root
-            .join("tests/fixtures/resstock/2025.1/weather")
-            .join(case.weather_file),
-        defaults_path: Some(root.join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::west_opt(case.utc_offset_west_h * 3600)
-                .expect("valid offset")
-                .with_ymd_and_hms(2018, case.month, case.day, 0, 0, 0)
-                .single()
-                .expect("valid start time"),
-            duration: Duration::minutes(15 * RESUME_TOTAL_STEPS as i64),
-            time_res: Duration::minutes(15),
-            reports: vec![hares_io::ReportSpec {
-                name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(8),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Memory,
-            }],
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 176_227,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(case.hpxml_path.clone()),
+        schedule: Some(InputSource::Path(
+            resume_home_dir().join("in.schedules.csv"),
+        )),
+        weather: WeatherInput::Path(
+            root.join("tests/fixtures/resstock/2025.1/weather")
+                .join(case.weather_file),
+        ),
+        defaults: DefaultsSource::directory(root.join("defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::west_opt(case.utc_offset_west_h * 3600)
+                    .expect("valid offset")
+                    .with_ymd_and_hms(2018, case.month, case.day, 0, 0, 0)
+                    .single()
+                    .expect("valid start time"),
+                duration: Duration::minutes(15 * RESUME_TOTAL_STEPS as i64),
+                time_res: Duration::minutes(15),
+                reports: vec![hares_io::ReportSpec {
+                    name: "frame".to_string(),
+                    selection: hares_io::Selection::Verbosity(8),
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Memory,
+                }],
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            176_227,
+            None,
+            None,
+        ),
     }
 }
 
@@ -796,33 +804,37 @@ fn assert_resume_equals_continuous(
 fn the_boiler_fluid_publish_marker_survives_a_checkpoint_restore() {
     let bldg_dir = repo_root().join("tests/fixtures/resstock/2025.1/bldg0000002");
     let config = DwellingConfig {
-        hpxml_path: bldg_dir.join("home.xml"),
-        schedule_path: Some(bldg_dir.join("in.schedules.csv")),
-        weather_path: repo_root().join("tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"),
-        defaults_path: Some(repo_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::west_opt(5 * 3600)
-                .expect("valid offset")
-                .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
-                .single()
-                .expect("valid start time"),
-            duration: Duration::hours(6),
-            time_res: Duration::hours(1),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 2,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(bldg_dir.join("home.xml")),
+        schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            repo_root().join("tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(repo_root().join("defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::west_opt(5 * 3600)
+                    .expect("valid offset")
+                    .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                    .single()
+                    .expect("valid start time"),
+                duration: Duration::hours(6),
+                time_res: Duration::hours(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            2,
+            None,
+            None,
+        ),
     };
 
     // Run past the fluid domain's first publish: the solver publishes at the

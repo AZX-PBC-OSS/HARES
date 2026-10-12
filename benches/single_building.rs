@@ -71,7 +71,7 @@ fn bench_output_destination(c: &mut Criterion) {
                     Some(common::repo_defaults_path()),
                     chrono::Duration::days(30),
                 );
-                cfg.sim_config.reports = match label {
+                cfg.settings.sim_config.reports = match label {
                     "no_report" => Vec::new(),
                     "memory" => vec![hares_io::ReportSpec {
                         name: "frame".to_string(),

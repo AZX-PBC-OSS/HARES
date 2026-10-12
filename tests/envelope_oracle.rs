@@ -15,6 +15,8 @@ mod denver_offset;
 #[cfg(test)]
 mod tests {
     use super::denver_offset::denver_offset;
+    use hares_core::DwellingSettings;
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -36,44 +38,50 @@ mod tests {
 
     fn beopt_config(csv_path: PathBuf) -> DwellingConfig {
         DwellingConfig {
-            hpxml_path: examples_dir().join("BEopt_example.xml"),
-            schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
-            // The OCHRE reference's zero-order hold of the weather, prepared
-            // by the Python adapter's hold_weather and committed: this test
-            // compares against OCHRE output, so it reads the held file
-            // instead of asking the engine for an override.
-            weather_path: project_root().join("tests/fixtures/ochre_hold/USA_CO_Denver_60s.epw"),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                // Denver local noon (UTC-7).
-                start_time: denver_offset()
-                    .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(1),
-                time_res: Duration::minutes(1),
-                reports: vec![hares_io::ReportSpec {
-                    name: "frame".to_string(),
-                    selection: hares_io::Selection::Verbosity(6), // envelope component breakdown
-                    frequency: hares_io::Frequency::default(),
-                    destination: hares_io::Destination::Csv {
-                        path: csv_path,
-                        overwrite: false,
-                    },
-                }],
-                diagnostics: false,
-                metrics: false,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-            },
-            overrides: None,
-            bldg_id: 1,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(examples_dir().join("BEopt_example.xml")),
+            schedule: Some(InputSource::Path(
+                examples_dir().join("BEopt_example_schedule.csv"),
+            )),
+            weather: WeatherInput::Path(
+                // The OCHRE reference's zero-order hold of the weather, prepared
+                // by the Python adapter's hold_weather and committed: this test
+                // compares against OCHRE output, so it reads the held file
+                // instead of asking the engine for an override.
+                project_root().join("tests/fixtures/ochre_hold/USA_CO_Denver_60s.epw"),
+            ),
+            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    // Denver local noon (UTC-7).
+                    start_time: denver_offset()
+                        .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
+                        .unwrap(),
+                    duration: Duration::hours(1),
+                    time_res: Duration::minutes(1),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(6), // envelope component breakdown
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path,
+                            overwrite: false,
+                        },
+                    }],
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                None,
+                1,
+                None,
+                None,
+            ),
         }
     }
 

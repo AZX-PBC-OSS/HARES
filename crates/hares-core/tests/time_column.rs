@@ -4,6 +4,8 @@
 //! standard UTC offset and the catalogue digest and nothing else, and a
 //! warmed-up run's frame starts at the start time with one row per step.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
@@ -30,35 +32,36 @@ fn cz2a_config(
 ) -> DwellingConfig {
     let fixture = project_root().join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
     DwellingConfig {
-        hpxml_path: fixture.join("building.xml"),
-        schedule_path: Some(fixture.join("schedule.csv")),
-        weather_path: fixture.join("weather.epw"),
-        sim_config: SimulationConfig {
-            start_time: start,
-            duration: chrono::Duration::seconds(duration_s),
-            time_res: chrono::Duration::seconds(step_s),
-            reports: vec![ReportSpec {
-                name: "frame".to_string(),
-                selection: Selection::Verbosity(verbosity),
-                frequency: hares_io::Frequency::default(),
-                destination: Destination::Memory,
-            }],
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 96,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        defaults_path: Some(project_root().join("defaults")),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: warmup_s
-            .map(|s| StdDuration::from_secs(u64::try_from(s).expect("warm-up seconds"))),
-        patches: None,
+        hpxml: InputSource::Path(fixture.join("building.xml")),
+        schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
+        weather: WeatherInput::Path(fixture.join("weather.epw")),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: start,
+                duration: chrono::Duration::seconds(duration_s),
+                time_res: chrono::Duration::seconds(step_s),
+                reports: vec![ReportSpec {
+                    name: "frame".to_string(),
+                    selection: Selection::Verbosity(verbosity),
+                    frequency: hares_io::Frequency::default(),
+                    destination: Destination::Memory,
+                }],
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 96,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            warmup_s.map(|s| StdDuration::from_secs(u64::try_from(s).expect("warm-up seconds"))),
+            None,
+        ),
     }
 }
 

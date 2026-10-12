@@ -73,6 +73,15 @@ pub(crate) fn read_meta(path: &Path) -> Result<WeatherMeta, WeatherError> {
     parse_header_meta(&names_line, &values_line)
 }
 
+/// The PSM3 header's metadata, read from the header lines themselves: the
+/// content twin of [`read_meta`] for an in-memory weather input.
+pub(crate) fn read_meta_str(
+    names_line: &str,
+    values_line: &str,
+) -> Result<WeatherMeta, WeatherError> {
+    parse_header_meta(names_line, values_line)
+}
+
 /// Parses the PSM3 header's two lines (field names, field values) into the
 /// metadata they carry: the same lines, lookups and defaults the full
 /// parser runs.
@@ -130,7 +139,8 @@ fn parse_header_meta(names_line: &str, values_line: &str) -> Result<WeatherMeta,
     })
 }
 
-fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
+pub(crate) fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
+    crate::parse_counts::bump_weather();
     let mut lines = contents.lines();
 
     // --- Line 1: field names ---

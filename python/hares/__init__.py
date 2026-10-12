@@ -5,6 +5,10 @@ from __future__ import annotations
 from ._hares import __version__
 from ._hares import Dwelling
 from ._hares import DwellingBlueprint
+from ._hares import ParsedHpxml
+from ._hares import ParsedWeather
+from ._hares import ParsedSchedule
+from ._hares import ParsedDefaults
 from ._hares import Fleet
 from ._hares import SteppableFleet
 from ._hares import FleetReport
@@ -165,6 +169,10 @@ __all__ = [
     # Core simulation
     "Dwelling",
     "DwellingBlueprint",
+    "ParsedHpxml",
+    "ParsedWeather",
+    "ParsedSchedule",
+    "ParsedDefaults",
     "Fleet",
     "SteppableFleet",
     "FleetReport",

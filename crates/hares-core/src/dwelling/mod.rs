@@ -15,8 +15,8 @@ pub use warnings::{WarningLog, WarningLogSnapshot};
 
 pub use premise_zip::PremiseZip;
 
-pub use blueprint::DwellingBlueprint;
 pub use blueprint::site_offset;
+pub use blueprint::{DwellingBlueprint, DwellingBlueprintBuilder};
 pub use conversions::{building_to_boundary_inputs, building_to_zone_inputs, stage_rank};
 
 /// The repo's shipped `defaults/` tree, the one directory test and synthetic
@@ -53,20 +53,19 @@ use hares_io::output::OutputError;
 use hares_io::output::callback::{BatchCallback, CallbackAttachment};
 use hares_io::{
     Building, CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
-    DEFROST_STATE_SUFFIX, Destination, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
-    ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
+    DEFROST_STATE_SUFFIX, DefaultsSource, Destination, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX,
+    ER_CAPACITY_SUFFIX, ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
     FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX, GAS_POWER_SUFFIX,
-    HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX,
+    HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, InputSource, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX,
     MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX, MODE_SUFFIX, MetricsCalculator,
     PAN_HEATER_POWER_SUFFIX, POWER_FACTOR_SUFFIX, PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX,
     PvPanelDefaults, REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
     RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL, SCHEDULE_SUFFIX,
     SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
-    SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, ScheduleTimeSeries,
-    SimulationConfig, StreamingRecorder, WeatherTimeSeries, end_use_electric_power_column,
-    equipment_name_to_end_use, has_soc, is_cooling_equipment, is_ev, is_heat_pump_heater,
-    is_hvac_or_wh, is_pv, is_reserved_output_column_name, parse_hpxml, parse_schedule_csv,
-    parse_weather,
+    SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, SimulationConfig,
+    StreamingRecorder, WeatherInput, end_use_electric_power_column, equipment_name_to_end_use,
+    has_soc, is_cooling_equipment, is_ev, is_heat_pump_heater, is_hvac_or_wh, is_pv,
+    is_reserved_output_column_name,
 };
 
 use hares_physics::constants::{
@@ -94,6 +93,7 @@ use serde_json::{Map, Value};
 use crate::actors::{
     BatteryManagementActor, BmsParams, EvDriverActor, EvDriverParams, SolverFeedbackActor,
 };
+use crate::derive_dwelling_rng;
 use crate::environment::EnvironmentInitOptions;
 #[cfg(feature = "profiling")]
 use crate::health::{ActorTiming, ActorTimings};
@@ -123,8 +123,8 @@ use roster::RosterCaches;
 
 use conversions::{
     apply_humidity_update_to_zones, apply_thermal_update_to_zones, build_output_column_index,
-    chrono_to_std_duration, duration_to_u32_secs, merged_equipment_config, required_datetime,
-    required_duration, required_path, validate_equipment_override_keys, validate_wildcard_override,
+    chrono_to_std_duration, merged_equipment_config, required_datetime, required_duration,
+    required_path, validate_equipment_override_keys, validate_wildcard_override,
 };
 #[cfg(any(feature = "profiling", test))]
 use hares_types::alloc_count::thread_allocations;
@@ -229,20 +229,33 @@ pub type Result<T> = std::result::Result<T, HaresError>;
 /// Stable config contract between fleet runners and a single dwelling orchestrator.
 #[derive(Debug, Clone)]
 pub struct DwellingConfig {
-    pub hpxml_path: PathBuf,
+    /// The dwelling's HPXML document: a path, or in-memory content.
+    pub hpxml: InputSource,
     /// The dwelling's schedule source. `None` requests a schedule generated
-    /// from the HPXML; `Some(path)` requests the CSV at `path`. A set path
-    /// that cannot be read is a construction error naming it: a mistyped
-    /// path must never silently run on a generated schedule's different
-    /// occupancy and loads.
-    pub schedule_path: Option<PathBuf>,
-    pub weather_path: PathBuf,
-    /// The directory the default schedule profiles load from. `None` means
-    /// no default profiles: an equipment with no schedule column and no
-    /// HPXML schedule fractions is a construction error naming this field,
-    /// and a generated schedule cannot be built. The profiles never come
-    /// from a working-directory guess.
-    pub defaults_path: Option<PathBuf>,
+    /// from the default profiles; `Some(source)` requests the CSV at the
+    /// path or in memory. A set source that cannot be read is a
+    /// construction error naming it: a mistyped path must never silently
+    /// run on a generated schedule's different occupancy and loads.
+    pub schedule: Option<InputSource>,
+    /// The dwelling's weather file: a path (format detected from the file)
+    /// or in-memory content with the format given.
+    pub weather: WeatherInput,
+    /// The defaults tree: a directory plus per-file replacements.
+    /// `base: None` keeps the optional defaults directory's behavior (no
+    /// default profiles: an equipment with no schedule column and no HPXML
+    /// schedule fractions is a construction error naming this field, and a
+    /// generated schedule cannot be built). The profiles never come from a
+    /// working-directory guess.
+    pub defaults: DefaultsSource,
+    /// The run's settings: everything the config carries but its inputs.
+    pub settings: DwellingSettings,
+}
+
+/// The dwelling's settings: [`DwellingConfig`] less its four input
+/// sources. Two configs whose settings agree and whose inputs are the same
+/// files or the same content build the same dwelling.
+#[derive(Debug, Clone)]
+pub struct DwellingSettings {
     pub sim_config: SimulationConfig,
     pub overrides: Option<serde_json::Value>,
     pub bldg_id: i64,
@@ -254,42 +267,23 @@ pub struct DwellingConfig {
     pub patches: Option<hares_io::HpxmlDataPatches>,
 }
 
-impl DwellingConfig {
-    /// The raw schedule this config requests, before resampling to the
-    /// simulation's step: the schedule file when `schedule_path` is set,
-    /// otherwise a schedule generated from the parsed HPXML. A set path
-    /// that cannot be read is an error naming it. A generated schedule
-    /// needs the default schedule profiles from the defaults directory:
-    /// no directory, an unreadable profile file, or a missing profile is
-    /// a construction error naming it.
-    pub(crate) fn load_schedule(
-        &self,
-        weather_meta: &hares_io::WeatherMeta,
-    ) -> Result<ScheduleTimeSeries> {
-        match self.schedule_path.as_deref() {
-            Some(path) => parse_schedule_csv(path, &[], Some(weather_meta), None).map_err(|err| {
-                HaresError::Io(format!(
-                    "schedule file '{}' could not be read: {err}",
-                    path.display()
-                ))
-            }),
-            None => {
-                let defaults_dir = self.defaults_path.as_deref().ok_or_else(|| {
-                    HaresError::Io(format!(
-                        "no defaults directory is configured: a generated schedule \
-                         needs the default schedule profiles file '{}' from the \
-                         defaults directory; set defaults_path",
-                        hares_io::schedule_resolve::DEFAULT_SCHEDULES_CSV,
-                    ))
-                })?;
-                let profiles = hares_io::load_default_profiles(defaults_dir)?;
-                Ok(hares_io::hpxml_schedule::generate_default_schedule(
-                    self.sim_config.start_time,
-                    self.sim_config.duration,
-                    self.sim_config.time_res,
-                    &profiles,
-                )?)
-            }
+impl DwellingSettings {
+    /// The settings of a config whose inputs are the four sources the
+    /// caller parsed: every non-input field moves.
+    #[must_use]
+    pub fn new(
+        sim_config: SimulationConfig,
+        overrides: Option<serde_json::Value>,
+        bldg_id: i64,
+        initialization_duration: Option<StdDuration>,
+        patches: Option<hares_io::HpxmlDataPatches>,
+    ) -> Self {
+        Self {
+            sim_config,
+            overrides,
+            bldg_id,
+            initialization_duration,
+            patches,
         }
     }
 }
@@ -2347,6 +2341,9 @@ pub struct Dwelling {
     /// never be stepped again.  A `failed` dwelling is permanently excluded
     /// from fleet simulation; its state may be inconsistent.
     pub failed: bool,
+    /// The blueprint the dwelling was built from: the shared parsed-input
+    /// handles and the frozen state every build of the blueprint clones.
+    blueprint: Arc<DwellingBlueprint>,
     equipment: Vec<Box<dyn Equipment>>,
     equipment_id_by_name: HashMap<String, EquipmentId>,
     /// Next never-reused equipment id for `add_equipment` /
@@ -2424,7 +2421,10 @@ pub struct Dwelling {
     /// PV panel defaults loaded from `defaults/pv/*.toml`, keyed by file stem.
     /// Populated during `from_preparsed` so PV sizing call sites can resolve
     /// panel specifications when the caller provides no explicit overrides.
-    pub pv_panel_defaults: HashMap<String, PvPanelDefaults>,
+    /// The PV panel defaults map, shared by reference: the parsed defaults
+    /// tree's map, one `Arc` per parse, read by every build of every
+    /// blueprint the tree's handle feeds.
+    pub pv_panel_defaults: Arc<HashMap<String, PvPanelDefaults>>,
 
     control_dispatcher: ControlDispatcher,
     price_signal: PriceSignal,
@@ -2637,27 +2637,14 @@ pub struct HpxmlInputs<'a> {
 
 impl Dwelling {
     /// Builds a dwelling from HPXML + schedule/weather paths and simulation config.
+    ///
+    /// The one construction path: the blueprint is parsed and frozen once
+    /// (every input parsed exactly once), then the dwelling builds from
+    /// it. Two configs sharing an input file or file content share the
+    /// parse through the blueprint's handles.
     pub fn from_config(config: DwellingConfig) -> Result<Self> {
-        // The same validation the TOML path runs: a config built in Rust
-        // code is checked exactly like one parsed from a file.
-        config
-            .sim_config
-            .validate()
-            .map_err(|err| HaresError::Io(err.to_string()))?;
-        let building = parse_hpxml(&config.hpxml_path)
-            .map_err(|err| HaresError::Io(format!("HPXML parse failed: {err}")))?;
-
-        let weather = parse_weather(&config.weather_path)
-            .map_err(|err| HaresError::Io(format!("weather parse failed: {err}")))?;
-
-        let schedule_raw = config.load_schedule(&weather.meta)?;
-
-        let target_step_secs = duration_to_u32_secs(config.sim_config.time_res)?;
-        let schedule = schedule_raw
-            .resample(target_step_secs)
-            .map_err(|err| HaresError::Io(format!("schedule resample failed: {err}")))?;
-
-        Self::from_preparsed(config, building, weather, schedule)
+        let blueprint = DwellingBlueprint::from_config(config)?;
+        blueprint.build()
     }
 
     /// Builds a dwelling directly from ResStock-style input files.
@@ -2734,15 +2721,19 @@ impl Dwelling {
         };
 
         let config = DwellingConfig {
-            hpxml_path: hpxml_path.to_path_buf(),
-            schedule_path: Some(schedule_path.to_path_buf()),
-            weather_path: weather_path.to_path_buf(),
-            defaults_path,
-            sim_config,
-            overrides,
-            bldg_id: 0,
-            initialization_duration: Some(StdDuration::from_secs(7 * 24 * 3600)),
-            patches: None,
+            hpxml: InputSource::Path(hpxml_path.to_path_buf()),
+            schedule: Some(InputSource::Path(schedule_path.to_path_buf())),
+            weather: WeatherInput::Path(weather_path.to_path_buf()),
+            defaults: defaults_path
+                .map(DefaultsSource::directory)
+                .unwrap_or_default(),
+            settings: DwellingSettings::new(
+                sim_config,
+                overrides,
+                0,
+                Some(StdDuration::from_secs(7 * 24 * 3600)),
+                None,
+            ),
         };
         Self::from_config(config)
     }
@@ -2823,33 +2814,42 @@ impl Dwelling {
         )?;
         let weather = build_synthetic_weather(&config, path)?;
         let dwelling_config = DwellingConfig {
-            hpxml_path: path.to_path_buf(),
+            hpxml: hares_io::InputSource::Path(path.to_path_buf()),
             // The synthetic schedule is built below from the TOML definition
-            // and handed to `from_preparsed` directly; the config's schedule
+            // and handed to the builder directly; the config's schedule
             // source is never read on this path.
-            schedule_path: None,
-            weather_path: path.to_path_buf(),
-            defaults_path: None,
-            sim_config: config.simulation.clone(),
-            overrides: config.overrides.clone(),
-            bldg_id: config.building_id.unwrap_or(0),
-            initialization_duration: config.initialization_duration_s.map(StdDuration::from_secs),
-            patches: None,
+            schedule: None,
+            weather: hares_io::WeatherInput::Path(path.to_path_buf()),
+            defaults: hares_io::DefaultsSource::default(),
+            settings: DwellingSettings::new(
+                config.simulation.clone(),
+                config.overrides.clone(),
+                config.building_id.unwrap_or(0),
+                config.initialization_duration_s.map(StdDuration::from_secs),
+                None,
+            ),
         };
 
-        Self::from_preparsed_with_defaults(
-            dwelling_config,
-            hpxml_building,
-            weather,
-            schedule_result.schedule,
-            // The synthetic dwelling's inputs are fully explicit: its envelope
-            // defines its own layer stack and its schedule carries its own
-            // columns, so no defaults store is consulted. The empty store is
-            // declared here, the typed way: no setup reaches an empty
-            // store through a missing file: a defaults load failure is an
-            // error naming the path.
-            hares_io::DefaultsStore::empty(),
-        )
+        // The synthetic dwelling's inputs are fully explicit: its envelope
+        // defines its own layer stack and its schedule carries its own
+        // columns, so no defaults store is consulted. The empty store is
+        // declared here, the typed way: no setup reaches an empty
+        // store through a missing file: a defaults load failure is an
+        // error naming the path.
+        let effective_zone = hpxml_building.climate_zone_iecc.clone();
+        let inputs = hares_io::ParsedInputs {
+            hpxml: Arc::new(hares_io::ParsedHpxml::from_building(hpxml_building)),
+            weather: Arc::new(hares_io::ParsedWeather::from_series(weather)),
+            schedule: Arc::new(hares_io::ParsedSchedule::from_series(
+                schedule_result.schedule,
+            )),
+            defaults: Arc::new(hares_io::ParsedDefaults::empty()),
+            effective_climate_zone: effective_zone,
+            climate_zone_warning: None,
+        };
+        let builder = DwellingBlueprintBuilder::new(inputs, dwelling_config.settings.clone())?;
+        let blueprint = builder.freeze()?;
+        build_from_blueprint(&blueprint)
     }
 
     /// PV panel defaults loaded from `defaults/pv/*.toml`, keyed by file stem.
@@ -2858,39 +2858,24 @@ impl Dwelling {
         &self.pv_panel_defaults
     }
 
-    fn from_preparsed(
-        config: DwellingConfig,
-        building: Building,
-        weather: WeatherTimeSeries,
-        schedule: ScheduleTimeSeries,
-    ) -> Result<Self> {
-        let blueprint = DwellingBlueprint::from_parts(config, building, weather, schedule)?;
-        build_from_blueprint(blueprint)
-    }
-
-    fn from_preparsed_with_defaults(
-        config: DwellingConfig,
-        building: Building,
-        weather: WeatherTimeSeries,
-        schedule: ScheduleTimeSeries,
-        defaults: hares_io::defaults::DefaultsStore,
-    ) -> Result<Self> {
-        let blueprint = DwellingBlueprint::from_parts_with_defaults(
-            config, building, weather, schedule, defaults,
-        )?;
-        build_from_blueprint(blueprint)
+    /// The blueprint the dwelling was built from: the parsed-input handles
+    /// every build of the blueprint shares (the shared parses), and the
+    /// state every build clones.
+    #[must_use]
+    pub fn blueprint(&self) -> &Arc<DwellingBlueprint> {
+        &self.blueprint
     }
 }
 
-pub(crate) fn build_from_blueprint(mut bp: DwellingBlueprint) -> Result<Dwelling> {
+pub(crate) fn build_from_blueprint(bp: &Arc<DwellingBlueprint>) -> Result<Dwelling> {
     let mut warnings = WarningLog::new();
     // Construction-time warnings first, in report order: the blueprint's
     // HPXML parse warnings, then its equipment-resolution warnings. The
     // schedule-injection warnings and each equipment's `init` warnings join
     // them in the body below, in that order. The log is filled before the
     // body runs so every failure path below can emit it.
-    for warning in bp.equipment_warnings.drain(..) {
-        warnings.push_warning(warning);
+    for warning in &bp.equipment_warnings {
+        warnings.push_warning(warning.clone());
     }
     let result = build_from_blueprint_inner(bp, &mut warnings);
     if let Err(err) = &result {
@@ -2914,17 +2899,63 @@ pub(crate) fn build_from_blueprint(mut bp: DwellingBlueprint) -> Result<Dwelling
     result
 }
 
+fn build_from_blueprint_with_seed(
+    bp: &Arc<DwellingBlueprint>,
+    settings: &DwellingSettings,
+    master_seed: u64,
+) -> Result<Dwelling> {
+    let mut warnings = WarningLog::new();
+    for warning in &bp.equipment_warnings {
+        warnings.push_warning(warning.clone());
+    }
+    let result = build_from_blueprint_inner_with_seed(bp, settings, master_seed, &mut warnings);
+    if let Err(err) = &result {
+        for entry in warnings.iter() {
+            tracing::warn!("{entry}");
+        }
+        if warnings.dropped() > 0 {
+            tracing::warn!(
+                "warning log capacity ({}) reached; {} additional warning(s) were dropped",
+                WarningLog::CAPACITY,
+                warnings.dropped()
+            );
+        }
+        tracing::warn!("dwelling construction failed: {err}");
+    }
+    result
+}
+
 fn build_from_blueprint_inner(
-    bp: DwellingBlueprint,
+    bp: &Arc<DwellingBlueprint>,
+    warnings: &mut WarningLog,
+) -> Result<Dwelling> {
+    build_from_blueprint_inner_with_seed(
+        bp,
+        &bp.settings,
+        bp.settings.sim_config.master_seed,
+        warnings,
+    )
+}
+
+fn build_from_blueprint_inner_with_seed(
+    bp: &Arc<DwellingBlueprint>,
+    settings: &DwellingSettings,
+    master_seed: u64,
     warnings: &mut WarningLog,
 ) -> Result<Dwelling> {
     let site_location = bp.site_location;
     let local_start = bp.local_start;
-    let mut defaults = bp.defaults;
-    let config = bp.config;
-    let rng = bp.rng;
+    let defaults = bp.inputs.defaults.store();
+    let config = settings;
+    // The rng: the blueprint's own (the master seed the blueprint froze
+    // with), or the seed given (the reset's), derived the same way.
+    let rng = if master_seed == bp.settings.sim_config.master_seed {
+        bp.rng.clone()
+    } else {
+        derive_dwelling_rng(master_seed, config.bldg_id)
+    };
 
-    let mut equipment_specs = bp.equipment_specs;
+    let mut equipment_specs = bp.equipment_specs.clone();
 
     let mut clock = SimClock::new(
         local_start,
@@ -2936,12 +2967,13 @@ fn build_from_blueprint_inner(
         clock.civil_tz = bp.parsed_civil_tz;
     }
 
-    let mut environment = EnvironmentManager::new_with_options(
-        bp.weather,
-        bp.schedule,
+    let mut environment = EnvironmentManager::new_shared(
+        Arc::clone(&bp.resampled_weather),
+        (*bp.resampled_schedule).clone(),
         &bp.building,
         bp.time_res,
         local_start,
+        &bp.site_location,
         EnvironmentInitOptions {
             civil_timezone: config.sim_config.civil_timezone.as_deref(),
             initial_rng: Some(rng.clone()),
@@ -3024,6 +3056,7 @@ fn build_from_blueprint_inner(
         &defaults,
         &bp.weather_avgs,
         &equipment_specs,
+        site_location.elevation_m,
     )?;
 
     // ── Zone thermal capacitances for EBM ─────────────────────────────────
@@ -3049,8 +3082,11 @@ fn build_from_blueprint_inner(
     // before equipment creation (it sets capacities on equipment specs).
     // ACCA Manual S-2017 oversizing factors applied: 1.4x heating, 1.15x cooling.
     {
-        let duct_params = hares_io::hpxml::resolve_hvac::compute_duct_dse_params(&bp.building)
-            .map_err(|e| HaresError::Dwelling(format!("autosizing: duct DSE parameters: {e}")))?;
+        let duct_params = hares_io::hpxml::resolve_hvac::compute_duct_dse_params(
+            &bp.building,
+            Some(&site_location),
+        )
+        .map_err(|e| HaresError::Dwelling(format!("autosizing: duct DSE parameters: {e}")))?;
 
         let indoor_zone = solvers.thermal.config().indoor_zone_id;
 
@@ -3121,7 +3157,7 @@ fn build_from_blueprint_inner(
         &mut equipment_specs,
         environment.schedule_mut(),
         pre_period_columns.as_deref(),
-        bp.defaults_path.as_deref(),
+        Some(&bp.inputs.defaults.profiles()),
         &defaults,
         &mut schedule_warnings,
     )?;
@@ -3349,7 +3385,11 @@ fn build_from_blueprint_inner(
     // config's `bms_mode` is the one declaration assembly can see, and a
     // battery without one would idle for the whole run. Runs before any
     // equipment is constructed, beside the override validations above.
-    conversions::validate_battery_controls(&equipment_specs, &override_root, &config.hpxml_path)?;
+    conversions::validate_battery_controls(
+        &equipment_specs,
+        &override_root,
+        &bp.inputs.hpxml.record().display(),
+    )?;
 
     let registry = EquipmentRegistry::new();
     let mut equipment: Vec<Box<dyn Equipment>> = Vec::new();
@@ -3516,6 +3556,7 @@ fn build_from_blueprint_inner(
 
     let mut dwelling = Dwelling {
         bldg_id: config.bldg_id,
+        blueprint: Arc::clone(bp),
         failed: false,
         restored_from_checkpoint: false,
         // The site's standard-time offset, resolved with the site location
@@ -3559,7 +3600,7 @@ fn build_from_blueprint_inner(
         wall_azimuths,
         latitude_deg,
         facility_type,
-        pv_panel_defaults: defaults.take_pv_panel_map(),
+        pv_panel_defaults: defaults.pv_panel_map(),
         control_dispatcher: ControlDispatcher::default(),
         price_signal: PriceSignal::default(),
         tariff_evaluator: None,
@@ -8097,16 +8138,17 @@ destination = "memory"
 "#
             );
             Dwelling::from_config(DwellingConfig {
-                hpxml_path: home.join("building.xml"),
-                schedule_path: Some(home.join("schedule.csv")),
-                weather_path: home.join("weather.epw"),
-                defaults_path: Some(root.join("defaults")),
-                sim_config: hares_io::SimulationConfig::from_toml(&sim_toml)
-                    .expect("sim config parses"),
-                overrides: None,
-                bldg_id: 1,
-                initialization_duration: None,
-                patches: None,
+                hpxml: InputSource::Path(home.join("building.xml")),
+                schedule: Some(InputSource::Path(home.join("schedule.csv"))),
+                weather: WeatherInput::Path(home.join("weather.epw")),
+                defaults: DefaultsSource::directory(root.join("defaults")),
+                settings: DwellingSettings::new(
+                    hares_io::SimulationConfig::from_toml(&sim_toml).expect("sim config parses"),
+                    None,
+                    1,
+                    None,
+                    None,
+                ),
             })
             .expect("dwelling builds")
         };
@@ -13215,21 +13257,35 @@ occupancy = 1.0
         )
         .expect("write the Occupancy-free defaults CSV");
         let dwelling_config = DwellingConfig {
-            hpxml_path: base_path.clone(),
-            // `from_preparsed` receives the schedule directly and never
-            // reads the config's schedule source.
-            schedule_path: None,
-            weather_path: base_path.clone(),
-            defaults_path: Some(no_occupancy_defaults.path().to_path_buf()),
-            sim_config,
-            overrides: config.overrides.clone(),
-            bldg_id: config.building_id.unwrap_or(0),
-            initialization_duration: config.initialization_duration_s.map(StdDuration::from_secs),
-            patches: None,
+            hpxml: InputSource::Path(base_path.clone()),
+            schedule: None,
+            weather: WeatherInput::Path(base_path.clone()),
+            defaults: DefaultsSource::directory(no_occupancy_defaults.path().to_path_buf()),
+            settings: DwellingSettings::new(
+                config.simulation.clone(),
+                config.overrides.clone(),
+                config.building_id.unwrap_or(0),
+                config.initialization_duration_s.map(StdDuration::from_secs),
+                None,
+            ),
         };
 
-        match Dwelling::from_preparsed(dwelling_config, building, weather, schedule_result.schedule)
-        {
+        let inputs = hares_io::ParsedInputs {
+            hpxml: Arc::new(hares_io::ParsedHpxml::from_building(building)),
+            weather: Arc::new(hares_io::ParsedWeather::from_series(weather)),
+            schedule: Arc::new(hares_io::ParsedSchedule::from_series(
+                schedule_result.schedule,
+            )),
+            defaults: Arc::new(
+                hares_io::ParsedDefaults::parse(&dwelling_config.defaults)
+                    .expect("the no-occupancy defaults load"),
+            ),
+            effective_climate_zone: None,
+            climate_zone_warning: None,
+        };
+        let builder = DwellingBlueprintBuilder::new(inputs, dwelling_config.settings.clone());
+
+        match builder.and_then(|builder| builder.build()) {
             Err(HaresError::Dwelling(msg)) => {
                 assert!(
                     msg.contains("no occupancy column found in schedule"),
@@ -16454,16 +16510,17 @@ destination = "memory"
 "#
         );
         Dwelling::from_config(DwellingConfig {
-            hpxml_path: home.join("building.xml"),
-            schedule_path: Some(home.join("schedule.csv")),
-            weather_path: home.join("weather.epw"),
-            sim_config: hares_io::SimulationConfig::from_toml(&sim_toml)
-                .expect("sim config parses"),
-            defaults_path: Some(root.join("defaults")),
-            overrides: None,
-            bldg_id: 1,
-            initialization_duration: None,
-            patches: None,
+            hpxml: InputSource::Path(home.join("building.xml")),
+            schedule: Some(InputSource::Path(home.join("schedule.csv"))),
+            weather: WeatherInput::Path(home.join("weather.epw")),
+            defaults: DefaultsSource::directory(root.join("defaults")),
+            settings: DwellingSettings::new(
+                hares_io::SimulationConfig::from_toml(&sim_toml).expect("sim config parses"),
+                None,
+                1,
+                None,
+                None,
+            ),
         })
         .expect("dwelling builds")
     }

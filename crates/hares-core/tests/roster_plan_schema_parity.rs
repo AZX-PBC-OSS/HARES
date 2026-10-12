@@ -4,6 +4,8 @@
 //! same schema: the same columns, each with the same field metadata
 //! (including telemetry-unit provenance), and the same actor columns.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
@@ -57,17 +59,25 @@ fn ochre_dwelling(hpxml_name: &str, output_dir: &tempfile::TempDir) -> Dwelling 
     let overrides = (hpxml_name == "base-battery.xml")
         .then(|| serde_json::json!({ "Battery": { "bms_mode": "\"Manual\"" } }));
     Dwelling::from_config(DwellingConfig {
-        hpxml_path: project_root()
-            .join("tests/fixtures/hpxml/ochre_samples")
-            .join(hpxml_name),
-        schedule_path: Some(project_root().join("data/examples/BEopt_example_schedule.csv")),
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(output_dir.path().join("out.csv")),
-        overrides,
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(
+            project_root()
+                .join("tests/fixtures/hpxml/ochre_samples")
+                .join(hpxml_name),
+        ),
+        schedule: Some(InputSource::Path(
+            project_root().join("data/examples/BEopt_example_schedule.csv"),
+        )),
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            sim_config(output_dir.path().join("out.csv")),
+            overrides,
+            100,
+            None,
+            None,
+        ),
     })
     .unwrap_or_else(|err| panic!("assemble {hpxml_name}: {err}"))
 }

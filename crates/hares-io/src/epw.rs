@@ -155,7 +155,8 @@ pub fn parse_epw_station_wmo<P: AsRef<Path>>(path: P) -> Option<String> {
     (!wmo.is_empty()).then(|| wmo.to_string())
 }
 
-fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
+pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
+    crate::parse_counts::bump_weather();
     let mut lines = contents.lines();
 
     let location_line = lines
@@ -485,6 +486,12 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
 pub(crate) fn read_meta(path: &Path) -> Result<WeatherMeta, WeatherError> {
     let first_line = read_first_line(path)?;
     parse_location_header(&first_line)
+}
+
+/// The EPW LOCATION header's metadata, read from the header line itself:
+/// the content twin of [`read_meta`] for an in-memory weather input.
+pub(crate) fn read_meta_str(first_line: &str) -> Result<WeatherMeta, WeatherError> {
+    parse_location_header(first_line)
 }
 
 /// Reads the file's first line, the only IO a header-only metadata read

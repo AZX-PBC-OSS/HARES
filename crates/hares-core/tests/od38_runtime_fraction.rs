@@ -12,6 +12,8 @@
 //! on most delivering steps, observe-gated) and the zone holds the comfort
 //! envelope at every resolution with tolerances stated per resolution.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -28,32 +30,40 @@ fn base_xml_config(month: u32, time_res_s: i64) -> DwellingConfig {
         _ => panic!("test months are January and July"),
     };
     DwellingConfig {
-        hpxml_path: project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
-        schedule_path: Some(project_root().join("data/examples/BEopt_example_schedule.csv")),
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::east_opt(offset_hours * 3600)
-                .unwrap()
-                .with_ymd_and_hms(2018, start_month_day.0, start_month_day.1, 0, 0, 0)
-                .unwrap(),
-            duration: Duration::days(5),
-            time_res: Duration::seconds(time_res_s),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
-        patches: None,
+        hpxml: InputSource::Path(
+            project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+        ),
+        schedule: Some(InputSource::Path(
+            project_root().join("data/examples/BEopt_example_schedule.csv"),
+        )),
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::east_opt(offset_hours * 3600)
+                    .unwrap()
+                    .with_ymd_and_hms(2018, start_month_day.0, start_month_day.1, 0, 0, 0)
+                    .unwrap(),
+                duration: Duration::days(5),
+                time_res: Duration::seconds(time_res_s),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            Some(std::time::Duration::from_secs(24 * 3600)),
+            None,
+        ),
     }
 }
 

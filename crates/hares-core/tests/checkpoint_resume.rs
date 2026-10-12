@@ -10,6 +10,8 @@
 //! mid-billing checkpoint lands at `2023-01-28T16:30` local: inside the
 //! January billing period and inside an afternoon price period, mid-hour.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -64,15 +66,11 @@ fn dwelling() -> Dwelling {
     let root = project_root();
     let home = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
     let mut dwelling = Dwelling::from_config(DwellingConfig {
-        hpxml_path: home.join("building.xml"),
-        schedule_path: Some(home.join("schedule.csv")),
-        weather_path: home.join("weather.epw"),
-        sim_config: sim_config(),
-        defaults_path: Some(root.join("defaults")),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(home.join("building.xml")),
+        schedule: Some(InputSource::Path(home.join("schedule.csv"))),
+        weather: WeatherInput::Path(home.join("weather.epw")),
+        defaults: DefaultsSource::directory(root.join("defaults")),
+        settings: DwellingSettings::new(sim_config(), None, 1, None, None),
     })
     .expect("cz4a dwelling builds");
     // The monthly cycle closes on the start's day anniversary, so a

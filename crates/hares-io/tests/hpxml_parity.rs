@@ -63,8 +63,15 @@ fn resolve(xml: &str) -> Vec<hares_io::EquipmentSpec> {
 
 fn resolve_with_defaults(xml: &str, defaults: &DefaultsStore) -> Vec<hares_io::EquipmentSpec> {
     let building = parse_building(xml).expect("should parse");
-    resolve_equipment(&building, defaults, None, &mut Vec::new())
-        .expect("resolve_equipment should succeed")
+    resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment should succeed")
 }
 
 fn repo_defaults() -> DefaultsStore {
@@ -676,8 +683,15 @@ fn heat_pump_typed_config_for_mini_split_sets_four_speeds() {
 
     let defaults = repo_defaults();
     let building = parse_building(&xml).expect("should parse");
-    let resolved = resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("resolve_equipment should succeed");
+    let resolved = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment should succeed");
     let cooler_spec = resolved
         .iter()
         .find(|s| s.name == "MSHP Cooler")
@@ -772,8 +786,15 @@ fn ashp_backup_lockout_temperature_extracted() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let heater = specs
         .iter()
@@ -843,8 +864,15 @@ fn switchover_only_maps_to_both_lockouts_ochre_parity() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
     let heater = specs
         .iter()
         .find(|s| s.name == "ASHP Heater")
@@ -907,8 +935,15 @@ fn separate_compressor_and_backup_lockouts_independent() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
     let heater = specs
         .iter()
         .find(|s| s.name == "ASHP Heater")
@@ -975,8 +1010,15 @@ fn no_lockout_fields_emits_no_lockout_params() {
 </HPXML>"#;
 
     let building = parse_building(xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
     let heater = specs
         .iter()
         .find(|s| s.name == "ASHP Heater")
@@ -1004,8 +1046,15 @@ fn cz4a_ashp_fixture_preserves_single_stage_compressor_intent() {
     // it now requires.
     building.site.latitude_deg.get_or_insert(39.29);
     building.site.longitude_deg.get_or_insert(-76.61);
-    let specs =
-        resolve_equipment(&building, &defaults, None, &mut Vec::new()).expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let heater = specs
         .iter()
@@ -1043,8 +1092,15 @@ fn propane_storage_water_heater_resolves_and_inits_as_propane() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let wh = specs
         .iter()
@@ -1094,8 +1150,15 @@ fn natural_gas_tankless_water_heater_resolves_and_inits_as_gas() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let wh = specs
         .iter()
@@ -1130,8 +1193,15 @@ fn hpwh_heating_capacity_populates_backup_element_power() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let wh = specs
         .iter()
@@ -1177,8 +1247,15 @@ fn low_power_hpwh_auto_detected_from_uef_without_hardcoded_presets() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let wh = specs
         .iter()
@@ -1247,8 +1324,15 @@ fn high_uef_hpwh_cop_derived_from_uef_not_hardcoded() {
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let wh = specs
         .iter()
@@ -1310,8 +1394,15 @@ fn propane_furnace_resolves_to_gas_furnace_config_with_propane_fuel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("propane furnace should resolve without error");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("propane furnace should resolve without error");
 
     let furnace = specs
         .iter()
@@ -1349,8 +1440,15 @@ fn fuel_oil_2_boiler_resolves_to_gas_boiler_config_with_oil_fuel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("fuel oil 2 boiler should resolve without error");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("fuel oil 2 boiler should resolve without error");
 
     let boiler = specs
         .iter()
@@ -1544,8 +1642,15 @@ fn resolve_ochre_fixture(fixture_name: &str) -> Vec<hares_io::EquipmentSpec> {
     let xml = ochre_fixture_xml(fixture_name);
     let building = parse_building(&xml).expect("should parse");
     let defaults = repo_defaults();
-    resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("resolve_equipment should succeed")
+    resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment should succeed")
 }
 
 #[test]
@@ -2143,8 +2248,15 @@ fn multifamily_shared_boiler_fixture_resolves_equipment() {
     );
 
     let defaults = repo_defaults();
-    let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("shared boiler fixture should resolve equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("shared boiler fixture should resolve equipment");
 
     let gas_boiler = specs
         .iter()

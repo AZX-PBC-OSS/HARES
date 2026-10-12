@@ -2,6 +2,8 @@
 //! the realised draw is the OpenStudio-HPXML daily volume at every step, so
 //! it does not depend on the step length, and a vacant home draws nothing.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
@@ -42,15 +44,17 @@ fn cz4a_config(
 ) -> DwellingConfig {
     let fixture = project_root().join("tests/fixtures/parity/cz4a_ashp_hpwh");
     DwellingConfig {
-        hpxml_path: fixture.join("building.xml"),
-        schedule_path: Some(fixture.join("schedule.csv")),
-        weather_path: fixture.join("weather.epw"),
-        sim_config: sim_config(start_time, duration, step_s),
-        defaults_path: Some(project_root().join("defaults")),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture.join("building.xml")),
+        schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
+        weather: WeatherInput::Path(fixture.join("weather.epw")),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            sim_config(start_time, duration, step_s),
+            None,
+            1,
+            None,
+            None,
+        ),
     }
 }
 
@@ -82,9 +86,15 @@ fn wet_appliance_hot_water_is_independent_of_the_step() {
         &project_root().join("tests/fixtures/parity/cz4a_ashp_hpwh/building.xml"),
     )
     .expect("cz4a building parses");
-    let specs =
-        hares_io::hpxml::equipment::resolve_equipment(&building, &defaults, None, &mut Vec::new())
-            .expect("cz4a equipment resolves");
+    let specs = hares_io::hpxml::equipment::resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("cz4a equipment resolves");
     let spec_f64 = |name: &str, key: &str| {
         specs
             .iter()
@@ -193,16 +203,21 @@ fn vacant_home_draws_no_appliance_hot_water() {
         .single()
         .expect("start");
     let config = DwellingConfig {
-        hpxml_path: project_root().join("tests/fixtures/resstock/2025.1/bldg0527060/home.xml"),
-        schedule_path: None,
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G5300330_2018.csv"),
-        sim_config: sim_config(start, Duration::seconds(86_400 * 365), 3600),
-        defaults_path: Some(project_root().join("defaults")),
-        overrides: None,
-        bldg_id: 527060,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/bldg0527060/home.xml"),
+        ),
+        schedule: None,
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G5300330_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            sim_config(start, Duration::seconds(86_400 * 365), 3600),
+            None,
+            527060,
+            None,
+            None,
+        ),
     };
     let mut dwelling = Dwelling::from_config(config).expect("vacant dwelling builds");
     let steps = 365 * 24;

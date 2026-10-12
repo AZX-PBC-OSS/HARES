@@ -422,9 +422,15 @@ fn red_probe_bedroom_count_without_numberofbedrooms() {
 
     // The appliance resolve errors the same way.
     let mut warnings = Vec::new();
-    let err =
-        hares_io::hpxml::resolve_equipment(&building, &DefaultsStore::empty(), None, &mut warnings)
-            .expect_err("an absent NumberofBedrooms must fail the appliance resolve");
+    let err = hares_io::hpxml::resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut warnings,
+    )
+    .expect_err("an absent NumberofBedrooms must fail the appliance resolve");
     assert!(
         err.to_string().contains("NumberofBedrooms"),
         "the error names the required field: {err}"
@@ -466,9 +472,15 @@ fn red_probe_blueprint_only_bedroom_count_without_numberofbedrooms() {
     let building = parse_hpxml_str(&blueprint_only).expect("the parse itself succeeds");
 
     let mut warnings = Vec::new();
-    let err =
-        hares_io::hpxml::resolve_equipment(&building, &DefaultsStore::empty(), None, &mut warnings)
-            .expect_err("a blueprint-only build without NumberofBedrooms must fail the resolve");
+    let err = hares_io::hpxml::resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut warnings,
+    )
+    .expect_err("a blueprint-only build without NumberofBedrooms must fail the resolve");
     assert!(
         err.to_string().contains("NumberofBedrooms"),
         "the error names the required field: {err}"

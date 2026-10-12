@@ -451,6 +451,20 @@ replacement.
   variables enter the output catalogue as `actor:<name>:<var>` columns.
   A publication made outside `decide()` lands at the next drain (the
   next `decide()`'s return); one made after the last drain is dropped.
+- Added: the parsed-input handles `ParsedHpxml`, `ParsedWeather` (with
+  `from_path(path)` and `from_text(text)`; `ParsedWeather` also taking
+  `format=` for content, the format a path detects), `ParsedSchedule`
+  (with `from_path(path)` and `from_text(text)`) and `ParsedDefaults`
+  (`ParsedDefaults(base, files=None)`, the per-file replacements a
+  relative-path to content dict, and `with_file(relative_path,
+  content)`): parse once, build many dwellings. `Dwelling.from_hpxml`,
+  `DwellingBlueprint.from_hpxml` and the `DwellingConfig` constructor
+  accept a handle anywhere they accept a path, and share it
+  (construction from a handle reads no file); construction still
+  releases the GIL. `Dwelling.blueprint()` reads the frozen blueprint
+  the dwelling was built from (`DwellingBlueprintRef`, whose
+  `parsed_inputs()` is the `ParsedInputs` record holding the handles'
+  shared `Arc`s).
 
 ## Troubleshooting
 

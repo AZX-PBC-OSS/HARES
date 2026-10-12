@@ -8,6 +8,8 @@
 //! profile, or a malformed profile row is a construction error naming what
 //! is wrong.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, TimeZone};
@@ -41,29 +43,35 @@ fn generated_schedule_config(schedule_path: Option<PathBuf>) -> DwellingConfig {
         .single()
         .expect("valid start time");
     DwellingConfig {
-        hpxml_path: project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
-        schedule_path,
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time,
-            duration: Duration::hours(24),
-            time_res: Duration::seconds(900),
-            reports: Vec::new(),
-            diagnostics: false,
-            metrics: false,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-        },
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(
+            project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+        ),
+        schedule: schedule_path.map(InputSource::Path),
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time,
+                duration: Duration::hours(24),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+            },
+            None,
+            1,
+            None,
+            None,
+        ),
     }
 }
 
@@ -137,38 +145,40 @@ fn no_schedule_generates_the_default_schedule() {
 
     let profiles = hares_io::load_default_profiles(
         config
-            .defaults_path
+            .defaults
+            .base
             .as_deref()
             .expect("the config carries a defaults directory"),
     )
     .expect("the shipped defaults CSV loads");
     let generated = hares_io::hpxml_schedule::generate_default_schedule(
-        config.sim_config.start_time,
-        config.sim_config.duration,
-        config.sim_config.time_res,
+        config.settings.sim_config.start_time,
+        config.settings.sim_config.duration,
+        config.settings.sim_config.time_res,
         &profiles,
     )
     .expect("the shipped profiles generate the schedule")
-    .resample(config.sim_config.time_res.num_seconds() as u32)
+    .resample(config.settings.sim_config.time_res.num_seconds() as u32)
     .expect("the generated schedule resamples");
 
     // Every column the index names is bitwise the generator's column: the
     // per-name values are today's, whatever index shift the column set
     // change caused.
+    let built_schedule = blueprint.resampled_schedule();
     assert_eq!(
-        blueprint.schedule.column_names, generated.column_names,
+        built_schedule.column_names, generated.column_names,
         "the dwelling's schedule must carry the generator's column names"
     );
     for name in generated.column_index.keys() {
-        let built_idx = blueprint.schedule.column_index[name];
+        let built_idx = built_schedule.column_index[name];
         let direct_idx = generated.column_index[name];
         assert_eq!(
-            blueprint.schedule.columns[built_idx], generated.columns[direct_idx],
+            built_schedule.columns[built_idx], generated.columns[direct_idx],
             "column '{name}' must be bitwise the generator's values"
         );
     }
 
-    let built_digest = schedule_digest(&blueprint.schedule);
+    let built_digest = schedule_digest(&built_schedule);
     assert_eq!(
         built_digest,
         schedule_digest(&generated),
@@ -186,7 +196,7 @@ fn no_schedule_generates_the_default_schedule() {
 fn generated_schedule_without_defaults_file_is_an_error() {
     let temp = copy_shipped_defaults_csv();
     let mut config = generated_schedule_config(None);
-    config.defaults_path = Some(temp.path().to_path_buf());
+    config.defaults.base = Some(temp.path().to_path_buf());
     std::fs::remove_file(temp.path().join("Default Schedule Parameters.csv"))
         .expect("remove the defaults CSV from the copy");
 
@@ -215,7 +225,7 @@ fn missing_default_profile_is_an_error() {
     std::fs::write(&csv_path, kept).expect("write the CSV without Indoor Lighting");
 
     let mut config = generated_schedule_config(None);
-    config.defaults_path = Some(temp.path().to_path_buf());
+    config.defaults.base = Some(temp.path().to_path_buf());
     let err = match Dwelling::from_config(config) {
         Err(err) => err,
         Ok(_) => panic!("a generated schedule with a missing profile must fail construction"),
@@ -247,7 +257,7 @@ fn malformed_default_profile_row_is_an_error() {
     std::fs::write(&csv_path, truncated).expect("write the CSV with the short row");
 
     let mut config = generated_schedule_config(None);
-    config.defaults_path = Some(temp.path().to_path_buf());
+    config.defaults.base = Some(temp.path().to_path_buf());
     let err = match Dwelling::from_config(config) {
         Err(err) => err,
         Ok(_) => panic!("a generated schedule with a malformed profile row must fail construction"),
@@ -264,7 +274,7 @@ fn malformed_default_profile_row_is_an_error() {
 #[test]
 fn generated_schedule_requires_a_defaults_directory() {
     let mut config = generated_schedule_config(None);
-    config.defaults_path = None;
+    config.defaults.base = None;
 
     let err = match Dwelling::from_config(config) {
         Err(err) => err,
@@ -295,7 +305,7 @@ fn schedule_file_missing_a_column_needs_a_defaults_directory() {
     let mut config = generated_schedule_config(Some(
         project_root().join("data/examples/BEopt_example_schedule.csv"),
     ));
-    config.defaults_path = None;
+    config.defaults.base = None;
 
     let err = match Dwelling::from_config(config.clone()) {
         Err(err) => err,
@@ -313,7 +323,7 @@ fn schedule_file_missing_a_column_needs_a_defaults_directory() {
         "the error must name the path it tried, got: {message}"
     );
 
-    config.defaults_path = Some(project_root().join("defaults"));
+    config.defaults.base = Some(project_root().join("defaults"));
     if let Err(err) = Dwelling::from_config(config) {
         panic!("the same config with the shipped defaults directory must build, got: {err}");
     }

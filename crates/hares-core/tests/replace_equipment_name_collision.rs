@@ -11,6 +11,8 @@
 //! the observation-misbinding class the identity contract exists to
 //! prevent, reached through a public, Python-reachable entrance.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
@@ -55,16 +57,13 @@ fn sim_config() -> SimulationConfig {
 
 fn dwelling_config(hpxml: &std::path::Path) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(),
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(sim_config(), None, 100, None, None),
     }
 }
 

@@ -37,6 +37,8 @@
 //!   defects together; real vehicles precondition while plugged in, and
 //!   OCHRE — the feature floor — has no cold-charge block at all).
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -400,15 +402,11 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
         health_policy: hares_io::HealthPolicy::default(),
     };
     let config = DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather,
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(sim, Some(overrides), 100, None, None),
     };
     SimulationEngine::new()
         .run(config)
@@ -483,15 +481,11 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
         health_policy: hares_io::HealthPolicy::default(),
     };
     let config = DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather,
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(sim, Some(overrides), 100, None, None),
     };
     let err = SimulationEngine::new()
         .run(config)
@@ -619,15 +613,11 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
         health_policy: hares_io::HealthPolicy::default(),
     };
     let config = DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather,
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(sim, Some(overrides), 100, None, None),
     };
     let err = SimulationEngine::new()
         .run(config)
@@ -692,15 +682,11 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
         health_policy: hares_io::HealthPolicy::default(),
     };
     let base = DwellingConfig {
-        hpxml_path: hpxml_path.clone(),
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather,
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path.clone()),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather),
+        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        settings: DwellingSettings::new(sim, None, 100, None, None),
     };
 
     // Control: the identical build with no overrides payload must succeed —
@@ -725,7 +711,10 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
         serde_json::json!(null),
     ] {
         let config = DwellingConfig {
-            overrides: Some(payload.clone()),
+            settings: DwellingSettings {
+                overrides: Some(payload.clone()),
+                ..base.settings.clone()
+            },
             ..base.clone()
         };
         let err = SimulationEngine::new().run(config).expect_err(

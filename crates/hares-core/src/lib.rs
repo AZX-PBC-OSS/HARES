@@ -43,8 +43,9 @@ pub use actor_registry::{ActorConfig, ActorFactory, ActorRegistry};
 pub use checkpoint::DwellingCheckpoint;
 pub use clock::SimClock;
 pub use dwelling::{
-    BatteryLutData, Dwelling, DwellingConfig, HpxmlInputs, PremiseZip, StepResult,
-    building_to_boundary_inputs, building_to_zone_inputs, shipped_defaults_dir,
+    BatteryLutData, Dwelling, DwellingBlueprint, DwellingBlueprintBuilder, DwellingConfig,
+    DwellingSettings, HpxmlInputs, PremiseZip, StepResult, building_to_boundary_inputs,
+    building_to_zone_inputs, shipped_defaults_dir,
 };
 pub use engine::{KernelTimer, SimulationEngine};
 pub use environment::{EnvironmentInitOptions, EnvironmentManager};
