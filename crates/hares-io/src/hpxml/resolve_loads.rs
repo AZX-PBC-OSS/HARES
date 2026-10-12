@@ -22,6 +22,7 @@ use super::xml_helpers::{
 };
 use hares_physics::units as conv;
 
+use super::elements::*;
 use crate::defaults::DefaultsStore;
 
 /// OCHRE EV fuel economy: 1/325 * 1000 miles per kWh (for sedans).
@@ -53,9 +54,9 @@ pub(crate) const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
 fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> std::result::Result<f64, HpxmlError> {
     let n_bedrooms_raw = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "NumberofBedrooms",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &NUMBEROF_BEDROOMS,
         ])
         .and_then(|n| parse_trimmed_f64(&n.text))
         .ok_or_else(|| HpxmlError::MissingField {
@@ -67,13 +68,13 @@ fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> std::result::Resul
                      (hpxml.py:263), so no count may be substituted for it",
         })?;
     let n_occupants = details
-        .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
+        .path(&[&BUILDING_SUMMARY, &BUILDING_OCCUPANCY, &NUMBEROF_RESIDENTS])
         .and_then(|n| parse_trimmed_f64(&n.text));
     let house_type = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "ResidentialFacilityType",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &RESIDENTIAL_FACILITY_TYPE,
         ])
         .map(|n| n.text.trim().to_ascii_lowercase());
     let adjusted = adjusted_bedroom_count(n_occupants, house_type.as_deref(), n_bedrooms_raw);
@@ -115,8 +116,8 @@ pub(super) fn adjusted_bedroom_count(
 
 /// The `extension/UsageMultiplier` of an appliance element, 1.0 when absent.
 fn usage_multiplier_of(node: &XmlNode) -> f64 {
-    node.child("extension")
-        .and_then(|e| child_f64(e, "UsageMultiplier"))
+    node.child(&EXTENSION)
+        .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
         .unwrap_or(1.0)
 }
 
@@ -140,38 +141,38 @@ fn insert_wet_appliance_apportionment(
     } else {
         ("ClothesWasher/IsSharedAppliance", "Clothes Washer")
     };
-    let is_shared = child_bool(node, "IsSharedAppliance", path, system_kind)?.unwrap_or(false);
+    let is_shared = child_bool(node, &IS_SHARED_APPLIANCE, path, system_kind)?.unwrap_or(false);
     params.insert("is_shared_appliance".to_string(), json!(is_shared));
     if let Some(idref) = node
-        .child("AttachedToWaterHeatingSystem")
+        .child(&ATTACHED_TO_WATER_HEATING_SYSTEM)
         .and_then(|c| c.attrs.get("idref").cloned())
     {
         params.insert("attached_water_heating_system_id".to_string(), json!(idref));
     }
     params.insert(
         "attached_hot_water_distribution".to_string(),
-        json!(node.child("AttachedToHotWaterDistribution").is_some()),
+        json!(node.child(&ATTACHED_TO_HOT_WATER_DISTRIBUTION).is_some()),
     );
     Ok(())
 }
 
 fn wet_appliance_occupancy_inputs(details: &XmlNode) -> OccupancyInputs {
     let n_occ = details
-        .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
+        .path(&[&BUILDING_SUMMARY, &BUILDING_OCCUPANCY, &NUMBEROF_RESIDENTS])
         .and_then(|n| parse_trimmed_f64(&n.text));
     let nbeds = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "NumberofBedrooms",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &NUMBEROF_BEDROOMS,
         ])
         .and_then(|n| parse_trimmed_f64(&n.text))
         .unwrap_or(3.0);
     let is_apartment = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "ResidentialFacilityType",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &RESIDENTIAL_FACILITY_TYPE,
         ])
         .map(|n| n.text.trim().to_ascii_lowercase())
         .as_deref()
@@ -210,19 +211,20 @@ fn washer_label_inputs(
     eri_version: EriVersion,
 ) -> Result<WasherLabelInputs, HpxmlError> {
     let system_id = element_id(node).unwrap_or_else(|| "unknown".to_string());
-    let require = |name: &'static str| -> Result<f64, HpxmlError> {
-        child_f64(node, name).ok_or_else(|| {
+    let require = |element: &'static super::elements::HpxmlElement| -> Result<f64, HpxmlError> {
+        child_f64(node, element).ok_or_else(|| {
             HpxmlError::Parse(
                 format!(
                     "Clothes Washer `{system_id}`: the HPXML provides RatedAnnualkWh, so \
-                     no other label field is defaulted (defaults.rb:4207 defaults the \
-                     whole set together): {name} is required"
+                         no other label field is defaulted (defaults.rb:4207 defaults the \
+                         whole set together): {} is required",
+                    element.name
                 )
                 .into(),
             )
         })
     };
-    if child_f64(node, "RatedAnnualkWh").is_none() {
+    if child_f64(node, &RATED_ANNUALK_WH).is_none() {
         let modern = matches!(eri_version, EriVersion::Y2019To2022 | EriVersion::Latest);
         return Ok(if modern {
             WasherLabelInputs {
@@ -247,17 +249,17 @@ fn washer_label_inputs(
     }
     let modern = matches!(eri_version, EriVersion::Y2019To2022 | EriVersion::Latest);
     Ok(WasherLabelInputs {
-        rated_annual_kwh: require("RatedAnnualkWh")?,
-        capacity_ft3: require("Capacity")?,
-        label_usage: match child_f64(node, "LabelUsage") {
+        rated_annual_kwh: require(&RATED_ANNUALK_WH)?,
+        capacity_ft3: require(&CAPACITY)?,
+        label_usage: match child_f64(node, &LABEL_USAGE) {
             Some(usage) => usage,
-            None if modern => require("LabelUsage")?,
+            None if modern => require(&LABEL_USAGE)?,
             // The pre-2019A algebra never reads it: the version's default.
             None => 999.0,
         },
-        label_electric_rate: require("LabelElectricRate")?,
-        label_gas_rate: require("LabelGasRate")?,
-        label_annual_gas_cost: require("LabelAnnualGasCost")?,
+        label_electric_rate: require(&LABEL_ELECTRIC_RATE)?,
+        label_gas_rate: require(&LABEL_GAS_RATE)?,
+        label_annual_gas_cost: require(&LABEL_ANNUAL_GAS_COST)?,
     })
 }
 
@@ -287,10 +289,10 @@ fn dishwasher_label_inputs(
     eri_version: EriVersion,
 ) -> Result<DishwasherLabelInputs, HpxmlError> {
     let system_id = element_id(node).unwrap_or_else(|| "unknown".to_string());
-    let energy_factor = child_f64(node, "EnergyFactor");
+    let energy_factor = child_f64(node, &ENERGY_FACTOR);
     let modern = matches!(eri_version, EriVersion::Y2019To2022 | EriVersion::Latest);
-    let label_field = |name: &'static str| -> Result<f64, HpxmlError> {
-        match child_f64(node, name) {
+    let label_field = |element: &'static super::elements::HpxmlElement| -> Result<f64, HpxmlError> {
+        match child_f64(node, element) {
             Some(value) => Ok(value),
             // The pre-2019A algebra reads no label field: the version's
             // 'unused' default.
@@ -298,14 +300,15 @@ fn dishwasher_label_inputs(
             None => Err(HpxmlError::Parse(
                 format!(
                     "Dishwasher `{system_id}`: the HPXML provides PlaceSettingCapacity, so \
-                     no other label field is defaulted (defaults.rb:4305 defaults the \
-                     whole set together): {name} is required"
+                         no other label field is defaulted (defaults.rb:4305 defaults the \
+                         whole set together): {} is required",
+                    element.name
                 )
                 .into(),
             )),
         }
     };
-    if child_f64(node, "PlaceSettingCapacity").is_none() {
+    if child_f64(node, &PLACE_SETTING_CAPACITY).is_none() {
         return Ok(if modern {
             DishwasherLabelInputs {
                 rated_annual_kwh: 467.0,
@@ -330,7 +333,7 @@ fn dishwasher_label_inputs(
             }
         });
     }
-    let rated_annual_kwh = match child_f64(node, "RatedAnnualkWh") {
+    let rated_annual_kwh = match child_f64(node, &RATED_ANNUALK_WH) {
         Some(rated) => rated,
         None if energy_factor.is_some() => 215.0 / energy_factor.expect("checked above"),
         None => {
@@ -346,13 +349,13 @@ fn dishwasher_label_inputs(
     };
     Ok(DishwasherLabelInputs {
         rated_annual_kwh,
-        place_setting_capacity: child_f64(node, "PlaceSettingCapacity")
+        place_setting_capacity: child_f64(node, &PLACE_SETTING_CAPACITY)
             .expect("PlaceSettingCapacity checked above"),
         energy_factor,
-        label_usage: label_field("LabelUsage")?,
-        label_electric_rate: label_field("LabelElectricRate")?,
-        label_gas_rate: label_field("LabelGasRate")?,
-        label_annual_gas_cost: label_field("LabelAnnualGasCost")?,
+        label_usage: label_field(&LABEL_USAGE)?,
+        label_electric_rate: label_field(&LABEL_ELECTRIC_RATE)?,
+        label_gas_rate: label_field(&LABEL_GAS_RATE)?,
+        label_annual_gas_cost: label_field(&LABEL_ANNUAL_GAS_COST)?,
     })
 }
 
@@ -380,9 +383,9 @@ pub(super) fn resolve_scheduled_loads(
     occupancy_inputs.eri_version = wet_appliance_eri_version(building)?;
 
     // Occupancy
-    if let Some(occupancy) = details.path(&["BuildingSummary", "BuildingOccupancy"]) {
+    if let Some(occupancy) = details.path(&[&BUILDING_SUMMARY, &BUILDING_OCCUPANCY]) {
         let mut params = Map::new();
-        if let Some(n) = child_f64(occupancy, "NumberofResidents") {
+        if let Some(n) = child_f64(occupancy, &NUMBEROF_RESIDENTS) {
             params.insert("number_of_occupants".to_string(), json!(n));
             #[cfg(feature = "observe")]
             tracing::info!(
@@ -392,9 +395,9 @@ pub(super) fn resolve_scheduled_loads(
             );
         } else if let Some(n_bedrooms) = details
             .path(&[
-                "BuildingSummary",
-                "BuildingConstruction",
-                "NumberofBedrooms",
+                &BUILDING_SUMMARY,
+                &BUILDING_CONSTRUCTION,
+                &NUMBEROF_BEDROOMS,
             ])
             .and_then(|n| parse_trimmed_f64(&n.text))
         {
@@ -455,31 +458,31 @@ pub(super) fn resolve_scheduled_loads(
         }
     }
 
-    if let Some(appliances) = details.child("Appliances") {
+    if let Some(appliances) = details.child(&APPLIANCES) {
         let n_bedrooms = resolve_bedroom_count_for_appliances(details)?;
 
         // Pre-extract washer params for dryer energy calculation (OCHRE passes
         // the actual ClothesWasher to parse_clothes_dryer).
-        let washer_node = appliances.children_named("ClothesWasher").next();
+        let washer_node = appliances.children_named(&CLOTHES_WASHER).next();
         let washer_rated_kwh = washer_node
-            .and_then(|n| child_f64(n, "RatedAnnualkWh"))
+            .and_then(|n| child_f64(n, &RATED_ANNUALK_WH))
             .unwrap_or(400.0);
         let washer_imef = washer_node
-            .and_then(|n| child_f64(n, "IntegratedModifiedEnergyFactor"))
+            .and_then(|n| child_f64(n, &INTEGRATED_MODIFIED_ENERGY_FACTOR))
             .unwrap_or(1.0);
         let washer_capacity_ft3 = washer_node
-            .and_then(|n| child_f64(n, "Capacity"))
+            .and_then(|n| child_f64(n, &CAPACITY))
             .unwrap_or(3.0);
 
         for (tag, name) in [
-            ("ClothesWasher", "Clothes Washer"),
-            ("ClothesDryer", "Clothes Dryer"),
-            ("Dishwasher", "Dishwasher"),
-            ("Refrigerator", "Refrigerator"),
-            ("Freezer", "Freezer"),
-            ("CookingRange", "Cooking Range"),
-            ("Microwave", "Microwave"),
-            ("Dehumidifier", "Dehumidifier"),
+            (&CLOTHES_WASHER, "Clothes Washer"),
+            (&CLOTHES_DRYER, "Clothes Dryer"),
+            (&DISHWASHER, "Dishwasher"),
+            (&REFRIGERATOR, "Refrigerator"),
+            (&FREEZER, "Freezer"),
+            (&COOKING_RANGE, "Cooking Range"),
+            (&MICROWAVE, "Microwave"),
+            (&DEHUMIDIFIER, "Dehumidifier"),
         ] {
             require_unique_appliance_ids(appliances, tag)?;
             let mut counter = 0u32;
@@ -489,7 +492,7 @@ pub(super) fn resolve_scheduled_loads(
                 let mut fuel = FuelType::Electric;
                 // Default RatedAnnualkWh: washer=400, dishwasher=467, fridge=637+18*beds, freezer=319.8.
                 // OCHRE falls back to these when HPXML omits the element.
-                let default_kwh = match tag {
+                let default_kwh = match tag.name {
                     "ClothesWasher" => Some(400.0),
                     "Dishwasher" => Some(467.0),
                     "Refrigerator" => Some(637.0 + 18.0 * n_bedrooms),
@@ -504,9 +507,9 @@ pub(super) fn resolve_scheduled_loads(
                     }
                 };
                 let rated_kwh = node
-                    .child("extension")
-                    .and_then(|ext| child_f64(ext, "AdjustedAnnualkWh"))
-                    .or_else(|| child_f64(node, "RatedAnnualkWh"))
+                    .child(&EXTENSION)
+                    .and_then(|ext| child_f64(ext, &ADJUSTED_ANNUALK_WH))
+                    .or_else(|| child_f64(node, &RATED_ANNUALK_WH))
                     .or(default_kwh);
                 if let Some(kwh) = rated_kwh {
                     params.insert("annual_electric_kwh".to_string(), json!(kwh));
@@ -517,23 +520,23 @@ pub(super) fn resolve_scheduled_loads(
                     fuel = FuelType::Gas;
                     params.insert("annual_gas_therms".to_string(), json!(load_therms));
                 }
-                if let Some(fuel_name) = child_text(node, "FuelType") {
+                if let Some(fuel_name) = child_text(node, &FUEL_TYPE) {
                     fuel = parse_fuel(Some(&fuel_name))?;
                 }
 
                 // Appliance-specific parameters
-                match tag {
+                match tag.name {
                     "ClothesWasher" => {
-                        if let Some(capacity_ft3) = child_f64(node, "Capacity") {
+                        if let Some(capacity_ft3) = child_f64(node, &CAPACITY) {
                             params.insert(
                                 "capacity_m3".to_string(),
                                 json!(conv::volume_ft3_to_m3(capacity_ft3)),
                             );
                         }
-                        if let Some(usage) = child_f64(node, "LabelUsage") {
+                        if let Some(usage) = child_f64(node, &LABEL_USAGE) {
                             params.insert("label_usage_cycles_per_week".to_string(), json!(usage));
                         }
-                        if let Some(imef) = child_f64(node, "IntegratedModifiedEnergyFactor") {
+                        if let Some(imef) = child_f64(node, &INTEGRATED_MODIFIED_ENERGY_FACTOR) {
                             params.insert("imef".to_string(), json!(imef));
                         }
 
@@ -544,8 +547,8 @@ pub(super) fn resolve_scheduled_loads(
                         // the version's asset form otherwise), the label
                         // algebra and the rated value.
                         let adjusted = child_load_kwh(node).or_else(|| {
-                            node.child("extension")
-                                .and_then(|ext| child_f64(ext, "AdjustedAnnualkWh"))
+                            node.child(&EXTENSION)
+                                .and_then(|ext| child_f64(ext, &ADJUSTED_ANNUALK_WH))
                         });
                         let washer_label = washer_label_inputs(node, occupancy_inputs.eri_version)?;
                         let inputs = ClothesWasherInputs {
@@ -586,13 +589,13 @@ pub(super) fn resolve_scheduled_loads(
                         params.insert("phase_3_duration_s".to_string(), json!(600.0));
                     }
                     "ClothesDryer" => {
-                        if let Some(cef) = child_f64(node, "CombinedEnergyFactor") {
+                        if let Some(cef) = child_f64(node, &COMBINED_ENERGY_FACTOR) {
                             params.insert("combined_energy_factor".to_string(), json!(cef));
-                        } else if let Some(ef) = child_f64(node, "EnergyFactor") {
+                        } else if let Some(ef) = child_f64(node, &ENERGY_FACTOR) {
                             params.insert("energy_factor".to_string(), json!(ef));
                         }
                         let vented =
-                            child_bool(node, "Vented", "ClothesDryer/Vented", "Clothes Dryer")?
+                            child_bool(node, &VENTED, "ClothesDryer/Vented", "Clothes Dryer")?
                                 .unwrap_or(true);
                         // A fuel-fired dryer conveys its moisture and combustion
                         // products outside the building (IFGC 614.1).
@@ -634,8 +637,8 @@ pub(super) fn resolve_scheduled_loads(
                                 })
                                 .unwrap_or(3.01);
                             let multiplier = node
-                                .child("extension")
-                                .and_then(|e| child_f64(e, "UsageMultiplier"))
+                                .child(&EXTENSION)
+                                .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                                 .unwrap_or(1.0);
                             let washer_capacity = washer_capacity_ft3;
                             let rmc = (0.97 * (washer_capacity / washer_imef)
@@ -664,10 +667,10 @@ pub(super) fn resolve_scheduled_loads(
                         }
                     }
                     "Dishwasher" => {
-                        if let Some(cap) = child_f64(node, "PlaceSettingCapacity") {
+                        if let Some(cap) = child_f64(node, &PLACE_SETTING_CAPACITY) {
                             params.insert("place_setting_capacity".to_string(), json!(cap));
                         }
-                        if let Some(usage) = child_f64(node, "LabelUsage") {
+                        if let Some(usage) = child_f64(node, &LABEL_USAGE) {
                             params.insert("label_usage_cycles_per_week".to_string(), json!(usage));
                         }
 
@@ -678,8 +681,8 @@ pub(super) fn resolve_scheduled_loads(
                         // the version's asset form otherwise), the label
                         // algebra and the rated value.
                         let adjusted = child_load_kwh(node).or_else(|| {
-                            node.child("extension")
-                                .and_then(|ext| child_f64(ext, "AdjustedAnnualkWh"))
+                            node.child(&EXTENSION)
+                                .and_then(|ext| child_f64(ext, &ADJUSTED_ANNUALK_WH))
                         });
                         let dishwasher_label =
                             dishwasher_label_inputs(node, occupancy_inputs.eri_version)?;
@@ -728,14 +731,14 @@ pub(super) fn resolve_scheduled_loads(
                         // OCHRE hpxml.py parse_cooking_range:1451-1461.
                         let is_induction = child_bool(
                             node,
-                            "IsInduction",
+                            &IS_INDUCTION,
                             "CookingRange/IsInduction",
                             "Cooking Range",
                         )?
                         .unwrap_or(false);
                         let multiplier = node
-                            .child("extension")
-                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .child(&EXTENSION)
+                            .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                             .unwrap_or(1.0);
                         let burner_ef = if is_induction { 0.91_f64 } else { 1.0_f64 };
                         let oven_ef = 1.0_f64;
@@ -756,14 +759,14 @@ pub(super) fn resolve_scheduled_loads(
                         // extension/AdjustedAnnualkWh; this arm applies the default only
                         // when neither is present.
                         let multiplier = node
-                            .child("extension")
-                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .child(&EXTENSION)
+                            .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                             .unwrap_or(1.0);
                         let annual_kwh = MICROWAVE_DEFAULT_ANNUAL_KWH * multiplier;
                         params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
                     }
                     "Dehumidifier" => {
-                        if let Some(cap_pints_day) = child_f64(node, "Capacity") {
+                        if let Some(cap_pints_day) = child_f64(node, &CAPACITY) {
                             // HPXML §Dehumidifier/Capacity is in US liquid pints/day per the HPXML 4.x schema
                             // annotation. 1 US liquid pint = 0.473176473 L (exact, NIST Handbook 44).
                             params.insert(
@@ -771,18 +774,18 @@ pub(super) fn resolve_scheduled_loads(
                                 json!(cap_pints_day * 0.473_176_473),
                             );
                         }
-                        if let Some(ef) = child_f64(node, "EnergyFactor") {
+                        if let Some(ef) = child_f64(node, &ENERGY_FACTOR) {
                             params.insert("energy_factor".to_string(), json!(ef));
                         }
-                        if let Some(ief) = child_f64(node, "IntegratedEnergyFactor") {
+                        if let Some(ief) = child_f64(node, &INTEGRATED_ENERGY_FACTOR) {
                             params.insert("integrated_energy_factor".to_string(), json!(ief));
                         }
-                        if let Some(frac) = child_f64(node, "FractionDehumidificationLoadServed")
-                            .or_else(|| child_f64(node, "FractionLoadServed"))
+                        if let Some(frac) = child_f64(node, &FRACTION_DEHUMIDIFICATION_LOAD_SERVED)
+                            .or_else(|| child_f64(node, &FRACTION_LOAD_SERVED))
                         {
                             params.insert("fraction_served".to_string(), json!(frac));
                         }
-                        if let Some(setpoint) = child_f64(node, "DehumidistatSetpoint") {
+                        if let Some(setpoint) = child_f64(node, &DEHUMIDISTAT_SETPOINT) {
                             let target_rh = if setpoint > 1.0 {
                                 setpoint / 100.0
                             } else {
@@ -793,8 +796,8 @@ pub(super) fn resolve_scheduled_loads(
                     }
                     "Refrigerator" => {
                         let multiplier = node
-                            .child("extension")
-                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .child(&EXTENSION)
+                            .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                             .unwrap_or(1.0);
                         if let Some(kwh) =
                             params.get("annual_electric_kwh").and_then(|v| v.as_f64())
@@ -805,8 +808,8 @@ pub(super) fn resolve_scheduled_loads(
                     }
                     "Freezer" => {
                         let multiplier = node
-                            .child("extension")
-                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .child(&EXTENSION)
+                            .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                             .unwrap_or(1.0);
                         if let Some(kwh) =
                             params.get("annual_electric_kwh").and_then(|v| v.as_f64())
@@ -827,14 +830,14 @@ pub(super) fn resolve_scheduled_loads(
                 #[cfg(debug_assertions)]
                 {
                     let multiplier = node
-                        .child("extension")
-                        .and_then(|e| child_f64(e, "UsageMultiplier"))
+                        .child(&EXTENSION)
+                        .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                         .unwrap_or(1.0);
                     if (multiplier - 1.0).abs() > f64::EPSILON
                         && let Some(kwh) =
                             params.get("annual_electric_kwh").and_then(|v| v.as_f64())
                     {
-                        let unscaled_default = match tag {
+                        let unscaled_default = match tag.name {
                             "Refrigerator" => Some(637.0 + 18.0 * n_bedrooms),
                             "Freezer" => Some(319.8),
                             _ => None,
@@ -843,7 +846,7 @@ pub(super) fn resolve_scheduled_loads(
                             && (kwh - default).abs() < 1e-6
                         {
                             tracing::warn!(
-                                appliance = tag,
+                                appliance = tag.name,
                                 multiplier = %multiplier,
                                 unscaled_default_kwh = default,
                                 "appliance default energy was not scaled by UsageMultiplier"
@@ -856,23 +859,23 @@ pub(super) fn resolve_scheduled_loads(
                     params.insert(k, v);
                 }
 
-                let is_non_primary_fridge = tag == "Refrigerator"
+                let is_non_primary_fridge = tag.name == "Refrigerator"
                     && !child_bool(
                         node,
-                        "PrimaryIndicator",
+                        &PRIMARY_INDICATOR,
                         "Refrigerator/PrimaryIndicator",
                         "Refrigerator",
                     )?
                     .unwrap_or(true);
-                if tag != "Dehumidifier" {
-                    let location = child_text(node, "Location").unwrap_or_else(|| {
+                if tag.name != "Dehumidifier" {
+                    let location = child_text(node, &LOCATION).unwrap_or_else(|| {
                         default_appliance_location(
                             building,
-                            tag == "Freezer" || is_non_primary_fridge,
+                            tag.name == "Freezer" || is_non_primary_fridge,
                         )
                         .to_string()
                     });
-                    match appliance_site(building, tag, node, &location)? {
+                    match appliance_site(building, tag.name, node, &location)? {
                         ApplianceSite::ConditionedSpace => {}
                         ApplianceSite::Zone(zone_id) => {
                             params.insert("zone_id".to_string(), json!(zone_id));
@@ -892,7 +895,7 @@ pub(super) fn resolve_scheduled_loads(
                 if is_non_primary_fridge {
                     spec.instance_name = Some(format!("{name} (Secondary)"));
                 }
-                if tag == "Dehumidifier" {
+                if tag.name == "Dehumidifier" {
                     // HPXML's Dehumidifier schema has no Location element;
                     // OS-HPXML and HARES both model every dehumidifier in the
                     // one conditioned zone. A building with no conditioned
@@ -933,7 +936,7 @@ pub(super) fn resolve_scheduled_loads(
         }
     }
 
-    if let Some(lighting) = details.child("Lighting") {
+    if let Some(lighting) = details.child(&LIGHTING) {
         let indoor_area_ft2 = conv::area_m2_to_ft2(conditioned_floor_area_m2(building));
         let foundation_area_ft2 = conv::area_m2_to_ft2(foundation_floor_area_m2(building));
         let garage_area_ft2 = conv::area_m2_to_ft2(garage_floor_area_m2(building));
@@ -943,11 +946,11 @@ pub(super) fn resolve_scheduled_loads(
         // turn fixes the float-summation order behind "Total Electric Power".
         // Sorted-key iteration keeps run-to-run output bit-identical.
         let mut by_location: BTreeMap<String, LightingFractions> = BTreeMap::new();
-        for group in lighting.children_named("LightingGroup") {
-            let location = child_text(group, "Location")
+        for group in lighting.children_named(&LIGHTING_GROUP) {
+            let location = child_text(group, &LOCATION)
                 .unwrap_or_else(|| "interior".to_string())
                 .to_ascii_lowercase();
-            let frac = child_f64(group, "FractionofUnitsInLocation").unwrap_or(0.0);
+            let frac = child_f64(group, &FRACTIONOF_UNITS_IN_LOCATION).unwrap_or(0.0);
 
             let entry = by_location.entry(location).or_default();
             // A group whose energy is stated directly (a Load) needs no
@@ -1100,12 +1103,12 @@ pub(super) fn resolve_scheduled_loads(
             specs.push(build_spec(name, FuelType::Electric, params, defaults));
         }
 
-        if let Some(ceiling_fan) = lighting.child("CeilingFan") {
+        if let Some(ceiling_fan) = lighting.child(&CEILING_FAN) {
             let mut params = Map::new();
             let n_bedrooms = resolve_bedroom_count_for_appliances(details)?;
-            let n_fans = child_f64(ceiling_fan, "Count").unwrap_or(n_bedrooms + 1.0);
+            let n_fans = child_f64(ceiling_fan, &COUNT).unwrap_or(n_bedrooms + 1.0);
             let efficiency_cfm_per_w = ceiling_fan
-                .path(&["Airflow", "Efficiency"])
+                .path(&[&AIRFLOW, &EFFICIENCY])
                 .and_then(|n| parse_trimmed_f64(&n.text))
                 .unwrap_or(3000.0 / 42.6);
             let annual_kwh = n_fans * 3000.0 / efficiency_cfm_per_w * 10.5 * 365.0 / 1000.0;
@@ -1114,10 +1117,10 @@ pub(super) fn resolve_scheduled_loads(
             params.insert(
                 "month_multipliers".to_string(),
                 Value::Array(
-                    read_extension_month_multipliers(ceiling_fan.child("extension"), "")
+                    read_extension_month_multipliers(ceiling_fan.child(&EXTENSION), "")
                         .or_else(|| {
                             read_extension_month_multipliers(
-                                lighting.child("extension"),
+                                lighting.child(&EXTENSION),
                                 "CeilingFan",
                             )
                         })
@@ -1136,9 +1139,9 @@ pub(super) fn resolve_scheduled_loads(
         }
     }
 
-    if let Some(misc_loads) = details.child("MiscLoads") {
-        for plug in misc_loads.children_named("PlugLoad") {
-            let load_type = child_text(plug, "PlugLoadType")
+    if let Some(misc_loads) = details.child(&MISC_LOADS) {
+        for plug in misc_loads.children_named(&PLUG_LOAD) {
+            let load_type = child_text(plug, &PLUG_LOAD_TYPE)
                 .unwrap_or_else(|| "other".to_string())
                 .to_ascii_lowercase();
             let (name, fuel) = match load_type.as_str() {
@@ -1219,8 +1222,8 @@ pub(super) fn resolve_scheduled_loads(
             specs.push(build_spec(name.to_string(), fuel, params, defaults));
         }
 
-        for fuel_load in misc_loads.children_named("FuelLoad") {
-            let load_type = child_text(fuel_load, "FuelLoadType")
+        for fuel_load in misc_loads.children_named(&FUEL_LOAD) {
+            let load_type = child_text(fuel_load, &FUEL_LOAD_TYPE)
                 .unwrap_or_else(|| "other".to_string())
                 .to_ascii_lowercase();
             let name = match load_type.as_str() {
@@ -1258,23 +1261,23 @@ pub(super) fn resolve_ventilation(
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
 ) -> std::result::Result<(), super::HpxmlError> {
-    let Some(vent_fans) = details.path(&["Systems", "MechanicalVentilation", "VentilationFans"])
+    let Some(vent_fans) = details.path(&[&SYSTEMS, &MECHANICAL_VENTILATION, &VENTILATION_FANS])
     else {
         return Ok(());
     };
 
-    for fan in vent_fans.children_named("VentilationFan") {
+    for fan in vent_fans.children_named(&VENTILATION_FAN) {
         // Only include fans used for whole-building or seasonal cooling ventilation.
         let is_whole_building = child_bool(
             fan,
-            "UsedForWholeBuildingVentilation",
+            &USED_FOR_WHOLE_BUILDING_VENTILATION,
             "VentilationFan/UsedForWholeBuildingVentilation",
             "Ventilation Fan",
         )?
         .unwrap_or(false);
         let is_seasonal_cooling = child_bool(
             fan,
-            "UsedForSeasonalCoolingLoadReduction",
+            &USED_FOR_SEASONAL_COOLING_LOAD_REDUCTION,
             "VentilationFan/UsedForSeasonalCoolingLoadReduction",
             "Ventilation Fan",
         )?
@@ -1283,11 +1286,11 @@ pub(super) fn resolve_ventilation(
             continue;
         }
 
-        let flow_cfm = child_f64(fan, "RatedFlowRate");
-        let fan_type_str = child_text(fan, "FanType");
+        let flow_cfm = child_f64(fan, &RATED_FLOW_RATE);
+        let fan_type_str = child_text(fan, &FAN_TYPE);
         let fan_type_lower = fan_type_str.as_deref().unwrap_or("").to_ascii_lowercase();
         let flow_m3_s = flow_cfm.map(|cfm| cfm * hares_physics::constants::CFM_TO_M3_S);
-        let fan_power_w = if let Some(power_w) = child_f64(fan, "FanPower") {
+        let fan_power_w = if let Some(power_w) = child_f64(fan, &FAN_POWER) {
             Some(power_w)
         } else if let Some(cfm) = flow_cfm {
             // OCHRE default W/CFM by fan type when FanPower is absent.
@@ -1323,8 +1326,8 @@ pub(super) fn resolve_ventilation(
                 "hrv"
             }
         };
-        let sensible_re = child_f64(fan, "SensibleRecoveryEfficiency").unwrap_or(0.0);
-        let total_re = child_f64(fan, "TotalRecoveryEfficiency").unwrap_or(0.0);
+        let sensible_re = child_f64(fan, &SENSIBLE_RECOVERY_EFFICIENCY).unwrap_or(0.0);
+        let total_re = child_f64(fan, &TOTAL_RECOVERY_EFFICIENCY).unwrap_or(0.0);
         let latent_re = (total_re - sensible_re).max(0.0);
         let cfg = VentilationConfig {
             equipment_id: None,
@@ -1342,7 +1345,7 @@ pub(super) fn resolve_ventilation(
             defrost_time_increase_rate_per_k: None,
             ventilation_type: Some(ventilation_type.to_string()),
             balanced: Some(balanced),
-            hours_in_operation: child_f64(fan, "HoursInOperation"),
+            hours_in_operation: child_f64(fan, &HOURS_IN_OPERATION),
         };
         specs.push(build_typed_spec(
             "Ventilation Fan".to_string(),
@@ -1357,7 +1360,10 @@ pub(super) fn resolve_ventilation(
 /// Same-type appliances are told apart by their SystemIdentifier ids (their
 /// instance names number them by order), so when an HPXML lists more than
 /// one of a type, each must carry a unique id.
-fn require_unique_appliance_ids(appliances: &XmlNode, tag: &str) -> Result<(), HpxmlError> {
+fn require_unique_appliance_ids(
+    appliances: &XmlNode,
+    tag: &'static super::elements::HpxmlElement,
+) -> Result<(), HpxmlError> {
     let ids: Vec<Option<String>> = appliances.children_named(tag).map(element_id).collect();
     if ids.len() < 2 {
         return Ok(());
@@ -1367,16 +1373,21 @@ fn require_unique_appliance_ids(appliances: &XmlNode, tag: &str) -> Result<(), H
         let Some(id) = id else {
             return Err(HpxmlError::Parse(
                 format!(
-                    "{} {tag} elements need a SystemIdentifier id each to be told \
+                    "{} {} elements need a SystemIdentifier id each to be told \
                      apart, but one has none",
-                    ids.len()
+                    ids.len(),
+                    tag.name
                 )
                 .into(),
             ));
         };
         if !seen.insert(id) {
             return Err(HpxmlError::Parse(
-                format!("duplicate SystemIdentifier id '{id}' among {tag} elements").into(),
+                format!(
+                    "duplicate SystemIdentifier id '{id}' among {} elements",
+                    tag.name
+                )
+                .into(),
             ));
         }
     }
@@ -1604,25 +1615,29 @@ fn derive_lighting_annual_kwh(location: &str, area_ft2: f64, fractions: &Lightin
 }
 
 fn lighting_group_type(group: &XmlNode) -> Option<String> {
-    let ty = group.child("LightingType")?;
+    let ty = group.child(&LIGHTING_TYPE)?;
     ty.children.first().map(|n| n.name.to_ascii_lowercase())
 }
 
 fn read_extension_month_multipliers(ext: Option<&XmlNode>, prefix: &str) -> Option<Vec<f64>> {
     let ext = ext?;
-    let key = if prefix.is_empty() {
-        "MonthlyScheduleMultipliers".to_string()
-    } else {
-        format!("{prefix}MonthlyScheduleMultipliers")
-    };
-    let raw = ext.child(&key)?.text.trim();
+    fn month_child<'a>(ext: &'a XmlNode, prefix: &str) -> Option<&'a XmlNode> {
+        let name = if prefix.is_empty() {
+            MONTHLY_SCHEDULE_MULTIPLIERS.name.to_string()
+        } else {
+            format!("{prefix}{}", MONTHLY_SCHEDULE_MULTIPLIERS.name)
+        };
+        ext.children.iter().find(|n| n.name == name)
+    }
+    let raw = month_child(ext, prefix)?.text.trim().to_string();
+    let raw = raw.trim();
     let vals: Vec<f64> = raw.split(',').filter_map(parse_trimmed_f64).collect();
     if vals.len() == 12 {
         Some(vals)
     } else {
         if !vals.is_empty() {
             tracing::warn!(
-                key = %key,
+                key = %raw,
                 count = vals.len(),
                 "MonthlyScheduleMultipliers has unexpected number of values (expected 12); ignoring"
             );
@@ -2026,16 +2041,16 @@ mod tests {
           </extension>
         </Refrigerator>"#;
         let node = parse_xml_document(xml).expect("parse");
-        let ext = node.child("extension").unwrap();
-        let adjusted = child_f64(ext, "AdjustedAnnualkWh");
+        let ext = node.child(&EXTENSION).unwrap();
+        let adjusted = child_f64(ext, &ADJUSTED_ANNUALK_WH);
         assert_eq!(adjusted, Some(420.0));
-        let rated = child_f64(&node, "RatedAnnualkWh");
+        let rated = child_f64(&node, &RATED_ANNUALK_WH);
         assert_eq!(rated, Some(500.0));
         // The combined lookup should prefer adjusted.
         let result = node
-            .child("extension")
-            .and_then(|e| child_f64(e, "AdjustedAnnualkWh"))
-            .or_else(|| child_f64(&node, "RatedAnnualkWh"));
+            .child(&EXTENSION)
+            .and_then(|e| child_f64(e, &ADJUSTED_ANNUALK_WH))
+            .or_else(|| child_f64(&node, &RATED_ANNUALK_WH));
         assert_eq!(result, Some(420.0));
     }
 
@@ -2046,9 +2061,9 @@ mod tests {
         </Refrigerator>"#;
         let node = parse_xml_document(xml).expect("parse");
         let result = node
-            .child("extension")
-            .and_then(|e| child_f64(e, "AdjustedAnnualkWh"))
-            .or_else(|| child_f64(&node, "RatedAnnualkWh"));
+            .child(&EXTENSION)
+            .and_then(|e| child_f64(e, &ADJUSTED_ANNUALK_WH))
+            .or_else(|| child_f64(&node, &RATED_ANNUALK_WH));
         assert_eq!(result, Some(500.0));
     }
 
@@ -3260,7 +3275,7 @@ mod tests {
             .expect("resolve_scheduled_loads");
         let spec = specs
             .iter()
-            .find(|s| s.name == "Dehumidifier")
+            .find(|s| s.name == DEHUMIDIFIER.name)
             .expect("dehumidifier spec resolved");
         assert_eq!(
             dehumidifier_zone_id_from_spec(spec),

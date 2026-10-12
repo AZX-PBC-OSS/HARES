@@ -10,6 +10,7 @@ use hares_types::Warning;
 
 use super::HpxmlError;
 use super::building::{ValueKind, XmlNode, ZoneType, parse_value_with_units, parse_zone_label};
+use super::elements::*;
 use super::xml_helpers::{child_text, element_id};
 
 /// Floor area, height and air volume of one HARES zone, and the HPXML
@@ -37,14 +38,14 @@ fn assumed_zone_height_ft(location: &str) -> f64 {
 /// `InteriorAdjacentTo` text.
 pub(super) fn surfaces<'a>(
     details: &'a XmlNode,
-    group: &'a str,
-    element: &'a str,
+    group: &'static super::elements::HpxmlElement,
+    element: &'static super::elements::HpxmlElement,
 ) -> impl Iterator<Item = (String, &'a XmlNode)> {
     details
-        .path(&["Enclosure", group])
+        .path(&[&ENCLOSURE, group])
         .into_iter()
         .flat_map(move |node| node.children_named(element))
-        .filter_map(|node| child_text(node, "InteriorAdjacentTo").map(|loc| (loc, node)))
+        .filter_map(|node| child_text(node, &INTERIOR_ADJACENT_TO).map(|loc| (loc, node)))
 }
 
 /// The height of the space at `location`: its tallest foundation wall, or
@@ -59,9 +60,9 @@ fn location_height_m(
     warnings: &mut Vec<Warning>,
 ) -> Result<f64, HpxmlError> {
     let mut tallest_m: Option<f64> = None;
-    for (wall_location, wall) in surfaces(details, "FoundationWalls", "FoundationWall") {
+    for (wall_location, wall) in surfaces(details, &FOUNDATION_WALLS, &FOUNDATION_WALL) {
         if wall_location == location
-            && let Some(height) = parse_value_with_units(wall.child("Height"), ValueKind::Length)?
+            && let Some(height) = parse_value_with_units(wall.child(&HEIGHT), ValueKind::Length)?
         {
             tallest_m = Some(tallest_m.map_or(height, |h: f64| h.max(height)));
         }
@@ -88,8 +89,8 @@ fn location_height_m(
 /// Slab areas per HPXML location, keyed by the location's text.
 fn slab_areas_m2_by_location(details: &XmlNode) -> Result<BTreeMap<String, f64>, HpxmlError> {
     let mut areas: BTreeMap<String, f64> = BTreeMap::new();
-    for (location, slab) in surfaces(details, "Slabs", "Slab") {
-        let area = parse_value_with_units(slab.child("Area"), ValueKind::Area)?
+    for (location, slab) in surfaces(details, &SLABS, &SLAB) {
+        let area = parse_value_with_units(slab.child(&AREA), ValueKind::Area)?
             .ok_or_else(|| HpxmlError::Parse(format!("slab in '{location}' has no Area").into()))?;
         *areas.entry(location).or_default() += area;
     }
@@ -168,13 +169,13 @@ fn roof_height_and_footprint_m(
 ) -> Result<Option<(f64, f64)>, HpxmlError> {
     let mut area_m2 = 0.0;
     let mut pitches = Vec::new();
-    for (location, roof) in surfaces(details, "Roofs", "Roof") {
+    for (location, roof) in surfaces(details, &ROOFS, &ROOF) {
         if parse_zone_label(&location) != *zone_type {
             continue;
         }
-        let area = parse_value_with_units(roof.child("Area"), ValueKind::Area)?
+        let area = parse_value_with_units(roof.child(&AREA), ValueKind::Area)?
             .ok_or_else(|| HpxmlError::Parse(format!("roof in '{location}' has no Area").into()))?;
-        let Some(pitch) = parse_value_with_units(roof.child("Pitch"), ValueKind::Raw)? else {
+        let Some(pitch) = parse_value_with_units(roof.child(&PITCH), ValueKind::Raw)? else {
             warnings.push(Warning::new(
                 "hpxml",
                 format!(
@@ -206,14 +207,13 @@ fn roof_height_and_footprint_m(
 /// The first HPXML location of `zone_type` an enclosure surface names.
 pub(super) fn first_location(details: &XmlNode, zone_type: &ZoneType) -> Option<String> {
     [
-        "Roofs/Roof",
-        "Slabs/Slab",
-        "FoundationWalls/FoundationWall",
-        "Walls/Wall",
-        "Floors/Floor",
+        (&ROOFS, &ROOF),
+        (&SLABS, &SLAB),
+        (&FOUNDATION_WALLS, &FOUNDATION_WALL),
+        (&WALLS, &WALL),
+        (&FLOORS, &FLOOR),
     ]
     .iter()
-    .filter_map(|path| path.split_once('/'))
     .flat_map(|(group, element)| surfaces(details, group, element))
     .map(|(location, _)| location)
     .find(|location| parse_zone_label(location) == *zone_type)
@@ -310,12 +310,12 @@ fn gable_rise_m(
     warnings: &mut Vec<Warning>,
 ) -> Result<Option<f64>, HpxmlError> {
     let mut gable_areas_m2: Vec<f64> = Vec::new();
-    for (location, wall) in surfaces(details, "Walls", "Wall") {
+    for (location, wall) in surfaces(details, &WALLS, &WALL) {
         if parse_zone_label(&location) == ZoneType::Attic
-            && child_text(wall, "ExteriorAdjacentTo").as_deref() == Some("outside")
+            && child_text(wall, &EXTERIOR_ADJACENT_TO).as_deref() == Some("outside")
         {
             gable_areas_m2.push(
-                parse_value_with_units(wall.child("Area"), ValueKind::Area)?.ok_or_else(|| {
+                parse_value_with_units(wall.child(&AREA), ValueKind::Area)?.ok_or_else(|| {
                     HpxmlError::Parse(format!("wall in '{location}' has no Area").into())
                 })?,
             );
@@ -326,14 +326,14 @@ fn gable_rise_m(
     }
     let mut pitches = Vec::new();
     let mut azimuths = Vec::new();
-    for (location, roof) in surfaces(details, "Roofs", "Roof") {
+    for (location, roof) in surfaces(details, &ROOFS, &ROOF) {
         if parse_zone_label(&location) != ZoneType::Attic {
             continue;
         }
-        if let Some(pitch) = parse_value_with_units(roof.child("Pitch"), ValueKind::Raw)? {
+        if let Some(pitch) = parse_value_with_units(roof.child(&PITCH), ValueKind::Raw)? {
             pitches.push(pitch);
         }
-        if let Some(azimuth) = parse_value_with_units(roof.child("Azimuth"), ValueKind::Raw)? {
+        if let Some(azimuth) = parse_value_with_units(roof.child(&AZIMUTH), ValueKind::Raw)? {
             let azimuth = azimuth.rem_euclid(360.0);
             if !azimuths.iter().any(|a: &f64| (a - azimuth).abs() < 1e-6) {
                 azimuths.push(azimuth);
@@ -480,8 +480,8 @@ fn storey_rectangle_sides_m(
     warnings: &mut Vec<Warning>,
 ) -> Result<Option<StoreyRectangle>, HpxmlError> {
     let mut attic_floor_m2 = 0.0;
-    for (location, floor) in surfaces(details, "Floors", "Floor") {
-        let exterior = child_text(floor, "ExteriorAdjacentTo").unwrap_or_default();
+    for (location, floor) in surfaces(details, &FLOORS, &FLOOR) {
+        let exterior = child_text(floor, &EXTERIOR_ADJACENT_TO).unwrap_or_default();
         let below = match (parse_zone_label(&location), parse_zone_label(&exterior)) {
             (_, ZoneType::Attic) => location.as_str(),
             (ZoneType::Attic, _) => exterior.as_str(),
@@ -495,7 +495,7 @@ fn storey_rectangle_sides_m(
                 ),
             ));
         }
-        attic_floor_m2 += parse_value_with_units(floor.child("Area"), ValueKind::Area)?
+        attic_floor_m2 += parse_value_with_units(floor.child(&AREA), ValueKind::Area)?
             .ok_or_else(|| HpxmlError::Parse(format!("floor over '{below}' has no Area").into()))?;
     }
     let mismatched =
@@ -521,15 +521,15 @@ fn storey_rectangle_sides_m(
     }
     let storey_wall_height_m = storey.wall_height_m;
     let mut wall_area_m2 = 0.0;
-    for (location, wall) in surfaces(details, "Walls", "Wall") {
-        let exterior = child_text(wall, "ExteriorAdjacentTo").unwrap_or_default();
+    for (location, wall) in surfaces(details, &WALLS, &WALL) {
+        let exterior = child_text(wall, &EXTERIOR_ADJACENT_TO).unwrap_or_default();
         if parse_zone_label(&location) == ZoneType::Conditioned
             && !matches!(
                 parse_zone_label(&exterior),
                 ZoneType::Attic | ZoneType::Conditioned
             )
         {
-            wall_area_m2 += parse_value_with_units(wall.child("Area"), ValueKind::Area)?
+            wall_area_m2 += parse_value_with_units(wall.child(&AREA), ValueKind::Area)?
                 .ok_or_else(|| {
                     HpxmlError::Parse(format!("wall in '{location}' has no Area").into())
                 })?;

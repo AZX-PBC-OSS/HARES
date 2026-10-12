@@ -147,6 +147,9 @@ from ._hares import (
 # Build identity
 from ._hares import BuildInfo, build_info
 
+# The machine-readable input schema
+from ._hares import input_schema
+
 # Standalone PV sizing functions
 from ._hares import (
     compute_annual_diffuse_fraction,
@@ -307,6 +310,8 @@ __all__ = [
     # Build identity
     "BuildInfo",
     "build_info",
+    # Input schema
+    "input_schema",
     "__version__",
     # Gym / RL
     "batch_step",

@@ -414,3 +414,111 @@ pub(super) fn parse_f64_array_3(raw: &str) -> crate::Result<[f64; 3]> {
     }
     Ok([numbers[0], numbers[1], numbers[2]])
 }
+
+/// The the duct distribution config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for DuctConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "dse_heat",
+                hares_types::FieldMeta {
+                    description: Some("the heating duct distribution system efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_distribution_efficiency",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the duct_distribution_efficiency setting of the duct distribution config",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_dse",
+                hares_types::FieldMeta {
+                    description: Some("the duct_dse setting of the duct distribution config"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "dse_cool",
+                hares_types::FieldMeta {
+                    description: Some("the cooling duct distribution system efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_airflow_m3_s_per_w",
+                hares_types::FieldMeta {
+                    description: Some("the explicit duct airflow, m3/s/W"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the duct losses deposit in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_house_volume_m3",
+                hares_types::FieldMeta {
+                    description: Some("the house volume the duct leakage normalises against, m3"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_supply_leakage_frac",
+                hares_types::FieldMeta {
+                    description: Some("the supply duct's leakage fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_supply_area_m2",
+                hares_types::FieldMeta {
+                    description: Some("the supply duct's surface area, m2"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_supply_r_m2_k_w",
+                hares_types::FieldMeta {
+                    description: Some("the supply duct's insulation R-value, m2 K/W"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_return_leakage_frac",
+                hares_types::FieldMeta {
+                    description: Some("the return duct's leakage fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_return_area_m2",
+                hares_types::FieldMeta {
+                    description: Some("the return duct's surface area, m2"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_return_r_m2_k_w",
+                hares_types::FieldMeta {
+                    description: Some("the return duct's insulation R-value, m2 K/W"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct_zone_type",
+                hares_types::FieldMeta {
+                    description: Some("the zone type the duct losses deposit in"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}

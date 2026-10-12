@@ -9,6 +9,7 @@ use hares_types::FuelType;
 use hares_types::{normalize_ascii, parse_trimmed_f64};
 
 use super::building::XmlNode;
+use super::elements::*;
 
 pub(crate) fn parse_fuel(raw: Option<&str>) -> Result<FuelType, super::HpxmlError> {
     let raw_str =
@@ -32,7 +33,7 @@ pub(crate) fn parse_fuel(raw: Option<&str>) -> Result<FuelType, super::HpxmlErro
 }
 
 pub(crate) fn element_id(node: &XmlNode) -> Option<String> {
-    node.child("SystemIdentifier")
+    node.child(&SYSTEM_IDENTIFIER)
         .and_then(|id_node| id_node.attrs.get("id"))
         .cloned()
 }
@@ -48,18 +49,21 @@ pub(crate) fn element_id(node: &XmlNode) -> Option<String> {
 /// `idref` is not present in the lookup.
 pub(crate) fn resolve_local_ref<'a, T>(
     node: &XmlNode,
-    child_name: &str,
+    element: &'static super::elements::HpxmlElement,
     lookup: &'a HashMap<String, T>,
 ) -> Option<&'a T> {
     let idref = node
-        .child(child_name)
+        .child(element)
         .and_then(|a| a.attrs.get("idref"))?
         .as_str();
     lookup.get(idref)
 }
 
-pub(crate) fn child_text(node: &XmlNode, child_name: &str) -> Option<String> {
-    node.child(child_name).map(|n| n.text.trim().to_string())
+pub(crate) fn child_text(
+    node: &XmlNode,
+    element: &'static super::elements::HpxmlElement,
+) -> Option<String> {
+    node.child(element).map(|n| n.text.trim().to_string())
 }
 
 /// Reads an `xs:boolean` element, whose lexical forms are `true`, `false`,
@@ -83,14 +87,14 @@ pub(crate) fn xs_boolean(
     }
 }
 
-/// [`xs_boolean`] for the child `child_name`, `None` when it is absent.
+/// [`xs_boolean`] for the child `element`, `None` when it is absent.
 pub(crate) fn child_bool(
     node: &XmlNode,
-    child_name: &str,
+    element: &'static super::elements::HpxmlElement,
     path: &'static str,
     system_kind: &'static str,
 ) -> Result<Option<bool>, super::HpxmlError> {
-    node.child(child_name)
+    node.child(element)
         .map(|child| {
             let id = element_id(node).unwrap_or_else(|| "unknown".to_string());
             xs_boolean(child, path, system_kind, &id)
@@ -98,15 +102,17 @@ pub(crate) fn child_bool(
         .transpose()
 }
 
-pub(crate) fn child_f64(node: &XmlNode, child_name: &str) -> Option<f64> {
-    node.child(child_name)
-        .and_then(|n| parse_trimmed_f64(&n.text))
+pub(crate) fn child_f64(
+    node: &XmlNode,
+    element: &'static super::elements::HpxmlElement,
+) -> Option<f64> {
+    node.child(element).and_then(|n| parse_trimmed_f64(&n.text))
 }
 
 pub(crate) fn child_temperature_c(node: &XmlNode) -> Option<f64> {
     let temp = node
-        .child("HotWaterTemperature")
-        .or_else(|| node.child("Temperature"))?;
+        .child(&HOT_WATER_TEMPERATURE)
+        .or_else(|| node.child(&TEMPERATURE))?;
     let value = parse_trimmed_f64(&temp.text)?;
     let units = temp
         .attrs
@@ -129,10 +135,13 @@ pub(crate) fn child_temperature_c(node: &XmlNode) -> Option<f64> {
     }
 }
 
-pub(crate) fn child_energy_kwh(node: &XmlNode, child_name: &str) -> Option<f64> {
-    let target = node.child(child_name)?;
-    let value = child_f64(target, "Value")?;
-    let units = child_text(target, "Units")?.to_ascii_lowercase();
+pub(crate) fn child_energy_kwh(
+    node: &XmlNode,
+    element: &'static super::elements::HpxmlElement,
+) -> Option<f64> {
+    let target = node.child(element)?;
+    let value = child_f64(target, &VALUE)?;
+    let units = child_text(target, &UNITS)?.to_ascii_lowercase();
     match units.as_str() {
         "kwh" | "kwh/year" | "kwh/yr" => Some(value),
         "wh" | "wh/year" | "wh/yr" => Some(value / 1000.0),
@@ -141,7 +150,7 @@ pub(crate) fn child_energy_kwh(node: &XmlNode, child_name: &str) -> Option<f64> 
             tracing::warn!(
                 units = other,
                 value,
-                field = child_name,
+                field = element.name,
                 "Unrecognized energy unit; cannot convert child energy to kWh"
             );
             None
@@ -150,9 +159,9 @@ pub(crate) fn child_energy_kwh(node: &XmlNode, child_name: &str) -> Option<f64> 
 }
 
 pub(crate) fn child_load_kwh(node: &XmlNode) -> Option<f64> {
-    let load = node.child("Load")?;
-    let value = child_f64(load, "Value")?;
-    let units_raw = child_text(load, "Units");
+    let load = node.child(&LOAD)?;
+    let value = child_f64(load, &VALUE)?;
+    let units_raw = child_text(load, &UNITS);
     let units = units_raw
         .as_deref()
         .unwrap_or("kwh/year")
@@ -173,9 +182,9 @@ pub(crate) fn child_load_kwh(node: &XmlNode) -> Option<f64> {
 }
 
 pub(crate) fn child_load_therms(node: &XmlNode) -> Option<f64> {
-    let load = node.child("Load")?;
-    let value = child_f64(load, "Value")?;
-    let units_raw = child_text(load, "Units");
+    let load = node.child(&LOAD)?;
+    let value = child_f64(load, &VALUE)?;
+    let units_raw = child_text(load, &UNITS);
     let units = units_raw
         .as_deref()
         .unwrap_or("therm/year")
@@ -206,18 +215,27 @@ pub(crate) fn capitalize(s: &str) -> String {
     out
 }
 
-pub(crate) fn descendants_named<'a>(node: &'a XmlNode, name: &'a str) -> Vec<&'a XmlNode> {
+pub(crate) fn descendants_named<'a>(
+    node: &'a XmlNode,
+    element: &'static super::elements::HpxmlElement,
+) -> Vec<&'a XmlNode> {
+    #[cfg(test)]
+    super::elements::read_recorder::record(element.name);
     let mut out = Vec::new();
-    collect_descendants(node, name, &mut out);
+    collect_descendants(node, element, &mut out);
     out
 }
 
-fn collect_descendants<'a>(node: &'a XmlNode, name: &str, out: &mut Vec<&'a XmlNode>) {
-    if node.name == name {
+fn collect_descendants<'a>(
+    node: &'a XmlNode,
+    element: &'static super::elements::HpxmlElement,
+    out: &mut Vec<&'a XmlNode>,
+) {
+    if node.name == element.name {
         out.push(node);
     }
     for child in &node.children {
-        collect_descendants(child, name, out);
+        collect_descendants(child, element, out);
     }
 }
 
@@ -227,20 +245,20 @@ fn collect_descendants<'a>(node: &'a XmlNode, name: &str, out: &mut Vec<&'a XmlN
 pub(crate) fn find_hvac_control(details: &XmlNode) -> Option<&XmlNode> {
     // ResStock-style: Systems > HVAC > HVACControl
     details
-        .path(&["Systems", "HVAC", "HVACControl"])
+        .path(&[&SYSTEMS, &HVAC, &HVAC_CONTROL])
         .or_else(|| {
             // NRELCAMP-style: HVACPlant > HVACControl
-            descendants_named(details, "HVACPlant")
+            descendants_named(details, &HVAC_PLANT)
                 .into_iter()
-                .find_map(|p| p.child("HVACControl"))
+                .find_map(|p| p.child(&HVAC_CONTROL))
         })
         .or_else(|| {
             // Any HVAC > HVACControl pairing
-            descendants_named(details, "HVAC")
+            descendants_named(details, &HVAC)
                 .into_iter()
-                .find_map(|p| p.child("HVACControl"))
+                .find_map(|p| p.child(&HVAC_CONTROL))
         })
-        .or_else(|| details.first_descendant("HVACControl"))
+        .or_else(|| details.first_descendant(&HVAC_CONTROL))
 }
 
 /// Parse a single HVAC setpoint schedule (24h array in °C) from an `HVACControl` node.
@@ -257,11 +275,48 @@ pub(crate) fn parse_setpoint_from_control(
     hvac_type: &str,
     weekday: bool,
 ) -> Result<Option<Vec<f64>>, super::HpxmlError> {
-    let day_prefix = if weekday { "Weekday" } else { "Weekend" };
-    let ext_key = format!("{day_prefix}SetpointTemps{hvac_type}Season");
+    // The declared elements the profile reads, chosen by the side and day
+    // kind: the 24-hour extension arrays, the constant element, and the
+    // setback or setup elements the constant carries.
+    let (ext_profile, constant, setback, hours, start_hour_element, default_start_hour) =
+        match (hvac_type, weekday) {
+            ("Heating", true) => (
+                &WEEKDAY_SETPOINT_TEMPS_HEATING_SEASON,
+                &SETPOINT_TEMP_HEATING_SEASON,
+                &SETBACK_TEMP_HEATING_SEASON,
+                &TOTAL_SETBACK_HOURSPER_WEEK_HEATING,
+                &SETBACK_START_HOUR_HEATING,
+                23,
+            ),
+            ("Heating", false) => (
+                &WEEKEND_SETPOINT_TEMPS_HEATING_SEASON,
+                &SETPOINT_TEMP_HEATING_SEASON,
+                &SETBACK_TEMP_HEATING_SEASON,
+                &TOTAL_SETBACK_HOURSPER_WEEK_HEATING,
+                &SETBACK_START_HOUR_HEATING,
+                23,
+            ),
+            ("Cooling", true) => (
+                &WEEKDAY_SETPOINT_TEMPS_COOLING_SEASON,
+                &SETPOINT_TEMP_COOLING_SEASON,
+                &SETUP_TEMP_COOLING_SEASON,
+                &TOTAL_SETUP_HOURSPER_WEEK_COOLING,
+                &SETUP_START_HOUR_COOLING,
+                9,
+            ),
+            ("Cooling", false) => (
+                &WEEKEND_SETPOINT_TEMPS_COOLING_SEASON,
+                &SETPOINT_TEMP_COOLING_SEASON,
+                &SETUP_TEMP_COOLING_SEASON,
+                &TOTAL_SETUP_HOURSPER_WEEK_COOLING,
+                &SETUP_START_HOUR_COOLING,
+                9,
+            ),
+            _ => unreachable!("only Heating and Cooling setpoint sides exist"),
+        };
 
-    if let Some(ext) = control.child("extension")
-        && let Some(node) = ext.child(&ext_key)
+    if let Some(ext) = control.child(&EXTENSION)
+        && let Some(node) = ext.child(ext_profile)
     {
         let vals: Vec<f64> = node
             .text
@@ -276,38 +331,23 @@ pub(crate) fn parse_setpoint_from_control(
     }
 
     // Fallback: single constant value from <SetpointTemp{hvac_type}Season>
-    let const_key = format!("SetpointTemp{hvac_type}Season");
     let Some(setpoint_f) = control
-        .child(&const_key)
+        .child(constant)
         .and_then(|node| parse_trimmed_f64(&node.text))
     else {
         return Ok(None);
     };
     let mut setpoints = vec![conv::temperature_f_to_c(setpoint_f); 24];
-    let (setback_key, hours_key, start_key, default_start_hour) = if hvac_type == "Heating" {
-        (
-            "SetbackTempHeatingSeason",
-            "TotalSetbackHoursperWeekHeating",
-            "SetbackStartHourHeating",
-            23,
-        )
-    } else {
-        (
-            "SetupTempCoolingSeason",
-            "TotalSetupHoursperWeekCooling",
-            "SetupStartHourCooling",
-            9,
-        )
-    };
-    if let Some(setback_f) = child_f64(control, setback_key) {
-        let hours_per_week = child_f64(control, hours_key).ok_or_else(|| {
+    let _ = (setback, hours);
+    if let Some(setback_f) = child_f64(control, setback) {
+        let hours_per_week = child_f64(control, hours).ok_or_else(|| {
             super::HpxmlError::Parse(
-                format!("HVACControl has {setback_key} but no {hours_key}").into(),
+                format!("HVACControl has {} but no {}", setback.name, hours.name).into(),
             )
         })?;
         let start_hour = control
-            .child("extension")
-            .and_then(|ext| child_f64(ext, start_key))
+            .child(&EXTENSION)
+            .and_then(|ext| child_f64(ext, start_hour_element))
             .map_or(default_start_hour, |hour| hour as usize);
         let setback_c = conv::temperature_f_to_c(setback_f);
         // Ruby's Integer() truncates the daily hours.
@@ -330,28 +370,30 @@ pub(crate) fn parse_schedule_extension_params(
     node: &XmlNode,
     prefix: &str,
 ) -> Vec<(String, Value)> {
+    // The prefixed extension element's node: the prefix (a location's
+    // capitalized name, e.g. "Interior") is prepended to the declared
+    // element's name, so the lookup is by the computed name of a declared
+    // element, never a positional literal.
+    fn ext_child<'a>(
+        ext: &'a XmlNode,
+        prefix: &str,
+        element: &'static super::elements::HpxmlElement,
+    ) -> Option<&'a XmlNode> {
+        let name = if prefix.is_empty() {
+            element.name.to_string()
+        } else {
+            format!("{prefix}{}", element.name)
+        };
+        ext.children.iter().find(|n| n.name == name)
+    }
+
     let mut out = Vec::new();
-    let Some(ext) = node.child("extension") else {
+    let Some(ext) = node.child(&EXTENSION) else {
         return out;
     };
 
-    let weekday_key = if prefix.is_empty() {
-        "WeekdayScheduleFractions".to_string()
-    } else {
-        format!("{prefix}WeekdayScheduleFractions")
-    };
-    let weekend_key = if prefix.is_empty() {
-        "WeekendScheduleFractions".to_string()
-    } else {
-        format!("{prefix}WeekendScheduleFractions")
-    };
-    let multiplier_key = if prefix.is_empty() {
-        "UsageMultiplier".to_string()
-    } else {
-        format!("{prefix}UsageMultiplier")
-    };
-
-    if let Some(frac_node) = ext.child(&weekday_key) {
+    if let Some(frac_node) = ext_child(ext, prefix, &WEEKDAY_SCHEDULE_FRACTIONS) {
+        let key = format!("{prefix}{}", WEEKDAY_SCHEDULE_FRACTIONS.name);
         let vals: Vec<f64> = frac_node
             .text
             .trim()
@@ -362,13 +404,14 @@ pub(crate) fn parse_schedule_extension_params(
             out.push(("weekday_schedule_fractions".to_string(), json!(vals)));
         } else if !vals.is_empty() {
             tracing::warn!(
-                key = %weekday_key,
+                key = %key,
                 count = vals.len(),
                 "WeekdayScheduleFractions has unexpected number of values (expected 24); ignoring"
             );
         }
     }
-    if let Some(frac_node) = ext.child(&weekend_key) {
+    if let Some(frac_node) = ext_child(ext, prefix, &WEEKEND_SCHEDULE_FRACTIONS) {
+        let key = format!("{prefix}{}", WEEKEND_SCHEDULE_FRACTIONS.name);
         let vals: Vec<f64> = frac_node
             .text
             .trim()
@@ -379,22 +422,20 @@ pub(crate) fn parse_schedule_extension_params(
             out.push(("weekend_schedule_fractions".to_string(), json!(vals)));
         } else if !vals.is_empty() {
             tracing::warn!(
-                key = %weekend_key,
+                key = %key,
                 count = vals.len(),
                 "WeekendScheduleFractions has unexpected number of values (expected 24); ignoring"
             );
         }
     }
-    if let Some(mult) = child_f64(ext, &multiplier_key) {
+    if let Some(mult) =
+        ext_child(ext, prefix, &USAGE_MULTIPLIER).and_then(|node| parse_trimmed_f64(&node.text))
+    {
         out.push(("usage_multiplier".to_string(), json!(mult)));
     }
 
-    let month_key = if prefix.is_empty() {
-        "MonthlyScheduleMultipliers".to_string()
-    } else {
-        format!("{prefix}MonthlyScheduleMultipliers")
-    };
-    if let Some(node) = ext.child(&month_key) {
+    if let Some(node) = ext_child(ext, prefix, &MONTHLY_SCHEDULE_MULTIPLIERS) {
+        let key = format!("{prefix}{}", MONTHLY_SCHEDULE_MULTIPLIERS.name);
         let vals: Vec<f64> = node
             .text
             .trim()
@@ -405,20 +446,20 @@ pub(crate) fn parse_schedule_extension_params(
             out.push(("month_multipliers".to_string(), json!(vals)));
         } else if !vals.is_empty() {
             tracing::warn!(
-                key = %month_key,
+                key = %key,
                 count = vals.len(),
                 "MonthlyScheduleMultipliers has unexpected number of values (expected 12); ignoring"
             );
         }
     }
 
-    if let Some(frac) = child_f64(ext, "FracSensible") {
+    if let Some(frac) = child_f64(ext, &FRAC_SENSIBLE) {
         out.push(("sensible_gain_fraction".to_string(), json!(frac)));
     }
-    if let Some(frac) = child_f64(ext, "FracLatent") {
+    if let Some(frac) = child_f64(ext, &FRAC_LATENT) {
         out.push(("latent_gain_fraction".to_string(), json!(frac)));
     }
-    if let Some(frac) = child_f64(ext, "FracRadiant") {
+    if let Some(frac) = child_f64(ext, &FRAC_RADIANT) {
         out.push(("radiative_gain_fraction".to_string(), json!(frac)));
     }
 
@@ -426,24 +467,24 @@ pub(crate) fn parse_schedule_extension_params(
     // EventBasedLoad::init() reads these keys directly from the config;
     // synthetic TOML fixtures set them via `<extension>` children so
     // they flow through the HPXML resolver into the EquipmentConfig.
-    for (ext_key, config_key) in &[
-        ("active_power_kw", "active_power_kw"),
-        ("active_duration_s", "active_duration_s"),
-        ("cooldown_duration_s", "cooldown_duration_s"),
-        ("event_window_source", "event_window_source"),
-        ("event_probability_source", "event_probability_source"),
-        ("event_probability_constant", "event_probability_constant"),
-        ("event_window_schedule_col", "event_window_schedule_col"),
+    for (element, config_key) in &[
+        (&ACTIVE_POWER_KW, "active_power_kw"),
+        (&ACTIVE_DURATION_S, "active_duration_s"),
+        (&COOLDOWN_DURATION_S, "cooldown_duration_s"),
+        (&EVENT_WINDOW_SOURCE, "event_window_source"),
+        (&EVENT_PROBABILITY_SOURCE, "event_probability_source"),
+        (&EVENT_PROBABILITY_CONSTANT, "event_probability_constant"),
+        (&EVENT_WINDOW_SCHEDULE_COL, "event_window_schedule_col"),
         (
-            "event_probability_schedule_col",
+            &EVENT_PROBABILITY_SCHEDULE_COL,
             "event_probability_schedule_col",
         ),
-        ("sensible_gain_fraction", "sensible_gain_fraction"),
-        ("latent_gain_fraction", "latent_gain_fraction"),
+        (&SENSIBLE_GAIN_FRACTION, "sensible_gain_fraction"),
+        (&LATENT_GAIN_FRACTION, "latent_gain_fraction"),
     ] {
-        if let Some(val) = child_f64(ext, ext_key) {
+        if let Some(val) = child_f64(ext, element) {
             out.push((config_key.to_string(), json!(val)));
-        } else if let Some(val) = child_text(ext, ext_key) {
+        } else if let Some(val) = child_text(ext, element) {
             out.push((config_key.to_string(), json!(val)));
         }
     }
@@ -655,33 +696,33 @@ mod tests {
     #[test]
     fn child_energy_kwh_parses_kwh() {
         let node = energy_node("Usage", 100.0, Some("kWh"));
-        assert!((child_energy_kwh(&node, "Usage").unwrap() - 100.0).abs() < 1e-10);
+        assert!((child_energy_kwh(&node, &USAGE).unwrap() - 100.0).abs() < 1e-10);
     }
 
     #[test]
     fn child_energy_kwh_parses_wh() {
         let node = energy_node("Usage", 5000.0, Some("Wh"));
-        assert!((child_energy_kwh(&node, "Usage").unwrap() - 5.0).abs() < 1e-10);
+        assert!((child_energy_kwh(&node, &USAGE).unwrap() - 5.0).abs() < 1e-10);
     }
 
     #[test]
     fn child_energy_kwh_converts_therms() {
         let node = energy_node("Usage", 10.0, Some("therm"));
         let expected = conv::energy_therms_to_kwh(10.0);
-        assert!((child_energy_kwh(&node, "Usage").unwrap() - expected).abs() < 1e-10);
+        assert!((child_energy_kwh(&node, &USAGE).unwrap() - expected).abs() < 1e-10);
     }
 
     #[test]
     fn child_energy_kwh_converts_therm_per_year() {
         let node = energy_node("Usage", 10.0, Some("therm/year"));
         let expected = conv::energy_therms_to_kwh(10.0);
-        assert!((child_energy_kwh(&node, "Usage").unwrap() - expected).abs() < 1e-10);
+        assert!((child_energy_kwh(&node, &USAGE).unwrap() - expected).abs() < 1e-10);
     }
 
     #[test]
     fn child_energy_kwh_returns_none_for_unrecognized_unit() {
         let node = energy_node("Usage", 100.0, Some("gigajoules"));
-        assert!(child_energy_kwh(&node, "Usage").is_none());
+        assert!(child_energy_kwh(&node, &USAGE).is_none());
     }
 
     #[test]

@@ -19,6 +19,7 @@ use super::xml_helpers::{
     parse_schedule_extension_params, resolve_local_ref,
 };
 
+use super::elements::*;
 use crate::defaults::DefaultsStore;
 
 /// HPXML PoolType enumeration values (also used for HotTub/Type).
@@ -77,12 +78,12 @@ fn resolve_pools(
     specs: &mut Vec<EquipmentSpec>,
 ) -> HashMap<String, PoolEquipmentLoads> {
     let mut lookup: HashMap<String, PoolEquipmentLoads> = HashMap::new();
-    let Some(pools) = details.child("Pools") else {
+    let Some(pools) = details.child(&POOLS) else {
         return lookup;
     };
-    for pool in pools.children_named("Pool") {
+    for pool in pools.children_named(&POOL) {
         let pool_id = element_id(pool).unwrap_or_default();
-        let pool_type = validate_pool_type(child_text(pool, "Type"), "Pool");
+        let pool_type = validate_pool_type(child_text(pool, &TYPE), "Pool");
         tracing::info!(
             pool_type = %pool_type,
             pool_id = %if pool_id.is_empty() { "none" } else { pool_id.as_str() },
@@ -105,10 +106,10 @@ fn resolve_pool_pumps(
     specs: &mut Vec<EquipmentSpec>,
     loads: &mut PoolEquipmentLoads,
 ) {
-    let Some(pumps) = pool.child("PoolPumps") else {
+    let Some(pumps) = pool.child(&POOL_PUMPS) else {
         return;
     };
-    for pump in pumps.children_named("PoolPump") {
+    for pump in pumps.children_named(&POOL_PUMP) {
         let Some(kwh) = child_load_kwh(pump) else {
             continue;
         };
@@ -139,7 +140,7 @@ fn resolve_pool_heater(
     specs: &mut Vec<EquipmentSpec>,
     loads: &mut PoolEquipmentLoads,
 ) {
-    let Some(heater) = pool.child("Heater") else {
+    let Some(heater) = pool.child(&HEATER) else {
         return;
     };
     let mut params = Map::new();
@@ -187,11 +188,11 @@ fn resolve_pool_heater(
 // ---------------------------------------------------------------------------
 
 fn resolve_hot_tubs(details: &XmlNode, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) {
-    let Some(tubs) = details.child("HotTubs") else {
+    let Some(tubs) = details.child(&HOT_TUBS) else {
         return;
     };
-    for tub in tubs.children_named("HotTub") {
-        let tub_type = validate_pool_type(child_text(tub, "Type"), "HotTub");
+    for tub in tubs.children_named(&HOT_TUB) {
+        let tub_type = validate_pool_type(child_text(tub, &TYPE), "HotTub");
         tracing::info!(
             tub_type = %tub_type,
             "Parsing hot tub equipment from HPXML <HotTubs>/<HotTub>"
@@ -207,10 +208,10 @@ fn resolve_hot_tub_pumps(
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
 ) {
-    let Some(pumps) = tub.child("HotTubPumps") else {
+    let Some(pumps) = tub.child(&HOT_TUB_PUMPS) else {
         return;
     };
-    for pump in pumps.children_named("HotTubPump") {
+    for pump in pumps.children_named(&HOT_TUB_PUMP) {
         let Some(kwh) = child_load_kwh(pump) else {
             continue;
         };
@@ -239,7 +240,7 @@ fn resolve_hot_tub_heater(
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
 ) {
-    let Some(heater) = tub.child("Heater") else {
+    let Some(heater) = tub.child(&HEATER) else {
         return;
     };
     let mut params = Map::new();
@@ -288,7 +289,7 @@ fn resolve_spas(
     specs: &mut Vec<EquipmentSpec>,
     pool_equipment: &HashMap<String, PoolEquipmentLoads>,
 ) -> Result<(), HpxmlError> {
-    let Some(spas) = details.child("Spas") else {
+    let Some(spas) = details.child(&SPAS) else {
         return Ok(());
     };
     resolve_permanent_spas(spas, defaults, specs, pool_equipment)?;
@@ -302,10 +303,10 @@ fn resolve_permanent_spas(
     specs: &mut Vec<EquipmentSpec>,
     pool_equipment: &HashMap<String, PoolEquipmentLoads>,
 ) -> Result<(), HpxmlError> {
-    for spa in spas.children_named("PermanentSpa") {
-        let Some(loads) = resolve_local_ref(spa, "AttachedToPool", pool_equipment) else {
+    for spa in spas.children_named(&PERMANENT_SPA) {
+        let Some(loads) = resolve_local_ref(spa, &ATTACHED_TO_POOL, pool_equipment) else {
             let idref = spa
-                .child("AttachedToPool")
+                .child(&ATTACHED_TO_POOL)
                 .and_then(|a| a.attrs.get("idref"))
                 .map(|s| s.as_str())
                 .unwrap_or("<absent>")
@@ -346,16 +347,16 @@ fn resolve_portable_electric_spas(
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
 ) {
-    for spa in spas.children_named("PortableElectricSpa") {
+    for spa in spas.children_named(&PORTABLE_ELECTRIC_SPA) {
         let mut params = Map::new();
-        if let Some(kwh) = child_f64(spa, "TotalAnnualPowerConsumptionInStandbyMode") {
+        if let Some(kwh) = child_f64(spa, &TOTAL_ANNUAL_POWER_CONSUMPTION_IN_STANDBY_MODE) {
             params.insert("annual_electric_kwh".to_string(), json!(kwh));
             tracing::info!(
                 load_kwh = kwh,
                 "PortableElectricSpa standby load from \
                  TotalAnnualPowerConsumptionInStandbyMode (annual_electric_kWh)"
             );
-        } else if let Some(watts) = child_f64(spa, "StandbyPower") {
+        } else if let Some(watts) = child_f64(spa, &STANDBY_POWER) {
             let kwh = conv::power_watt_to_kwh_per_year(watts);
             params.insert("annual_electric_kwh".to_string(), json!(kwh));
             tracing::info!(

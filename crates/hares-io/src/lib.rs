@@ -10,6 +10,7 @@ pub mod forcing;
 pub mod hpxml;
 pub mod hpxml_schedule;
 pub mod input;
+pub mod input_schema;
 pub mod inputs;
 pub mod output;
 pub mod parse_counts;

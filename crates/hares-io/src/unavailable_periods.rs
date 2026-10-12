@@ -18,6 +18,7 @@ use chrono::{Datelike, Timelike};
 
 use crate::hpxml::HpxmlError;
 use crate::hpxml::building::XmlNode;
+use crate::hpxml::elements::*;
 use crate::hpxml::xml_helpers::{child_f64, child_text, element_id};
 use crate::schedule::ScheduleTimeSeries;
 use hares_types::HaresError;
@@ -284,21 +285,22 @@ pub fn apply_unavailable_periods(
 pub(crate) fn parse_unavailable_periods(
     root: &XmlNode,
 ) -> Result<Vec<UnavailablePeriod>, HpxmlError> {
-    let Some(periods_node) = root.path(&["SoftwareInfo", "extension", "UnavailablePeriods"]) else {
+    let Some(periods_node) = root.path(&[&SOFTWARE_INFO, &EXTENSION, &UNAVAILABLE_PERIODS]) else {
         return Ok(Vec::new());
     };
     let mut periods = Vec::new();
-    for node in periods_node.children_named("UnavailablePeriod") {
+    for node in periods_node.children_named(&UNAVAILABLE_PERIOD) {
         let id = element_id(node).unwrap_or_else(|| "unknown".to_string());
-        let require_f64 = |name: &'static str| -> Result<f64, HpxmlError> {
-            child_f64(node, name).ok_or_else(|| HpxmlError::MissingField {
-                path: "SoftwareInfo/extension/UnavailablePeriods/UnavailablePeriod",
-                system_kind: "Unavailable Period",
-                system_id: id.clone(),
-                reason: "the period's begin and end dates are required",
-            })
-        };
-        let column = child_text(node, "ColumnName").ok_or_else(|| HpxmlError::MissingField {
+        let require_f64 =
+            |element: &'static crate::hpxml::elements::HpxmlElement| -> Result<f64, HpxmlError> {
+                child_f64(node, element).ok_or_else(|| HpxmlError::MissingField {
+                    path: "SoftwareInfo/extension/UnavailablePeriods/UnavailablePeriod",
+                    system_kind: "Unavailable Period",
+                    system_id: id.clone(),
+                    reason: "the period's begin and end dates are required",
+                })
+            };
+        let column = child_text(node, &COLUMN_NAME).ok_or_else(|| HpxmlError::MissingField {
             path: "SoftwareInfo/extension/UnavailablePeriods/UnavailablePeriod/ColumnName",
             system_kind: "Unavailable Period",
             system_id: id.clone(),
@@ -315,18 +317,18 @@ pub(crate) fn parse_unavailable_periods(
                          No Space Heating, No Space Cooling (the table's \
                          Schedule Name values)",
             })?;
-        let begin_month = require_f64("BeginMonth")? as u32;
-        let begin_day = require_f64("BeginDayOfMonth")? as u32;
-        let end_month = require_f64("EndMonth")? as u32;
-        let end_day = require_f64("EndDayOfMonth")? as u32;
-        let require_hour = |name: &'static str,
+        let begin_month = require_f64(&BEGIN_MONTH)? as u32;
+        let begin_day = require_f64(&BEGIN_DAY_OF_MONTH)? as u32;
+        let end_month = require_f64(&END_MONTH)? as u32;
+        let end_day = require_f64(&END_DAY_OF_MONTH)? as u32;
+        let require_hour = |element: &'static crate::hpxml::elements::HpxmlElement,
                             path: &'static str,
                             default: f64,
                             lower: f64,
                             upper: f64,
                             range_reason: &'static str|
          -> Result<u32, HpxmlError> {
-            match child_f64(node, name) {
+            match child_f64(node, element) {
                 None => Ok(default as u32),
                 // The schematron bounds the hour and the field is a whole
                 // hour of day: a negative value saturating to 0 or a
@@ -347,7 +349,7 @@ pub(crate) fn parse_unavailable_periods(
             }
         };
         let begin_hour = require_hour(
-            "BeginHourOfDay",
+            &BEGIN_HOUR_OF_DAY,
             "UnavailablePeriod/BeginHourOfDay",
             0.0,
             0.0,
@@ -355,7 +357,7 @@ pub(crate) fn parse_unavailable_periods(
             "the begin hour must be a whole number from 0 to 23",
         )?;
         let end_hour = require_hour(
-            "EndHourOfDay",
+            &END_HOUR_OF_DAY,
             "UnavailablePeriod/EndHourOfDay",
             24.0,
             1.0,
@@ -387,7 +389,7 @@ pub(crate) fn parse_unavailable_periods(
                 });
             }
         }
-        let natural_ventilation = match child_text(node, "NaturalVentilation") {
+        let natural_ventilation = match child_text(node, &NATURAL_VENTILATION) {
             None => NaturalVentilation::RegularSchedule,
             Some(raw) => {
                 NaturalVentilation::parse(&raw).ok_or_else(|| HpxmlError::InvalidField {

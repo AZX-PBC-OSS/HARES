@@ -2307,6 +2307,54 @@ pub fn check_hvac_setpoint_invariants(specs: &[EquipmentSpec]) {
     }
 }
 
+/// The schedule columns the engine reads and the columns it accepts
+/// without reading, derived from the mapping table (the input schema's
+/// `schedule_columns` and `unused_schedule_columns`). The setpoint columns
+/// carry the unit the parser reads them in (Celsius), and the
+/// `water_heater_setpoint` column is in neither list: the mapping table's
+/// entry is the construction error's, since IN-5 (a column the engine
+/// accepts is a column it applies, and HARES does not apply it).
+pub(crate) fn schedule_column_schemas() -> (
+    Vec<crate::input_schema::ScheduleColumnSchema>,
+    Vec<crate::input_schema::UnusedScheduleColumnSchema>,
+) {
+    use crate::input_schema::{ScheduleColumnSchema, UnusedScheduleColumnSchema};
+
+    let mut used = Vec::new();
+    let mut unused = Vec::new();
+    for mapping in COLUMN_MAPPINGS {
+        match mapping.category {
+            ScheduleCategory::Power
+            | ScheduleCategory::EventWindow
+            | ScheduleCategory::Occupancy
+            | ScheduleCategory::WaterHeater => used.push(ScheduleColumnSchema {
+                name: mapping.csv_column.to_string(),
+                unit: None,
+                description: format!("mapped to the '{}' equipment", mapping.equipment_name),
+            }),
+            ScheduleCategory::Setpoint => {
+                if mapping.csv_column == "water_heater_setpoint" {
+                    // Not listed: a schedule carrying it is a construction
+                    // error (the mapping entry is the error's), so the
+                    // engine accepts nothing for it.
+                    continue;
+                }
+                used.push(ScheduleColumnSchema {
+                    name: mapping.csv_column.to_string(),
+                    unit: Some("C".to_string()),
+                    description: "the thermostat setpoint column, read in degrees Celsius"
+                        .to_string(),
+                });
+            }
+            ScheduleCategory::NotUsed { reason } => unused.push(UnusedScheduleColumnSchema {
+                name: mapping.csv_column.to_string(),
+                reason: reason.to_string(),
+            }),
+        }
+    }
+    (used, unused)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

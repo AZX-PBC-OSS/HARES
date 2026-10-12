@@ -228,6 +228,125 @@ impl PvConfig {
     }
 }
 
+/// The the PV system's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for PvConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_kw",
+                hares_types::FieldMeta {
+                    description: Some("the array's rated capacity, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tilt_deg",
+                hares_types::FieldMeta {
+                    description: Some("the array's tilt from horizontal, degrees"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "azimuth_deg",
+                hares_types::FieldMeta {
+                    description: Some("the array's azimuth, degrees"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "module_type",
+                hares_types::FieldMeta {
+                    description: Some("the module type"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "noct_c",
+                hares_types::FieldMeta {
+                    description: Some("the module's nominal operating cell temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "array_type",
+                hares_types::FieldMeta {
+                    description: Some("the array's mounting type"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "system_losses_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the system's loss fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "inverter_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the inverter's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "inverter_capacity_kw",
+                hares_types::FieldMeta {
+                    description: Some("the inverter's capacity, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "power_factor",
+                hares_types::FieldMeta {
+                    description: Some("the power factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "surface_resolution_deg",
+                hares_types::FieldMeta {
+                    description: Some("the surface sampling's resolution, degrees"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "sam_lut_path",
+                hares_types::FieldMeta {
+                    description: Some("the SAM lookup table's path"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "soiling",
+                hares_types::FieldMeta {
+                    description: Some("the soiling loss configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "arrays",
+                hares_types::FieldMeta {
+                    description: Some("the array's sub-arrays"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

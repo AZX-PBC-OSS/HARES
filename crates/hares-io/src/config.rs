@@ -304,6 +304,155 @@ pub struct SimulationConfig {
 /// equipment, which the rollback cannot clear, ends it.
 pub const DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES: u32 = 1;
 
+/// The config's fields as the input schema publishes them: the serde
+/// field names, types, defaults and per-field bounds, derived from a
+/// sample instance every field set (so an `Option`'s key never skips) and
+/// the metadata rows beside this definition.
+impl hares_types::DescribeFields for SimulationConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        use hares_types::{FieldMeta, describe, field_schema};
+        let sample = SimulationConfig {
+            start_time: DateTime::parse_from_rfc3339("2023-01-01T00:00:00Z")
+                .expect("a valid sample start time"),
+            duration: Duration::hours(48),
+            time_res: default_time_res(),
+            reports: vec![ReportSpec {
+                name: "sample".to_string(),
+                selection: crate::output::report::Selection::Verbosity(2),
+                frequency: Default::default(),
+                destination: crate::output::report::Destination::Memory,
+            }],
+            diagnostics: false,
+            metrics: false,
+            output_chunk_size: default_output_chunk_size(),
+            setpoint_deadband_c: Some(1.0),
+            master_seed: 0,
+            civil_timezone: Some("America/Denver".to_string()),
+            site_location: SiteLocationOverride::sample(),
+            max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: HealthPolicy::sample(),
+        };
+        let mut fields = describe(
+            &sample,
+            &[
+                (
+                    "start_time",
+                    FieldMeta {
+                        description: Some("the simulation's start, local wall-clock time"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "duration",
+                    FieldMeta {
+                        description: Some("the simulation's length in seconds"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "time_res",
+                    FieldMeta {
+                        description: Some("the timestep's length in seconds"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "reports",
+                    FieldMeta {
+                        description: Some("the run's reports: what each records and where it goes"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "diagnostics",
+                    FieldMeta {
+                        description: Some("whether the run requests the diagnostics report"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "metrics",
+                    FieldMeta {
+                        description: Some("whether the run requests the run metrics"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "output_chunk_size",
+                    FieldMeta {
+                        description: Some("rows per Arrow RecordBatch flush"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "setpoint_deadband_c",
+                    FieldMeta {
+                        description: Some(
+                            "the global thermostat deadband in Celsius for comfort metrics",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "master_seed",
+                    FieldMeta {
+                        description: Some("the master RNG seed for reproducibility"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "civil_timezone",
+                    FieldMeta {
+                        description: Some(
+                            "the IANA timezone for civil-time schedule indexing (a dst-feature field)",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "site_location",
+                    FieldMeta {
+                        description: Some(
+                            "the explicit site-location override; any set field wins over HPXML and the weather header",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "max_consecutive_step_failures",
+                    FieldMeta {
+                        description: Some(
+                            "the consecutive failed steps one equipment tolerates before the run errors",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "health_policy",
+                    FieldMeta {
+                        description: Some("which counted health events escalate to a run failure"),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        );
+        // The value types the serialisation cannot distinguish: an
+        // Option<String>'s sample is a string, a duration's a number of
+        // seconds, the start's an RFC 3339 timestamp.
+        for field in &mut fields {
+            match field.name.as_str() {
+                "start_time" => field.value_type = hares_types::ValueType::Timestamp,
+                "duration" | "time_res" => {
+                    field.value_type = hares_types::ValueType::DurationSeconds
+                }
+                _ => {}
+            }
+        }
+        let _ = field_schema;
+        fields
+    }
+}
+
 /// The run's health policy: which counted health events escalate to a run
 /// failure, and which stay counted. The empty policy (the default) keeps
 /// every event counted and nothing escalated, so a run built without one
@@ -336,7 +485,73 @@ pub struct HealthPolicy {
     pub require_warmup_convergence: bool,
 }
 
+/// The policy's fields as the input schema publishes them.
+impl hares_types::DescribeFields for HealthPolicy {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        use hares_types::{FieldMeta, describe};
+        describe(
+            &Self::sample(),
+            &[
+                (
+                    "max_port_rollbacks",
+                    FieldMeta {
+                        description: Some("the port-rollback run total the run fails at crossing"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "max_rejected_control_signals",
+                    FieldMeta {
+                        description: Some(
+                            "the rejected-control-signal run total the run fails at crossing",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "max_clamped_actions",
+                    FieldMeta {
+                        description: Some("the clamped-action run total the run fails at crossing"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "max_curve_index_clamps",
+                    FieldMeta {
+                        description: Some(
+                            "the curve-index-clamp run total the run fails at crossing",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "require_warmup_convergence",
+                    FieldMeta {
+                        description: Some(
+                            "whether a warm-up that ends without converging fails the run",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        )
+    }
+}
+
 impl HealthPolicy {
+    /// A sample instance every field set: the `DescribeFields` derive's
+    /// serialisation input.
+    #[must_use]
+    pub fn sample() -> Self {
+        Self {
+            max_port_rollbacks: Some(10),
+            max_rejected_control_signals: Some(10),
+            max_clamped_actions: Some(10),
+            max_curve_index_clamps: Some(10),
+            require_warmup_convergence: false,
+        }
+    }
+
     /// The policy that rejects an evaluation on its first counted event:
     /// every limit `Some(0)` and warm-up convergence required.
     #[must_use]

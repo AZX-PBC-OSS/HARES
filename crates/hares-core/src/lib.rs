@@ -25,6 +25,7 @@ pub mod dwelling;
 pub mod engine;
 pub mod environment;
 pub mod health;
+pub mod input_schema;
 pub mod invariants;
 #[cfg(feature = "observe")]
 pub mod observer;
@@ -59,6 +60,7 @@ pub use hares_io::{InputRecord, InputRecordSource, InputRecords};
 #[cfg(feature = "profiling")]
 pub use health::{ActorTiming, ActorTimings};
 pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
+pub use input_schema::input_schema;
 pub use rand_chacha::ChaCha8Rng;
 pub use resolved::{
     ResolvedBoundary, ResolvedClock, ResolvedEnvelope, ResolvedEquipment, ResolvedInfiltration,

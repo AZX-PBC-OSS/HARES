@@ -3025,6 +3025,7 @@ class ParsedSchedule:
 
 class ParsedDefaults:
     def __init__(self, base: str | None = ..., files: dict[str, str] | None = ...) -> None: ...
+    def read_files(self) -> list[str]: ...
     def with_file(self, relative_path: str, content: str) -> ParsedDefaults: ...
 
 class ParsedInputs:
@@ -3305,3 +3306,15 @@ def metrics_from_table(
 # build_info: the extension build's compile-time identity, the record
 # every run's Provenance.build carries.
 def build_info() -> BuildInfo: ...
+
+# ---------------------------------------------------------------------------
+# Input schema
+# ---------------------------------------------------------------------------
+
+# input_schema: the machine-readable schema of every input the engine
+# reads, as a dict of its sections (config_fields, dwelling_fields,
+# settings_fields, override_classes, removed_keys, schedule_columns,
+# unused_schedule_columns, defaults_files, hpxml_elements,
+# rejected_hpxml_elements). Every section derives from the engine's own
+# typed definitions; the JSON of the dict is the schema's serialisation.
+def input_schema() -> dict[str, Any]: ...

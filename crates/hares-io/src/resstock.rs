@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::hpxml::elements::*;
 use arrow::{
     array::{Array, Float64Array, Int64Array, LargeStringArray, StringArray},
     datatypes::{DataType, Schema},
@@ -529,8 +530,8 @@ pub fn parse_weather_station_fips(path: &Path) -> std::result::Result<String, We
         .map_err(|err| WeatherStationError::Unreadable(err.to_string()))?;
 
     let name_text = root
-        .first_descendant("WeatherStation")
-        .and_then(|ws| ws.child("Name"))
+        .first_descendant(&WEATHER_STATION)
+        .and_then(|ws| ws.child(&NAME))
         .map(|n| n.text.trim().to_string())
         .filter(|s| !s.is_empty())
         .ok_or(WeatherStationError::MissingName)?;

@@ -879,6 +879,1067 @@ impl HeatPumpWaterHeaterConfig {
     }
 }
 
+/// The the gas water heater's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for GasWaterHeaterConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "loop_id",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop the equipment is wired to"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fuel_type",
+                hares_types::FieldMeta {
+                    description: Some("the equipment's fuel"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_volume_m3",
+                hares_types::FieldMeta {
+                    description: Some("the tank's volume, m3"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_height_m",
+                hares_types::FieldMeta {
+                    description: Some("the tank's height, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "energy_factor",
+                hares_types::FieldMeta {
+                    description: Some("the unit's energy factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "uniform_energy_factor",
+                hares_types::FieldMeta {
+                    description: Some("the water heater's uniform energy factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heating_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ua_w_per_k",
+                hares_types::FieldMeta {
+                    description: Some("the battery's UA, W/K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's setpoint, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "deadband_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's deadband, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_tank_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's maximum temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "initial_tank_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's initial temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_nodes",
+                hares_types::FieldMeta {
+                    description: Some("the tank's thermal node count"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "avg_water_draw_l_per_day",
+                hares_types::FieldMeta {
+                    description: Some("the average daily draw, litres per day"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "draw_flow_rate_kg_s",
+                hares_types::FieldMeta {
+                    description: Some("the draw's flow rate, kg/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "draw_flow_rate_source",
+                hares_types::FieldMeta {
+                    description: Some("the draw flow rate's source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "mains_temp_c_source",
+                hares_types::FieldMeta {
+                    description: Some("the mains temperature's source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "appliance_draw_flow_rate_source",
+                hares_types::FieldMeta {
+                    description: Some("the appliance draw's flow-rate source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pilot_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the pilot light's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "flue_loss_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the gas flue's loss fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "skin_loss_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the tank's skin loss fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ignition_type",
+                hares_types::FieldMeta {
+                    description: Some("the burner's ignition type"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "performance_adjustment",
+                hares_types::FieldMeta {
+                    description: Some("the performance adjustment factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_type",
+                hares_types::FieldMeta {
+                    description: Some("the zone type the tank stands in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "first_hour_rating_m3",
+                hares_types::FieldMeta {
+                    description: Some("the first-hour rating, m3"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "jacket_r_value_m2_k_w",
+                hares_types::FieldMeta {
+                    description: Some("the jacket's insulation R-value, m2 K/W"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "conversion_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the burner's conversion efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fixture_delivery_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the fixture delivery temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hot_draw_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the hot draw temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pilot_fraction_to_tank",
+                hares_types::FieldMeta {
+                    description: Some("the pilot heat's fraction to the tank"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fan's rated power, watts"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the electric resistance water heater's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for ElectricResistanceWaterHeaterConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "loop_id",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop the equipment is wired to"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_volume_m3",
+                hares_types::FieldMeta {
+                    description: Some("the tank's volume, m3"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_height_m",
+                hares_types::FieldMeta {
+                    description: Some("the tank's height, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "energy_factor",
+                hares_types::FieldMeta {
+                    description: Some("the unit's energy factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "uniform_energy_factor",
+                hares_types::FieldMeta {
+                    description: Some("the water heater's uniform energy factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heating_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ua_w_per_k",
+                hares_types::FieldMeta {
+                    description: Some("the battery's UA, W/K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's setpoint, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "deadband_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's deadband, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_tank_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's maximum temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "initial_tank_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's initial temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_nodes",
+                hares_types::FieldMeta {
+                    description: Some("the tank's thermal node count"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "avg_water_draw_l_per_day",
+                hares_types::FieldMeta {
+                    description: Some("the average daily draw, litres per day"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "draw_flow_rate_kg_s",
+                hares_types::FieldMeta {
+                    description: Some("the draw's flow rate, kg/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "draw_flow_rate_source",
+                hares_types::FieldMeta {
+                    description: Some("the draw flow rate's source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "mains_temp_c_source",
+                hares_types::FieldMeta {
+                    description: Some("the mains temperature's source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "appliance_draw_flow_rate_source",
+                hares_types::FieldMeta {
+                    description: Some("the appliance draw's flow-rate source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "performance_adjustment",
+                hares_types::FieldMeta {
+                    description: Some("the performance adjustment factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_type",
+                hares_types::FieldMeta {
+                    description: Some("the zone type the tank stands in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "first_hour_rating_m3",
+                hares_types::FieldMeta {
+                    description: Some("the first-hour rating, m3"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "element_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the element's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_setpoint_ramp_rate_c_per_min",
+                hares_types::FieldMeta {
+                    description: Some("the setpoint's maximum ramp rate, Celsius per minute"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "element_priority_mode",
+                hares_types::FieldMeta {
+                    description: Some("the element's priority mode"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "jacket_r_value_m2_k_w",
+                hares_types::FieldMeta {
+                    description: Some("the jacket's insulation R-value, m2 K/W"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_combined_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the maximum combined power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fixture_delivery_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the fixture delivery temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hot_draw_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the hot draw temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the tankless water heater's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for TanklessWaterHeaterConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "loop_id",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop the equipment is wired to"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fuel_type",
+                hares_types::FieldMeta {
+                    description: Some("the equipment's fuel"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "energy_factor",
+                hares_types::FieldMeta {
+                    description: Some("the unit's energy factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "uniform_energy_factor",
+                hares_types::FieldMeta {
+                    description: Some("the water heater's uniform energy factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heating_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's setpoint, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "parasitic_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the parasitic power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "performance_adjustment",
+                hares_types::FieldMeta {
+                    description: Some("the performance adjustment factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "inlet_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the cold inlet's temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "draw_flow_rate_kg_s",
+                hares_types::FieldMeta {
+                    description: Some("the draw's flow rate, kg/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "draw_flow_rate_source",
+                hares_types::FieldMeta {
+                    description: Some("the draw flow rate's source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "mains_temp_c_source",
+                hares_types::FieldMeta {
+                    description: Some("the mains temperature's source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "appliance_draw_flow_rate_source",
+                hares_types::FieldMeta {
+                    description: Some("the appliance draw's flow-rate source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "avg_water_draw_l_per_day",
+                hares_types::FieldMeta {
+                    description: Some("the average daily draw, litres per day"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_type",
+                hares_types::FieldMeta {
+                    description: Some("the zone type the tank stands in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_flow_kg_s",
+                hares_types::FieldMeta {
+                    description: Some("the minimum flow, kg/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_flow_gpm",
+                hares_types::FieldMeta {
+                    description: Some("the minimum flow, gpm"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the indirect tank's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for IndirectTankConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "boiler_loop_id",
+                hares_types::FieldMeta {
+                    description: Some("the boiler loop the tank wires to"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_volume_m3",
+                hares_types::FieldMeta {
+                    description: Some("the tank's volume, m3"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_height_m",
+                hares_types::FieldMeta {
+                    description: Some("the tank's height, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ua_w_per_k",
+                hares_types::FieldMeta {
+                    description: Some("the battery's UA, W/K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hx_ua_w_per_k",
+                hares_types::FieldMeta {
+                    description: Some("the heat exchanger's UA, W/K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's setpoint, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "deadband_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's deadband, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_tank_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's maximum temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "initial_tank_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's initial temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_nodes",
+                hares_types::FieldMeta {
+                    description: Some("the tank's thermal node count"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "draw_flow_rate_kg_s",
+                hares_types::FieldMeta {
+                    description: Some("the draw's flow rate, kg/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "avg_water_draw_l_per_day",
+                hares_types::FieldMeta {
+                    description: Some("the average daily draw, litres per day"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "draw_flow_rate_source",
+                hares_types::FieldMeta {
+                    description: Some("the draw flow rate's source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "mains_temp_c_source",
+                hares_types::FieldMeta {
+                    description: Some("the mains temperature's source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "appliance_draw_flow_rate_source",
+                hares_types::FieldMeta {
+                    description: Some("the appliance draw's flow-rate source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "performance_adjustment",
+                hares_types::FieldMeta {
+                    description: Some("the performance adjustment factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_type",
+                hares_types::FieldMeta {
+                    description: Some("the zone type the tank stands in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "first_hour_rating_m3",
+                hares_types::FieldMeta {
+                    description: Some("the first-hour rating, m3"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "jacket_r_value_m2_k_w",
+                hares_types::FieldMeta {
+                    description: Some("the jacket's insulation R-value, m2 K/W"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fixture_delivery_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the fixture delivery temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hot_draw_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the hot draw temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "boiler_loop_flow_rate_kg_s",
+                hares_types::FieldMeta {
+                    description: Some("the boiler loop's flow rate, kg/s"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the heat pump water heater's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for HeatPumpWaterHeaterConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "loop_id",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop the equipment is wired to"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_volume_m3",
+                hares_types::FieldMeta {
+                    description: Some("the tank's volume, m3"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_height_m",
+                hares_types::FieldMeta {
+                    description: Some("the tank's height, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cop",
+                hares_types::FieldMeta {
+                    description: Some("the heat pump's rated coefficient of performance"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "backup_element_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the backup element's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ua_w_per_k",
+                hares_types::FieldMeta {
+                    description: Some("the battery's UA, W/K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's setpoint, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "deadband_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's deadband, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_tank_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's maximum temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "initial_tank_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's initial temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tank_nodes",
+                hares_types::FieldMeta {
+                    description: Some("the tank's thermal node count"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tempering_valve_setpoint_c",
+                hares_types::FieldMeta {
+                    description: Some("the tempering valve's setpoint, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "avg_water_draw_l_per_day",
+                hares_types::FieldMeta {
+                    description: Some("the average daily draw, litres per day"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "draw_flow_rate_kg_s",
+                hares_types::FieldMeta {
+                    description: Some("the draw's flow rate, kg/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "appliance_draw_flow_rate_source",
+                hares_types::FieldMeta {
+                    description: Some("the appliance draw's flow-rate source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "compressor_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the compressor's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "backup_enable_offset_c",
+                hares_types::FieldMeta {
+                    description: Some("the backup enable offset below the setpoint, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_ambient_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the compressor's minimum ambient temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_ambient_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the compressor's maximum ambient temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_on_time_s",
+                hares_types::FieldMeta {
+                    description: Some("the compressor's minimum on time, seconds"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_off_time_s",
+                hares_types::FieldMeta {
+                    description: Some("the compressor's minimum off time, seconds"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hp_only_mode",
+                hares_types::FieldMeta {
+                    description: Some("whether the unit runs heat-pump-only"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "element_hp_control_mode",
+                hares_types::FieldMeta {
+                    description: Some("the element and heat pump's control mode"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fan's rated power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "parasitic_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the parasitic power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "backup_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the backup element's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "shr",
+                hares_types::FieldMeta {
+                    description: Some("the sensible heat ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "lost_heat_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the compressor heat's lost fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "wall_heat_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the compressor heat's fraction to the wall"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_biquadratic_coeffs",
+                hares_types::FieldMeta {
+                    description: Some("the capacity correction curve's coefficients"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cop_biquadratic_coeffs",
+                hares_types::FieldMeta {
+                    description: Some("the COP correction curve's coefficients"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cop_curve_is_normalized",
+                hares_types::FieldMeta {
+                    description: Some("whether the COP curve is normalised"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "performance_adjustment",
+                hares_types::FieldMeta {
+                    description: Some("the performance adjustment factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_type",
+                hares_types::FieldMeta {
+                    description: Some("the zone type the tank stands in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "first_hour_rating_m3",
+                hares_types::FieldMeta {
+                    description: Some("the first-hour rating, m3"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "jacket_r_value_m2_k_w",
+                hares_types::FieldMeta {
+                    description: Some("the jacket's insulation R-value, m2 K/W"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fixture_delivery_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the fixture delivery temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "low_power_hpwh",
+                hares_types::FieldMeta {
+                    description: Some("whether the unit runs in low-power mode"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "uniform_energy_factor",
+                hares_types::FieldMeta {
+                    description: Some("the water heater's uniform energy factor"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

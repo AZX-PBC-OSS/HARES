@@ -458,6 +458,16 @@ replacement.
   `Provenance.catalogue_digest` (the catalogue digest as a 64 char hex
   string): every run's provenance now records what built it and the
   catalogue the run's reports are typed by.
+- Added: `input_schema()`: the machine-readable schema of every input the
+  engine reads, as a dict of its sections (`config_fields`,
+  `dwelling_fields`, `settings_fields`, `override_classes`,
+  `removed_keys`, `schedule_columns`, `unused_schedule_columns`,
+  `defaults_files`, `hpxml_elements`, `rejected_hpxml_elements`), each
+  field with its type, unit, default, bounds and description; every
+  section derives from the engine's own typed definitions, so a consumer
+  that classifies its fields reads the schema instead of HARES source.
+- Added: `ParsedDefaults.read_files()`: the defaults files the load read,
+  in load order (the read list the schema's `defaults_files` publishes).
 - Added: `Provenance.inputs`: what the run read, recorded when each input
   was parsed. `None` for a synthetic TOML dwelling (that path reads the
   TOML, recorded nowhere in the records, and the absence discloses that);

@@ -2179,6 +2179,230 @@ fn generator_telemetry_fields(has_chp: bool, is_fuel_cell: bool) -> Vec<Telemetr
 // Tests
 // ---------------------------------------------------------------------------
 
+/// The the generator's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for GeneratorConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fuel_type",
+                hares_types::FieldMeta {
+                    description: Some("the equipment's fuel"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "rated_power_kw",
+                hares_types::FieldMeta {
+                    description: Some("the generator's rated power, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eta_electric",
+                hares_types::FieldMeta {
+                    description: Some("the electric efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eta_thermal",
+                hares_types::FieldMeta {
+                    description: Some("the thermal recovery efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eta_jacket_water",
+                hares_types::FieldMeta {
+                    description: Some("the jacket water's recovery efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eta_lube_oil",
+                hares_types::FieldMeta {
+                    description: Some("the lube oil's recovery efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eta_exhaust",
+                hares_types::FieldMeta {
+                    description: Some("the exhaust's recovery efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "efficiency_type",
+                hares_types::FieldMeta {
+                    description: Some("the efficiency curve's kind"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "efficiency_curve_points",
+                hares_types::FieldMeta {
+                    description: Some("the efficiency curve's points"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "delta_kw_per_s",
+                hares_types::FieldMeta {
+                    description: Some("the ramp rate, kW per second"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_min_kw",
+                hares_types::FieldMeta {
+                    description: Some("the minimum capacity, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "grid_import_limit_kw",
+                hares_types::FieldMeta {
+                    description: Some("the grid import limit, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "export_limit_kw",
+                hares_types::FieldMeta {
+                    description: Some("the export limit, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "loop_id",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop the equipment is wired to"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "flow_rate_kg_s",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop's design flow rate, kg/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "supply_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the loop's supply temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "return_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop's design return temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "inverter_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the inverter's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stack_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the exhaust stack's temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stack_cooler_r0",
+                hares_types::FieldMeta {
+                    description: Some("the stack cooler's R0"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stack_cooler_r1",
+                hares_types::FieldMeta {
+                    description: Some("the stack cooler's R1"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stack_cooler_r2",
+                hares_types::FieldMeta {
+                    description: Some("the stack cooler's R2"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stack_cooler_r3",
+                hares_types::FieldMeta {
+                    description: Some("the stack cooler's R3"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stack_nominal_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the stack's nominal temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heat_rec_max_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the heat recovery's maximum temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "no_load_fuel_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the no-load fuel fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "grid_forming",
+                hares_types::FieldMeta {
+                    description: Some("whether the unit is grid-forming"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "standby_mode",
+                hares_types::FieldMeta {
+                    description: Some("the standby mode"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "parasitic_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the parasitic load's fraction"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

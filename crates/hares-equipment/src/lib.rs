@@ -5,6 +5,7 @@ mod macros;
 
 pub mod battery;
 pub mod config;
+pub mod describe_fields;
 pub mod ev;
 pub mod event_load;
 pub(crate) mod gain_fractions;
@@ -17,6 +18,7 @@ pub mod protocol_bridge;
 pub mod pv;
 pub mod raw_params;
 pub mod registry;
+pub mod sample_config;
 pub(crate) mod schedule_helpers;
 pub mod scheduled_load;
 pub mod serial;

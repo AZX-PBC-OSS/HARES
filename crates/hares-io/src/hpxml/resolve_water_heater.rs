@@ -19,6 +19,7 @@ use super::xml_helpers::{
 };
 use hares_physics::units as conv;
 
+use super::elements::*;
 use crate::defaults::DefaultsStore;
 use crate::draw_profile::{DistributionSystem, FixtureEfficiency, combined_daily_hot_water_l};
 
@@ -93,29 +94,30 @@ fn hpwh_wall_heat_fraction(location: &str) -> f64 {
     }
 }
 
-/// HPXML enclosure surface elements, the set OS-HPXML's
-/// `HPXML::Building#surfaces` searches in `has_location` (hpxml.rb:1790-1797).
-const ENCLOSURE_SURFACES: [&str; 7] = [
-    "Roof",
-    "RimJoist",
-    "Wall",
-    "FoundationWall",
-    "Floor",
-    "FrameFloor",
-    "Slab",
+/// The same surfaces as declared elements (the descendants_named reads),
+/// the set OS-HPXML's `HPXML::Building#surfaces` searches in
+/// `has_location` (hpxml.rb:1790-1797).
+const ENCLOSURE_SURFACE_ELEMENTS: [&super::elements::HpxmlElement; 7] = [
+    &ROOF,
+    &RIM_JOIST,
+    &WALL,
+    &FOUNDATION_WALL,
+    &FLOOR,
+    &FRAME_FLOOR,
+    &SLAB,
 ];
 
 /// Whether any enclosure surface is adjacent to `location` (OS-HPXML
 /// `has_location`, hpxml.rb:1790-1797).
 fn has_surface_adjacent_to(building: &Building, location: &str) -> bool {
-    let Some(enclosure) = building.details_xml.child("Enclosure") else {
+    let Some(enclosure) = building.details_xml.child(&ENCLOSURE) else {
         return false;
     };
-    ENCLOSURE_SURFACES.iter().any(|surface| {
+    ENCLOSURE_SURFACE_ELEMENTS.iter().any(|surface| {
         descendants_named(enclosure, surface)
             .into_iter()
             .any(|node| {
-                ["InteriorAdjacentTo", "ExteriorAdjacentTo"]
+                [&INTERIOR_ADJACENT_TO, &EXTERIOR_ADJACENT_TO]
                     .iter()
                     .any(|side| child_text(node, side).is_some_and(|text| text.trim() == location))
             })
@@ -191,13 +193,13 @@ pub(super) fn resolve_water_heaters(
     // the schematron's sum rule after the loop.
     let mut declared_fractions: Vec<(String, f64)> = Vec::new();
 
-    for wh in descendants_named(details, "WaterHeatingSystem") {
-        let wh_type = child_text(wh, "WaterHeaterType").unwrap_or_default();
+    for wh in descendants_named(details, &WATER_HEATING_SYSTEM) {
+        let wh_type = child_text(wh, &WATER_HEATER_TYPE).unwrap_or_default();
         let fuel = parse_water_heater_fuel(wh, &wh_type)?;
         let name = canonical_water_heater_name(&wh_type, fuel)?;
         let setpoint_c = child_temperature_c(wh);
-        let performance_adjustment = child_f64(wh, "PerformanceAdjustment");
-        let location = match child_text(wh, "Location") {
+        let performance_adjustment = child_f64(wh, &PERFORMANCE_ADJUSTMENT);
+        let location = match child_text(wh, &LOCATION) {
             Some(location) => location,
             None => {
                 let location = default_water_heater_location(building, climate_zone_iecc)?;
@@ -220,12 +222,12 @@ pub(super) fn resolve_water_heaters(
         let zone_id = zone_id_for_location(building, &location);
         let zone_name = Some(location.clone());
 
-        let energy_factor = child_f64(wh, "EnergyFactor");
-        let uniform_energy_factor = child_f64(wh, "UniformEnergyFactor");
-        let tank_volume_rated_gal = child_f64(wh, "TankVolume");
-        let first_hour_rating_gal = child_f64(wh, "FirstHourRating");
-        let heating_capacity_input = child_f64(wh, "HeatingCapacity");
-        let recovery_efficiency = child_f64(wh, "RecoveryEfficiency");
+        let energy_factor = child_f64(wh, &ENERGY_FACTOR);
+        let uniform_energy_factor = child_f64(wh, &UNIFORM_ENERGY_FACTOR);
+        let tank_volume_rated_gal = child_f64(wh, &TANK_VOLUME);
+        let first_hour_rating_gal = child_f64(wh, &FIRST_HOUR_RATING);
+        let heating_capacity_input = child_f64(wh, &HEATING_CAPACITY);
+        let recovery_efficiency = child_f64(wh, &RECOVERY_EFFICIENCY);
 
         let volume_correction = if fuel == FuelType::Electric {
             0.9
@@ -237,20 +239,20 @@ pub(super) fn resolve_water_heaters(
         // Tank height is optional in HPXML; propagate None so the equipment
         // model falls back to its documented stratified-tank geometry defaults
         // rather than having the IO layer silently substitute 4 ft here.
-        let tank_height_m = child_f64(wh, "TankHeight").map(conv::length_ft_to_m);
+        let tank_height_m = child_f64(wh, &TANK_HEIGHT).map(conv::length_ft_to_m);
         let first_hour_rating_m3 = first_hour_rating_gal.map(conv::volume_gal_to_m3);
         let heating_capacity_btu_hr = heating_capacity_input;
         let heating_capacity_w = heating_capacity_input.map(conv::power_btu_h_to_w);
 
         // HPXML JacketRValue is in hr·ft²·°F/Btu; convert to SI m²·K/W.
         let jacket_r_value_m2_k_w = wh
-            .path(&["WaterHeaterInsulation", "Jacket"])
-            .and_then(|j| child_f64(j, "JacketRValue"))
+            .path(&[&WATER_HEATER_INSULATION, &JACKET])
+            .and_then(|j| child_f64(j, &JACKET_R_VALUE))
             .map(conv::r_value_ip_to_si);
 
         // RelatedHVACSystem cross-reference for combi boiler / indirect tank.
         let related_hvac_idref = wh
-            .child("RelatedHVACSystem")
+            .child(&RELATED_HVAC_SYSTEM)
             .and_then(|n| n.attrs.get("idref").cloned());
 
         let category = wh_category(&wh_type, fuel);
@@ -288,7 +290,7 @@ pub(super) fn resolve_water_heaters(
         let mut spec = match name.as_str() {
             "Gas Water Heater" => {
                 let conversion_efficiency = ua_result.map(|r| r.conversion_efficiency);
-                let gas_flue_loss_fraction = child_f64(wh, "FlueLossFraction")
+                let gas_flue_loss_fraction = child_f64(wh, &FLUE_LOSS_FRACTION)
                     .or_else(|| conversion_efficiency.map(|_| 0.0));
                 // Draft-inducer / power-vent blower wattage. The HPXML schema
                 // has no standard WaterHeatingSystem element for water-heater
@@ -299,8 +301,8 @@ pub(super) fn resolve_water_heaters(
                 // 0 W (atmospheric vent), leaving existing simulations
                 // unchanged.
                 let fan_power_w = wh
-                    .path(&["extension"])
-                    .and_then(|ext| child_power_w(ext, "FanPowerWatts"));
+                    .path(&[&EXTENSION])
+                    .and_then(|ext| child_power_w(ext, &FAN_POWER_WATTS));
                 let cfg = GasWaterHeaterConfig {
                     equipment_id: None,
                     zone_id,
@@ -325,7 +327,7 @@ pub(super) fn resolve_water_heaters(
                     pilot_power_w: child_pilot_power_w(wh),
                     flue_loss_fraction: gas_flue_loss_fraction,
                     skin_loss_fraction: None,
-                    ignition_type: child_text(wh, "IgnitionType"),
+                    ignition_type: child_text(wh, &IGNITION_TYPE),
                     performance_adjustment,
                     zone_type: zone_name.clone(),
                     first_hour_rating_m3,
@@ -376,7 +378,7 @@ pub(super) fn resolve_water_heaters(
                 // UEF-only inputs (no EF) use 0.94 default per RESNET 301;
                 // EF-sourced inputs use the legacy 0.92 default.
                 let default_perf_adj = if energy_factor.is_none() { 0.94 } else { 0.92 };
-                let perf_adj = child_f64(wh, "PerformanceAdjustment").unwrap_or(default_perf_adj);
+                let perf_adj = child_f64(wh, &PERFORMANCE_ADJUSTMENT).unwrap_or(default_perf_adj);
                 let cfg = TanklessWaterHeaterConfig {
                     equipment_id: None,
                     zone_id,
@@ -521,7 +523,7 @@ pub(super) fn resolve_water_heaters(
         // file without it has a single system serving everything, so the
         // absent value reads as 1.0. A share of zero draws nothing, the
         // same skip `if gpd_frac > 0` runs.
-        let fraction_dhw_load_served = match child_f64(wh, "FractionDHWLoadServed") {
+        let fraction_dhw_load_served = match child_f64(wh, &FRACTION_DHW_LOAD_SERVED) {
             // A negative share is a validation error, not a value the
             // clamp silently turns into a zero-draw system: the schematron
             // bounds the element and a mistyped negative would otherwise
@@ -566,8 +568,8 @@ pub(super) fn resolve_water_heaters(
                     .insert("autosize_water_heater".to_string(), json!(true));
                 // Parse factor from extension if present.
                 if let Some(factor) = wh
-                    .path(&["extension"])
-                    .and_then(|ext| child_f64(ext, "WaterHeaterAutosizingFactor"))
+                    .path(&[&EXTENSION])
+                    .and_then(|ext| child_f64(ext, &WATER_HEATER_AUTOSIZING_FACTOR))
                 {
                     spec.parameters
                         .insert("autosize_water_heater_factor".to_string(), json!(factor));
@@ -580,7 +582,7 @@ pub(super) fn resolve_water_heaters(
     // Invariant: when multiple WaterHeatingSystem elements are present, each
     // must carry a unique SystemIdentifier/@id so downstream code can
     // cross-reference individual water heaters without ambiguity.
-    let wh_count = descendants_named(details, "WaterHeatingSystem").len();
+    let wh_count = descendants_named(details, &WATER_HEATING_SYSTEM).len();
     // The schematron's sum rule (EPvalidator.sch:290) on the multi-system
     // path: the declared FractionDHWLoadServed values sum to 1 (within
     // [0.99, 1.01]) when any system declares one, or no system declares
@@ -650,9 +652,9 @@ fn parse_avg_water_draw_and_bedrooms(
 ) -> Result<(Option<f64>, Option<f64>), super::HpxmlError> {
     let n_bedrooms_raw = match details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "NumberofBedrooms",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &NUMBEROF_BEDROOMS,
         ])
         .and_then(|n| parse_trimmed_f64(&n.text))
     {
@@ -663,13 +665,13 @@ fn parse_avg_water_draw_and_bedrooms(
     // Adjust bedroom count by occupancy and house type (OCHRE hpxml.py:789-797),
     // the shared adjustment the appliance energies also apply.
     let n_occupants = details
-        .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
+        .path(&[&BUILDING_SUMMARY, &BUILDING_OCCUPANCY, &NUMBEROF_RESIDENTS])
         .and_then(|n| parse_trimmed_f64(&n.text));
     let house_type = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "ResidentialFacilityType",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &RESIDENTIAL_FACILITY_TYPE,
         ])
         .map(|n| n.text.trim().to_ascii_lowercase());
     let n_bedrooms = super::resolve_loads::adjusted_bedroom_count(
@@ -680,10 +682,10 @@ fn parse_avg_water_draw_and_bedrooms(
 
     // Fixture efficiency: low-flow if any WaterFixture has <LowFlow>true</LowFlow>.
     let mut any_low_flow = false;
-    if let Some(wh_section) = details.path(&["WaterHeating"]) {
-        for fixture in descendants_named(wh_section, "WaterFixture") {
+    if let Some(wh_section) = details.path(&[&WATER_HEATING]) {
+        for fixture in descendants_named(wh_section, &WATER_FIXTURE) {
             any_low_flow |=
-                child_bool(fixture, "LowFlow", "WaterFixture/LowFlow", "Water Fixture")?
+                child_bool(fixture, &LOW_FLOW, "WaterFixture/LowFlow", "Water Fixture")?
                     .unwrap_or(false);
         }
     }
@@ -695,8 +697,8 @@ fn parse_avg_water_draw_and_bedrooms(
 
     // Usage multiplier from the WaterHeating extension (OCHRE: WaterFixturesUsageMultiplier).
     let usage_multiplier = details
-        .path(&["WaterHeating", "extension"])
-        .and_then(|ext| child_f64(ext, "WaterFixturesUsageMultiplier"))
+        .path(&[&WATER_HEATING, &EXTENSION])
+        .and_then(|ext| child_f64(ext, &WATER_FIXTURES_USAGE_MULTIPLIER))
         .unwrap_or(1.0);
 
     // Distribution system.
@@ -729,9 +731,9 @@ pub fn extract_bedroom_count(
     let details = &building.details_xml;
     let raw = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "NumberofBedrooms",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &NUMBEROF_BEDROOMS,
         ])
         .and_then(|n| parse_trimmed_f64(&n.text));
     raw.or_else(|| data_patches.and_then(|p| p.number_of_bedrooms))
@@ -796,7 +798,7 @@ fn parse_water_heater_fuel(
     wh: &XmlNode,
     wh_type: &str,
 ) -> std::result::Result<FuelType, super::HpxmlError> {
-    match child_text(wh, "FuelType") {
+    match child_text(wh, &FUEL_TYPE) {
         Some(raw) => parse_water_heater_fuel_from_str(&raw),
         None => {
             let ty = wh_type.trim();
@@ -819,34 +821,34 @@ fn parse_water_heater_fuel(
 /// is unrecognised.  Default piping length for Standard distribution is derived from
 /// conditioned floor area and number of floors following the OCHRE formula.
 fn parse_distribution_system(details: &XmlNode, n_bedrooms: f64) -> DistributionSystem {
-    let Some(dist_node) = details.path(&["WaterHeating", "HotWaterDistribution"]) else {
+    let Some(dist_node) = details.path(&[&WATER_HEATING, &HOT_WATER_DISTRIBUTION]) else {
         return DistributionSystem::Unknown;
     };
 
     // HPXML PipeRValue is in hr·ft²·°F/Btu (IP R-value). Convert to SI [m²·K/W] at parse time.
     let pipe_r_value = dist_node
-        .path(&["PipeInsulation"])
-        .and_then(|n| child_f64(n, "PipeRValue"))
+        .path(&[&PIPE_INSULATION])
+        .and_then(|n| child_f64(n, &PIPE_R_VALUE))
         .map(conv::r_value_ip_to_si)
         .unwrap_or(0.0);
 
-    let system_type = dist_node.child("SystemType");
+    let system_type = dist_node.child(&SYSTEM_TYPE);
 
-    if let Some(standard) = system_type.and_then(|n| n.child("Standard")) {
+    if let Some(standard) = system_type.and_then(|n| n.child(&STANDARD)) {
         // Default piping length: OCHRE formula using floor area and floors.
         // 2 * sqrt(floor_area_ft2 / floors) + 10 * floors + 5 * has_unfinished_basement
         // We use a bedroom-count proxy when floor area data is not available.
         let default_piping_length_m = derive_default_piping_length_m(details, n_bedrooms);
-        let piping_length_m = child_f64(standard, "PipingLength").map(conv::length_ft_to_m); // HPXML PipingLength is in feet
+        let piping_length_m = child_f64(standard, &PIPING_LENGTH).map(conv::length_ft_to_m); // HPXML PipingLength is in feet
         DistributionSystem::Standard {
             pipe_r_value,
             piping_length_m,
             default_piping_length_m,
         }
-    } else if let Some(recirc) = system_type.and_then(|n| n.child("Recirculation")) {
+    } else if let Some(recirc) = system_type.and_then(|n| n.child(&RECIRCULATION)) {
         // BranchPipingLoopLength is in feet in HPXML.
         let branch_loop_length_m =
-            child_f64(recirc, "BranchPipingLoopLength").map(conv::length_ft_to_m);
+            child_f64(recirc, &BRANCH_PIPING_LOOP_LENGTH).map(conv::length_ft_to_m);
         DistributionSystem::Recirculation {
             pipe_r_value,
             branch_loop_length_m,
@@ -866,9 +868,9 @@ fn parse_distribution_system(details: &XmlNode, n_bedrooms: f64) -> Distribution
 fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
     let floor_area_m2 = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "ConditionedFloorArea",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &CONDITIONED_FLOOR_AREA,
         ])
         .and_then(|n| {
             let val = parse_trimmed_f64(&n.text)?;
@@ -883,15 +885,15 @@ fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
 
     let n_floors = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "NumberofConditionedFloors",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &NUMBEROF_CONDITIONED_FLOORS,
         ])
         .or_else(|| {
             details.path(&[
-                "BuildingSummary",
-                "BuildingConstruction",
-                "NumberofConditionedFloorsAboveGrade",
+                &BUILDING_SUMMARY,
+                &BUILDING_CONSTRUCTION,
+                &NUMBEROF_CONDITIONED_FLOORS_ABOVE_GRADE,
             ])
         })
         .and_then(|n| parse_trimmed_f64(&n.text))
@@ -899,7 +901,7 @@ fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
         .max(1.0);
 
     let has_unfinished_bsmt = details
-        .path(&["BuildingSummary", "BuildingConstruction", "FoundationType"])
+        .path(&[&BUILDING_SUMMARY, &BUILDING_CONSTRUCTION, &FOUNDATION_TYPE])
         .map(|n| n.text.trim().eq_ignore_ascii_case("UnfinishedBasement"))
         .unwrap_or(false);
 
@@ -993,8 +995,8 @@ fn canonical_water_heater_name(
 /// `*Watts` carry watts by definition, so `W` is the default when no `units`
 /// attribute is present; an explicit `kW` is converted. Unrecognized units
 /// are rejected (with a warning) rather than guessed.
-fn child_power_w(node: &XmlNode, child_name: &str) -> Option<f64> {
-    let el = node.child(child_name)?;
+fn child_power_w(node: &XmlNode, element: &'static super::elements::HpxmlElement) -> Option<f64> {
+    let el = node.child(element)?;
     let value = hares_types::parse_trimmed_f64(&el.text)?;
     let units = el.attrs.get("units").map(String::as_str).unwrap_or("W");
     match units.to_ascii_lowercase().as_str() {
@@ -1004,7 +1006,7 @@ fn child_power_w(node: &XmlNode, child_name: &str) -> Option<f64> {
             tracing::warn!(
                 units = other,
                 value,
-                field = child_name,
+                field = element.name,
                 "unrecognized power unit; accepted: W, kW — ignoring value"
             );
             None
@@ -1022,7 +1024,7 @@ fn child_power_w(node: &XmlNode, child_name: &str) -> Option<f64> {
 /// `units` attribute is present. An explicit `W` is accepted as-is.
 /// Unrecognized units are rejected (with a warning) rather than guessed.
 fn child_pilot_power_w(node: &XmlNode) -> Option<f64> {
-    let el = node.child("PilotPower")?;
+    let el = node.child(&PILOT_POWER)?;
     let value = hares_types::parse_trimmed_f64(&el.text)?;
     let units = el.attrs.get("units").map(String::as_str).unwrap_or("Btuh");
     match units.to_ascii_lowercase().as_str() {
@@ -1397,7 +1399,7 @@ mod tests {
     /// zone topology.
     fn building_for_test(root: &XmlNode) -> Building {
         let details = root
-            .path(&["Building", "BuildingDetails"])
+            .path(&[&BUILDING, &BUILDING_DETAILS])
             .cloned()
             .unwrap_or_else(|| root.clone());
         Building {

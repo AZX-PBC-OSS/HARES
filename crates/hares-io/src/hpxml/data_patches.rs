@@ -1,7 +1,6 @@
 //! HPXML data-quality patches for fields that may be missing or invalid in
 //! the source HPXML document. Populated from ResStock metadata or other
 //! external data sources that provide ground-truth values.
-
 use std::collections::HashMap;
 
 /// Typed patches that supplement or correct HPXML-parsed data.

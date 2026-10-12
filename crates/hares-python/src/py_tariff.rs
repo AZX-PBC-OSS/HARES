@@ -86,7 +86,10 @@ fn parse_window(d: &Bound<'_, PyDict>) -> PyResult<TimeWindow> {
     Ok(TimeWindow::new(day, start_minute, end_minute, 0.0))
 }
 
-fn json_value_to_py<'py>(py: Python<'py>, v: &serde_json::Value) -> PyResult<Py<pyo3::PyAny>> {
+pub(crate) fn json_value_to_py<'py>(
+    py: Python<'py>,
+    v: &serde_json::Value,
+) -> PyResult<Py<pyo3::PyAny>> {
     match v {
         serde_json::Value::Null => Ok(py.None()),
         serde_json::Value::Bool(b) => (*b).into_py_any(py),

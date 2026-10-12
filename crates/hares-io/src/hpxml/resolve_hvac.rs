@@ -29,6 +29,7 @@ use hares_physics::constants::{
 };
 use hares_physics::units as conv;
 
+use super::elements::*;
 use crate::defaults::DefaultsStore;
 
 /// SEER2→SEER factor for ducted split/package systems.
@@ -2083,7 +2084,7 @@ pub(super) fn resolve_hvac(
     warnings: &mut Vec<Warning>,
 ) -> std::result::Result<(), HpxmlError> {
     let details = &building.details_xml;
-    let Some(hvac) = details.path(&["Systems", "HVAC"]) else {
+    let Some(hvac) = details.path(&[&SYSTEMS, &HVAC]) else {
         return Ok(());
     };
 
@@ -2092,10 +2093,10 @@ pub(super) fn resolve_hvac(
     // `idref` attribute referencing a `SystemIdentifier/@id` on a HeatingSystem,
     // CoolingSystem, or HeatPump element.
     let primary_heating_idref = hvac
-        .path(&["HVACPlant", "PrimarySystems", "PrimaryHeatingSystem"])
+        .path(&[&HVAC_PLANT, &PRIMARY_SYSTEMS, &PRIMARY_HEATING_SYSTEM])
         .and_then(|n| n.attrs.get("idref").cloned());
     let primary_cooling_idref = hvac
-        .path(&["HVACPlant", "PrimarySystems", "PrimaryCoolingSystem"])
+        .path(&[&HVAC_PLANT, &PRIMARY_SYSTEMS, &PRIMARY_COOLING_SYSTEM])
         .and_then(|n| n.attrs.get("idref").cloned());
 
     let setpoint_params = parse_hvac_setpoint_params(details)?;
@@ -2107,13 +2108,13 @@ pub(super) fn resolve_hvac(
 
     let starting_spec_count = specs.len();
 
-    for heating in descendants_named(hvac, "HeatingSystem") {
+    for heating in descendants_named(hvac, &HEATING_SYSTEM) {
         let fuel = super::xml_helpers::parse_fuel(
-            child_text(heating, "HeatingSystemFuel")
+            child_text(heating, &HEATING_SYSTEM_FUEL)
                 .as_deref()
-                .or(child_text(heating, "FuelType").as_deref()),
+                .or(child_text(heating, &FUEL_TYPE).as_deref()),
         )?;
-        let Some(system_type) = parse_named_type(heating, "HeatingSystemType") else {
+        let Some(system_type) = parse_named_type(heating, &HEATING_SYSTEM_TYPE) else {
             return Err(HpxmlError::MissingField {
                 path: "HeatingSystem/HeatingSystemType",
                 system_kind: "HeatingSystem",
@@ -2124,17 +2125,17 @@ pub(super) fn resolve_hvac(
         };
         let name = canonical_hvac_heating_name(&system_type, fuel)?;
         let mut params = Map::new();
-        insert_capacity_kbtu_h(&mut params, heating, "HeatingCapacity");
+        insert_capacity_kbtu_h(&mut params, heating, &HEATING_CAPACITY);
         insert_capacity_w(
             &mut params,
             heating,
-            "HeatingCapacity",
+            &HEATING_CAPACITY,
             "heating_capacity_w",
         );
         insert_capacity_w(
             &mut params,
             heating,
-            "CoolingCapacity",
+            &COOLING_CAPACITY,
             "cooling_capacity_w",
         );
         insert_annual_efficiency(&mut params, heating, true, false);
@@ -2143,12 +2144,12 @@ pub(super) fn resolve_hvac(
         }
         params.insert("system_type".to_string(), Value::String(system_type));
 
-        if let Some(frac) = child_f64(heating, "FractionHeatLoadServed")
-            .or_else(|| child_f64(heating, "FractionHeatingLoadServed"))
+        if let Some(frac) = child_f64(heating, &FRACTION_HEAT_LOAD_SERVED)
+            .or_else(|| child_f64(heating, &FRACTION_HEATING_LOAD_SERVED))
         {
             params.insert("fraction_load_served".to_string(), json!(frac));
         }
-        if let Some(aux_kwh) = child_f64(heating, "ElectricAuxiliaryEnergy") {
+        if let Some(aux_kwh) = child_f64(heating, &ELECTRIC_AUXILIARY_ENERGY) {
             // ElectricAuxiliaryEnergy is an annual total (kWh/year per HPXML Data
             // Dictionary v4.2).
             //
@@ -2172,16 +2173,16 @@ pub(super) fn resolve_hvac(
                 json!(aux_kwh / hours * KW_TO_W),
             );
         }
-        if let Some(ext) = heating.child("extension") {
-            if let Some(w_per_cfm) = child_f64(ext, "FanPowerWattsPerCFM") {
+        if let Some(ext) = heating.child(&EXTENSION) {
+            if let Some(w_per_cfm) = child_f64(ext, &FAN_POWER_WATTS_PER_CFM) {
                 params.insert("fan_power_w_per_cfm".to_string(), json!(w_per_cfm));
-            } else if let Some(w) = child_f64(ext, "FanPowerWatts") {
+            } else if let Some(w) = child_f64(ext, &FAN_POWER_WATTS) {
                 params.insert("fan_power_w".to_string(), json!(w));
             }
-            if let Some(v) = child_f64(ext, "AirflowDefectRatio") {
+            if let Some(v) = child_f64(ext, &AIRFLOW_DEFECT_RATIO) {
                 params.insert("airflow_defect_ratio".to_string(), json!(v));
             }
-            if let Some(v) = child_f64(ext, "HeatingAirflowCFM") {
+            if let Some(v) = child_f64(ext, &HEATING_AIRFLOW_CFM) {
                 params.insert("heating_airflow_cfm".to_string(), json!(v));
             }
         }
@@ -2291,13 +2292,13 @@ pub(super) fn resolve_hvac(
     #[cfg(feature = "observe")]
     let heating_loop_end = specs.len();
 
-    for cooling in descendants_named(hvac, "CoolingSystem") {
+    for cooling in descendants_named(hvac, &COOLING_SYSTEM) {
         let fuel = super::xml_helpers::parse_fuel(
-            child_text(cooling, "CoolingSystemFuel")
+            child_text(cooling, &COOLING_SYSTEM_FUEL)
                 .as_deref()
                 .or(Some("electricity")),
         )?;
-        let Some(system_type) = child_text(cooling, "CoolingSystemType") else {
+        let Some(system_type) = child_text(cooling, &COOLING_SYSTEM_TYPE) else {
             return Err(HpxmlError::MissingField {
                 path: "CoolingSystem/CoolingSystemType",
                 system_kind: "CoolingSystem",
@@ -2321,18 +2322,18 @@ pub(super) fn resolve_hvac(
             }
         };
         let mut params = Map::new();
-        insert_capacity_kbtu_h(&mut params, cooling, "CoolingCapacity");
+        insert_capacity_kbtu_h(&mut params, cooling, &COOLING_CAPACITY);
         insert_capacity_w(
             &mut params,
             cooling,
-            "CoolingCapacity",
+            &COOLING_CAPACITY,
             "cooling_capacity_w",
         );
         insert_annual_efficiency(&mut params, cooling, false, false);
         params.insert("system_type".to_string(), Value::String(system_type));
         insert_mode_and_speed_metadata(
             &mut params,
-            child_text(cooling, "CompressorType").as_deref(),
+            child_text(cooling, &COMPRESSOR_TYPE).as_deref(),
             "CoolingSystem",
             &name,
         )?;
@@ -2345,34 +2346,34 @@ pub(super) fn resolve_hvac(
         apply_multispeed_cooling_parameters(&mut params, defaults, &name, warnings);
         insert_startup_degradation(&mut params, &name, false);
 
-        if let Some(shr) = child_f64(cooling, "SensibleHeatFraction") {
+        if let Some(shr) = child_f64(cooling, &SENSIBLE_HEAT_FRACTION) {
             params.insert("shr".to_string(), json!(shr));
         }
-        if let Some(frac) = child_f64(cooling, "FractionCoolLoadServed")
-            .or_else(|| child_f64(cooling, "FractionCoolingLoadServed"))
+        if let Some(frac) = child_f64(cooling, &FRACTION_COOL_LOAD_SERVED)
+            .or_else(|| child_f64(cooling, &FRACTION_COOLING_LOAD_SERVED))
         {
             params.insert("fraction_load_served".to_string(), json!(frac));
         }
         // Crankcase heater power: HPXML does not define a standard element.
         // OpenStudio-HPXML uses extension/CrankcaseHeaterPowerWatts (W).
         // Non-standard HPXML files may carry a direct CrankcaseHeaterWatts (W) child.
-        let crankcase_w = child_f64(cooling, "CrankcaseHeaterWatts");
-        if let Some(ext) = cooling.child("extension") {
-            if let Some(w_per_cfm) = child_f64(ext, "FanPowerWattsPerCFM") {
+        let crankcase_w = child_f64(cooling, &CRANKCASE_HEATER_WATTS);
+        if let Some(ext) = cooling.child(&EXTENSION) {
+            if let Some(w_per_cfm) = child_f64(ext, &FAN_POWER_WATTS_PER_CFM) {
                 params.insert("fan_power_w_per_cfm".to_string(), json!(w_per_cfm));
-            } else if let Some(w) = child_f64(ext, "FanPowerWatts") {
+            } else if let Some(w) = child_f64(ext, &FAN_POWER_WATTS) {
                 params.insert("fan_power_w".to_string(), json!(w));
             }
-            if let Some(v) = child_f64(ext, "AirflowDefectRatio") {
+            if let Some(v) = child_f64(ext, &AIRFLOW_DEFECT_RATIO) {
                 params.insert("airflow_defect_ratio".to_string(), json!(v));
             }
-            if let Some(v) = child_f64(ext, "ChargeDefectRatio") {
+            if let Some(v) = child_f64(ext, &CHARGE_DEFECT_RATIO) {
                 params.insert("charge_defect_ratio".to_string(), json!(v));
             }
-            if let Some(v) = child_f64(ext, "CoolingAirflowCFM") {
+            if let Some(v) = child_f64(ext, &COOLING_AIRFLOW_CFM) {
                 params.insert("cooling_airflow_cfm".to_string(), json!(v));
             }
-            if let Some(v) = child_f64(ext, "CrankcaseHeaterPowerWatts") {
+            if let Some(v) = child_f64(ext, &CRANKCASE_HEATER_POWER_WATTS) {
                 params.insert("crankcase_heater_w".to_string(), json!(v));
             }
         }
@@ -2443,8 +2444,8 @@ pub(super) fn resolve_hvac(
 
     let cooling_start = specs.len();
 
-    for heat_pump in descendants_named(hvac, "HeatPump") {
-        let heat_pump_type = child_text(heat_pump, "HeatPumpType")
+    for heat_pump in descendants_named(hvac, &HEAT_PUMP) {
+        let heat_pump_type = child_text(heat_pump, &HEAT_PUMP_TYPE)
             .ok_or_else(|| {
                 HpxmlError::Parse("HeatPump is missing required HeatPumpType element".into())
             })?
@@ -2469,23 +2470,23 @@ pub(super) fn resolve_hvac(
         };
 
         let mut params = Map::new();
-        insert_capacity_kbtu_h(&mut params, heat_pump, "HeatingCapacity");
-        insert_capacity_kbtu_h(&mut params, heat_pump, "CoolingCapacity");
+        insert_capacity_kbtu_h(&mut params, heat_pump, &HEATING_CAPACITY);
+        insert_capacity_kbtu_h(&mut params, heat_pump, &COOLING_CAPACITY);
         insert_capacity_w(
             &mut params,
             heat_pump,
-            "HeatingCapacity",
+            &HEATING_CAPACITY,
             "heating_capacity_w",
         );
         insert_capacity_w(
             &mut params,
             heat_pump,
-            "CoolingCapacity",
+            &COOLING_CAPACITY,
             "cooling_capacity_w",
         );
         // HPXML MinimumCapacity → min_compressor_fraction when HeatingCapacity is available.
         // MinimumCapacity is the lowest compressor output; min_compressor_fraction = MinimumCapacity / HeatingCapacity.
-        if let Some(min_btu_h) = child_f64(heat_pump, "MinimumCapacity")
+        if let Some(min_btu_h) = child_f64(heat_pump, &MINIMUM_CAPACITY)
             && let Some(Value::Number(cap_n)) = params.get("heating_capacity_w")
             && let Some(heat_w) = cap_n.as_f64()
             && heat_w > 0.0
@@ -2514,7 +2515,7 @@ pub(super) fn resolve_hvac(
         // HeatingCapacity17F: AHRI 210/240 H3 low-ambient rating point at 17°F (-8.33°C).
         // Stores capacity_ratio_at_17f = HeatingCapacity17F / HeatingCapacity (both in W)
         // so the biquadratic curve can be validated against the manufacturer spec.
-        if let Some(cap_17f_btu) = child_f64(heat_pump, "HeatingCapacity17F")
+        if let Some(cap_17f_btu) = child_f64(heat_pump, &HEATING_CAPACITY_17_F)
             && let Some(cap_w) = params.get("heating_capacity_w").and_then(Value::as_f64)
             && cap_w > 0.0
         {
@@ -2531,13 +2532,13 @@ pub(super) fn resolve_hvac(
         // (a) a backup system exists but capacity is omitted for autosizing,
         // and (b) no backup system exists at all.
         // Gate autosizing on evidence that a backup system is declared.
-        if let Some(cap_btu) = child_f64(heat_pump, "BackupHeatingCapacity") {
+        if let Some(cap_btu) = child_f64(heat_pump, &BACKUP_HEATING_CAPACITY) {
             params.insert(
                 "backup_capacity_w".to_string(),
                 json!(conv::power_btu_h_to_w(cap_btu)),
             );
-        } else if child_text(heat_pump, "BackupSystemFuel").is_some()
-            || child_text(heat_pump, "BackupType").is_some()
+        } else if child_text(heat_pump, &BACKUP_SYSTEM_FUEL).is_some()
+            || child_text(heat_pump, &BACKUP_TYPE).is_some()
         {
             // Backup system declared but capacity omitted — autosize to 100%
             // of design heating load (no oversizing) per ACCA Manual S-2017.
@@ -2548,10 +2549,10 @@ pub(super) fn resolve_hvac(
         // backup). For ASHP, init_from_typed will return Err if a required
         // backup capacity is missing, guarding against a genuinely incomplete
         // HPXML rather than silently inferring an absent backup system.
-        if let Some(eff_node) = heat_pump.child("BackupAnnualHeatingEfficiency")
-            && let Some(val) = child_f64(eff_node, "Value")
+        if let Some(eff_node) = heat_pump.child(&BACKUP_ANNUAL_HEATING_EFFICIENCY)
+            && let Some(val) = child_f64(eff_node, &VALUE)
         {
-            let units_raw = child_text(eff_node, "Units").unwrap_or_default();
+            let units_raw = child_text(eff_node, &UNITS).unwrap_or_default();
             let units = units_raw.to_ascii_uppercase();
             let eir =
                 match units.as_str() {
@@ -2593,7 +2594,7 @@ pub(super) fn resolve_hvac(
                 };
             params.insert("backup_eir".to_string(), json!(eir));
         }
-        if let Some(fuel) = child_text(heat_pump, "BackupSystemFuel") {
+        if let Some(fuel) = child_text(heat_pump, &BACKUP_SYSTEM_FUEL) {
             params.insert("backup_fuel".to_string(), Value::String(fuel));
         }
 
@@ -2601,15 +2602,15 @@ pub(super) fn resolve_hvac(
         for (xml_keys, param_key) in [
             (
                 &[
-                    "CompressorLockoutTemperature",
-                    "BackupHeatingSwitchoverTemperature",
+                    &COMPRESSOR_LOCKOUT_TEMPERATURE,
+                    &BACKUP_HEATING_SWITCHOVER_TEMPERATURE,
                 ][..],
                 "hp_lockout_temp_c",
             ),
             (
                 &[
-                    "BackupHeatingLockoutTemperature",
-                    "BackupHeatingSwitchoverTemperature",
+                    &BACKUP_HEATING_LOCKOUT_TEMPERATURE,
+                    &BACKUP_HEATING_SWITCHOVER_TEMPERATURE,
                 ][..],
                 "er_lockout_temp_c",
             ),
@@ -2629,7 +2630,7 @@ pub(super) fn resolve_hvac(
         // appears in some non-standard HPXML files. The resolver reads it as
         // a direct child of <HeatPump> for compatibility and stores it as
         // max_oat_supplemental_c.
-        if let Some(f_val) = child_f64(heat_pump, "SupplementalHeatingLockoutTemperature") {
+        if let Some(f_val) = child_f64(heat_pump, &SUPPLEMENTAL_HEATING_LOCKOUT_TEMPERATURE) {
             params.insert(
                 "max_oat_supplemental_c".to_string(),
                 json!(conv::temperature_f_to_c(f_val)),
@@ -2638,7 +2639,7 @@ pub(super) fn resolve_hvac(
 
         insert_mode_and_speed_metadata(
             &mut params,
-            child_text(heat_pump, "CompressorType").as_deref(),
+            child_text(heat_pump, &COMPRESSOR_TYPE).as_deref(),
             "HeatPump",
             cooler_name,
         )?;
@@ -2656,39 +2657,39 @@ pub(super) fn resolve_hvac(
             );
         }
 
-        if let Some(shr) = child_f64(heat_pump, "CoolingSensibleHeatFraction") {
+        if let Some(shr) = child_f64(heat_pump, &COOLING_SENSIBLE_HEAT_FRACTION) {
             params.insert("shr".to_string(), json!(shr));
         }
-        if let Some(frac) = child_f64(heat_pump, "FractionHeatLoadServed")
-            .or_else(|| child_f64(heat_pump, "FractionHeatingLoadServed"))
+        if let Some(frac) = child_f64(heat_pump, &FRACTION_HEAT_LOAD_SERVED)
+            .or_else(|| child_f64(heat_pump, &FRACTION_HEATING_LOAD_SERVED))
         {
             params.insert("fraction_heating_load_served".to_string(), json!(frac));
         }
-        if let Some(frac) = child_f64(heat_pump, "FractionCoolLoadServed")
-            .or_else(|| child_f64(heat_pump, "FractionCoolingLoadServed"))
+        if let Some(frac) = child_f64(heat_pump, &FRACTION_COOL_LOAD_SERVED)
+            .or_else(|| child_f64(heat_pump, &FRACTION_COOLING_LOAD_SERVED))
         {
             params.insert("fraction_cooling_load_served".to_string(), json!(frac));
         }
-        if let Some(ext) = heat_pump.child("extension") {
-            if let Some(w_per_cfm) = child_f64(ext, "FanPowerWattsPerCFM") {
+        if let Some(ext) = heat_pump.child(&EXTENSION) {
+            if let Some(w_per_cfm) = child_f64(ext, &FAN_POWER_WATTS_PER_CFM) {
                 params.insert("fan_power_w_per_cfm".to_string(), json!(w_per_cfm));
-            } else if let Some(w) = child_f64(ext, "FanPowerWatts") {
+            } else if let Some(w) = child_f64(ext, &FAN_POWER_WATTS) {
                 params.insert("fan_power_w".to_string(), json!(w));
             }
-            if let Some(v) = child_f64(ext, "AirflowDefectRatio") {
+            if let Some(v) = child_f64(ext, &AIRFLOW_DEFECT_RATIO) {
                 params.insert("airflow_defect_ratio".to_string(), json!(v));
             }
-            if let Some(v) = child_f64(ext, "ChargeDefectRatio") {
+            if let Some(v) = child_f64(ext, &CHARGE_DEFECT_RATIO) {
                 params.insert("charge_defect_ratio".to_string(), json!(v));
             }
-            if let Some(v) = child_f64(ext, "HeatingAirflowCFM") {
+            if let Some(v) = child_f64(ext, &HEATING_AIRFLOW_CFM) {
                 params.insert("heating_airflow_cfm".to_string(), json!(v));
             }
-            if let Some(v) = child_f64(ext, "CoolingAirflowCFM") {
+            if let Some(v) = child_f64(ext, &COOLING_AIRFLOW_CFM) {
                 params.insert("cooling_airflow_cfm".to_string(), json!(v));
             }
             // Crankcase heater power (W): OpenStudio-HPXML extension convention.
-            if let Some(v) = child_f64(ext, "CrankcaseHeaterPowerWatts") {
+            if let Some(v) = child_f64(ext, &CRANKCASE_HEATER_POWER_WATTS) {
                 params.insert("crankcase_heater_w".to_string(), json!(v));
             }
         }
@@ -2801,9 +2802,9 @@ pub(super) fn resolve_hvac(
         );
     }
 
-    for dehumidifier in descendants_named(hvac, "Dehumidifier") {
+    for dehumidifier in descendants_named(hvac, &DEHUMIDIFIER) {
         let mut params = Map::new();
-        if let Some(cap_pints_day) = child_f64(dehumidifier, "Capacity") {
+        if let Some(cap_pints_day) = child_f64(dehumidifier, &CAPACITY) {
             // HPXML §Dehumidifier/Capacity is in US liquid pints/day per the HPXML 4.x schema
             // annotation. 1 US liquid pint = 0.473176473 L (exact, NIST Handbook 44).
             params.insert(
@@ -2811,18 +2812,18 @@ pub(super) fn resolve_hvac(
                 json!(cap_pints_day * 0.473_176_473),
             );
         }
-        if let Some(ef) = child_f64(dehumidifier, "EnergyFactor") {
+        if let Some(ef) = child_f64(dehumidifier, &ENERGY_FACTOR) {
             params.insert("energy_factor".to_string(), json!(ef));
         }
-        if let Some(ief) = child_f64(dehumidifier, "IntegratedEnergyFactor") {
+        if let Some(ief) = child_f64(dehumidifier, &INTEGRATED_ENERGY_FACTOR) {
             params.insert("integrated_energy_factor".to_string(), json!(ief));
         }
-        if let Some(frac) = child_f64(dehumidifier, "FractionDehumidificationLoadServed")
-            .or_else(|| child_f64(dehumidifier, "FractionLoadServed"))
+        if let Some(frac) = child_f64(dehumidifier, &FRACTION_DEHUMIDIFICATION_LOAD_SERVED)
+            .or_else(|| child_f64(dehumidifier, &FRACTION_LOAD_SERVED))
         {
             params.insert("fraction_served".to_string(), json!(frac));
         }
-        if let Some(setpoint) = child_f64(dehumidifier, "DehumidistatSetpoint") {
+        if let Some(setpoint) = child_f64(dehumidifier, &DEHUMIDISTAT_SETPOINT) {
             params.insert("target_rh".to_string(), json!(setpoint));
         }
         let typed_config = Some(try_build_dehumidifier_config("Dehumidifier", &params)?);
@@ -2839,8 +2840,11 @@ pub(super) fn resolve_hvac(
     Ok(())
 }
 
-fn parse_named_type(node: &XmlNode, tag: &str) -> Option<String> {
-    let ty = node.child(tag)?;
+fn parse_named_type(
+    node: &XmlNode,
+    element: &'static super::elements::HpxmlElement,
+) -> Option<String> {
+    let ty = node.child(element)?;
     if !ty.text.trim().is_empty() {
         return Some(ty.text.trim().to_string());
     }
@@ -2947,17 +2951,26 @@ fn canonical_hvac_cooling_name(
     Ok(name.to_string())
 }
 
-fn insert_capacity_kbtu_h(params: &mut Map<String, Value>, node: &XmlNode, tag: &str) {
-    if let Some(cap) = child_f64(node, tag) {
+fn insert_capacity_kbtu_h(
+    params: &mut Map<String, Value>,
+    node: &XmlNode,
+    element: &'static super::elements::HpxmlElement,
+) {
+    if let Some(cap) = child_f64(node, element) {
         params.insert(
-            format!("{}_kbtu_h", tag.to_ascii_lowercase()),
+            format!("{}_kbtu_h", element.name.to_ascii_lowercase()),
             json!(conv::power_btu_h_to_kbtu_h(cap)),
         );
     }
 }
 
-fn insert_capacity_w(params: &mut Map<String, Value>, node: &XmlNode, tag: &str, key: &str) {
-    if let Some(cap_btu_h) = child_f64(node, tag) {
+fn insert_capacity_w(
+    params: &mut Map<String, Value>,
+    node: &XmlNode,
+    element: &'static super::elements::HpxmlElement,
+    key: &str,
+) {
+    if let Some(cap_btu_h) = child_f64(node, element) {
         params.insert(key.to_string(), json!(conv::power_btu_h_to_w(cap_btu_h)));
     } else {
         // Mark for autosizing: capacity was omitted from HPXML.
@@ -2994,12 +3007,14 @@ fn insert_autosizing_params(
 ) {
     // Helper: read a factor from direct child, then extension child.
     // Direct children take precedence (HPXML 4.x schema native location).
-    let read_factor = |params: &mut Map<String, Value>, tag: &str, key: &str| {
+    let read_factor = |params: &mut Map<String, Value>,
+                       tag: &'static super::elements::HpxmlElement,
+                       key: &str| {
         if let Some(factor) = child_f64(node, tag) {
             params.insert(key.to_string(), json!(factor));
             return;
         }
-        if let Some(ext) = node.child("extension")
+        if let Some(ext) = node.child(&EXTENSION)
             && let Some(factor) = child_f64(ext, tag)
         {
             params.insert(key.to_string(), json!(factor));
@@ -3007,15 +3022,23 @@ fn insert_autosizing_params(
     };
 
     if has_heating {
-        read_factor(params, "HeatingAutosizingFactor", "autosize_heating_factor");
+        read_factor(
+            params,
+            &HEATING_AUTOSIZING_FACTOR,
+            "autosize_heating_factor",
+        );
     }
     if has_cooling {
-        read_factor(params, "CoolingAutosizingFactor", "autosize_cooling_factor");
+        read_factor(
+            params,
+            &COOLING_AUTOSIZING_FACTOR,
+            "autosize_cooling_factor",
+        );
     }
     if has_backup {
         read_factor(
             params,
-            "BackupHeatingAutosizingFactor",
+            &BACKUP_HEATING_AUTOSIZING_FACTOR,
             "autosize_backup_factor",
         );
     }
@@ -3024,25 +3047,27 @@ fn insert_autosizing_params(
     // Supports direct child and extension child.
     // Child element names match the OpenStudio-HPXML convention:
     // `<MinCapacity>` and `<MaxCapacity>` (value in Btu/h).
-    let limits_node = node.child("AutosizingLimits").or_else(|| {
-        node.child("extension")
-            .and_then(|ext| ext.child("AutosizingLimits"))
+    let limits_node = node.child(&AUTOSIZING_LIMITS).or_else(|| {
+        node.child(&EXTENSION)
+            .and_then(|ext| ext.child(&AUTOSIZING_LIMITS))
     });
 
     if let Some(limits) = limits_node {
-        let insert_limit = |params: &mut Map<String, Value>, child: &str, key: &str| {
-            if let Some(val_btu_h) = child_f64(limits, child) {
+        let insert_limit = |params: &mut Map<String, Value>,
+                            child_element: &'static super::elements::HpxmlElement,
+                            key: &str| {
+            if let Some(val_btu_h) = child_f64(limits, child_element) {
                 params.insert(key.to_string(), json!(conv::power_btu_h_to_w(val_btu_h)));
             }
         };
 
         if has_heating {
-            insert_limit(params, "MinCapacity", "autosize_heating_min_w");
-            insert_limit(params, "MaxCapacity", "autosize_heating_max_w");
+            insert_limit(params, &MIN_CAPACITY, "autosize_heating_min_w");
+            insert_limit(params, &MAX_CAPACITY, "autosize_heating_max_w");
         }
         if has_cooling {
-            insert_limit(params, "MinCapacity", "autosize_cooling_min_w");
-            insert_limit(params, "MaxCapacity", "autosize_cooling_max_w");
+            insert_limit(params, &MIN_CAPACITY, "autosize_cooling_min_w");
+            insert_limit(params, &MAX_CAPACITY, "autosize_cooling_max_w");
         }
     }
 }
@@ -3053,15 +3078,14 @@ fn insert_annual_efficiency(
     is_heating: bool,
     is_ductless: bool,
 ) {
-    let annual_tag = if is_heating {
-        "AnnualHeatingEfficiency"
+    let annual_tag: &'static super::elements::HpxmlElement = if is_heating {
+        &ANNUAL_HEATING_EFFICIENCY
     } else {
-        "AnnualCoolingEfficiency"
+        &ANNUAL_COOLING_EFFICIENCY
     };
 
     if let Some(annual) = node.child(annual_tag)
-        && let (Some(units), Some(value)) =
-            (child_text(annual, "Units"), child_f64(annual, "Value"))
+        && let (Some(units), Some(value)) = (child_text(annual, &UNITS), child_f64(annual, &VALUE))
     {
         let (normalized_units, normalized_value) =
             normalize_efficiency_units(&units, value, is_ductless);
@@ -3083,11 +3107,9 @@ fn insert_annual_efficiency(
         );
     }
 
-    for tag in [
-        "SEER", "SEER2", "EER", "EER2", "HSPF", "HSPF2", "AFUE", "COP",
-    ] {
-        if let Some(value) = child_f64(node, tag) {
-            let (units, normalized) = normalize_efficiency_units(tag, value, is_ductless);
+    for element in [&SEER, &SEER_2, &EER, &EER_2, &HSPF, &HSPF_2, &AFUE, &COP] {
+        if let Some(value) = child_f64(node, element) {
+            let (units, normalized) = normalize_efficiency_units(element.name, value, is_ductless);
             params.insert(
                 format!("efficiency_{}", units.to_ascii_lowercase()),
                 json!(normalized),
@@ -5117,7 +5139,7 @@ mod tests {
         "#;
         let root = parse_xml_document(xml).expect("XML must parse");
         let details = root
-            .path(&["Building", "BuildingDetails"])
+            .path(&[&BUILDING, &BUILDING_DETAILS])
             .expect("details node must exist");
 
         let params = parse_hvac_setpoint_params(details).expect("setpoints parse");
@@ -5183,7 +5205,7 @@ mod tests {
         "#;
         let root = parse_xml_document(xml).expect("XML must parse");
         let details = root
-            .path(&["Building", "BuildingDetails"])
+            .path(&[&BUILDING, &BUILDING_DETAILS])
             .expect("details node must exist");
 
         let params = parse_hvac_setpoint_params(details).expect("setpoints parse");
@@ -6137,7 +6159,7 @@ mod tests {
         "#;
         let root = parse_xml_document(xml).expect("XML must parse");
         let details = root
-            .path(&["Building", "BuildingDetails"])
+            .path(&[&BUILDING, &BUILDING_DETAILS])
             .expect("details node must exist");
 
         let params = parse_hvac_setpoint_params(details).expect("setpoints parse");
@@ -6574,7 +6596,7 @@ mod tests {
         "#;
         let root = parse_xml_document(xml).expect("XML must parse");
         let details = root
-            .path(&["Building", "BuildingDetails"])
+            .path(&[&BUILDING, &BUILDING_DETAILS])
             .expect("details must exist");
         let mut building = empty_building(vec![conditioned_zone()]);
         building.details_xml = details.clone();
@@ -6627,7 +6649,7 @@ mod tests {
         "#;
         let root = parse_xml_document(xml).expect("XML must parse");
         let details = root
-            .path(&["Building", "BuildingDetails"])
+            .path(&[&BUILDING, &BUILDING_DETAILS])
             .expect("details must exist");
         let mut building = empty_building(vec![conditioned_zone()]);
         building.details_xml = details.clone();
@@ -6782,7 +6804,7 @@ mod tests {
         "#;
         let root = parse_xml_document(xml).expect("XML must parse");
         let details = root
-            .path(&["Building", "BuildingDetails"])
+            .path(&[&BUILDING, &BUILDING_DETAILS])
             .expect("details must exist");
         let mut building = empty_building(vec![conditioned_zone()]);
         building.details_xml = details.clone();
@@ -6874,7 +6896,7 @@ mod tests {
         "#;
         let root = parse_xml_document(xml).expect("XML must parse");
         let details = root
-            .path(&["Building", "BuildingDetails"])
+            .path(&[&BUILDING, &BUILDING_DETAILS])
             .expect("details must exist");
         let mut building = empty_building(vec![conditioned_zone()]);
         building.details_xml = details.clone();
@@ -6968,7 +6990,7 @@ mod tests {
         );
         let root = parse_xml_document(&xml).expect("XML must parse");
         let details = root
-            .path(&["Building", "BuildingDetails"])
+            .path(&[&BUILDING, &BUILDING_DETAILS])
             .expect("details must exist");
         let mut building = empty_building(vec![conditioned_zone()]);
         building.details_xml = details.clone();
@@ -7073,7 +7095,7 @@ mod tests {
         );
         let root = parse_xml_document(&xml).expect("XML must parse");
         let details = root
-            .path(&["Building", "BuildingDetails"])
+            .path(&[&BUILDING, &BUILDING_DETAILS])
             .expect("details must exist");
         let mut building = empty_building(vec![conditioned_zone()]);
         building.details_xml = details.clone();

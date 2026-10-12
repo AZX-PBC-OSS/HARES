@@ -197,6 +197,14 @@ impl PyParsedDefaults {
         })
     }
 
+    /// The defaults files the load read, in load order: the relative
+    /// paths of the store's input log, the read list the input schema's
+    /// `defaults_files` publishes.
+    #[pyo3(name = "read_files")]
+    pub fn read_files(&self) -> Vec<String> {
+        self.inner.read_files()
+    }
+
     /// The tree with one file replaced: that file re-parsed, every other
     /// table shared with this handle.
     pub fn with_file(&self, py: Python<'_>, relative_path: &str, content: &str) -> PyResult<Self> {

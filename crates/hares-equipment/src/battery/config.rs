@@ -233,6 +233,266 @@ impl BatteryConfig {
     }
 }
 
+/// The the battery's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for BatteryConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_kwh",
+                hares_types::FieldMeta {
+                    description: Some("the pack's capacity, kWh"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_charge_kw",
+                hares_types::FieldMeta {
+                    description: Some("the maximum charge power, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_discharge_kw",
+                hares_types::FieldMeta {
+                    description: Some("the maximum discharge power, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "n_series",
+                hares_types::FieldMeta {
+                    description: Some("the series cell count"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "n_parallel",
+                hares_types::FieldMeta {
+                    description: Some("the parallel cell count"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ah_cell",
+                hares_types::FieldMeta {
+                    description: Some("the cell's capacity, ampere-hours"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "v_cell",
+                hares_types::FieldMeta {
+                    description: Some("the cell's nominal voltage, volts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cell_resistance_ohm",
+                hares_types::FieldMeta {
+                    description: Some("the cell's internal resistance, ohms"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pack_voltage_v",
+                hares_types::FieldMeta {
+                    description: Some("the pack's nominal voltage, volts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "chemistry",
+                hares_types::FieldMeta {
+                    description: Some("the cell chemistry"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "standby_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the standby draw, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "self_discharge_pct_per_day",
+                hares_types::FieldMeta {
+                    description: Some("the self-discharge rate, percent per day"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_soc",
+                hares_types::FieldMeta {
+                    description: Some("the minimum state of charge"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_soc",
+                hares_types::FieldMeta {
+                    description: Some("the maximum state of charge"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "initial_soc",
+                hares_types::FieldMeta {
+                    description: Some("the initial state of charge"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "initial_cell_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the cells' initial temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "import_limit_w",
+                hares_types::FieldMeta {
+                    description: Some("the grid import limit, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "export_limit_w",
+                hares_types::FieldMeta {
+                    description: Some("the grid export limit, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heater_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the battery heater's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heater_threshold_c",
+                hares_types::FieldMeta {
+                    description: Some("the battery heater's threshold, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_discharge_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the minimum discharge temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "full_power_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the temperature above which full power flows, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_charge_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the minimum charge temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cell_thermal_mass_j_per_k",
+                hares_types::FieldMeta {
+                    description: Some("the cell's thermal mass, J/K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cell_ua_w_per_k",
+                hares_types::FieldMeta {
+                    description: Some("the cell's UA, W/K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "inverter_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the inverter's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "charge_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the charge path's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "discharge_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the discharge path's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "bms_mode",
+                hares_types::FieldMeta {
+                    description: Some("the battery management strategy"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "grid_export_rule",
+                hares_types::FieldMeta {
+                    description: Some("the grid export rule"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "power_factor",
+                hares_types::FieldMeta {
+                    description: Some("the power factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "inverter_capacity_kva",
+                hares_types::FieldMeta {
+                    description: Some("the inverter's capacity, kVA"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "grid_forming",
+                hares_types::FieldMeta {
+                    description: Some("whether the unit is grid-forming"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_dwell_steps",
+                hares_types::FieldMeta {
+                    description: Some("the minimum steps between setpoint changes"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

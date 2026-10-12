@@ -9,6 +9,7 @@ use thiserror::Error;
 pub mod building;
 pub mod climate_zone;
 pub mod data_patches;
+pub mod elements;
 pub mod equipment;
 pub mod infiltration_geometry;
 mod resolve_der;
@@ -22,7 +23,10 @@ mod wet_appliance;
 pub(crate) mod xml_helpers;
 mod zone_geometry;
 
-use building::{parse_building_from_node, parse_xml_document};
+pub use elements::{HPXML_ELEMENTS, HPXML_REJECTED_ELEMENTS, HpxmlElement, RejectedHpxmlElement};
+
+use building::{XmlNode, parse_building_from_node, parse_xml_document};
+use elements::CLIMATE_ZONE;
 use hares_types::Warning;
 use validation::{ValidationError, validate_building_ranges, validate_hpxml_schema_node};
 
@@ -193,10 +197,34 @@ pub fn parse_hpxml(path: &Path) -> Result<Building> {
     parse_hpxml_str(&xml)
 }
 
+/// The declared elements' rejection scan: for every entry of
+/// [`HPXML_REJECTED_ELEMENTS`], a document carrying the element fails the
+/// parse with the entry's reason. The scan searches the tree's own names
+/// (never the read accessors, whose test recorder records reads), so the
+/// parser's refusals are exactly its declared list. Both document
+/// entrances run it.
+pub(crate) fn reject_declared_elements(root: &XmlNode) -> Result<()> {
+    for entry in HPXML_REJECTED_ELEMENTS {
+        if tree_contains(root, entry.name) {
+            return Err(HpxmlError::Parse(
+                format!("{}: {}", entry.name, entry.reason).into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the subtree carries an element of this name.
+fn tree_contains(node: &XmlNode, name: &str) -> bool {
+    node.name == name || node.children.iter().any(|child| tree_contains(child, name))
+}
+
 /// Parse HPXML from a string input.
 pub fn parse_hpxml_str(xml: &str) -> Result<Building> {
     crate::parse_counts::bump_hpxml();
     let root = parse_xml_document(xml)?;
+
+    reject_declared_elements(&root)?;
 
     let schema_warnings =
         validate_hpxml_schema_node(&root).map_err(HpxmlError::SchemaValidation)?;
@@ -240,7 +268,7 @@ pub fn parse_iecc_climate_zone(path: &Path) -> Option<String> {
     let xml = fs::read_to_string(path).ok()?;
     let root = parse_xml_document(&xml).ok()?;
 
-    root.first_descendant("ClimateZone")
+    root.first_descendant(&CLIMATE_ZONE)
         .map(|node| node.text.trim().to_string())
         .filter(|s| !s.is_empty())
 }

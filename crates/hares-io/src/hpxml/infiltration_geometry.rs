@@ -9,6 +9,7 @@ use hares_physics::units as conv;
 
 use super::HpxmlError;
 use super::building::{Building, ValueKind, XmlNode, parse_value_with_units};
+use super::elements::*;
 use super::xml_helpers::child_text;
 use super::zone_geometry::{average_ceiling_height_m, surfaces};
 
@@ -28,7 +29,7 @@ fn canonical(location: &str) -> &str {
 fn sides(interior: &str, surface: &XmlNode) -> (String, Option<String>) {
     (
         canonical(interior).to_string(),
-        child_text(surface, "ExteriorAdjacentTo").map(|e| canonical(&e).to_string()),
+        child_text(surface, &EXTERIOR_ADJACENT_TO).map(|e| canonical(&e).to_string()),
     )
 }
 
@@ -47,7 +48,7 @@ fn is_conditioned_location(location: &str) -> bool {
 /// bounds (hpxml.rb:5079-5096, 12400-12416): its `FloorOrCeiling`, else a
 /// ceiling when either side is an attic and a floor otherwise.
 fn is_floor(floor: &XmlNode, interior: &str, exterior: &str) -> bool {
-    if let Some(kind) = child_text(floor, "FloorOrCeiling") {
+    if let Some(kind) = child_text(floor, &FLOOR_OR_CEILING) {
         return kind != "ceiling";
     }
     let attic = |location: &str| location.starts_with("attic");
@@ -62,9 +63,9 @@ fn is_floor(floor: &XmlNode, interior: &str, exterior: &str) -> bool {
 fn unit_height_above_grade_m(details: &XmlNode) -> Result<f64, HpxmlError> {
     let given = parse_value_with_units(
         details.path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "UnitHeightAboveGrade",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &UNIT_HEIGHT_ABOVE_GRADE,
         ]),
         ValueKind::Length,
     )?;
@@ -73,7 +74,7 @@ fn unit_height_above_grade_m(details: &XmlNode) -> Result<f64, HpxmlError> {
     }
     let mut boundary_floors = 0_usize;
     let mut exterior_floors = 0_usize;
-    for (interior, floor) in surfaces(details, "Floors", "Floor") {
+    for (interior, floor) in surfaces(details, &FLOORS, &FLOOR) {
         let (interior, exterior) = sides(&interior, floor);
         let exterior = exterior.unwrap_or_default();
         let thermal_boundary =
@@ -88,7 +89,7 @@ fn unit_height_above_grade_m(details: &XmlNode) -> Result<f64, HpxmlError> {
             }
         }
     }
-    let has_slab = surfaces(details, "Slabs", "Slab").next().is_some();
+    let has_slab = surfaces(details, &SLABS, &SLAB).next().is_some();
     Ok(
         if boundary_floors > 0 && boundary_floors == exterior_floors && !has_slab {
             conv::length_ft_to_m(2.0)
@@ -100,13 +101,15 @@ fn unit_height_above_grade_m(details: &XmlNode) -> Result<f64, HpxmlError> {
 
 fn foundation_top_in(details: &XmlNode) -> Result<f64, HpxmlError> {
     let mut top_m = unit_height_above_grade_m(details)?;
-    for (location, wall) in surfaces(details, "FoundationWalls", "FoundationWall") {
-        let required = |name: &str| -> Result<f64, HpxmlError> {
+    for (location, wall) in surfaces(details, &FOUNDATION_WALLS, &FOUNDATION_WALL) {
+        let required = |name: &'static super::elements::HpxmlElement| -> Result<f64, HpxmlError> {
             parse_value_with_units(wall.child(name), ValueKind::Length)?.ok_or_else(|| {
-                HpxmlError::Parse(format!("foundation wall in '{location}' has no {name}").into())
+                HpxmlError::Parse(
+                    format!("foundation wall in '{location}' has no {}", name.name).into(),
+                )
             })
         };
-        top_m = top_m.max(required("Height")? - required("DepthBelowGrade")?);
+        top_m = top_m.max(required(&HEIGHT)? - required(&DEPTH_BELOW_GRADE)?);
     }
     Ok(top_m)
 }
@@ -115,10 +118,15 @@ fn foundation_top_in(details: &XmlNode) -> Result<f64, HpxmlError> {
 /// OS-HPXML's order (hpxml.rb:3515-3523, 3832-3847, and `to_location` at
 /// 3404-3420, 3662-3692), for the types whose location can lie inside the
 /// infiltration volume.
-fn space_location(space: &XmlNode, type_element: &str) -> Option<&'static str> {
+fn space_location(
+    space: &XmlNode,
+    type_element: &'static super::elements::HpxmlElement,
+) -> Option<&'static str> {
     let kind = space.child(type_element)?.children.first()?;
-    let flag = |name: &str| child_text(kind, name).map(|text| text == "true");
-    match (kind.name.as_str(), flag("Vented"), flag("Conditioned")) {
+    let flag = |element: &'static super::elements::HpxmlElement| {
+        child_text(kind, element).map(|text| text == "true")
+    };
+    match (kind.name.as_str(), flag(&VENTED), flag(&CONDITIONED)) {
         ("Attic", Some(false), _) => Some("attic - unvented"),
         ("Basement", _, Some(false)) => Some("basement - unconditioned"),
         ("Basement", _, Some(true)) => Some("basement - conditioned"),
@@ -136,18 +144,18 @@ fn space_location(space: &XmlNode, type_element: &str) -> Option<&'static str> {
 fn infiltration_volume_locations(details: &XmlNode) -> Vec<&'static str> {
     let mut locations = vec![CONDITIONED_SPACE];
     for (group, element, type_element) in [
-        ("Attics", "Attic", "AtticType"),
-        ("Foundations", "Foundation", "FoundationType"),
+        (&ATTICS, &ATTIC, &ATTIC_TYPE),
+        (&FOUNDATIONS, &FOUNDATION, &FOUNDATION_TYPE),
     ] {
         for space in details
-            .path(&["Enclosure", group])
+            .path(&[&ENCLOSURE, group])
             .into_iter()
             .flat_map(|node| node.children_named(element))
         {
             let Some(location) = space_location(space, type_element) else {
                 continue;
             };
-            let within = child_text(space, "WithinInfiltrationVolume")
+            let within = child_text(space, &WITHIN_INFILTRATION_VOLUME)
                 .map_or(is_conditioned_location(location), |text| text == "true");
             if within && !locations.contains(&location) {
                 locations.push(location);
@@ -168,12 +176,12 @@ fn compartmentalization_exterior_fraction(details: &XmlNode) -> Result<f64, Hpxm
     let mut exterior_m2 = 0.0;
     for location in &within {
         for (group, element) in [
-            ("Roofs", "Roof"),
-            ("RimJoists", "RimJoist"),
-            ("Walls", "Wall"),
-            ("FoundationWalls", "FoundationWall"),
-            ("Floors", "Floor"),
-            ("Slabs", "Slab"),
+            (&ROOFS, &ROOF),
+            (&RIM_JOISTS, &RIM_JOIST),
+            (&WALLS, &WALL),
+            (&FOUNDATION_WALLS, &FOUNDATION_WALL),
+            (&FLOORS, &FLOOR),
+            (&SLABS, &SLAB),
         ] {
             for (interior, surface) in surfaces(details, group, element) {
                 let (interior, exterior) = sides(&interior, surface);
@@ -187,9 +195,11 @@ fn compartmentalization_exterior_fraction(details: &XmlNode) -> Result<f64, Hpxm
                 {
                     continue;
                 }
-                let area_m2 = parse_value_with_units(surface.child("Area"), ValueKind::Area)?
+                let area_m2 = parse_value_with_units(surface.child(&AREA), ValueKind::Area)?
                     .ok_or_else(|| {
-                        HpxmlError::Parse(format!("{element} in '{interior}' has no Area").into())
+                        HpxmlError::Parse(
+                            format!("{} in '{interior}' has no Area", element.name).into(),
+                        )
                     })?;
                 total_m2 += area_m2;
                 let to_other_space = exterior.as_deref().is_some_and(|e| {
@@ -224,16 +234,16 @@ fn compartmentalization_exterior_fraction(details: &XmlNode) -> Result<f64, Hpxm
 /// the dwelling and its garage.
 pub fn exterior_leakage_fraction(building: &Building) -> Result<f64, HpxmlError> {
     let details = &building.details_xml;
-    let measurement = details.first_descendant("AirInfiltrationMeasurement");
+    let measurement = details.first_descendant(&AIR_INFILTRATION_MEASUREMENT);
     let unit_total = match measurement {
-        Some(m) => child_text(m, "TypeOfInfiltrationLeakage").as_deref() == Some("unit total"),
+        Some(m) => child_text(m, &TYPE_OF_INFILTRATION_LEAKAGE).as_deref() == Some("unit total"),
         None => true,
     };
     if !unit_total {
         return Ok(1.0);
     }
     let given = match measurement {
-        Some(m) => parse_value_with_units(m.path(&["extension", "Aext"]), ValueKind::Raw)?,
+        Some(m) => parse_value_with_units(m.path(&[&EXTENSION, &AEXT]), ValueKind::Raw)?,
         None => None,
     };
     if let Some(a_ext) = given {
@@ -261,22 +271,27 @@ pub fn foundation_top_m(building: &Building) -> Result<f64, HpxmlError> {
 /// leakage is driven at this height.
 pub fn walls_top_m(building: &Building) -> Result<f64, HpxmlError> {
     let details = &building.details_xml;
-    let construction = details.path(&["BuildingSummary", "BuildingConstruction"]);
-    let required = |name: &str, kind: ValueKind| -> Result<f64, HpxmlError> {
+    let construction = details.path(&[&BUILDING_SUMMARY, &BUILDING_CONSTRUCTION]);
+    let required = |name: &'static super::elements::HpxmlElement,
+                    kind: ValueKind|
+     -> Result<f64, HpxmlError> {
         parse_value_with_units(construction.and_then(|c| c.child(name)), kind)?.ok_or_else(|| {
             HpxmlError::Parse(
-                format!("missing {name}; the height of the walls above grade derives from it")
-                    .into(),
+                format!(
+                    "missing {}; the height of the walls above grade derives from it",
+                    name.name
+                )
+                .into(),
             )
         })
     };
-    let floors = required("NumberofConditionedFloorsAboveGrade", ValueKind::Raw)?;
-    let conditioned_floor_area_m2 = required("ConditionedFloorArea", ValueKind::Area)?;
+    let floors = required(&NUMBEROF_CONDITIONED_FLOORS_ABOVE_GRADE, ValueKind::Raw)?;
+    let conditioned_floor_area_m2 = required(&CONDITIONED_FLOOR_AREA, ValueKind::Area)?;
     let ceiling_m = average_ceiling_height_m(
         details,
-        construction.and_then(|c| c.child("AverageCeilingHeight")),
+        construction.and_then(|c| c.child(&AVERAGE_CEILING_HEIGHT)),
         parse_value_with_units(
-            construction.and_then(|c| c.child("ConditionedBuildingVolume")),
+            construction.and_then(|c| c.child(&CONDITIONED_BUILDING_VOLUME)),
             ValueKind::Volume,
         )?,
         conditioned_floor_area_m2,

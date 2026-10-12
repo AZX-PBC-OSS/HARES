@@ -652,6 +652,18 @@ pub struct ParsedDefaults {
 }
 
 impl ParsedDefaults {
+    /// The defaults files the load read, in load order: the relative
+    /// paths of the store's input log (the input digest's material), the
+    /// read list the input schema's `defaults_files` publishes.
+    #[must_use]
+    pub fn read_files(&self) -> Vec<String> {
+        self.store
+            .input_log()
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
     /// Load the defaults tree and the schedule profiles from a directory
     /// plus per-file replacements, parsed once.
     ///

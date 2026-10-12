@@ -19,6 +19,7 @@ pub mod ports;
 pub mod resolved;
 pub mod rng;
 pub mod schedule;
+pub mod schema;
 pub mod telemetry;
 pub mod telemetry_keys;
 pub mod text;
@@ -37,6 +38,9 @@ pub use fluid::*;
 pub use health::*;
 pub use output::*;
 pub use resolved::*;
+pub use schema::{
+    Bounds, DescribeFields, FieldMeta, FieldSchema, ValueType, describe, field_schema,
+};
 pub use warning::*;
 
 // `mode_flow_guard` itself stays crate-private: the consistency checks are

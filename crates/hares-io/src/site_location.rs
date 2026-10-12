@@ -139,7 +139,79 @@ pub struct SiteLocationOverride {
     pub utc_offset_h: Option<f64>,
 }
 
+/// The override's fields as the input schema publishes them.
+impl hares_types::DescribeFields for SiteLocationOverride {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        use hares_types::{FieldMeta, describe};
+        describe(
+            &Self::sample(),
+            &[
+                (
+                    "latitude_deg",
+                    FieldMeta {
+                        bounds: Some(crate::input_schema::Bounds {
+                            min: Some(-90.0),
+                            max: Some(90.0),
+                            ..Default::default()
+                        }),
+                        description: Some("the site's latitude, degrees"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "longitude_deg",
+                    FieldMeta {
+                        bounds: Some(crate::input_schema::Bounds {
+                            min: Some(-180.0),
+                            max: Some(180.0),
+                            ..Default::default()
+                        }),
+                        description: Some("the site's longitude, degrees"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "elevation_m",
+                    FieldMeta {
+                        bounds: Some(crate::input_schema::Bounds {
+                            min: Some(-500.0),
+                            max: Some(9000.0),
+                            ..Default::default()
+                        }),
+                        description: Some("the site's elevation above sea level, metres"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "utc_offset_h",
+                    FieldMeta {
+                        bounds: Some(crate::input_schema::Bounds {
+                            min: Some(-14.0),
+                            max: Some(14.0),
+                            ..Default::default()
+                        }),
+                        description: Some("the site's standard-time UTC offset, hours"),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        )
+    }
+}
+
 impl SiteLocationOverride {
+    /// A sample instance every field set: the `DescribeFields` derive's
+    /// serialisation input (an `Option`'s key never skips).
+    #[must_use]
+    pub fn sample() -> Self {
+        Self {
+            latitude_deg: Some(39.74),
+            longitude_deg: Some(-104.99),
+            elevation_m: Some(1609.0),
+            utc_offset_h: Some(-7.0),
+        }
+    }
+
     /// `true` when no override field is set.
     #[must_use]
     pub fn is_empty(&self) -> bool {

@@ -3,7 +3,7 @@
 mod autosize;
 pub mod blueprint;
 mod checkpointing;
-mod conversions;
+pub(crate) mod conversions;
 mod loop_allocator;
 mod premise_zip;
 mod roster;
@@ -265,6 +265,133 @@ pub struct DwellingSettings {
     /// document contains missing or invalid values.
     /// `None` for direct HPXML use where no external metadata is available.
     pub patches: Option<hares_io::HpxmlDataPatches>,
+}
+
+/// The dwelling keys as the input schema publishes them: the fields a
+/// caller supplies to build one dwelling, its inputs and settings
+/// together.
+impl hares_types::DescribeFields for DwellingConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        use hares_types::{FieldSchema, ValueType};
+        vec![
+            FieldSchema {
+                name: "hpxml".to_string(),
+                value_type: ValueType::String,
+                unit: None,
+                default: serde_json::Value::Null,
+                bounds: None,
+                description: Some(
+                    "the dwelling's HPXML document: a path, or content text or bytes".to_string(),
+                ),
+            },
+            FieldSchema {
+                name: "schedule".to_string(),
+                value_type: ValueType::String,
+                unit: None,
+                default: serde_json::Value::Null,
+                bounds: None,
+                description: Some(
+                    "the schedule CSV: a path or content; None requests the schedule generated \
+                     from the default profiles"
+                        .to_string(),
+                ),
+            },
+            FieldSchema {
+                name: "weather".to_string(),
+                value_type: ValueType::String,
+                unit: None,
+                default: serde_json::Value::Null,
+                bounds: None,
+                description: Some(
+                    "the weather file: a path (the format detected) or content with its format"
+                        .to_string(),
+                ),
+            },
+            FieldSchema {
+                name: "defaults".to_string(),
+                value_type: ValueType::String,
+                unit: None,
+                default: serde_json::Value::Null,
+                bounds: None,
+                description: Some(
+                    "the defaults tree: a directory, with optional per-file replacements"
+                        .to_string(),
+                ),
+            },
+            FieldSchema {
+                name: "settings".to_string(),
+                value_type: ValueType::Object,
+                unit: None,
+                default: serde_json::Value::Null,
+                bounds: None,
+                description: Some(
+                    "the dwelling's settings: the sim config, the overrides, the building id, \
+                     the warm-up duration and the HPXML patches"
+                        .to_string(),
+                ),
+            },
+        ]
+    }
+}
+
+/// The settings' fields as the input schema publishes them.
+impl hares_types::DescribeFields for DwellingSettings {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        use hares_types::{FieldSchema, ValueType};
+        vec![
+            FieldSchema {
+                name: "sim_config".to_string(),
+                value_type: ValueType::Object,
+                unit: None,
+                default: serde_json::Value::Null,
+                bounds: None,
+                description: Some("the run's SimulationConfig".to_string()),
+            },
+            FieldSchema {
+                name: "overrides".to_string(),
+                value_type: ValueType::Object,
+                unit: None,
+                default: serde_json::Value::Null,
+                bounds: None,
+                description: Some(
+                    "the equipment override map: an equipment name, the wildcard \
+                     ('all' or '*'), or both, each layer an object of the fields the \
+                     input schema's override_classes list for the class"
+                        .to_string(),
+                ),
+            },
+            FieldSchema {
+                name: "bldg_id".to_string(),
+                value_type: ValueType::Integer,
+                unit: None,
+                default: serde_json::json!(0),
+                bounds: None,
+                description: Some("the building id the RNG streams derive from".to_string()),
+            },
+            FieldSchema {
+                name: "initialization_duration".to_string(),
+                value_type: ValueType::DurationSeconds,
+                unit: None,
+                default: serde_json::Value::Null,
+                bounds: None,
+                description: Some(
+                    "the warm-up duration in seconds; None runs the converged warm-up".to_string(),
+                ),
+            },
+            FieldSchema {
+                name: "patches".to_string(),
+                value_type: ValueType::Object,
+                unit: None,
+                default: serde_json::Value::Null,
+                bounds: None,
+                description: Some(
+                    "the HPXML data-quality patches (number_of_bedrooms), from external \
+                     metadata"
+                        .to_string(),
+                ),
+            },
+        ]
+    }
 }
 
 impl DwellingSettings {

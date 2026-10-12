@@ -232,6 +232,61 @@ impl RawParams {
         }
         out
     }
+
+    /// The parameters as the input schema's override fields publish them:
+    /// every key parameter and every member of a fixed-count family, with
+    /// the kind the load reads it as; a family whose count another
+    /// parameter sets contributes its base keys at index 0 (the count the
+    /// load reads them under is the override's own `phase_len`-shaped
+    /// parameter's).
+    #[must_use]
+    pub fn field_schemas(&self) -> Vec<hares_types::FieldSchema> {
+        use hares_types::ValueType;
+        let mut out = Vec::new();
+        for param in self.params() {
+            let value_type = match param.kind {
+                ParamKind::Number => ValueType::Number,
+                ParamKind::Text => ValueType::String,
+                ParamKind::Bool => ValueType::Boolean,
+                ParamKind::NumberList => ValueType::Array,
+            };
+            let push = |name: String, out: &mut Vec<hares_types::FieldSchema>| {
+                out.push(hares_types::FieldSchema {
+                    name,
+                    value_type,
+                    unit: None,
+                    default: serde_json::Value::Null,
+                    bounds: None,
+                    description: None,
+                });
+            };
+            match param.form {
+                ParamForm::Key(name) => push(name.to_string(), &mut out),
+                ParamForm::Indexed {
+                    prefix,
+                    suffix,
+                    count,
+                } => match count {
+                    IndexCount::Fixed(n) => {
+                        for index in 0..n {
+                            push(format!("{prefix}{index}{suffix}"), &mut out);
+                        }
+                    }
+                    IndexCount::Param(_) => push(format!("{prefix}0{suffix}"), &mut out),
+                },
+            }
+        }
+        out
+    }
+
+    /// The parameters' names alone, for the schema's tests.
+    #[must_use]
+    pub fn field_names(&self) -> Vec<String> {
+        self.field_schemas()
+            .into_iter()
+            .map(|field| field.name)
+            .collect()
+    }
 }
 
 /// What every raw-parameter load reads beside its gain fractions: its
@@ -290,6 +345,7 @@ pub fn raw_params_for_class(ochre_class: &str) -> Option<&'static RawParams> {
     if crate::scheduled_load::CLASSES
         .iter()
         .any(|(class, _)| *class == ochre_class)
+        || ochre_class == "Scheduled EV"
     {
         return Some(&SCHEDULED_LOAD);
     }

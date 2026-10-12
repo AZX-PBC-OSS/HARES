@@ -680,3 +680,270 @@ impl EvConfig {
         Ok(())
     }
 }
+
+/// The the EV's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for EvConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_kwh",
+                hares_types::FieldMeta {
+                    description: Some("the pack's capacity, kWh"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "charging_level",
+                hares_types::FieldMeta {
+                    description: Some("the charging level"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_charging_power_kw",
+                hares_types::FieldMeta {
+                    description: Some("the maximum charging power, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "charging_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the charging path's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "l1_current_a",
+                hares_types::FieldMeta {
+                    description: Some("the level-1 charger's current, amperes"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "l1_voltage_v",
+                hares_types::FieldMeta {
+                    description: Some("the level-1 charger's voltage, volts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "soc_max",
+                hares_types::FieldMeta {
+                    description: Some("the maximum state of charge"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "initial_soc",
+                hares_types::FieldMeta {
+                    description: Some("the initial state of charge"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "battery_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the battery's initial temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_charge_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the minimum charge temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "full_power_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the temperature above which full power flows, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heater_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the battery heater's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heater_threshold_c",
+                hares_types::FieldMeta {
+                    description: Some("the battery heater's threshold, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "thermal_mass_j_per_k",
+                hares_types::FieldMeta {
+                    description: Some("the battery's thermal mass, J/K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ua_w_per_k",
+                hares_types::FieldMeta {
+                    description: Some("the battery's UA, W/K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "n_series",
+                hares_types::FieldMeta {
+                    description: Some("the series cell count"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "n_parallel",
+                hares_types::FieldMeta {
+                    description: Some("the parallel cell count"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cell_resistance_ohm",
+                hares_types::FieldMeta {
+                    description: Some("the cell's internal resistance, ohms"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "v2l_enabled",
+                hares_types::FieldMeta {
+                    description: Some("whether vehicle-to-load is enabled"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "v2l_soc_reserve",
+                hares_types::FieldMeta {
+                    description: Some("the vehicle-to-load's SOC reserve"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "v2l_max_discharge_kw",
+                hares_types::FieldMeta {
+                    description: Some("the vehicle-to-load's maximum discharge, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "v2g_enabled",
+                hares_types::FieldMeta {
+                    description: Some("whether vehicle-to-grid is enabled"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "v2g_soc_reserve",
+                hares_types::FieldMeta {
+                    description: Some("the vehicle-to-grid's SOC reserve"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "v2g_max_discharge_kw",
+                hares_types::FieldMeta {
+                    description: Some("the vehicle-to-grid's maximum discharge, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "chemistry",
+                hares_types::FieldMeta {
+                    description: Some("the cell chemistry"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fuel_economy_kwh_per_mi",
+                hares_types::FieldMeta {
+                    description: Some("the vehicle's consumption, kWh per mile"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ready_soc",
+                hares_types::FieldMeta {
+                    description: Some("the departure-ready SOC"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "charging_strategy",
+                hares_types::FieldMeta {
+                    description: Some("the charging strategy"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "plug_in_policy",
+                hares_types::FieldMeta {
+                    description: Some("the plug-in policy"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "power_limit_kw",
+                hares_types::FieldMeta {
+                    description: Some("the charging power limit, kW"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "initial_connection_state",
+                hares_types::FieldMeta {
+                    description: Some("the initial connection state"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "power_factor",
+                hares_types::FieldMeta {
+                    description: Some("the power factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "charger_capacity_kva",
+                hares_types::FieldMeta {
+                    description: Some("the charger's capacity, kVA"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cc_cv_transition_soc",
+                hares_types::FieldMeta {
+                    description: Some("the CC-CV transition's SOC"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "charging_priority",
+                hares_types::FieldMeta {
+                    description: Some("the charging priority"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "discharge_respects_deadline",
+                hares_types::FieldMeta {
+                    description: Some("whether discharge respects the deadline"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}

@@ -1066,6 +1066,129 @@ fn telemetry_fields() -> Vec<TelemetryField> {
     ]
 }
 
+/// The the ventilation unit's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for VentilationConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "flow_rate_m3_s",
+                hares_types::FieldMeta {
+                    description: Some("the ventilation's flow rate, m3/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fan's rated power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "supply_fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the supply fan's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "exhaust_fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the exhaust fan's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "sensible_effectiveness",
+                hares_types::FieldMeta {
+                    description: Some("the heat exchanger's sensible effectiveness"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "latent_effectiveness",
+                hares_types::FieldMeta {
+                    description: Some("the heat exchanger's latent effectiveness"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "bypass_temp_min_c",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the economiser bypass's minimum outdoor temperature, Celsius",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "bypass_temp_max_c",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the economiser bypass's maximum outdoor temperature, Celsius",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the defrost's outdoor threshold, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_initial_time_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the defrost's initial time fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_time_increase_rate_per_k",
+                hares_types::FieldMeta {
+                    description: Some("the defrost time's increase per kelvin below the threshold"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ventilation_type",
+                hares_types::FieldMeta {
+                    description: Some("the ventilation's type"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "balanced",
+                hares_types::FieldMeta {
+                    description: Some("whether the unit is balanced"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hours_in_operation",
+                hares_types::FieldMeta {
+                    description: Some("the operating hours per day"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
