@@ -1244,6 +1244,63 @@ of the same selection);
 **Dependencies:** OR-14, PY-9, PY-1 (`pyo3-arrow` and its
 `PyRecordBatch`).
 
+**State:** committed `e21207b8` (branch `row/r59-py10`, cut from
+`072722bf`). The reconciliation ran over the landed surface first, and
+most of the entry was already there: `Dwelling.attach_callback(report,
+fn)` (validating the report name and refusing rows already recorded),
+the `BatchInfo` pyclass (`report`, `bldg_id`, `batch_index`), the
+adapter in `hares-python` implementing the Rust trait over `Py<PyAny>`
+(the call under `Python::attach` the step released, a panic caught at
+the delivery as the typed error that latches the run) and the
+`callback_receives_every_batch_in_order` acceptance test all landed with
+the output-reporting row (`b512848e`, its review fix `66c825f6`), and
+the delivery moved to the Arrow capsule with the export row
+(`b8037120`). Genuinely missing, added here: the callable's batch
+argument is now pyo3-arrow's `PyRecordBatch`, the Arrow PyCapsule array
+interface over the batch's own buffers (the interim polars-frame
+handoff is replaced, and with it the conversion helper that built the
+frame, its only caller); `Destination.callback()`, the Python
+constructor of the serialisable marker; `HaresCallbackError`, a
+`HaresSimulationError` subclass, exported and covered by the
+engine-exception pickle round trip (the test enumerates every
+exception class the module exports, so the export joins it); the
+`__cause__` chaining per the entry's design: on an exception the
+adapter stores the `PyErr` in a slot shared with the dwelling wrapper
+and returns `CallbackError`, and the binding's step, simulate and
+finish mappings take the stored exception onto the
+`HaresCallbackError` they raise as `__cause__` (the engine's latch
+re-raises an ended run as the simulation error carrying the latched
+message, so the budget pin stays on the base class, as landed);
+`callback_exception_fails_run_with_cause_chained`,
+`callback_not_called_for_other_reports` and
+`callback_info_carries_bldg_id`, the three acceptance tests the landed
+rows had not named; and the test file renamed to the entry's
+verification path, `tests/python/test_callback.py` (from
+`test_batch_callback.py`, which nothing referenced).
+
+RED first: with the import of the missing class at the test module's
+head, the file failed collection on `ImportError:
+cannot import name 'HaresCallbackError'`; with the class's absence
+isolated, the Arrow-batch test failed behaviorally (the delivered
+batch, a polars `DataFrame`, has no `__arrow_c_array__`), the marker
+test failed on `AttributeError: type object 'Destination' has no
+attribute 'callback'`, and the Rust class pin failed to compile on the
+missing class; `callback_not_called_for_other_reports` and
+`callback_info_carries_bldg_id` passed on the landed surface and pin
+it. Green on the full surface: the entry's verification command runs
+9 tests (`test_callback.py`), the class chaining asserted by object
+identity (`exc.__cause__ is raised`).
+
+Gates at the commit: fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; `cargo nextest run --workspace
+--all-features -j 4` 7973/7973 (1 skipped: the ignored kind-pin
+generator); `uv run pytest tests/python -m ''` 1687 passed, 6 xfailed,
+0 failed, 0 errors (1684 + 6 at the parent; the file's net +3); pyright
+0 errors, 0 warnings; the goldens bitwise (`frame_golden compare-all`
+8 manifests identical on the default build, `full_year_900s_dst`
+identical on the dst build). The docs' changes section records the
+marker constructor, the exception class and the Arrow batch surface.
+
 ## PY-11: Python actors declare their output variables
 
 **Kind:** initiative work (`dl-i08-architecture.new_capability`: "Python
