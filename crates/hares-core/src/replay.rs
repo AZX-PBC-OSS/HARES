@@ -188,15 +188,15 @@ fn export_bytes(record: &InputRecord, what: &str) -> Result<Vec<u8>, HaresError>
     if digest != record.sha256 {
         let named = match &record.source {
             hares_io::InputRecordSource::Path(path) => {
-                format!(" '{}' at {}", what, path.display())
+                format!("the {what} input at '{}'", path.display())
             }
             hares_io::InputRecordSource::Text(_) | hares_io::InputRecordSource::Bytes(_) => {
-                format!(" {what}")
+                format!("the {what} input's content")
             }
         };
         return Err(HaresError::Io(format!(
-            "the {named} input changed since the run parsed it: the parse recorded \
-             digest {}, the input's content now digests {}",
+            "{named} changed since the run parsed it: the parse recorded digest {}, \
+             the input's content now digests {}",
             hares_io::input::hex(&record.sha256),
             hares_io::input::hex(&digest),
         )));
