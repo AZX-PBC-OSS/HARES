@@ -2,18 +2,19 @@
 //! receives every flushed batch of the run's report.
 //!
 //! The attached object is called with the batch's info and the batch
-//! itself as the frame surface the Python bindings already hand out (a
-//! polars `DataFrame` built over the Arrow batch). The engine's step runs
-//! with the GIL released, so the call re-acquires it here; a Python
-//! exception surfaces as the typed callback error that fails the run,
-//! never as a panic through the recorder. The destinations work plugs in
-//! the config-side marker constructor, and the dedicated Python exception
-//! class with the original exception chained as `__cause__` arrives with
-//! the surface row that owns it; until then the mapped simulation error
-//! carries the cause's message.
+//! itself as pyo3-arrow's `PyRecordBatch`: the Arrow PyCapsule array
+//! interface over the batch's own buffers, so every Arrow consumer
+//! (polars, pyarrow, pandas through pyarrow) imports it zero-copy. The
+//! engine's step runs with the GIL released, so the call re-acquires it
+//! here; a Python exception surfaces as the typed callback error that
+//! fails the run, never as a panic through the recorder. The exception is
+//! stored in a slot shared with the dwelling wrapper, and the binding
+//! chains it as `__cause__` on the typed error it raises. The
+//! config-side marker constructor is `Destination.callback()`.
 
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex};
 
 use arrow::record_batch::RecordBatch;
 use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
@@ -70,15 +71,21 @@ pub struct PyBatchInfo {
     pub batch_index: u64,
 }
 
+/// The slot the adapter stores a callable's exception in: the dwelling
+/// wrapper reads it when it maps the run's callback error, chaining the
+/// exception as `__cause__` on the typed error it raises.
+pub(crate) type CallbackCauseSlot = Arc<Mutex<Option<PyErr>>>;
+
 /// The Rust sink over a Python callable: the attached object is called
 /// once per flushed batch, in flush order.
 pub(crate) struct PyBatchCallback {
     callable: Py<PyAny>,
+    cause: CallbackCauseSlot,
 }
 
 impl PyBatchCallback {
-    pub(crate) fn new(callable: Py<PyAny>) -> Self {
-        Self { callable }
+    pub(crate) fn new(callable: Py<PyAny>, cause: CallbackCauseSlot) -> Self {
+        Self { callable, cause }
     }
 }
 
@@ -104,7 +111,7 @@ impl BatchCallback for PyBatchCallback {
         // callable is caught and typed, never let through the recorder as
         // an unwind.
         let delivered = catch_unwind(AssertUnwindSafe(|| {
-            Python::attach(|py| -> Result<(), String> {
+            Python::attach(|py| -> Result<(), (String, PyErr)> {
                 let info = Py::new(
                     py,
                     PyBatchInfo {
@@ -113,23 +120,30 @@ impl BatchCallback for PyBatchCallback {
                         batch_index,
                     },
                 )
-                .map_err(|err| format!("the batch info object could not be built: {err}"))?;
-                let table = crate::conversions::batches_to_py_table(vec![batch])
-                    .map_err(|err| format!("the batch frame could not be built: {err}"))?;
-                let table = Py::new(py, table)
-                    .map_err(|err| format!("the batch frame could not be built: {err}"))?;
-                let frame = crate::conversions::py_table_to_polars_df(py, table.bind(py))
-                    .map_err(|err| format!("the batch frame could not be built: {err}"))?;
-                self.callable
-                    .call1(py, (info, frame))
-                    .map_err(|err| format!("{err}"))?;
+                .map_err(|err| {
+                    (
+                        format!("the batch info object could not be built: {err}"),
+                        err,
+                    )
+                })?;
+                let record = Py::new(py, pyo3_arrow::PyRecordBatch::new(batch.clone()))
+                    .map_err(|err| (format!("the batch frame could not be built: {err}"), err))?;
+                if let Err(err) = self.callable.call1(py, (info, record)) {
+                    let message = err.to_string();
+                    return Err((message, err));
+                }
                 Ok(())
             })
         }));
 
         match delivered {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(message)) => Err(CallbackError::new(message)),
+            Ok(Err((message, cause))) => {
+                if let Ok(mut slot) = self.cause.lock() {
+                    *slot = Some(cause);
+                }
+                Err(CallbackError::new(message))
+            }
             Err(payload) => Err(CallbackError::new(format!(
                 "the attached callable panicked: {}",
                 panic_payload_to_string(payload)

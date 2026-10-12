@@ -12,6 +12,7 @@ import polars as pl
 
 from ._hares_types import (
     ActorTimingSummary as ActorTimingSummary,
+    ArrowArrayExportable as ArrowArrayExportable,
     ArrowStreamExportable as ArrowStreamExportable,
     FleetStepEntry,
     ProfilingSummary,
@@ -2270,6 +2271,8 @@ class Destination:
     def parquet(path: str, overwrite: bool = False) -> Destination: ...
     @staticmethod
     def csv(path: str, overwrite: bool = False) -> Destination: ...
+    @staticmethod
+    def callback() -> Destination: ...
     def __repr__(self) -> str: ...
 
 class ReportSpec:
@@ -2933,6 +2936,12 @@ class HaresHealthPolicyError(HaresSimulationError):
     (the run-total count at the crossing) and ``limit`` (the policy limit
     it crossed)."""
 
+class HaresCallbackError(HaresSimulationError):
+    """Raised when a run's batch callback fails it: an exception from the
+    attached callable (chained as ``__cause__``), a callback re-entering
+    the dwelling, or a callback report whose run recorded with none
+    attached."""
+
 # ---------------------------------------------------------------------------
 # DwellingBlueprint
 # ---------------------------------------------------------------------------
@@ -3016,7 +3025,7 @@ class Dwelling:
     def attach_callback(
         self,
         report: str,
-        fn: Callable[[BatchInfo, pl.DataFrame], None],
+        fn: Callable[[BatchInfo, ArrowArrayExportable], None],
     ) -> None: ...
     def clear_equipment(self) -> None: ...
     def remove_equipment_by_end_use(self, end_uses: list[EndUse]) -> int: ...

@@ -1,8 +1,8 @@
 //! Python bindings for dwelling simulation.
 
 use std::panic::AssertUnwindSafe;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::PriceSignal;
@@ -41,6 +41,7 @@ pyo3::create_exception!(
     pyo3::exceptions::PyRuntimeError
 );
 pyo3::create_exception!(hares._hares, HaresHealthPolicyError, HaresSimulationError);
+pyo3::create_exception!(hares._hares, HaresCallbackError, HaresSimulationError);
 pyo3::create_exception!(
     hares._hares,
     FatalDwellingError,
@@ -691,6 +692,10 @@ pub struct PyDwelling {
     equipment_registry: EquipmentRegistry,
     zone_keys: Option<Vec<String>>,
     gas_tariff: Option<crate::py_tariff::PyGasTariff>,
+    /// The attached batch callback's cause slot: the adapter stores the
+    /// callable's exception there and the run-error mapping chains it as
+    /// `__cause__`. Cleared when the dwelling is rebuilt.
+    callback_cause: std::sync::Mutex<Option<crate::py_callback::CallbackCauseSlot>>,
 }
 
 #[pymethods]
@@ -738,6 +743,7 @@ impl PyDwelling {
             equipment_registry: EquipmentRegistry::new(),
             zone_keys: None,
             gas_tariff: None,
+            callback_cause: std::sync::Mutex::new(None),
         })
     }
 
@@ -856,7 +862,7 @@ impl PyDwelling {
                 if self.poisoned.load(Ordering::Acquire) {
                     return Err(FatalDwellingError::new_err(e.to_string()));
                 }
-                return Err(to_py_err(e));
+                return Err(self.map_run_error(e));
             }
             Err(payload) => {
                 if self.dwelling.is_poisoned() {
@@ -929,7 +935,7 @@ impl PyDwelling {
                 if self.poisoned.load(Ordering::Acquire) {
                     return Err(FatalDwellingError::new_err(e.to_string()));
                 }
-                Err(to_py_err(e))
+                Err(self.map_run_error(e))
             }
         }
     }
@@ -968,7 +974,7 @@ impl PyDwelling {
                 if self.poisoned.load(Ordering::Acquire) {
                     return Err(FatalDwellingError::new_err(e.to_string()));
                 }
-                return Err(to_py_err(e));
+                return Err(self.map_run_error(e));
             }
             Err(payload) => {
                 if self.dwelling.is_poisoned() {
@@ -1721,11 +1727,13 @@ impl PyDwelling {
     }
 
     /// Attaches a Python callable as the dwelling's batch callback: the
-    /// recorder calls it with the batch's info and the batch as a polars
-    /// frame, once per flushed batch, in flush order. The step runs with
-    /// the GIL released, so the call re-acquires it; an exception from the
-    /// callable fails the run as a typed callback error, and the run stays
-    /// ended after it.
+    /// recorder calls it with the batch's info and the batch as the
+    /// zero-copy Arrow batch (pyo3-arrow's `PyRecordBatch`, the Arrow
+    /// PyCapsule array interface over the batch's own buffers), once per
+    /// flushed batch, in flush order. The step runs with the GIL
+    /// released, so the call re-acquires it; an exception from the
+    /// callable fails the run as a typed callback error with the raised
+    /// object chained as `__cause__`, and the run stays ended after it.
     pub fn attach_callback(&mut self, report: &str, callback: Bound<'_, PyAny>) -> PyResult<()> {
         if !callback.is_callable() {
             let repr = callback
@@ -1736,13 +1744,19 @@ impl PyDwelling {
                 "the batch callback must be callable, got {repr}"
             )));
         }
+        let cause: crate::py_callback::CallbackCauseSlot = Arc::new(std::sync::Mutex::new(None));
         let mut dwelling = self.acquire()?;
         dwelling
             .attach_callback(
                 report,
-                Box::new(crate::py_callback::PyBatchCallback::new(callback.unbind())),
+                Box::new(crate::py_callback::PyBatchCallback::new(
+                    callback.unbind(),
+                    Arc::clone(&cause),
+                )),
             )
-            .map_err(to_py_err)
+            .map_err(to_py_err)?;
+        *self.callback_cause.lock().expect("cause slot mutex") = Some(cause);
+        Ok(())
     }
 
     pub fn reset_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<()> {
@@ -1757,6 +1771,7 @@ impl PyDwelling {
         self.config = config;
         self.initialized = false;
         self.zone_keys = None;
+        *self.callback_cause.lock().expect("cause slot mutex") = None;
 
         self.initialize()
     }
@@ -2215,6 +2230,7 @@ impl PyDwelling {
             equipment_registry: EquipmentRegistry::new(),
             zone_keys: None,
             gas_tariff: None,
+            callback_cause: std::sync::Mutex::new(None),
         }
     }
 
@@ -2444,6 +2460,29 @@ fn reentry_refusal() -> PyErr {
     to_py_err(reentry_hares_error())
 }
 
+impl PyDwelling {
+    /// Maps a run's error to a Python exception, chaining the attached
+    /// callback's stored exception as `__cause__` on a typed callback
+    /// error: the adapter stored the callable's `PyErr` when it failed
+    /// the run, and the error that carries the failure out of the
+    /// dwelling takes it.
+    fn map_run_error(&self, err: HaresError) -> PyErr {
+        let stored = self
+            .callback_cause
+            .lock()
+            .expect("cause slot mutex")
+            .as_ref()
+            .and_then(|slot| slot.lock().expect("cause slot mutex").take());
+        let py_err = to_py_err(err);
+        if let Some(cause) = stored {
+            Python::attach(|py| {
+                let _ = py_err.value(py).setattr("__cause__", cause.value(py));
+            });
+        }
+        py_err
+    }
+}
+
 pub(crate) fn to_py_err(err: HaresError) -> PyErr {
     let msg = err.to_string();
     // A rejected equipment's error carries the warnings it raised; the
@@ -2491,6 +2530,7 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         // Physics variant is DEPRECATED: zero production constructors remain in
         // the codebase (T-0144). Kept for serialization compatibility and future
         // hares-physics crate retrofitting (T-0145).
+        HaresError::Callback { .. } => HaresCallbackError::new_err(msg),
         HaresError::Physics(_)
         | HaresError::Control(_)
         | HaresError::Tariff(_)
@@ -2499,7 +2539,6 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         | HaresError::InvariantViolation { .. }
         | HaresError::NanDetected { .. }
         | HaresError::NegativeDeliveredEnergy { .. }
-        | HaresError::Callback { .. }
         | HaresError::RejectedEquipment { .. } => HaresSimulationError::new_err(msg),
     }
 }
@@ -2762,6 +2801,25 @@ mod tests {
 
             let simulation = super::to_py_err(rejected(HaresError::Control("taken".to_string())));
             assert!(simulation.is_instance_of::<super::HaresSimulationError>(py));
+        });
+    }
+
+    /// A callback error converts to the callback error class, a subclass
+    /// of the simulation error, naming the report in its message.
+    #[test]
+    fn callback_error_maps_to_python_error() {
+        use hares_types::HaresError;
+        Python::attach(|py| {
+            let py_err = super::to_py_err(HaresError::Callback {
+                report: "timestep".to_string(),
+                message: "the store is down".to_string(),
+            });
+            assert!(
+                py_err.is_instance_of::<super::HaresCallbackError>(py),
+                "the callback error maps to the callback error class, got: {py_err}"
+            );
+            assert!(py_err.is_instance_of::<super::HaresSimulationError>(py));
+            assert!(py_err.to_string().contains("timestep"));
         });
     }
 

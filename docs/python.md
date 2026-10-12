@@ -358,9 +358,9 @@ replacement.
 
 - Added: `ReportSpec`, `Selection` (with `verbosity`, `named`, `pattern`,
   `diagnostics`), `Frequency` (with `timestep`), `Destination` (with
-  `memory`, `parquet`, `csv`), `RunResult`, `ReportResult`, `RunMetrics`,
-  `RunHealth`, `WarmupOutcome`, `WarmupResiduals`, `Warning`, `Provenance`,
-  `EquipmentProvenance`, `SiteLocationOverride`.
+  `memory`, `parquet`, `csv`, `callback`), `RunResult`, `ReportResult`,
+  `RunMetrics`, `RunHealth`, `WarmupOutcome`, `WarmupResiduals`, `Warning`,
+  `Provenance`, `EquipmentProvenance`, `SiteLocationOverride`.
 - Added: `HealthPolicy` (with `strict()`), `HaresHealthPolicyError`, and
   the `SimulationConfig.health_policy` keyword.
 - Added: `Dwelling.finish()`, `Dwelling.health()`,
@@ -419,7 +419,12 @@ replacement.
 - Added: the equipment classes `ElectricBoiler`, `ElectricFurnace`,
   `GasBoiler`, `IndirectTank`, `TanklessWaterHeater`; the exceptions
   `HaresConfigError`, `HaresEquipmentError`, `HaresSimulationError`;
-  the callback info class `BatchInfo`.
+  the callback info class `BatchInfo` and the callback error class
+  `HaresCallbackError` (a `HaresSimulationError` subclass; an exception
+  from an attached callable is chained as its `__cause__`). The
+  `Dwelling.attach_callback` callable receives each batch as the
+  zero-copy Arrow batch (the Arrow PyCapsule array interface over the
+  batch's own buffers), which every Arrow consumer imports directly.
 - Added: `Alignment` (with `instant`, `local_clock`) and the
   `alignment=` keyword on `Fleet.from_buildings` and
   `Fleet.from_resstock`: the fleet's declared time alignment.

@@ -21,14 +21,6 @@ pub fn batches_to_py_table(batches: Vec<RecordBatch>) -> PyResult<PyTable> {
     PyTable::try_new(batches, schema)
 }
 
-/// The table as a polars `DataFrame`: the frame reads the table's stream
-/// through the capsule, over the same shared buffers.
-pub fn py_table_to_polars_df(py: Python<'_>, table: &Bound<'_, PyTable>) -> PyResult<Py<PyAny>> {
-    let polars = py.import("polars")?;
-    let df = polars.getattr("DataFrame")?.call1((table,))?;
-    Ok(df.unbind())
-}
-
 /// Convert a naive local wall-clock time into a naive Python `datetime`:
 /// the representation the step dict's timestamp and the environment's
 /// `current_time` carry, the value the frame's Time column spells.

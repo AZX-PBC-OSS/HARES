@@ -126,3 +126,21 @@ class ArrowStreamExportable(Protocol):
     ) -> object:
         """The object's data as a capsule holding an Arrow C stream."""
         ...
+
+
+class ArrowArrayExportable(Protocol):
+    """Any object exporting its data as a single Arrow record batch.
+
+    The Arrow PyCapsule array interface: the engine's batch callback
+    delivers each report batch as one (the ``Dwelling.attach_callback``
+    callable's second argument), and every Arrow consumer (polars,
+    pyarrow, pandas through pyarrow) imports it with the underlying
+    buffers shared, zero-copy.
+    """
+
+    def __arrow_c_array__(
+        self, requested_schema: object | None = None
+    ) -> tuple[object, object]:
+        """The object's schema and data as capsules holding the Arrow C
+        array interface."""
+        ...

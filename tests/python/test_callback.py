@@ -1,6 +1,8 @@
 """The batch callback in Python: a callable attached to a dwelling receives
-every flushed batch of the run's report, in order, and an exception from
-the callable fails the run as a typed error instead of a panic."""
+every flushed batch of the run's report, in order, as the zero-copy Arrow
+batch, an exception from the callable fails the run as the typed callback
+error with the raised object chained as ``__cause__``, and the callable is
+never called for a report it was not attached to."""
 
 import subprocess
 import sys
@@ -12,7 +14,7 @@ import polars as pl
 import pytest
 from conftest import make_dwelling
 from hares import Destination, ReportSpec, Selection, SimulationConfig
-from hares._hares import HaresSimulationError
+from hares._hares import HaresCallbackError, HaresSimulationError
 
 REPORT = "timestep"
 
@@ -20,51 +22,51 @@ REPORT = "timestep"
 class Collector:
     """Records the batches and contexts it receives; fails one batch on demand."""
 
-    def __init__(self, fail_on=None):
+    def __init__(self, fail_on=None, exception=None):
         self.info = []
         self.batches = []
         self.fail_on = fail_on
+        self.exception = exception if exception is not None else RuntimeError("the store is down")
 
     def __call__(self, info, batch):
         if self.fail_on == info.batch_index:
-            raise RuntimeError("the store is down")
+            raise self.exception
         self.info.append((info.report, info.bldg_id, info.batch_index))
         self.batches.append(batch)
 
 
-def callback_config(output_path, retain_batches):
+def callback_config(output_path, destinations, output_chunk_size=40):
+    """A 24 h run at 900 s over the committed BEopt inputs.
+
+    ``destinations`` maps report name to destination, so a test declares
+    exactly the reports it attaches to and reads."""
     return SimulationConfig(
         start_time="2019-01-01T00:00:00",
         duration=24 * 3600,
         time_res=900,
         reports=[
-            ReportSpec(
-                REPORT,
-                Selection.verbosity(2),
-                (
-                    Destination.memory()
-                    if retain_batches
-                    else Destination.parquet(output_path)
-                ),
-            )
+            ReportSpec(name, Selection.verbosity(2), destination)
+            for name, destination in destinations.items()
         ],
-        output_chunk_size=40,
+        output_chunk_size=output_chunk_size,
     )
 
 
-def build_dwelling(collector, tmp_path):
-    # The callback rides the named report's recorder, memory included: the
-    # batches are delivered exactly as a file destination delivers them.
+def build_dwelling(collector, tmp_path, destinations=None, attach_to=REPORT):
+    if destinations is None:
+        destinations = {REPORT: Destination.memory()}
     dw = make_dwelling(
-        sim_config=callback_config(str(tmp_path / "run.parquet"), retain_batches=True)
+        sim_config=callback_config(str(tmp_path / "run.parquet"), destinations)
     )
-    dw.attach_callback(REPORT, collector)
+    dw.attach_callback(attach_to, collector)
     return dw
 
 
-def reference_frame(tmp_path):
+def reference_frame(tmp_path, report=REPORT):
     dw = make_dwelling(
-        sim_config=callback_config(str(tmp_path / "reference.parquet"), retain_batches=True)
+        sim_config=callback_config(
+            str(tmp_path / "reference.parquet"), {report: Destination.memory()}
+        )
     )
     result = dw.simulate()
     return result.reports[0].table()
@@ -81,28 +83,87 @@ def test_callback_receives_every_batch_in_order(tmp_path):
         (REPORT, 42, 1),
         (REPORT, 42, 2),
     ]
-    assert [batch.height for batch in collector.batches] == [40, 40, 16]
+    frames = [pl.DataFrame(batch) for batch in collector.batches]
+    assert [frame.height for frame in frames] == [40, 40, 16]
+    for batch in collector.batches:
+        assert hasattr(batch, "__arrow_c_array__"), (
+            "the batch must export the Arrow PyCapsule array interface"
+        )
 
-    concatenated = pl.concat(collector.batches)
+    concatenated = pl.concat(frames)
     assert concatenated.equals(expected)
 
 
-def test_callback_exception_fails_the_run(tmp_path):
-    collector = Collector(fail_on=1)
+def test_callback_exception_fails_run_with_cause_chained(tmp_path):
+    raised = RuntimeError("the store is down")
+    collector = Collector(fail_on=1, exception=raised)
     dw = build_dwelling(collector, tmp_path)
-    with pytest.raises(HaresSimulationError) as excinfo:
+    with pytest.raises(HaresCallbackError) as excinfo:
         dw.simulate()
+    assert isinstance(excinfo.value, HaresSimulationError)
     message = str(excinfo.value)
     assert REPORT in message
     assert "the store is down" in message
+    assert excinfo.value.__cause__ is raised, (
+        "the raised object must be chained as __cause__"
+    )
 
     # The budget semantics: the run stays ended and the callback is not
-    # called again.
+    # called again. The engine's latch re-raises the ended run as the
+    # simulation error carrying the latched message.
     calls = len(collector.batches)
     with pytest.raises(HaresSimulationError) as later:
         dw.step()
     assert "the store is down" in str(later.value)
     assert len(collector.batches) == calls
+
+
+def test_callback_not_called_for_other_reports(tmp_path):
+    collector = Collector()
+    dw = build_dwelling(
+        collector,
+        tmp_path,
+        destinations={REPORT: Destination.memory(), "extra": Destination.memory()},
+        attach_to=REPORT,
+    )
+    dw.simulate()
+
+    assert collector.info, "the attached callable must run"
+    assert {info[0] for info in collector.info} == {REPORT}, (
+        "the callable is called only for the report it was attached to"
+    )
+
+
+def test_callback_info_carries_bldg_id(tmp_path):
+    collector = Collector()
+    dw = build_dwelling(collector, tmp_path)
+    dw.simulate()
+
+    assert collector.info == [
+        (REPORT, 42, 0),
+        (REPORT, 42, 1),
+        (REPORT, 42, 2),
+    ]
+
+
+def test_callback_destination_marker_delivers(tmp_path):
+    """Destination.callback() declares the OR-14 marker: the report's
+    batches go to the attached callable and nothing is retained."""
+    collector = Collector()
+    dw = make_dwelling(
+        sim_config=callback_config(
+            str(tmp_path / "run.parquet"), {REPORT: Destination.callback()}
+        )
+    )
+    dw.attach_callback(REPORT, collector)
+    result = dw.simulate()
+
+    assert [info[2] for info in collector.info] == [0, 1, 2]
+    assert [pl.DataFrame(batch).height for batch in collector.batches] == [40, 40, 16]
+    assert repr(Destination.callback()) == "Destination.callback()"
+    with pytest.raises(HaresSimulationError) as excinfo:
+        result.reports[0].table()
+    assert REPORT in str(excinfo.value)
 
 
 def test_construction_does_not_surface_the_callback(tmp_path):
@@ -129,13 +190,21 @@ def test_construction_does_not_surface_the_callback(tmp_path):
 
 
 def test_attach_requires_a_callable(tmp_path):
-    dw = make_dwelling(sim_config=callback_config(str(tmp_path / "run.parquet"), retain_batches=True))
+    dw = make_dwelling(
+        sim_config=callback_config(
+            str(tmp_path / "run.parquet"), {REPORT: Destination.memory()}
+        )
+    )
     with pytest.raises(TypeError):
         dw.attach_callback(REPORT, cast(Any, 42))
 
 
 def test_unknown_report_name_is_rejected(tmp_path):
-    dw = make_dwelling(sim_config=callback_config(str(tmp_path / "run.parquet"), retain_batches=True))
+    dw = make_dwelling(
+        sim_config=callback_config(
+            str(tmp_path / "run.parquet"), {REPORT: Destination.memory()}
+        )
+    )
 
     def callback(info, batch):
         raise AssertionError("never called")

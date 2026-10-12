@@ -149,6 +149,15 @@ impl PyDestination {
         })
     }
 
+    /// Deliver every flushed batch to the callable
+    /// `Dwelling.attach_callback` registered on the report, in flush
+    /// order; nothing is retained. A run whose callback report has no
+    /// attached callback fails its first step.
+    #[staticmethod]
+    pub fn callback() -> Self {
+        Self(Destination::Callback)
+    }
+
     pub fn __repr__(&self) -> String {
         match &self.0 {
             Destination::Memory => "Destination.memory()".to_string(),

@@ -179,6 +179,10 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<py_dwelling::HaresSimulationError>(),
     )?;
     m.add(
+        "HaresCallbackError",
+        m.py().get_type::<py_dwelling::HaresCallbackError>(),
+    )?;
+    m.add(
         "HaresHealthPolicyError",
         m.py().get_type::<py_dwelling::HaresHealthPolicyError>(),
     )?;
