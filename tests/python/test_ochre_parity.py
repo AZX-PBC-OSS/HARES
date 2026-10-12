@@ -138,7 +138,7 @@ def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
     """Run HARES via simulate() and parse the DataFrame for column kWh."""
     from hares import Dwelling as HaresDwelling
 
-    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, master_seed=42, reports=_frame_reports(6)))
+    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, master_seed=42, reports=_frame_reports(6)))
     dwelling.initialize()
     df = dwelling.simulate().reports[0].table()
 
@@ -154,7 +154,7 @@ def _run_hares_simulate_24h(output_dir: Path) -> dict[str, float]:
     """Run HARES via simulate() and parse the DataFrame for the 24-hour window."""
     from hares import Dwelling as HaresDwelling
 
-    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES_24H, time_res=TIME_RES_MIN * 60, duration=DURATION_H_24 * 3600, master_seed=42, reports=_frame_reports(6)))
+    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES_24H, time_res=TIME_RES_MIN * 60, duration=DURATION_H_24 * 3600, master_seed=42, reports=_frame_reports(6)))
     dwelling.initialize()
     df = dwelling.simulate().reports[0].table()
 

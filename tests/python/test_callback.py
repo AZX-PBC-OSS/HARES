@@ -279,7 +279,7 @@ def _reentry_probe() -> int:
                 ],
                 output_chunk_size=40,
             ),
-            defaults_path=str(root / "defaults"),
+            defaults=str(root / "defaults"),
             bldg_id=42,
         )
         dw.initialize()

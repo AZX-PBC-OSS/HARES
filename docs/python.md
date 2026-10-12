@@ -122,7 +122,7 @@ dw = Dwelling.from_hpxml(
     config=SimulationConfig(
         reports=[ReportSpec("frame", Selection.verbosity(2), Destination.memory())],
     ),
-    defaults_path="path/to/HARES/defaults",
+    defaults="path/to/HARES/defaults",
 )
 dw.initialize()
 
@@ -138,12 +138,12 @@ for ts in dw.timesteps():
 result = dw.finish()
 ```
 
-`defaults_path` names the directory holding the default schedule profiles
+`defaults` names the directory holding the default schedule profiles
 (`Default Schedule Parameters.csv`), normally the repository's `defaults/`.
 An equipment whose load has no column in the schedule file and no HPXML
 schedule fractions takes its default profile from there. Without
-`defaults_path` there are no default profiles, so such an equipment fails
-construction, naming itself and `defaults_path`; a schedule file that
+`defaults` there are no default profiles, so such an equipment fails
+construction, naming itself and `defaults`; a schedule file that
 names every column the building's equipment needs builds without one. A
 schedule generated from the HPXML (`schedule=None`) always needs it.
 
@@ -188,7 +188,7 @@ dw = Dwelling.from_hpxml(
         time_res=3600,
         reports=[ReportSpec("frame", Selection.verbosity(1), Destination.memory())],
     ),
-    defaults_path="defaults",
+    defaults="defaults",
 )
 dw.initialize()
 
@@ -280,7 +280,7 @@ dw = Dwelling.from_hpxml(
         metrics=True,
         reports=[ReportSpec("frame", Selection.verbosity(2), Destination.memory())],
     ),
-    defaults_path="path/to/HARES/defaults",
+    defaults="path/to/HARES/defaults",
 )
 dw.initialize()
 
@@ -322,7 +322,7 @@ dw = Dwelling.from_hpxml(
         time_res=900,
         reports=[ReportSpec("frame", Selection.verbosity(2), Destination.memory())],
     ),
-    defaults_path="path/to/HARES/defaults",
+    defaults="path/to/HARES/defaults",
 )
 dw.initialize()
 for _ in dw.timesteps():
@@ -345,7 +345,7 @@ dw = Dwelling.from_hpxml(
         duration=86400,
         time_res=900,
     ),
-    defaults_path="path/to/HARES/defaults",
+    defaults="path/to/HARES/defaults",
 )
 dw.initialize()
 dw.step()

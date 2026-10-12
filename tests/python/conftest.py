@@ -206,7 +206,7 @@ def make_dwelling(
         SCHEDULE,
         WEATHER,
         config=sim_config,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         **kw,
     )

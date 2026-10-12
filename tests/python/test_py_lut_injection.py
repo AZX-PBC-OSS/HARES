@@ -27,7 +27,7 @@ SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 def _make_dwelling() -> Dwelling:
     """Create a minimal dwelling for LUT injection testing."""
-    dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60))
+    dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60))
     dw.initialize()
     return dw
 

@@ -61,7 +61,7 @@ def fleet(tmp_path: Path):
             ],
             metrics=True,
         ),
-        defaults_path=str(ROOT / "defaults"),
+        defaults=str(ROOT / "defaults"),
     )
     return Fleet.from_buildings([config])
 

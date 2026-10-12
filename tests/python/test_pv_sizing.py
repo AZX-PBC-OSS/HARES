@@ -191,7 +191,7 @@ class TestPvPowerProduction:
     def _make_pv_dwelling(start: str, duration_s: int = 86400, time_res_s: int = 900):
         from hares import Dwelling
 
-        return Dwelling.from_hpxml(hpxml=HPXML_PV, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time=start, duration=duration_s, time_res=time_res_s))
+        return Dwelling.from_hpxml(hpxml=HPXML_PV, schedule=SCHEDULE, weather=WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time=start, duration=duration_s, time_res=time_res_s))
 
     @pytest.mark.slow
     def test_pv_dwelling_initializes_without_error(self):

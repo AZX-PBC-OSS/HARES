@@ -174,6 +174,11 @@ pub static REMOVED_KEYS: &[RemovedKey] = &[
     },
     RemovedKey {
         scope: KeyScope::PythonKeyword,
+        key: "defaults_path",
+        replacement: "pass defaults (a path or a parsed ParsedDefaults handle)",
+    },
+    RemovedKey {
+        scope: KeyScope::PythonKeyword,
         key: "hpxml_dir",
         replacement: "pass the unpacked buildings directory as the `buildings_dir` argument",
     },
@@ -1465,7 +1470,7 @@ latitude_deg = 95.0
         // [output] table, the [simulation] table's old keys (the output
         // booleans among them, removed by the destinations row), and the
         // Python keyword surface's old names.
-        let expected: [(KeyScope, &str); 15] = [
+        let expected: [(KeyScope, &str); 16] = [
             (KeyScope::DwellingTable, "output"),
             (KeyScope::SimulationConfig, "initialization_duration_s"),
             (KeyScope::SimulationConfig, "duration_s"),
@@ -1481,6 +1486,7 @@ latitude_deg = 95.0
             (KeyScope::PythonKeyword, "elevation_m"),
             (KeyScope::PythonKeyword, "utc_offset_h"),
             (KeyScope::PythonKeyword, "output_to_parquet"),
+            (KeyScope::PythonKeyword, "defaults_path"),
         ];
         for (scope, key) in expected {
             assert!(

@@ -43,7 +43,7 @@ def _build_dwelling():
         str(HPXML),
         str(SCHEDULE),
         str(WEATHER),
-        defaults_path=str(DEFAULTS),
+        defaults=str(DEFAULTS),
         bldg_id=1,
         overrides=BATTERY_OVERRIDES,
         config=SimulationConfig(

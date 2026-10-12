@@ -14,7 +14,7 @@ def test_simulation_plan_single_segment():
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
     )
@@ -33,7 +33,7 @@ def test_simulation_plan_two_segments_same_equipment():
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
     )
@@ -56,7 +56,7 @@ def test_simulation_plan_empty_segments_raises():
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=300,
     )
@@ -73,7 +73,7 @@ def test_run_returns_the_full_batch_schema(tmp_path):
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
         verbosity=0,
@@ -95,7 +95,7 @@ def test_simulation_plan_swap_furnace_to_ashp():
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
     )
@@ -146,7 +146,7 @@ def test_thermal_continuity_across_segments():
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=300,
     )
@@ -182,7 +182,7 @@ def test_post_build_callback_adds_battery():
     """post_build callback can add equipment before initialize."""
     plan = SimulationPlan(
         HPXML, SCHEDULE, WEATHER,
-        defaults_path=str(HARES_DEFAULTS), bldg_id=42,
+        defaults=str(HARES_DEFAULTS), bldg_id=42,
         time_res_s=300,
     )
     battery_added = []

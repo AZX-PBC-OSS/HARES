@@ -32,7 +32,7 @@ def make_dwelling(duration_s: int = 48 * 3600):
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=1,
         config=SimulationConfig(
             start_time="2023-01-01T00:00:00-07:00",

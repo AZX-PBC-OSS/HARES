@@ -364,7 +364,7 @@ class TestHpxmlDeclaredEv:
         hpxml_path = tmp_path / "with_ev.xml"
         hpxml_path.write_text(xml)
 
-        dw = Dwelling.from_hpxml(str(hpxml_path), SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3 * 86400, time_res=900, master_seed=42, reports=_frame_report(1)))
+        dw = Dwelling.from_hpxml(str(hpxml_path), SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3 * 86400, time_res=900, master_seed=42, reports=_frame_report(1)))
         dw.initialize()
         df = dw.simulate().reports[0].table()
 

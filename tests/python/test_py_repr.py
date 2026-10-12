@@ -20,7 +20,7 @@ SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 def dwelling():
     from hares import Dwelling as PyDwelling
 
-    dw = PyDwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60,master_seed=0))
+    dw = PyDwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60,master_seed=0))
     dw.initialize()
     return dw
 

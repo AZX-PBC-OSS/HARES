@@ -428,7 +428,7 @@ def _run_simulation(
                         ReportSpec("frame", Selection.verbosity(3), Destination.memory())
                     ],
                 ),
-                defaults_path=defaults,
+                defaults=defaults,
                 bldg_id=42,
             )
             dw.initialize()

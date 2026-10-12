@@ -41,7 +41,7 @@ class SimulationPlan:
         schedule: str,
         weather: str,
         *,
-        defaults_path: str | None = None,
+        defaults: str | None = None,
         bldg_id: int = 0,
         time_res_s: int = 300,
         verbosity: int = 0,
@@ -70,7 +70,7 @@ class SimulationPlan:
                 ReportSpec("frame", Selection.verbosity(verbosity), Destination.memory())
             ]
         self.base_kwargs: dict[str, Any] = {
-            "defaults_path": defaults_path,
+            "defaults": defaults,
             "bldg_id": bldg_id,
             "initialization_duration": initialization_duration,
         }

@@ -81,7 +81,7 @@ def test_resample_weather_matches_in_python():
         str(FIXTURE / "schedule.csv"),
         str(FIXTURE / "weather.epw"),
         config=_report_config(900),
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=1,
     )
     dwelling.initialize()

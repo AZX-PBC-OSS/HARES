@@ -47,7 +47,7 @@ def _dwelling(config):
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=DEFAULTS,
+        defaults=DEFAULTS,
         bldg_id=1,
         config=config,
     )

@@ -14,7 +14,7 @@ def _blueprint(duration_s=48 * 3600, time_res=3600, overrides=None):
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=1,
         config=SimulationConfig(duration=duration_s, time_res=time_res, start_time="2023-01-01T00:00:00"),
         overrides=overrides,

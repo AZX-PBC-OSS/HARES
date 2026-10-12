@@ -34,7 +34,7 @@ def _make_blueprint(**kw: Any):
     ):
         if name in kw:
             sim[name] = kw.pop(name)
-    return DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(**sim), **kw)
+    return DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(**sim), **kw)
 
 
 def _collect_step_powers(bp, max_steps=None):

@@ -51,7 +51,7 @@ def build(config: Any, **kw: Any):
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=1,
         config=config,
         **kw,

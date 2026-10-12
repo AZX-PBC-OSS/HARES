@@ -119,7 +119,7 @@ def _make_gym_env(action_config: dict[str, list[str]]):
             hpxml=HPXML,
             schedule=SCHEDULE,
             weather=WEATHER,
-            defaults_path=str(HARES_DEFAULTS),
+            defaults=str(HARES_DEFAULTS),
             sim_config=SimulationConfig(
                 start_time="2019-01-01T00:00:00",
                 duration=600,

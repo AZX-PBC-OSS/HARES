@@ -309,7 +309,7 @@ pub(crate) fn weather_arg(obj: &Bound<'_, PyAny>) -> PyResult<WeatherArg> {
     Ok(WeatherArg::Source(WeatherInput::Path(path.into())))
 }
 
-/// The `defaults_path` argument: a path string or a `ParsedDefaults`.
+/// The `defaults` argument: a path string or a `ParsedDefaults`.
 pub(crate) fn defaults_arg(obj: &Bound<'_, PyAny>) -> PyResult<DefaultsArg> {
     if obj.is_none() {
         return Ok(DefaultsArg::Source(DefaultsSource::default()));
@@ -319,6 +319,6 @@ pub(crate) fn defaults_arg(obj: &Bound<'_, PyAny>) -> PyResult<DefaultsArg> {
     }
     let path: String = obj
         .extract()
-        .map_err(|_| PyValueError::new_err("defaults_path must be a path or a ParsedDefaults"))?;
+        .map_err(|_| PyValueError::new_err("defaults must be a path or a ParsedDefaults"))?;
     Ok(DefaultsArg::Source(DefaultsSource::directory(path)))
 }

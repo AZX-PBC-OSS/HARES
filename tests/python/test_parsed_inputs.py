@@ -37,16 +37,16 @@ def test_parsed_weather_shared_across_dwellings(tmp_path):
 
     base_pv = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base-pv.xml")
     from_handle_base = Dwelling.from_hpxml(
-        HPXML, SCHEDULE, parsed, defaults_path=str(HARES_DEFAULTS), bldg_id=7, config=_config()
+        HPXML, SCHEDULE, parsed, defaults=str(HARES_DEFAULTS), bldg_id=7, config=_config()
     )
     from_handle_pv = Dwelling.from_hpxml(
-        base_pv, SCHEDULE, parsed, defaults_path=str(HARES_DEFAULTS), bldg_id=8, config=_config()
+        base_pv, SCHEDULE, parsed, defaults=str(HARES_DEFAULTS), bldg_id=8, config=_config()
     )
     from_path_base = Dwelling.from_hpxml(
-        HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=7, config=_config()
+        HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=7, config=_config()
     )
     from_path_pv = Dwelling.from_hpxml(
-        base_pv, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=8, config=_config()
+        base_pv, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=8, config=_config()
     )
 
     for handle_dwelling, path_dwelling in [
@@ -86,13 +86,13 @@ def test_schedule_handle_takes_the_weather_meta_fallback(tmp_path):
     from_text = ParsedSchedule.from_text(csv.read_text(), weather_meta=weather)
 
     from_handle = Dwelling.from_hpxml(
-        HPXML, handle, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=9, config=_config()
+        HPXML, handle, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=9, config=_config()
     )
     from_text_handle = Dwelling.from_hpxml(
-        HPXML, from_text, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=9, config=_config()
+        HPXML, from_text, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=9, config=_config()
     )
     from_path = Dwelling.from_hpxml(
-        HPXML, str(csv), WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=9, config=_config()
+        HPXML, str(csv), WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=9, config=_config()
     )
 
     f_handle = _frame(from_handle)

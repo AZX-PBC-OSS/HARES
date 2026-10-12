@@ -514,7 +514,7 @@ def test_heterogeneous_equipment_aggregates_the_union_of_columns() -> None:
         hpxml=str(fixture_dir / "base.xml"),
         schedule=schedule,
         weather=weather,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=1,
     )
     config2 = DwellingConfig(
@@ -522,7 +522,7 @@ def test_heterogeneous_equipment_aggregates_the_union_of_columns() -> None:
         hpxml=str(fixture_dir / "base-battery.xml"),
         schedule=schedule,
         weather=weather,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         overrides=battery_overrides,
         bldg_id=2,
     )
@@ -573,7 +573,7 @@ def _base_home(tmp_path: Path, bldg_id: int, schedule: Path) -> DwellingConfig:
         schedule=str(schedule),
         weather=str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400, time_res=900),
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=bldg_id,
     )
 
@@ -619,7 +619,7 @@ def _mixed_offset_configs() -> list[DwellingConfig]:
             config=SimulationConfig(
                 start_time="2018-01-01T00:00:00", duration=86400, time_res=3600
             ),
-            defaults_path=str(HARES_DEFAULTS),
+            defaults=str(HARES_DEFAULTS),
             bldg_id=i + 1,
         )
         for i, (home, weather) in enumerate(

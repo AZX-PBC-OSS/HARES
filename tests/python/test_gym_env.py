@@ -40,7 +40,7 @@ _DWELLING_CONFIG = GymDwellingConfig(
     hpxml=HPXML,
     schedule=SCHEDULE,
     weather=WEATHER,
-    defaults_path=str(HARES_DEFAULTS),
+    defaults=str(HARES_DEFAULTS),
     sim_config=SimulationConfig(
         start_time="2019-01-01T00:00:00",
         duration=600,
@@ -71,7 +71,7 @@ def _make_env(episode_length: timedelta = timedelta(minutes=5)) -> DwellingGymEn
 
 
 def _make_dwelling(seed: int = 0, duration_s: int = 600) -> PyDwelling:
-    return PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=duration_s, time_res=60, master_seed=seed))
+    return PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=duration_s, time_res=60, master_seed=seed))
 
 
 def test_gym_reset_restores_snapshot_and_reseeds():
@@ -390,7 +390,7 @@ def test_vec_gym_random_policy_100_steps():
     n_dwel = 2
     obs_fields = ["total_power_kw", "outdoor_temp"]
     dwellings = [
-        PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i))
+        PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i))
         for i in range(n_dwel)
     ]
     for dw in dwellings:
@@ -630,7 +630,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
     n_dwel = 2
     obs_fields = ["total_power_kw", "outdoor_temp"]
     dwellings = [
-        PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i))
+        PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i))
         for i in range(n_dwel)
     ]
     from hares import Battery
@@ -1392,7 +1392,7 @@ def _gym_config(sim_config: SimulationConfig | None = None) -> GymDwellingConfig
         hpxml=HPXML,
         schedule=SCHEDULE,
         weather=WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         sim_config=sim_config,
     )
 
@@ -1419,7 +1419,7 @@ def test_gym_rejects_non_numeric_time_res():
             "hpxml": HPXML,
             "schedule": SCHEDULE,
             "weather": WEATHER,
-            "defaults_path": str(HARES_DEFAULTS),
+            "defaults": str(HARES_DEFAULTS),
             "time_res_s": "600",
         },
     )
@@ -1462,7 +1462,7 @@ def test_gym_default_writes_no_file(tmp_path: Path):
             hpxml=HPXML,
             schedule=SCHEDULE,
             weather=WEATHER,
-            defaults_path=str(HARES_DEFAULTS),
+            defaults=str(HARES_DEFAULTS),
             sim_config=SimulationConfig(
                 start_time="2019-01-01T00:00:00",
                 duration=1200,
@@ -1869,7 +1869,7 @@ _REPORTED_CONFIG = GymDwellingConfig(
     hpxml=HPXML,
     schedule=SCHEDULE,
     weather=WEATHER,
-    defaults_path=str(HARES_DEFAULTS),
+    defaults=str(HARES_DEFAULTS),
     sim_config=SimulationConfig(
         start_time="2019-01-01T00:00:00",
         duration=600,
@@ -1958,6 +1958,6 @@ def _make_dwelling_for_reports(seed: int = 0) -> PyDwelling:
         hpxml=HPXML,
         schedule=SCHEDULE,
         weather=WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         config=config,
     )

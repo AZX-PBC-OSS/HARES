@@ -27,7 +27,7 @@ def test_python_memory_report_returns_frame() -> None:
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=1,
         config=SimulationConfig(
             start_time="2023-01-01T00:00:00-07:00",
@@ -71,7 +71,7 @@ def test_simulate_without_a_memory_report_has_no_frame(tmp_path) -> None:
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=1,
         config=SimulationConfig(
             start_time="2023-01-01T00:00:00-07:00",

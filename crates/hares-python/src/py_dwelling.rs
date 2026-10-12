@@ -719,7 +719,7 @@ pub struct PyDwelling {
 #[pymethods]
 impl PyDwelling {
     #[classmethod]
-    #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, initialization_duration = None, defaults_path = None, overrides = None, **unexpected))]
+    #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, initialization_duration = None, defaults = None, overrides = None, **unexpected))]
     // PyO3 #[classmethod] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     pub fn from_hpxml(
@@ -730,7 +730,7 @@ impl PyDwelling {
         config: crate::py_config::PySimulationConfig,
         bldg_id: i64,
         initialization_duration: Option<i64>,
-        defaults_path: Option<&Bound<'_, PyAny>>,
+        defaults: Option<&Bound<'_, PyAny>>,
         overrides: Option<&Bound<'_, PyDict>>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
@@ -743,7 +743,7 @@ impl PyDwelling {
                 hpxml: crate::py_inputs::hpxml_arg(hpxml)?,
                 schedule: crate::py_blueprint::schedule_arg_maybe(schedule)?,
                 weather: crate::py_inputs::weather_arg(weather)?,
-                defaults: match defaults_path {
+                defaults: match defaults {
                     Some(path) => crate::py_inputs::defaults_arg(path)?,
                     None => {
                         crate::py_inputs::DefaultsArg::Source(hares_io::DefaultsSource::default())

@@ -55,7 +55,7 @@ def _base_config(
 
 class TestMetrics:
     def test_metrics_after_simulate(self):
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=_base_config(master_seed=0, verbosity=1))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=_base_config(master_seed=0, verbosity=1))
         dw.initialize()
         result = dw.simulate()
 
@@ -100,7 +100,7 @@ class TestMetrics:
         )
 
     def test_metrics_repr_works(self):
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
         dw.initialize()
         result = dw.simulate()
 
@@ -116,14 +116,14 @@ class TestMetrics:
         is None exactly when SimulationConfig.metrics is not requested."""
         from hares import SimulationConfig
 
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, metrics=False))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, metrics=False))
         dw.initialize()
 
         result = dw.simulate()
         assert result.metrics is None
 
     def test_envelope_loads_none_at_low_verbosity(self):
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=0))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=_base_config(verbosity=0))
         dw.initialize()
         result = dw.simulate()
 
@@ -132,7 +132,7 @@ class TestMetrics:
         assert metrics.envelope_loads_kwh is None
 
     def test_envelope_loads_present_at_high_verbosity(self, tmp_path):
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=6))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=_base_config(verbosity=6))
         dw.initialize()
         result = dw.simulate()
 
@@ -162,7 +162,7 @@ class TestMetrics:
         )
 
     def test_gas_energy_available_when_fuel_type_present(self):
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
         dw.initialize()
         result = dw.simulate()
 
@@ -175,7 +175,7 @@ class TestMetrics:
             assert metrics.gas_energy.total_therms > 0
 
     def test_combined_total_energy_kwh(self):
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
         dw.initialize()
         result = dw.simulate()
 
@@ -189,7 +189,7 @@ class TestMetrics:
 
     def test_total_energy_kwh_has_expected_properties(self):
         """Verify the renamed/added TotalEnergyKwh properties are accessible."""
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
         dw.initialize()
         result = dw.simulate()
 
@@ -211,7 +211,7 @@ class TestMetrics:
 
         For a dwelling without PV, gross_pv_generation_kwh should be zero.
         """
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=_base_config(verbosity=1))
         dw.initialize()
         result = dw.simulate()
 
@@ -239,7 +239,7 @@ class TestMetrics:
         (kW)\" aggregate column, which is a pre-existing infrastructure gap
         (see T-0326 Known Limitations).
         """
-        dw = Dwelling.from_hpxml(HPXML_PV, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(start_time="2019-07-15T00:00:00Z", duration=86400, time_res=900))
+        dw = Dwelling.from_hpxml(HPXML_PV, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=_base_config(start_time="2019-07-15T00:00:00Z", duration=86400, time_res=900))
         dw.initialize()
         result = dw.simulate()
 
@@ -258,7 +258,7 @@ class TestMetrics:
         """RunResult.metrics is Some exactly when the run requested them:
         a config without metrics=True carries none, one with it computes."""
         dw = Dwelling.from_hpxml(
-            HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), config=_base_config(verbosity=0, metrics=False)
+            HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=_base_config(verbosity=0, metrics=False)
         )
         dw.initialize()
         result = dw.simulate()
@@ -268,7 +268,7 @@ class TestMetrics:
             HPXML,
             SCHEDULE,
             WEATHER,
-            defaults_path=str(HARES_DEFAULTS),
+            defaults=str(HARES_DEFAULTS),
             config=_base_config(verbosity=0, metrics=True),
         )
         requested.initialize()

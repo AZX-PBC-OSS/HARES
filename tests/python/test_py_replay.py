@@ -44,7 +44,7 @@ def build_replayable(tmp_path: Path) -> Any:
         str(tmp_path / "building.xml"),
         str(tmp_path / "schedule.csv"),
         str(tmp_path / "weather.epw"),
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=1,
         config=replay_config(),
     )

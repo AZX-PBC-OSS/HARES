@@ -2500,7 +2500,7 @@ class DwellingConfig:
         *,
         bldg_id: int = ...,
         initialization_duration: int | None = ...,
-        defaults_path: str | ParsedDefaults | None = ...,
+        defaults: str | ParsedDefaults | None = ...,
         overrides: dict[str, Any] | None = ...,
         **unexpected: object,
     ) -> None: ...
@@ -2513,7 +2513,7 @@ class DwellingConfig:
     @property
     def config(self) -> SimulationConfig: ...
     @property
-    def defaults_path(self) -> str | None: ...
+    def defaults(self) -> str | None: ...
     @property
     def bldg_id(self) -> int: ...
     @property
@@ -3093,7 +3093,7 @@ class DwellingBlueprint:
         *,
         bldg_id: int = ...,
         initialization_duration: int | None = ...,
-        defaults_path: str | ParsedDefaults | None = ...,
+        defaults: str | ParsedDefaults | None = ...,
         overrides: dict[str, Any] | None = ...,
         **unexpected: object,
     ) -> DwellingBlueprint: ...
@@ -3136,7 +3136,7 @@ class Dwelling:
         *,
         bldg_id: int = ...,
         initialization_duration: int | None = ...,
-        defaults_path: str | ParsedDefaults | None = ...,
+        defaults: str | ParsedDefaults | None = ...,
         overrides: dict[str, Any] | None = ...,
         **unexpected: object,
     ) -> Dwelling: ...

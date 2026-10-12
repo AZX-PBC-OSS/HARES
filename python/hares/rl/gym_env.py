@@ -61,7 +61,7 @@ class GymDwellingConfig:
     hpxml: str
     schedule: str
     weather: str
-    defaults_path: str | None = None
+    defaults: str | None = None
     sim_config: SimulationConfig | None = None
 
 
@@ -473,8 +473,8 @@ class DwellingGymEnv(_GYM_BASE):
         )
 
         hpxml_kwargs: dict[str, Any] = {}
-        if self._config.defaults_path is not None:
-            hpxml_kwargs["defaults_path"] = self._config.defaults_path
+        if self._config.defaults is not None:
+            hpxml_kwargs["defaults"] = self._config.defaults
         if self._config.sim_config is not None:
             # The whole object, so every field reaches the dwelling by
             # construction and the engine validates it.

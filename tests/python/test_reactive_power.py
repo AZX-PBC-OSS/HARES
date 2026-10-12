@@ -485,7 +485,7 @@ class TestZipPfOverride:
             hpxml=common["hpxml"],
             schedule=common["schedule"],
             weather=common["weather"],
-            defaults_path=common["defaults_path"],
+            defaults=common["defaults_path"],
             bldg_id=common["bldg_id"],
             config=sim_config,
         )
@@ -496,7 +496,7 @@ class TestZipPfOverride:
             hpxml=common["hpxml"],
             schedule=common["schedule"],
             weather=common["weather"],
-            defaults_path=common["defaults_path"],
+            defaults=common["defaults_path"],
             bldg_id=common["bldg_id"],
             config=sim_config,
             overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
@@ -583,7 +583,7 @@ class TestZipPfOverride:
             hpxml=common["hpxml"],
             schedule=common["schedule"],
             weather=common["weather"],
-            defaults_path=common["defaults_path"],
+            defaults=common["defaults_path"],
             bldg_id=common["bldg_id"],
             config=sim_config,
             overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
@@ -690,7 +690,7 @@ class TestResolvedZipInspection:
     def test_ashp_heater_resolved_zip_pf_084(self):
         from hares import ASHPHeater, DwellingBlueprint, EndUse
 
-        bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=600, time_res=60,start_time="2019-01-01T00:00:00"))
+        bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=600, time_res=60,start_time="2019-01-01T00:00:00"))
         bp.remove_equipment_by_end_use([EndUse.HVAC_HEATING])
         bp.add_equipment(
             ASHPHeater("ASHP", capacity_w=12000, hspf=9.5, backup_capacity_w=5000)
@@ -709,7 +709,7 @@ class TestResolvedZipInspection:
     def test_user_zip_override_pf_09_visible(self):
         from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults_path=str(HARES_DEFAULTS), bldg_id=42, overrides={"Air Conditioner": {"zip": {"pf": 0.9}}}, config=SimulationConfig(start_time="2019-07-01T14:00:00", duration=600, time_res=60,master_seed=0))
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, overrides={"Air Conditioner": {"zip": {"pf": 0.9}}}, config=SimulationConfig(start_time="2019-07-01T14:00:00", duration=600, time_res=60,master_seed=0))
         dw.initialize()
 
         zip_dict = dw.equipment_zip("Air Conditioner")

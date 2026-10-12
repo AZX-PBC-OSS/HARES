@@ -12,10 +12,11 @@ from typing import Any, cast
 
 import pytest
 
-from conftest import REMOVED_SITE_KEYWORD_MESSAGES
+from conftest import HARES_DEFAULTS, HPXML, REMOVED_SITE_KEYWORD_MESSAGES, SCHEDULE, WEATHER
 from hares import (
     Destination,
     Dwelling,
+    DwellingBlueprint,
     DwellingConfig,
     Frequency,
     HealthPolicy,
@@ -344,7 +345,7 @@ class TestDwellingConfig:
         assert cfg.weather == "path/to/weather.epw"
         assert cfg.bldg_id == 0
         assert cfg.config.duration == 3600
-        assert cfg.defaults_path is None
+        assert cfg.defaults is None
 
     def test_initialization_duration_round_trips(self):
         cfg = DwellingConfig(
@@ -544,3 +545,32 @@ class TestDwellingConfig:
         assert result is not None
         assert "hvac" in result
         assert result["hvac"]["capacity_kw"] == 5.0
+
+
+class TestDefaultsKeyword:
+    """The dwelling-level defaults keyword is `defaults`: `defaults_path`
+    is a removed key whose message names `defaults`, on every construction
+    surface, and `defaults` builds the dwelling the old keyword built."""
+
+    @pytest.fixture
+    def short_config(self) -> SimulationConfig:
+        return SimulationConfig(start_time="2019-01-01T00:00:00", duration=300, time_res=60)
+
+    def _call(self, surface: str, config: SimulationConfig, **kw: Any) -> Any:
+        if surface == "dwelling":
+            return Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, config=config, bldg_id=42, **kw)
+        if surface == "blueprint":
+            return DwellingBlueprint.from_hpxml(
+                HPXML, SCHEDULE, WEATHER, config=config, bldg_id=42, **kw
+            )
+        return DwellingConfig(HPXML, SCHEDULE, WEATHER, config=config, bldg_id=42, **kw)
+
+    @pytest.mark.parametrize("surface", ["dwelling", "blueprint", "config"])
+    def test_defaults_path_names_defaults(self, short_config: SimulationConfig, surface: str):
+        with pytest.raises(TypeError, match="'defaults_path'.*defaults|defaults.*'defaults_path'"):
+            self._call(surface, short_config, defaults_path=str(HARES_DEFAULTS))
+
+    def test_defaults_keyword_builds_the_dwelling(self, short_config: SimulationConfig):
+        dw = self._call("dwelling", short_config, defaults=str(HARES_DEFAULTS))
+        dw.initialize()
+        assert dw.config().duration == short_config.duration
