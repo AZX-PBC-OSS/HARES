@@ -329,7 +329,8 @@ is recorded as measured and dropped.
 
 **State:** committed `3fa77b58` (2026-10-12, branch `row/r62-rt2`, based
 on `9cc6d578`), rebased onto RT-4's fold (`row/r61-rt4`: `2434deb8` +
-`c7098a38`) as `470b0473` + `902d8d60`, and the review fix below on top.
+`c7098a38`) as `470b0473` + `902d8d60`, and the review fix `81a8969d`
+below on top.
 The table is kept: the stepped-episode loop's wall, the rule's arbiter,
 read 5.8% and 7.8% lower with it in two paired sets (the exact
 accumulator under it: the loop's 9600 per-step computations, about 9 ms
