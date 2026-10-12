@@ -2921,3 +2921,26 @@ sha256sum`, ten passes in a loop: 0.051 s total, about 5 ms per blueprint
 on the warm page cache. The digest cost is negligible against the parse
 it rides (the same blueprint's HPXML parse alone is tens of ms); the
 re-read for the digest touches the same page-cached bytes.
+
+### The validate-only path's wall time, 2026-10-12, `906d4a1c`
+
+Load average at write time: under 1 (the gate runs finished).
+
+Quantity: the requirement's feasibility query in milliseconds: the
+validate-only assembly's wall time against the 100 ms target, the valid
+input (the cz4a parity fixture, 48 h at 900 s, no warm-up) and the
+infeasible one (the cz2a parity fixture's gas furnace with an override of
+AFUE 1.33, rejected at the equipment's init in the assembly).
+
+Command: the blueprint_validate suite's hand-run measurement test
+(`validate_wall_time`, ignored, run by hand in the release build with all
+features): `cargo test -p hares-core --release --all-features --test
+blueprint_validate validate_wall_time -- --ignored --nocapture`, the
+first validate() call discarded (page cache and lazy statics), the second
+timed.
+
+Result: the cz4a fixture's validate() 3.3 ms; the cz2a AFUE rejection
+6.6 ms. Both one order of magnitude under the 100 ms target, so no phase
+breakdown was recorded; the dominant cost either way is the assembly's
+own (the environment init and the equipment construction), the warm-up's
+simulated days absent by construction.

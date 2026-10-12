@@ -194,6 +194,54 @@ it. `blueprint_catalogue_in_python` (Python): the same equality through
 
 **Commit:** `feat: validate a blueprint and read its resolved model without running it`
 
+**State:** committed `906d4a1c` (2026-10-12, branch `row/r66-in2-in7`,
+cut from `228eecbe`). The build's assembly and warm-up are separate
+phases: `assemble_from_blueprint_with_seed` runs every construction-time
+check, computes the resolved model, initialises the equipment and
+registers the built-in actors, and the build runs
+`run_warmup_converged` on the dwelling the assembly returns, the RNG
+restore and the production-clock rebuild unchanged. `validate()` and
+`catalogue()` run the assembly alone, the construction-time warnings
+seeded and emitted on failure exactly as the build's failure path emits
+them. The read-back is the blueprint's own `ResolvedModel`
+(`crates/hares-core/src/resolved.rs`, the plan's shape less the
+equipment, window and infiltration fields the resolved-parameter
+read-back row owns, which had not landed at the cut, so the fold extends
+the type): every boundary's `ResolvedBoundary` (id, kind, area, the
+network's own `r_effective_m2k_w`, the films named apart, `c_j_k`, the
+construction's `layers` outside to inside, the LUT row's or the material
+layers', empty for the F-factor slab), the resolved `site` with its
+per-field sources, and the `ResolvedClock` this entry adds (the first
+step's local standard time, the site offset, the step, the configured
+horizon's step count). The built dwelling carries the same model and
+`Dwelling::resolved_model()` reads it, so validate and build cannot
+disagree. RED first: the Rust acceptance file failed to compile on the
+missing API and the Python test on the missing import, both witnessed at
+the base with only the tests applied. The acceptance: the AFUE-1.33
+override fails `validate()` and `build()` with equal errors, `PartialEq`
+and `Display` both; the step counter reads 0 after `validate()` and 3
+after three steps; `validate()` equals the built dwelling's read-back;
+the full-year clock reads 8760 steps, 3600 s, -25200 s, 2023-01-01
+00:00:00; the blueprint's catalogue equals the built dwelling's (the
+digest, the length) with no step. Adaptations: the step counter is the
+process-wide doc-hidden instrument the parse counters are (an
+integration test cannot read a `cfg(test)` field); `validate()` and
+`catalogue()` take the `Arc` receiver `build()` takes; the Python
+surface clones the builder and freezes the clone for the read-only
+calls, so `build()` still works after either. Python:
+`DwellingBlueprint.validate()` returns the dict form (the site's values
+beside their source labels, the clock, the boundaries' layer stacks) and
+`DwellingBlueprint.catalogue()` returns the `Catalogue`, with the stub
+and the docs line. Gates green on the staged change and again on the
+commit: fmt clean; clippy `--workspace --all-targets --all-features -D
+warnings` clean and the dst and observe variants clean; nextest
+`--workspace --all-features -j 4` 8041/8041 (4 skipped: the ignored
+kind-pin generator and the hand-run measurement tests); `pytest -m ''`
+1730 passed + 6 xfailed, 0 failed, 0 errors; pyright 0; the nine goldens
+bitwise (compare-all 8 + dst 1). The measurement: the cz4a `validate()`
+3.3 ms and the cz2a AFUE rejection 6.6 ms in the release build, both
+under R9's 100 ms target (`02-measurement.md`).
+
 **Dependencies:** `06-runtime-memory.md` RT-6; `03-output-reporting.md`
 OR-1 (the catalogue); `05-python-surface.md` PY-4 (the Python
 `Catalogue`).
@@ -703,6 +751,57 @@ takes equipment names only (`crates/hares-core/src/dwelling/conversions.rs:858,
 `frame_golden compare-all`.
 
 **Commit:** `feat: envelope resistance and thermal-mass scales applied after LUT row selection`
+
+**State:** committed `e1c5a689` (2026-10-12, branch `row/r66-in2-in7`,
+after the validate row's `906d4a1c`, cut from `228eecbe`). Landed:
+`EnvelopeScales` (`crates/hares-io/src/envelope_scales.rs`, new; the
+plan's shape, `#[serde(default, deny_unknown_fields)]`, default 1.0 and
+1.0, the field descriptions naming the slab exclusion), the reserved
+`envelope` key exempted from the equipment-name override validation, the
+extraction and `EnvelopeScales::validate()` at the assembly boundary
+before any side effect (an unknown field or an out-of-bounds value is an
+error naming the key, the field, its value and the bounds, OD-2's rule),
+and the application after the row selection: the boundary construction
+picks the LUT row on the declared R unscaled, then every opaque layer's
+resistance multiplies by `opaque_r_scale` and its capacitance by
+`thermal_mass_scale`, on the LUT row's layers, the input's own material
+layers and the single-resistor fallback, films unscaled, the F-factor
+slab and the fenestration outside both. A material layer scales through
+its conductivity's inverse (the resistance) and its density (the
+capacitance), so the layer's own R and C are the values the scales
+multiply and the layer-splitting the RC network derives from the scaled
+material preserves the totals. The scaled values are what the resolved
+model reports: the boundary read-back's `films_m2k_w` names apart the
+film resistance the boundary's total includes (the exterior one only
+when the two sides face different zones), so the material R the scales
+act on is `r_effective_m2k_w` minus its films. The data sources
+`build_default_solvers` takes are grouped into one `SolverInputs` struct
+(clippy's argument bound). RED first, witnessed at the validate row's
+commit with only the tests applied: every acceptance test failed on the
+base's `unknown equipment override key 'envelope'` rejection (the wrong
+reason, the key unimplemented), the scale-response assertions
+unreachable behind it. The acceptance green: unit scales bitwise-neutral
+on the M-2 fixture sets a config can build (cz2a and cz4a, every column
+of every batch by bits, the metrics read the same; the fleet and the
+defaults-file-replacement surface ride the gate's compare-all, bitwise);
+0.0 and 10.5 rejected naming the field, the value and (0, 10]; the
+never-reselects pin on the ochre-samples home at 0.5, 0.8, 1.0, 1.25 and
+2.0 (every layer capacitance bitwise the unscaled one, every layer
+resistance the unscaled one times the scale, on bits); the mass scale
+moving capacitance only (times 2 on bits, resistances bitwise); 200
+scales from 0.5 to 2.0 with every opaque boundary's material R
+proportional to the scale within 1e-9 relative (the per-layer scaling is
+exact on bits, the summed total's rounding inside the band) and the slab
+and fenestration unmoved on bits; the unknown field rejected naming it.
+Movement declared: none; no fixture carries the `envelope` key and the
+unit scales are bitwise today's, so the nine goldens (compare-all 8 +
+dst 1) are bitwise identical, compared on the staged change and again on
+the commit, nothing re-captured. Gates: fmt clean; clippy
+`--workspace --all-targets --all-features -D warnings` clean and the dst
+and observe variants clean; nextest `--workspace --all-features -j 4`
+8050/8050 (4 skipped: the ignored kind-pin generator and the hand-run
+measurement tests); `pytest -m ''` 1730 passed + 6 xfailed, 0 failed, 0
+errors; pyright 0.
 
 **Dependencies:** RT-6 (`ResolvedModel` layers); OD-2.
 
