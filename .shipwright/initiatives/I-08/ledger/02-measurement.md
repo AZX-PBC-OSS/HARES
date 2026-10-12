@@ -2860,3 +2860,48 @@ was a cached call mislabeled):
   the steady read;
 - a cached call (the held wrapper's later `arrow()`): 0.0005 to
   0.0009 ms, which share the cached batch's buffers.
+
+### The surface-independent forcing computed once per weather and time grid, 2026-10-12 (branch `row/r62-rt2`, based on `9cc6d578`)
+
+Raw record: `.shipwright/runs/r62-rt2-measurement.md` (every set, its
+validity verdict under the 5% rule, and the host condition: WSL2, shared
+with another worktree's test suite at load 7 to 18, which the wall sets
+could not beat).
+
+The row's numbers, the consumer shape (the ResStock bldg0176227 home at
+900 s over one weather file):
+
+- The forcing block's own work (the profiling-gated accumulator, exact):
+  the stepped-episode loop's 9600 per-step computations (about 0.95 us
+  each, 8.6 to 14.0 ms of the loop) become one shared table build and
+  about 0.5 to 1.5 ms of reads; a full-year run's forcing drops from 35 to
+  43 ms (2.9% of `simulate()`) to 3.6 to 4.6 ms (0.3%).
+- The stepped-episode loop's wall (M-3 item 5's shape, 100 x
+  load-state-and-96-steps), paired in one binary (the table against the
+  per-step computation the `FORCE_PER_STEP_FORCING` switch selects):
+  median 348.7 against 378.2 ms, and 354.6 against 376.6 ms in the second
+  set: 5.8% to 7.8% lower with the table, above the band; no set is valid
+  under the noise rule on this host (the spread exceeds 5% in every set),
+  so the verdict rests on the two sets' agreement in direction plus the
+  exact accumulator's removal of the per-step computation.
+- The fleet step loop (12 homes on one weather file, 96 steps, 4 threads):
+  median 47.2 against 49.8 ms, -5.2%, the sets overlapping: at the band's
+  edge, recorded as not resolved on this host. The fleet's construction
+  wall (12 homes): about 604 ms with the table against about 534 ms
+  without (the identity hash per home plus one shared build).
+- The single-pass full year: table median 1395 ms, per-step 1364 ms
+  (+2.3%, inside the band: no measurable change, as the entry's
+  parenthetical says, a single run computes each row once either way).
+  The year dwelling's construction: about 77 ms against about 39 ms (the
+  eager one-pass build plus the identity hash).
+- The table's size: 35040 rows at 900 s, 2242560 bytes (2.24 MB); 525600
+  rows at 60 s, 33638400 bytes (33.6 MB); 64 bytes per row.
+- The per-surface Perez and incidence loop's share (a temporary
+  accumulator, removed): 7.3% to 7.5% of `simulate()` on the full year
+  and 5.7% to 5.8% of the stepped-episode loop, both at or above the 5%
+  band: the per-surface branch's condition fires. Its specified mechanism
+  (a per-blueprint table shared by every dwelling the blueprint builds,
+  and its two-dwellings-from-one-blueprint acceptance test) needs the
+  blueprint that builds many dwellings, which `06-runtime-memory.md`
+  RT-4's parsed-input surface owns: the branch lands with that row, the
+  shares recorded here as the measurement that fired it.

@@ -327,6 +327,78 @@ decision they produced. If the table is dropped, the row commits no engine
 change: the numbers go into `02-measurement.md`'s log and the row's state
 is recorded as measured and dropped.
 
+**State:** committed `3fa77b58` (2026-10-12, branch `row/r62-rt2`, based
+on `9cc6d578`). The table is kept: the stepped-episode loop's wall, the
+rule's arbiter, read 5.8% and 7.8% lower with it in two paired sets (the
+exact accumulator under it: the loop's 9600 per-step computations, about
+9 ms of the loop's work, removed; the full-year forcing 2.9% to 0.3% of
+`simulate()`); the numbers, the noise verdicts and the fleet step-loop
+figure at `02-measurement.md`'s log entry, raw record
+`.shipwright/runs/r62-rt2-measurement.md`.
+
+The row ran ahead of its dependency: the entry's dependencies name
+RT-4 first and RT-4 has not landed, so two mechanisms are adapted to
+today's tree and recorded here.
+
+The share mechanism: `ForcingKey` and `ForcingTable` are `hares-io`'s
+(`forcing.rs`), the key exactly the entry's plain values (the resolution
+in seconds, the naive local start, the resolved site UTC offset in
+seconds, the horizon in steps, the resolved latitude, longitude and
+elevation as bit patterns, the civil timezone's IANA name). The map from
+key to `Arc<ForcingTable>` behind a mutex, locked once per construction
+and never on the step path, cannot live on a parsed-weather handle that
+does not exist: it is a process-global map whose key pairs the grid key
+with the content digest of the resampled weather series (every field's
+values plus the meta fields the build reads, hashed by bit pattern), so
+constructions over one weather file on one grid share the winner's table
+(`Arc::ptr_eq`, the acceptance tests prove it) and a changed file keys
+differently and never shares a stale table. When RT-4's parsed handles
+land, the map moves onto them and the identity tuple dissolves. The
+horizon rule is the entry's: `max(duration steps, steps per day)` with
+warm-up on, the duration's steps without, sized once and never read past
+(a step past the horizon, like a stepping clock whose time base is not
+the construction's, reads the per-step computation, whose semantics are
+the parent's own; two existing tests that step such clocks caught the
+first cut indexing blindly and the check is the fix).
+
+The thread safety: `ForcingTable` is plain data (64-byte `Copy` rows),
+shared as an `Arc`, read-only during stepping; the map's mutex is
+touched only where a manager is constructed. The fleet's parallel steps
+(rayon, one dwelling per thread) read the shared table through their
+own `Arc`s with no lock on the step path, which is the entry's
+`Send + Sync` requirement verbatim.
+
+RED first: the duplicate-computation proof is the process-global
+`FORCING_COMPUTATIONS` counter (kept, documented, one increment per
+computation): at the parent, three dwellings built over one weather file
+and stepped ten steps each moved it by 33 (one per step, plus each
+construction's initial state); with the table, by exactly 1. The
+acceptance tests failed to compile at the parent (no `ForcingTable`
+surface) and the differential failed behaviourally once the switch
+existed; all eight tests in `crates/hares-core/tests/forcing_table.rs`
+are green on the commit, bitwise frames against the per-step computation
+selected by the kept `FORCE_PER_STEP_FORCING` switch (the per-step path
+is the parent's own block, so one binary runs both sides of the
+comparison and the pin cannot rot).
+
+The per-surface branch: its condition fires (the measured shares, 7.3%
+to 7.5% of `simulate()` on the full year and 5.7% to 5.8% of the
+stepped-episode loop, at or above the 5% band; a temporary accumulator,
+removed) and its mechanism does not adapt: a per-blueprint table shared
+by every dwelling the blueprint builds, and the
+`per_surface_table_shared_across_builds_of_one_blueprint` test, need the
+blueprint that builds many dwellings, which is RT-4's change. A
+per-dwelling table in today's one-blueprint-one-dwelling tree would pay
+the entry's own size estimate per home with nothing shared. The branch
+lands with RT-4, the shares recorded in the measurement log as the
+measurement that fired it.
+
+Gates: fmt clean; clippy --workspace --all-targets --all-features -D
+warnings clean; nextest --workspace --all-features -j 4 8003 passed, 1
+skipped (the ignored kind-pin generator); `-F dst environment::` 62
+passed; pytest -m '' 1723 passed, 6 xfailed, 0 failed, 0 errors; pyright
+0; the nine goldens bitwise (compare-all 8, `full_year_900s_dst` 1).
+
 ## RT-3: thermal solver steps without heap allocation
 
 **Kind:** initiative work (`context.md` items 4 and 5).
