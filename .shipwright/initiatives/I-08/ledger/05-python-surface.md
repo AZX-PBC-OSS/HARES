@@ -928,6 +928,78 @@ provenance`; `uv run --no-sync pytest tests/python`.
 **Dependencies:** OR-1, OR-6, OR-7 (`Catalogue::digest()`), PY-9 (the
 `Provenance` pyclass).
 
+**State:** committed `e3d53fb0` (2026-10-11, branch `row/r58-py6`, cut
+from `072722bf`, one commit). `crates/hares-core/build.rs` (new) records
+the build identity once per build as one `BuildInfo` expression in
+`OUT_DIR`, which `BuildInfo::get()` includes. The commit is read
+file-based, never from a git process: `HEAD` verbatim for a detached
+head, else the symbolic ref's loose ref file in the git directory or the
+common directory its `commondir` file names, else the `packed-refs`
+entry. The dirty flag is one `git status --porcelain
+--untracked-files=no` run parsed by the pure `porcelain_is_dirty`
+(`None` when git or `.git` is absent, never a guess). The profile comes
+from `PROFILE`, the features lowercased from `CARGO_FEATURE_*` sorted,
+rustc from `$RUSTC -V`. The parsing lives in
+`crates/hares-core/build_support/git.rs`, included by `build.rs` through
+`#[path]` and by the crate's test build; the rerun paths (the git
+directory's `HEAD`, the resolved ref file, its `index`, the workspace's
+`crates` tree, `Cargo.toml`, `Cargo.lock`) resolve from
+`CARGO_MANIFEST_DIR` to the workspace root and only paths that exist are
+emitted, and a worktree's `.git` file is followed to the `gitdir:`
+directory it names (every engine-under-test checkout included), so
+`HEAD` and `index` are that worktree's and the branch ref resolves
+through the common directory. `Dwelling::build_provenance`, the one
+construction site on the one `finish()` finalisation path (`simulate()`
+included), records `Provenance.build` and `Provenance.catalogue_digest`,
+the 32 bytes decoded from the catalogue's hex `digest()` (OR-7's, which
+also writes the hex into the schema's `hares:catalogue_digest`
+metadata). Python: the frozen `BuildInfo` pyclass (one getter per field,
+`__repr__`), `hares.build_info()`, `hares.__version__`
+(`CARGO_PKG_VERSION`, the pyproject's `0.1.0`), the `Provenance.build`
+and `Provenance.catalogue_digest` (hex string) getters on PY-9's
+`Provenance`, their `_hares.pyi` stubs and their lines in the docs'
+changes section. RED first, witnessed at the base in a throwaway
+worktree with only the test files applied: the Rust acceptance suite
+failed to compile on the missing API (ten errors: `BuildInfo` not found
+in `hares_core`, no field `build` or `catalogue_digest` on
+`Provenance`), and the Python acceptance test failed with AttributeError
+on the missing `hares.build_info`. The acceptance tests all exist and
+pass: the five `build_support` probes (`head_commit_resolution` over
+synthetic `.git` trees for the detached, symbolic-ref, packed-ref,
+worktree and no-`.git` shapes with no git process started,
+`rerun_paths_follow_the_worktree_gitdir`,
+`porcelain_parse_reports_dirty`,
+`build_info_commit_matches_source_tree`,
+`build_info_fields_exist_and_match_the_build`) and the five result
+probes on the `cz4a_ashp_hpwh` inputs
+(`provenance_carries_build_identity`,
+`provenance_digest_equals_schema_metadata`,
+`two_runs_carry_the_same_build_identity`,
+`catalogue_digest_changes_when_a_variable_is_added` through a test actor
+declaring one `state_flag`,
+`catalogue_digest_equal_for_two_builds_of_one_blueprint`), plus
+`test_python_build_info_equals_run_provenance` (field-for-field
+equality, the commit non-empty, `__version__` equal, the digest a 64
+char hex string). Gates, run on the staged change and again on the
+commit: fmt clean; clippy `--workspace --all-targets --all-features -D
+warnings` clean (first round fixed three build-script-test lints:
+`match_result_ok`, `manual_contains` twice,
+`needless_option_as_deref`); nextest `--workspace --all-features -j 4`
+7982/7982 and `-F dst -j 4` 7912/7912 (1 skipped each: the ignored
+kind-pin generator; the only first-run failure was this worktree's
+uninitialised `vendors/OCHRE` submodule, environmental, green after
+`git submodule update --init --recursive`); `uv run pytest tests/python
+-m ''` 1685 passed, 6 xfailed, 0 failed, 0 errors (one new test over row
+56's 1684); pyright 0 errors. The nine goldens bitwise on the staged
+change and on the commit (compare-all 8 identical, `full_year_900s_dst`
+identical): no movement, and none can happen, the golden products carry
+no provenance keys, so no re-capture and the twice-byte-identical
+regeneration is not exercised; the identity's own stability is pinned by
+`two_runs_carry_the_same_build_identity` and proven live across the
+commit: the dirty-tree build recorded `072722bf` with `dirty=true`, the
+committed rebuild recorded `e3d53fb0` with `dirty=false`, read through
+`hares.build_info()` after `maturin develop`.
+
 ## PY-9: `RunResult`, `finish()`, `health()` and reports in Python
 
 **Kind:** initiative work (`dl-i08-architecture.results`; R3, X-3, RS-1).
