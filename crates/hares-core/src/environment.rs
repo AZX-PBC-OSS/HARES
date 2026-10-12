@@ -6,6 +6,7 @@ use std::time::Duration as StdDuration;
 #[cfg(test)]
 use chrono::Duration;
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
+use hares_io::forcing::{ForcingCacheKey, ForcingKey, ForcingRow, ForcingTable};
 use hares_io::hpxml::building::{BoundaryType, ZoneType};
 use hares_io::{
     Building, ScheduleTimeSeries, SiteLocation, WeatherMeta, WeatherTimeSeries, monthly_day_counts,
@@ -14,7 +15,7 @@ use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherF
 use hares_physics::{
     psychrometrics::{humidity_ratio_from_tdp, moist_air_enthalpy, wet_bulb_from_humidity_ratio},
     solar::{
-        OMNI_AZIMUTH_SAMPLES, SkyIrradiance, SunPosition, SurfaceOrientation,
+        OMNI_AZIMUTH_SAMPLES, SkyIrradiance, SolarPosition, SunPosition, SurfaceOrientation,
         omni_directional_irradiance, perez_tilted_irradiance, solar_position,
     },
     water_mains::{Hemisphere, water_mains_temperature_c},
@@ -35,6 +36,32 @@ use crate::ambient_air::{MoistAir, scheduled_space_air};
 
 const DEFAULT_GRID_VOLTAGE_PU: f64 = 1.0;
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
+
+/// How many times this process computed the surface-independent forcing
+/// (the humidity ratio, wet bulb, enthalpy, day of year, solar position and
+/// mains temperature that depend only on the weather and the time grid).
+/// One increment per shared forcing table built, or per step on the
+/// per-step path [`FORCE_PER_STEP_FORCING`] selects. The duplicate
+/// computation probe the forcing tests read: dwellings over one weather
+/// file and time grid must move it by one construction in total, not one
+/// step each.
+pub static FORCING_COMPUTATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The surface-independent forcing's accumulated computation time,
+/// compiled in only with the `profiling` feature (an `Instant::now()` pair
+/// per step would otherwise cost the hot path). The share measurements
+/// read it: the forcing's nanos against the run's wall.
+pub static FORCING_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// When true, every `EnvironmentManager` constructed afterwards computes
+/// the forcing per step instead of reading a shared table. The forcing
+/// differential tests and the paired perf measurements set it: the per-step
+/// path is the pre-table computation, so one binary can run both sides of
+/// the comparison. Tests run in separate processes under nextest, so the
+/// flag's process scope races nothing.
+pub static FORCE_PER_STEP_FORCING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Geometry required for solar irradiance projection.
 ///
@@ -92,6 +119,8 @@ pub enum EnvironmentManagerError {
         zone_type: String,
         volume_m3: Option<f64>,
     },
+    #[error(transparent)]
+    Forcing(#[from] HaresError),
 }
 
 fn check_override_carries(
@@ -115,6 +144,12 @@ pub struct EnvironmentInitOptions<'a> {
     pub civil_timezone: Option<&'a str>,
     pub initial_rng: Option<ChaCha8Rng>,
     pub setpoint_deadband_c: Option<f64>,
+    /// The run's horizon in steps: the number of rows the shared forcing
+    /// table is sized to. `None` sizes the table to the weather series'
+    /// own length, which covers every step a run over one weather year
+    /// reads; the dwelling path passes the horizon rule's value (the
+    /// duration's steps, and at least one day's steps when warm-up runs).
+    pub horizon_steps: Option<u64>,
 }
 
 /// Produces a complete [`EnvironmentState`] at each timestep.
@@ -188,6 +223,13 @@ pub struct EnvironmentManager {
     // Pre-allocated buffers reused each step to avoid per-step allocations.
     solar_irradiance_buf: Vec<SurfaceIrradiance>,
     schedule_values_buf: Vec<f64>,
+    /// The shared surface-independent forcing for this weather and time
+    /// grid: built once per grid (shared with every other manager over the
+    /// same weather content and key) and read-only afterwards. `None` when
+    /// [`FORCE_PER_STEP_FORCING`] selects the per-step computation.
+    forcing: Option<Arc<ForcingTable>>,
+    /// The grid key the forcing table was found or built under.
+    forcing_key: ForcingKey,
     /// The slot writes' allocation accumulator; this crate's test build
     /// only. The dwelling's snapshot-allocation test reads it.
     #[cfg(test)]
@@ -425,6 +467,42 @@ impl EnvironmentManager {
         let num_surfaces = surfaces.len();
         let num_schedule_cols = schedule.columns.len();
 
+        let forcing_key = ForcingKey {
+            time_res_secs: step_secs,
+            local_start: start_time.naive_local(),
+            utc_offset_secs: start_time.offset().local_minus_utc(),
+            horizon_steps: options
+                .horizon_steps
+                .unwrap_or_else(|| weather.len() as u64)
+                .max(1),
+            latitude_bits: weather_meta.latitude.to_bits(),
+            longitude_bits: weather_meta.longitude.to_bits(),
+            elevation_bits: weather_meta.elevation_m.to_bits(),
+            civil_timezone: options.civil_timezone.map(str::to_owned),
+        };
+        let forcing = if FORCE_PER_STEP_FORCING.load(std::sync::atomic::Ordering::Relaxed) {
+            None
+        } else {
+            let horizon_steps = forcing_key.horizon_steps;
+            Some(shared_forcing_table(
+                ForcingCacheKey {
+                    content: weather_identity(&weather),
+                    key: forcing_key.clone(),
+                },
+                || {
+                    build_forcing_table(
+                        &weather,
+                        weather_start_offset,
+                        step_secs,
+                        start_time,
+                        horizon_steps,
+                        #[cfg(feature = "dst")]
+                        civil_tz.as_ref(),
+                    )
+                },
+            )?)
+        };
+
         Ok(Self {
             weather,
             schedule,
@@ -439,6 +517,8 @@ impl EnvironmentManager {
             mains_t_annual_avg_c,
             mains_dt_annual_range_c,
             mains_hemisphere,
+            forcing,
+            forcing_key,
             #[cfg(feature = "observe")]
             raw_mains_temp_f: 0.0,
             #[cfg(feature = "observe")]
@@ -798,43 +878,102 @@ impl EnvironmentManager {
         };
         let schedule_idx = self.compute_schedule_idx(clock);
 
-        // Step 1: weather lookup and psychrometric derivations
+        // Step 1: weather lookup and psychrometric derivations. The
+        // surface-independent forcing (humidity ratio, wet bulb, enthalpy,
+        // day of year, solar position, mains temperature) reads the shared
+        // table when one was built for this weather and time grid, and is
+        // computed per step when [`FORCE_PER_STEP_FORCING`] selects the
+        // pre-table path.
+        #[cfg(feature = "profiling")]
+        let forcing_started = std::time::Instant::now();
         let outdoor_temp_c = self.weather.get(WeatherField::DryBulbC, weather_idx);
         let dew_point_c = self.weather.get(WeatherField::DewPointC, weather_idx);
         let pressure_kpa = self.weather.get(WeatherField::PressureKpa, weather_idx);
         let pressure_pa = pressure_kpa * 1000.0;
-        let outdoor_humidity_ratio = humidity_ratio_from_tdp(dew_point_c, pressure_pa);
-        let outdoor_wet_bulb_c =
-            wet_bulb_from_humidity_ratio(outdoor_temp_c, outdoor_humidity_ratio, pressure_pa);
-        let outdoor_enthalpy_j_kg = moist_air_enthalpy(outdoor_temp_c, outdoor_humidity_ratio);
-
-        // Step 2: per-surface solar irradiance -- compute into self.solar_irradiance_buf,
-        // then swap into state.weather.solar_irradiance so the old Vec's capacity is
-        // returned to self.solar_irradiance_buf for reuse next step.
-        let now = clock.current_time();
-        // Day-of-year from DST-aware civil time when a timezone is configured,
-        // so that consumers (solar_position, Perez irradiance, mains temp, weather field)
-        // observe the civil wall-clock day, not the fixed-offset day which may
-        // be wrong across DST transitions.
-        #[cfg(feature = "dst")]
-        let day_of_year = self
-            .civil_tz
-            .as_ref()
-            .map(|tz| now.with_timezone(tz).ordinal())
-            .unwrap_or_else(|| now.ordinal());
-        #[cfg(not(feature = "dst"))]
-        let day_of_year = now.ordinal();
-
-        let pos = solar_position(
-            self.weather_meta.latitude,
-            self.weather_meta.longitude,
-            now,
-            day_of_year,
-        );
         let ghi = self.weather.get(WeatherField::GhiWM2, weather_idx);
         let dni = self.weather.get(WeatherField::DniWM2, weather_idx);
         let dhi = self.weather.get(WeatherField::DhiWM2, weather_idx);
-        let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
+        let now = clock.current_time();
+        // The table's rows are indexed by the step and built against the
+        // construction start's wall clock. A stepping clock whose time base
+        // is not the construction's (a direct-construction caller stepping
+        // its own clock, or a step past the horizon) reads the per-step
+        // computation, whose time base is the clock's own.
+        let row = self.forcing_row(now, step);
+        let (
+            outdoor_humidity_ratio,
+            outdoor_wet_bulb_c,
+            outdoor_enthalpy_j_kg,
+            day_of_year,
+            pos,
+            solar_zenith_deg,
+            mains_temp_c,
+        ) = match row {
+            Some(row) => (
+                row.humidity_ratio,
+                row.wet_bulb_c,
+                row.enthalpy_j_kg,
+                row.day_of_year,
+                SolarPosition {
+                    altitude_deg: row.solar_altitude_deg,
+                    azimuth_deg: row.solar_azimuth_deg,
+                },
+                row.solar_zenith_deg,
+                row.mains_temp_c,
+            ),
+            None => {
+                let outdoor_humidity_ratio = humidity_ratio_from_tdp(dew_point_c, pressure_pa);
+                let outdoor_wet_bulb_c = wet_bulb_from_humidity_ratio(
+                    outdoor_temp_c,
+                    outdoor_humidity_ratio,
+                    pressure_pa,
+                );
+                let outdoor_enthalpy_j_kg =
+                    moist_air_enthalpy(outdoor_temp_c, outdoor_humidity_ratio);
+                FORCING_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                // Day-of-year from DST-aware civil time when a timezone is configured,
+                // so that consumers (solar_position, Perez irradiance, mains temp, weather field)
+                // observe the civil wall-clock day, not the fixed-offset day which may
+                // be wrong across DST transitions.
+                #[cfg(feature = "dst")]
+                let day_of_year = self
+                    .civil_tz
+                    .as_ref()
+                    .map(|tz| now.with_timezone(tz).ordinal())
+                    .unwrap_or_else(|| now.ordinal());
+                #[cfg(not(feature = "dst"))]
+                let day_of_year = now.ordinal();
+
+                let pos = solar_position(
+                    self.weather_meta.latitude,
+                    self.weather_meta.longitude,
+                    now,
+                    day_of_year,
+                );
+                let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
+                let mains_temp_c = water_mains_temperature_c(
+                    self.mains_t_annual_avg_c,
+                    self.mains_dt_annual_range_c,
+                    u16::try_from(day_of_year).unwrap_or(366),
+                    self.mains_hemisphere,
+                )?;
+                (
+                    outdoor_humidity_ratio,
+                    outdoor_wet_bulb_c,
+                    outdoor_enthalpy_j_kg,
+                    day_of_year,
+                    pos,
+                    solar_zenith_deg,
+                    mains_temp_c,
+                )
+            }
+        };
+        #[cfg(feature = "profiling")]
+        FORCING_NANOS.fetch_add(
+            forcing_started.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         #[cfg(all(feature = "dst", debug_assertions))]
         if let Some(ref tz) = self.civil_tz {
@@ -850,18 +989,11 @@ impl EnvironmentManager {
         // read the same let-binding, so UTC-vs-civil divergence during DST transitions
         // cannot produce a split between solar geometry and irradiance computation.
 
-        let mains_temp_c = water_mains_temperature_c(
-            self.mains_t_annual_avg_c,
-            self.mains_dt_annual_range_c,
-            u16::try_from(day_of_year).unwrap_or(366),
-            self.mains_hemisphere,
-        )?;
-
-        // `water_mains_temperature_c` clamps to the 32 F minimum, so the
-        // former re-check of non-negativity is deleted.
-
         let ground_albedo = self.weather.get(WeatherField::SurfaceAlbedo, weather_idx);
 
+        // Step 2: per-surface solar irradiance -- compute into self.solar_irradiance_buf,
+        // then swap into state.weather.solar_irradiance so the old Vec's capacity is
+        // returned to self.solar_irradiance_buf for reuse next step.
         self.solar_irradiance_buf.clear();
         if let Some(ref overrides) = self.solar_override {
             let idx = (step + self.weather_start_offset) % overrides.len();
@@ -1013,9 +1145,18 @@ impl EnvironmentManager {
                 u16::try_from(day_of_year).unwrap_or(366),
                 self.mains_hemisphere,
             );
-            self.obs_raw_day_of_year = now.ordinal();
-            self.obs_civil_day_of_year = day_of_year;
-            self.obs_utc_day_of_year = now.to_utc().ordinal();
+            match row {
+                Some(row) => {
+                    self.obs_raw_day_of_year = row.raw_day_of_year;
+                    self.obs_civil_day_of_year = row.day_of_year;
+                    self.obs_utc_day_of_year = row.utc_day_of_year;
+                }
+                None => {
+                    self.obs_raw_day_of_year = now.ordinal();
+                    self.obs_civil_day_of_year = day_of_year;
+                    self.obs_utc_day_of_year = now.to_utc().ordinal();
+                }
+            }
         }
         state.weather.rainfall_m = self.weather.get(WeatherField::LiquidPrecipM, weather_idx);
         state.weather.ground_albedo = ground_albedo;
@@ -1062,6 +1203,194 @@ impl EnvironmentManager {
         self.update_in_place(&mut state, clock)?;
         Ok(state)
     }
+
+    /// The grid key this manager's forcing table was found or built under.
+    #[must_use]
+    pub fn forcing_key(&self) -> &ForcingKey {
+        &self.forcing_key
+    }
+
+    /// The shared surface-independent forcing table this manager reads,
+    /// or `None` when [`FORCE_PER_STEP_FORCING`] selects the per-step
+    /// computation.
+    #[must_use]
+    pub fn forcing_table(&self) -> Option<&Arc<ForcingTable>> {
+        self.forcing.as_ref()
+    }
+
+    /// The table's row for one step, when the step's time is the row the
+    /// table holds: the stepping clock's time must be the construction
+    /// start's wall clock advanced by the step's resolution, and the step
+    /// must sit inside the horizon. Every other step reads `None` and the
+    /// caller computes per step against the clock's own time. The row is
+    /// copied out (plain data), so no borrow of the manager lives past the
+    /// lookup.
+    fn forcing_row(&self, now: DateTime<FixedOffset>, step: usize) -> Option<ForcingRow> {
+        let table = self.forcing.as_ref()?;
+        let res_secs = i64::from(self.forcing_key.time_res_secs);
+        let expected = self.forcing_key.local_start
+            + chrono::Duration::seconds(
+                res_secs.saturating_mul(i64::try_from(step).unwrap_or(i64::MAX)),
+            );
+        if now.naive_local() != expected
+            || now.offset().local_minus_utc() != self.forcing_key.utc_offset_secs
+        {
+            return None;
+        }
+        table.get_row(step).copied()
+    }
+}
+
+/// The process's shared forcing tables: one entry per (weather content,
+/// time grid). The map is locked once per manager construction to look up
+/// or insert, and never on the step path, where the table is an
+/// `Arc` read-only.
+static SHARED_FORCING_TABLES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<ForcingCacheKey, Arc<ForcingTable>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Returns the shared table for the sought key, building it on the first
+/// construction that asks for the grid. Two constructions over one weather
+/// file on one grid share the winner's table; the lock is held only for
+/// the map's own operations, never around the build.
+fn shared_forcing_table(
+    sought: ForcingCacheKey,
+    build: impl FnOnce() -> Result<ForcingTable, HaresError>,
+) -> Result<Arc<ForcingTable>, HaresError> {
+    {
+        let map = SHARED_FORCING_TABLES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(table) = map.get(&sought) {
+            return Ok(Arc::clone(table));
+        }
+    }
+    let built = Arc::new(build()?);
+    FORCING_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut map = SHARED_FORCING_TABLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Ok(Arc::clone(map.entry(sought).or_insert(built)))
+}
+
+/// Digests the resampled weather series into the content identity a shared
+/// table's cache key pairs with its grid key: every field's values, plus
+/// the meta fields the forcing build reads (the source resolution and the
+/// midpoint offset that shape the annual row offset). f64 values hash by
+/// bit pattern, so a signed-zero or NaN-payload difference keys
+/// differently and never shares a table.
+fn weather_identity(weather: &WeatherTimeSeries) -> u64 {
+    use std::hash::Hash;
+
+    let mut hasher = std::hash::DefaultHasher::new();
+    weather.meta.source_step_secs.hash(&mut hasher);
+    weather.meta.midpoint_offset_secs.hash(&mut hasher);
+    for values in [
+        &weather.dry_bulb_c,
+        &weather.dew_point_c,
+        &weather.rel_humidity_pct,
+        &weather.pressure_kpa,
+        &weather.ghi_w_m2,
+        &weather.dni_w_m2,
+        &weather.dhi_w_m2,
+        &weather.wind_speed_m_s,
+        &weather.wind_dir_deg,
+        &weather.opaque_sky_cover,
+        &weather.horizontal_infrared_w_m2,
+        &weather.sky_temp_c,
+        &weather.ground_temp_c,
+        &weather.liquid_precip_m,
+    ] {
+        values.len().hash(&mut hasher);
+        for &value in values {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    match &weather.surface_albedo {
+        None => false.hash(&mut hasher),
+        Some(values) => {
+            true.hash(&mut hasher);
+            values.len().hash(&mut hasher);
+            for &value in values {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
+    }
+    std::hash::Hasher::finish(&hasher)
+}
+
+/// Builds the surface-independent forcing for one weather and time grid in
+/// one pass: the same functions, in the same order, with the same inputs
+/// the step's per-step computation uses, so a row's values are bitwise the
+/// values the per-step computation produces for that step.
+#[allow(clippy::too_many_arguments)]
+fn build_forcing_table(
+    weather: &WeatherTimeSeries,
+    weather_start_offset: usize,
+    step_secs: u32,
+    local_start: DateTime<FixedOffset>,
+    horizon_steps: u64,
+    #[cfg(feature = "dst")] civil_tz: Option<&chrono_tz::Tz>,
+) -> Result<ForcingTable, HaresError> {
+    let is_southern = weather.meta.latitude < 0.0;
+    let mains_hemisphere = if is_southern {
+        Hemisphere::Southern
+    } else {
+        Hemisphere::Northern
+    };
+    let (mains_t_annual_avg_c, mains_dt_annual_range_c) = compute_mains_inputs(weather, step_secs);
+
+    let step_secs_i64 = i64::from(step_secs);
+    let rows: Result<Vec<ForcingRow>, HaresError> = (0..horizon_steps)
+        .map(|step_index| {
+            let step_secs_u = i64::try_from(step_index).unwrap_or(i64::MAX);
+            let now =
+                local_start + chrono::Duration::seconds(step_secs_i64.saturating_mul(step_secs_u));
+            let weather_idx = (step_index as usize + weather_start_offset) % weather.len();
+            let outdoor_temp_c = weather.get(WeatherField::DryBulbC, weather_idx);
+            let dew_point_c = weather.get(WeatherField::DewPointC, weather_idx);
+            let pressure_kpa = weather.get(WeatherField::PressureKpa, weather_idx);
+            let pressure_pa = pressure_kpa * 1000.0;
+            let outdoor_humidity_ratio = humidity_ratio_from_tdp(dew_point_c, pressure_pa);
+            let outdoor_wet_bulb_c =
+                wet_bulb_from_humidity_ratio(outdoor_temp_c, outdoor_humidity_ratio, pressure_pa);
+            let outdoor_enthalpy_j_kg = moist_air_enthalpy(outdoor_temp_c, outdoor_humidity_ratio);
+            #[cfg(feature = "dst")]
+            let day_of_year = civil_tz
+                .map(|tz| now.with_timezone(tz).ordinal())
+                .unwrap_or_else(|| now.ordinal());
+            #[cfg(not(feature = "dst"))]
+            let day_of_year = now.ordinal();
+            let pos = solar_position(
+                weather.meta.latitude,
+                weather.meta.longitude,
+                now,
+                day_of_year,
+            );
+            let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
+            let mains_temp_c = water_mains_temperature_c(
+                mains_t_annual_avg_c,
+                mains_dt_annual_range_c,
+                u16::try_from(day_of_year).unwrap_or(366),
+                mains_hemisphere,
+            )?;
+            Ok(ForcingRow {
+                humidity_ratio: outdoor_humidity_ratio,
+                wet_bulb_c: outdoor_wet_bulb_c,
+                enthalpy_j_kg: outdoor_enthalpy_j_kg,
+                day_of_year,
+                solar_altitude_deg: pos.altitude_deg,
+                solar_azimuth_deg: pos.azimuth_deg,
+                solar_zenith_deg,
+                mains_temp_c,
+                #[cfg(feature = "observe")]
+                raw_day_of_year: now.ordinal(),
+                #[cfg(feature = "observe")]
+                utc_day_of_year: now.to_utc().ordinal(),
+            })
+        })
+        .collect();
+    Ok(ForcingTable::from_rows(rows?))
 }
 
 /// EPW hour-ending midpoint shift (30 minutes = 1800 seconds).

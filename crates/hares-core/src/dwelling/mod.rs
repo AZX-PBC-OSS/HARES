@@ -2867,6 +2867,22 @@ impl Dwelling {
     }
 }
 
+/// The horizon rule for the shared forcing table: every step index a run
+/// can read. Warm-up replays the first day and the production run restarts
+/// the clock, so a warm-up run's horizon is its duration's steps and at
+/// least one day's; without warm-up it is the duration's steps alone. The
+/// step counts match the clock's own (`SimClock::total_steps`, and
+/// `run_warmup_converged`'s per-day count).
+fn forcing_horizon_steps(duration: Duration, time_res: StdDuration, warmup: bool) -> u64 {
+    let res_secs = time_res.as_secs().max(1);
+    let duration_steps = u64::try_from(duration.num_seconds()).unwrap_or(0) / res_secs;
+    if !warmup {
+        return duration_steps;
+    }
+    let steps_per_day = 24 * 3600 / res_secs;
+    duration_steps.max(steps_per_day)
+}
+
 pub(crate) fn build_from_blueprint(bp: &Arc<DwellingBlueprint>) -> Result<Dwelling> {
     let mut warnings = WarningLog::new();
     // Construction-time warnings first, in report order: the blueprint's
@@ -2978,6 +2994,11 @@ fn build_from_blueprint_inner_with_seed(
             civil_timezone: config.sim_config.civil_timezone.as_deref(),
             initial_rng: Some(rng.clone()),
             setpoint_deadband_c: config.sim_config.setpoint_deadband_c,
+            horizon_steps: Some(forcing_horizon_steps(
+                config.sim_config.duration,
+                bp.time_res,
+                config.initialization_duration.is_some(),
+            )),
         },
     )
     .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;

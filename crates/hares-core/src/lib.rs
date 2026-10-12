@@ -48,7 +48,10 @@ pub use dwelling::{
     building_to_zone_inputs, shipped_defaults_dir,
 };
 pub use engine::{KernelTimer, SimulationEngine};
-pub use environment::{EnvironmentInitOptions, EnvironmentManager};
+pub use environment::{
+    EnvironmentInitOptions, EnvironmentManager, FORCE_PER_STEP_FORCING, FORCING_COMPUTATIONS,
+    FORCING_NANOS,
+};
 pub use hares_io::SimulationConfig;
 #[cfg(feature = "profiling")]
 pub use health::{ActorTiming, ActorTimings};
