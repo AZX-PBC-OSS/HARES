@@ -45,9 +45,9 @@ pub struct DwellingBlueprint {
     pub(super) rng: rand_chacha::ChaCha8Rng,
     /// The input records of the files the config's parse read: the HPXML,
     /// the schedule when it is a file, the weather with its resolved
-    /// format, and the defaults digest. `None` when the blueprint was
-    /// built from pre-parsed data whose files the parse did not read
-    /// (the synthetic TOML dwellings).
+    /// format, and the defaults digest. `None` for the synthetic TOML
+    /// dwellings: that path reads the TOML, recorded nowhere in the
+    /// records, and the absence discloses that.
     pub(super) input_records: Option<InputRecords>,
 }
 

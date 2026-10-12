@@ -291,8 +291,8 @@ pub struct Provenance {
     /// Every input the run read, recorded when it was parsed: the HPXML,
     /// the schedule when it is a file, the weather with the format it was
     /// parsed as, and the digest over the defaults files the load read.
-    /// `None` for a construction that read no files (the synthetic TOML
-    /// dwellings).
+    /// `None` for the synthetic TOML dwellings: that path reads the TOML,
+    /// recorded nowhere in the records, and the absence discloses that.
     pub inputs: Option<hares_io::InputRecords>,
 }
 

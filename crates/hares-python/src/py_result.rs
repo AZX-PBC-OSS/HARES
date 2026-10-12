@@ -627,7 +627,9 @@ impl PyProvenance {
     /// record's path, or the kind it was supplied as when it is content,
     /// and its hex digest, plus the weather format the run parsed the
     /// weather as, the digest over the defaults files and the defaults
-    /// replacements. `None` when the run read no files.
+    /// replacements. `None` for the synthetic TOML path: it reads the
+    /// TOML, recorded nowhere in the records, and the absence discloses
+    /// that.
     #[getter]
     fn inputs<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
         let Some(inputs) = self.inner.inputs.as_ref() else {

@@ -351,8 +351,9 @@ fn file_schedule_defaults_digest_moves_with_the_profiles_csv() {
     );
 }
 
-/// A schedule generated from the HPXML carries no record: it is a function
-/// of the HPXML record, and the weather format is the detected one.
+/// A schedule generated from the HPXML carries no record: its inputs are
+/// the config and the profiles CSV, both recorded. The weather format is
+/// the detected one.
 #[test]
 fn generated_schedule_has_no_input_record() {
     let inputs = run(config_for(

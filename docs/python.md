@@ -445,15 +445,18 @@ replacement.
   string): every run's provenance now records what built it and the
   catalogue the run's reports are typed by.
 - Added: `Provenance.inputs`: what the run read, recorded when each input
-  was parsed. `None` when the run read no files (a synthetic TOML
-  dwelling); otherwise a dict with `hpxml`, `schedule` (`None` when the
-  schedule is generated from the HPXML) and `weather`, each a record of
+  was parsed. `None` for a synthetic TOML dwelling (that path reads the
+  TOML, recorded nowhere in the records, and the absence discloses that);
+  otherwise a dict with `hpxml`, `schedule` (`None` when the schedule is
+  generated from the HPXML: its inputs are the config and the profiles
+  CSV, both recorded) and `weather`, each a record of
   the file's `path` (or `kind` `"text"`/`"bytes"` for content) and its
   `sha256` as a 64 char hex digest over the bytes read; plus
   `weather_format` (the format the run parsed the weather as:
   `"epw"`, `"psm3"`, `"res_stock_csv"` or `"tmy3"`),
   `defaults_files_sha256` (the digest over every defaults file the load
-  read, in load order) and `defaults_replacements`.
+  read, in load order, the schedule profiles file composed last) and
+  `defaults_replacements`.
 - Added: `OutputVariable` and the `Actor` methods `output_variables()`
   and `set_output()`: a Python actor declares its output variables (name,
   unit, kind, aggregation, across homes, sampling, labels, description)

@@ -56,9 +56,10 @@ impl InputRecord {
 }
 
 /// Every input a run read, recorded when it was parsed. A schedule
-/// generated from the HPXML has no record of its own: it is a function of
-/// the HPXML record. The defaults digest runs over every defaults file the
-/// load read, in load order.
+/// generated from the HPXML has no record of its own: its inputs are the
+/// config and the profiles CSV, both recorded (the HPXML record, and the
+/// profiles file in the defaults digest). The defaults digest runs over
+/// every defaults file the load read, in load order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputRecords {
     pub hpxml: InputRecord,
