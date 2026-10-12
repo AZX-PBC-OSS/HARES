@@ -831,18 +831,35 @@ fn indoor_zone<'a>(
     })
 }
 
+/// The data sources the default solvers are built from, beside the live
+/// environment state and the sim config: the building, the defaults tree,
+/// the weather averages, the equipment specs, the site elevation and the
+/// envelope scales.
+pub(crate) struct SolverInputs<'a> {
+    pub building: &'a Building,
+    pub defaults: &'a DefaultsStore,
+    pub weather_avgs: &'a WeatherAverages,
+    pub equipment_specs: &'a [EquipmentSpec],
+    pub site_elevation_m: f64,
+    pub envelope_scales: &'a hares_io::EnvelopeScales,
+}
+
 pub(crate) fn build_default_solvers(
     env: &EnvironmentState,
     sim_config: &SimulationConfig,
-    building: &Building,
-    defaults: &DefaultsStore,
-    weather_avgs: &WeatherAverages,
-    equipment_specs: &[EquipmentSpec],
-    site_elevation_m: f64,
+    inputs: SolverInputs<'_>,
 ) -> Result<SolverBundle> {
     use hares_envelope::state_space::{OutputMapping, StateSpaceModel};
     use nalgebra::DMatrix;
 
+    let SolverInputs {
+        building,
+        defaults,
+        weather_avgs,
+        equipment_specs,
+        site_elevation_m,
+        envelope_scales,
+    } = inputs;
     let n_zones = env.zones.len().max(1);
 
     // Log info when multiple zones share the same ZoneType (multi-unit building).
@@ -850,7 +867,7 @@ pub(crate) fn build_default_solvers(
 
     // Convert building data to envelope-crate input types.
     let zone_inputs = building_to_zone_inputs(building, n_zones);
-    let boundary_inputs = building_to_boundary_inputs(
+    let mut boundary_inputs = building_to_boundary_inputs(
         building,
         n_zones,
         defaults,
@@ -858,6 +875,10 @@ pub(crate) fn build_default_solvers(
         weather_avgs.avg_ambient_c,
         weather_avgs.avg_ground_c,
     )?;
+    // The envelope scales, after the row selection: the LUT row (or the
+    // input's own material layers) is chosen on the declared R unscaled,
+    // then the selected layers multiply by the scales.
+    super::conversions::apply_envelope_scales(building, &mut boundary_inputs, envelope_scales);
 
     // Zone air node capacitances [J/K].
     // Use ISA standard atmosphere pressure from the resolved site
@@ -2056,11 +2077,14 @@ mod tests {
         let err = match super::build_default_solvers(
             &env,
             &sim_config,
-            &building,
-            &hares_io::DefaultsStore::empty(),
-            &weather_avgs,
-            &[],
-            0.0,
+            super::SolverInputs {
+                building: &building,
+                defaults: &hares_io::DefaultsStore::empty(),
+                weather_avgs: &weather_avgs,
+                equipment_specs: &[],
+                site_elevation_m: 0.0,
+                envelope_scales: &hares_io::EnvelopeScales::default(),
+            },
         ) {
             Err(err) => err,
             Ok(_) => panic!("a zone without an environment zone must fail assembly"),
@@ -2119,11 +2143,14 @@ mod tests {
         let err = match super::build_default_solvers(
             &env,
             &sim_config,
-            &building,
-            &hares_io::DefaultsStore::empty(),
-            &weather_avgs,
-            &[],
-            0.0,
+            super::SolverInputs {
+                building: &building,
+                defaults: &hares_io::DefaultsStore::empty(),
+                weather_avgs: &weather_avgs,
+                equipment_specs: &[],
+                site_elevation_m: 0.0,
+                envelope_scales: &hares_io::EnvelopeScales::default(),
+            },
         ) {
             Err(err) => err,
             Ok(_) => panic!(

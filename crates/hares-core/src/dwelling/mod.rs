@@ -3168,14 +3168,21 @@ fn assemble_from_blueprint_with_seed(
     for warning in conversions::envelope_input_warnings(&bp.building)? {
         warnings.push_warning(warning);
     }
+    // The envelope scales, extracted and validated at the assembly
+    // boundary: the reserved `envelope` override's two factors, unit until
+    // a caller names them.
+    let envelope_scales = conversions::extract_envelope_scales(config.overrides.as_ref())?;
     let solvers = build_default_solvers(
         &initial_env,
         &config.sim_config,
-        &bp.building,
-        &defaults,
-        &bp.weather_avgs,
-        &equipment_specs,
-        site_location.elevation_m,
+        solver_builder::SolverInputs {
+            building: &bp.building,
+            defaults: &defaults,
+            weather_avgs: &bp.weather_avgs,
+            equipment_specs: &equipment_specs,
+            site_elevation_m: site_location.elevation_m,
+            envelope_scales: &envelope_scales,
+        },
     )?;
 
     // ── Zone thermal capacitances for EBM ─────────────────────────────────

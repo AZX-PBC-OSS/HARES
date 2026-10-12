@@ -10,7 +10,7 @@ use hares_envelope::longwave_radiation::{
 };
 use hares_envelope::{BoundaryInput, ExteriorTarget, LayerInput, ZoneInput};
 use hares_equipment::{ConfigPayload, EquipmentConfig, config::ConfigValue};
-use hares_io::{Building, DefaultsStore};
+use hares_io::{Building, DefaultsStore, EnvelopeScales};
 use hares_types::{DomainUpdate, EnvironmentState, ExecutionStage, HaresError, ZoneId};
 use serde_json::{Map, Value};
 
@@ -1053,6 +1053,70 @@ pub(crate) fn merged_equipment_config(
 /// coefficients, which every equipment takes.
 const RESERVED_ZIP_OVERRIDE: &str = "zip";
 
+/// The reserved `envelope` override, deserialised and validated: the
+/// scales the boundary construction multiplies its selected layers by.
+/// Absent from the map (the setting `None` or the key absent), the unit
+/// default. A malformed object (a non-object value, a field the struct
+/// does not declare) or an out-of-bounds field is an error naming the key
+/// and the field, at the assembly boundary before any side effect.
+///
+/// # Errors
+///
+/// [`HaresError::Dwelling`] naming the key and the offending field when
+/// the object does not deserialise or its fields are out of bounds.
+pub(crate) fn extract_envelope_scales(overrides: Option<&Value>) -> Result<EnvelopeScales> {
+    let Some(value) = overrides.and_then(|root| root.get(hares_io::ENVELOPE_OVERRIDE_KEY)) else {
+        return Ok(EnvelopeScales::default());
+    };
+    let scales: EnvelopeScales = serde_json::from_value(value.clone()).map_err(|err| {
+        HaresError::Dwelling(format!(
+            "the '{}' override rejected: {err}",
+            hares_io::ENVELOPE_OVERRIDE_KEY
+        ))
+    })?;
+    scales
+        .validate()
+        .map_err(|err| HaresError::Dwelling(err.to_string()))?;
+    Ok(scales)
+}
+
+/// Apply the envelope scales to the boundary inputs, after the row
+/// selection: the resistance scale multiplies every opaque layer's
+/// resistance and the thermal-mass scale every such layer's capacitance,
+/// on the LUT row's layers, the input's own material layers, and the
+/// single-resistor fallback the no-layer path builds from. The films are
+/// unscaled and the F-factor slab and the fenestration are outside both
+/// scales: the slab's resistor is the perimeter method's, and a window's
+/// resistance is its U-factor decomposition's.
+pub(crate) fn apply_envelope_scales(
+    building: &Building,
+    inputs: &mut [hares_envelope::BoundaryInput],
+    scales: &EnvelopeScales,
+) {
+    use hares_io::hpxml::BoundaryType;
+    for (bd, input) in building.boundaries.iter().zip(inputs.iter_mut()) {
+        if matches!(
+            bd.boundary_type,
+            BoundaryType::Slab | BoundaryType::Window | BoundaryType::Skylight
+        ) {
+            continue;
+        }
+        for layer in &mut input.precomputed_rc {
+            layer.resistance_m2_k_w *= scales.opaque_r_scale;
+            layer.capacitance_kj_m2_k *= scales.thermal_mass_scale;
+        }
+        for layer in &mut input.material_layers {
+            // The layer's resistance is its thickness over its conductivity
+            // and its capacitance its density by specific heat by thickness:
+            // scaling the conductivity's inverse scales the resistance alone,
+            // scaling the density the capacitance alone.
+            layer.conductivity_w_m_k /= scales.opaque_r_scale;
+            layer.density_kg_m3 *= scales.thermal_mass_scale;
+        }
+        input.fallback_r_m2_k_w *= scales.opaque_r_scale;
+    }
+}
+
 /// The typed-config type name of the stationary battery.
 const BATTERY_TYPE_NAME: &str = "Battery";
 
@@ -1403,6 +1467,12 @@ pub(crate) fn validate_equipment_override_keys(
     };
     for key in root.keys() {
         if hares_io::hpxml::WILDCARD_OVERRIDE_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        // The reserved `envelope` key is not an equipment name: the
+        // envelope scales it names are extracted and validated at the
+        // assembly boundary, and the boundary construction applies them.
+        if key == hares_io::ENVELOPE_OVERRIDE_KEY {
             continue;
         }
         if overridable_names.contains(&key.as_str()) {

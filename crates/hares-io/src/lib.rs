@@ -4,6 +4,7 @@ pub mod config;
 pub mod defaults;
 pub mod draw_profile;
 pub mod envelope_lut;
+pub mod envelope_scales;
 pub mod epw;
 pub mod forcing;
 pub mod hpxml;
@@ -43,6 +44,7 @@ pub use draw_profile::{
 pub use envelope_lut::{
     EnvelopeLookup, EnvelopeLookupResult, EnvelopeLutError, PrecomputedLayer, resolve_boundary_name,
 };
+pub use envelope_scales::{ENVELOPE_OVERRIDE_KEY, EnvelopeScales};
 pub use epw::{
     DesignConditions, SkyTempModel, berdahl_martin_sky_emissivity, clark_allen_sky_emissivity,
     compute_sky_temp_c, monthly_day_counts, parse_epw, parse_epw_location_state,
