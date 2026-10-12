@@ -2039,6 +2039,7 @@ mod fixture_start;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::DateTime;
     use hares_core::{Provenance, RunHealth};
     use std::collections::HashSet;
     use std::fs;
@@ -2666,7 +2667,7 @@ mod tests {
         assert!(fleet.total_steps() > 0);
         assert!(fleet.time_res_s() > 0.0);
 
-        let first_step = fleet.step();
+        let first_step = fleet.step().expect("steps run");
         assert_eq!(first_step.len(), 3);
         assert!(first_step.iter().all(|result| result.is_ok()));
         for result in first_step {
@@ -2677,19 +2678,75 @@ mod tests {
         assert!(!fleet.is_finished());
 
         while !fleet.is_finished() {
-            let step = fleet.step();
+            let step = fleet.step().expect("steps run to the end");
             assert_eq!(step.len(), 3);
             assert!(step.iter().all(|result| result.is_ok()));
         }
 
         assert!(fleet.is_finished());
         assert_eq!(fleet.current_step(), fleet.total_steps());
-        let post_end = fleet.step();
-        assert_eq!(post_end.len(), 3);
+    }
+
+    /// Stepping a finished fleet is one fleet-level error naming the
+    /// finished step count, not one failure per home: the fleet did not
+    /// fail, it finished.
+    #[test]
+    fn step_after_finish_is_already_finished_error() {
+        let dir = tempdir().expect("temp dir");
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
+                .expect("build steppable fleet");
+        assert!(build_errors.is_empty());
+
+        while !fleet.is_finished() {
+            let step = fleet.step().expect("steps run to the end");
+            assert!(step.iter().all(|result| result.is_ok()));
+        }
+
+        let total_steps = fleet.total_steps();
+        let err = fleet
+            .step()
+            .expect_err("a step past the end is the fleet's error");
         assert!(
-            post_end
-                .iter()
-                .all(|result| matches!(result, Err(SimError::Failed { .. })))
+            matches!(err, FleetError::AlreadyFinished { total_steps: finished } if finished == total_steps),
+            "got: {err:?}"
+        );
+    }
+
+    /// The per-home accessors reject a missing home with
+    /// `NoSuchHome` naming the index and the length, instead of logging
+    /// and returning or reporting `None`.
+    #[test]
+    fn steppable_fleet_accessors_reject_a_missing_home() {
+        let dir = tempdir().expect("temp dir");
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 2), 2)
+                .expect("build steppable fleet");
+        assert!(build_errors.is_empty());
+        let len = fleet.len();
+
+        let telemetry_err = fleet
+            .telemetry(len)
+            .expect_err("telemetry past the end is an error");
+        assert!(
+            matches!(telemetry_err, FleetError::NoSuchHome { index, len: l } if index == len && l == len),
+            "got: {telemetry_err:?}"
+        );
+
+        let voltage_err = fleet
+            .set_grid_voltage(len, 1.0)
+            .expect_err("set_grid_voltage past the end is an error");
+        assert!(
+            matches!(voltage_err, FleetError::NoSuchHome { index, len: l } if index == len && l == len),
+            "got: {voltage_err:?}"
+        );
+
+        let control_err = fleet
+            .apply_control(len, "grid", ControlSignal::thermal_release())
+            .expect_err("apply_control past the end is an error");
+        assert!(
+            matches!(control_err, FleetError::NoSuchHome { index, len: l } if index == len && l == len),
+            "got: {control_err:?}"
         );
     }
 
@@ -2708,7 +2765,7 @@ mod tests {
         assert_eq!(build_errors[0].bldg_id, 999);
         assert!(!build_errors[0].message.is_empty());
 
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|result| result.is_ok()));
     }
@@ -2748,7 +2805,7 @@ mod tests {
         fleet.dwellings[1].failed = true;
 
         // Step: dwellings 0 and 2 should succeed, dwelling 1 should be skipped.
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 3);
 
         assert!(results[0].is_ok(), "dwelling 0 should succeed");
@@ -2773,7 +2830,7 @@ mod tests {
         );
 
         // Subsequent step also skips the same dwelling.
-        let results2 = fleet.step();
+        let results2 = fleet.step().expect("steps run");
         assert!(
             matches!(results2[1], Err(SimError::Skipped { .. })),
             "dwelling 1 should stay skipped on every subsequent step"
@@ -2798,7 +2855,7 @@ mod tests {
         let mut skipped_steps = [0usize; 3];
 
         while !fleet.is_finished() {
-            let results = fleet.step();
+            let results = fleet.step().expect("steps run");
             assert_eq!(results.len(), 3);
 
             for (i, result) in results.iter().enumerate() {
@@ -2867,7 +2924,7 @@ mod tests {
         // The failed construction never produced a dwelling, so there is
         // no runtime state to be corrupted.  The fleet has only the 2
         // valid dwellings, and both step normally.
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 2);
         assert!(
             results.iter().all(|r| r.is_ok()),
@@ -2900,7 +2957,7 @@ mod tests {
 
         // First step: dwelling 1 panics, the panic is caught by
         // step_dwellings_parallel, failed is set to true.
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 3);
 
         // (a) Panicking dwelling returns Panic.
@@ -2928,7 +2985,7 @@ mod tests {
         assert!(!fleet.dwellings[2].failed);
 
         // (b) Second step: dwelling 1 is now failed → Skipped.
-        let results2 = fleet.step();
+        let results2 = fleet.step().expect("steps run");
         assert_eq!(results2.len(), 3);
 
         match &results2[1] {
@@ -2967,7 +3024,7 @@ mod tests {
 
         fleet.dwellings[1].set_test_assert_panic();
 
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 3);
 
         match &results[1] {
@@ -3019,7 +3076,7 @@ mod tests {
         fleet.dwellings[1].set_test_panic();
 
         // Step 0: dwelling 1 panics, the fleet survives.
-        let results = fleet.step();
+        let results = fleet.step().expect("steps run");
         assert_eq!(results.len(), 3);
 
         // Dwelling 1 returns a Panic error.
@@ -3047,7 +3104,7 @@ mod tests {
         // Remaining steps: dwelling 1 is skipped, others complete normally.
         // Fleet simulation must run to completion without aborting.
         while !fleet.is_finished() {
-            let step_results = fleet.step();
+            let step_results = fleet.step().expect("steps run");
             assert_eq!(step_results.len(), 3);
             assert!(step_results[0].is_ok());
             assert!(matches!(step_results[1], Err(SimError::Skipped { .. })));
@@ -4257,10 +4314,13 @@ mod tests {
     }
 
     /// Two identical homes at different UTC offsets (one site override),
-    /// starting at the same instant: the fold's periods align on the
-    /// instant, so the aggregate is the full common grid (no intersection
-    /// loss) and the covered weight is the two homes' weight sum in every
-    /// cell, on bits.
+    /// starting at the same instant, the fleet declaring the `Instant`
+    /// alignment at UTC: the homes reduce on the declared offset's period
+    /// boundaries and the fold's periods align on the instant, so the
+    /// aggregate is the full common grid (no intersection loss) and the
+    /// covered weight is the two homes' weight sum in every cell, on
+    /// bits. At `+00:00` the labels render with `Z`, byte for byte the
+    /// undeclared single-offset fleet's.
     #[test]
     fn cross_offset_homes_align_on_the_start_instant() {
         let examples = repo_root().join("data/examples");
@@ -4318,7 +4378,10 @@ mod tests {
         ])
         .expect("the homes carry no reserved report or shared destination")
         .with_sample_weights(vec![1.0, 1.0])
-        .expect("the weights are finite and non-negative");
+        .expect("the weights are finite and non-negative")
+        .with_alignment(Alignment::Instant(
+            FixedOffset::east_opt(0).expect("a zero offset is representable"),
+        ));
 
         let report = FleetReport {
             selection: hares_io::Selection::Verbosity(2),
@@ -5271,7 +5334,6 @@ mod tests {
             other => panic!("expected NoCoveredWeight, got {other:?}"),
         }
     }
-}
 
     // -------------------------------------------------------------------
     // The declared time alignment's acceptance.
@@ -5689,3 +5751,4 @@ mod tests {
             "got: {err:?}"
         );
     }
+}
