@@ -1166,7 +1166,6 @@ impl ParsedInputs {
             None => ParsedDefaults::parse(defaults)?,
         };
         let defaults = Arc::new(defaults_handle);
-        let schedule_was_generated = schedule.is_none();
         let mut inputs = Self::from_handles(
             hpxml,
             schedule.or(generated_schedule),
@@ -1176,8 +1175,8 @@ impl ParsedInputs {
         )?;
         // The records ride the parse, computed once and shared: the
         // handles' sources digested, the defaults load's own log composed
-        // with the generated schedule's profiles file.
-        inputs.records = Some(Self::build_records(&inputs, schedule_was_generated)?);
+        // with the schedule profiles file.
+        inputs.records = Some(Self::build_records(&inputs)?);
         Ok(inputs)
     }
 
@@ -1185,17 +1184,17 @@ impl ParsedInputs {
     /// schedule when it is a file, the weather with its resolved format,
     /// and the defaults digest. The defaults digest runs over every
     /// defaults file the load read, in load order, then the schedule
-    /// profiles file for a generated schedule (its inputs are the
-    /// profiles too, read after the store).
+    /// profiles file. Every run with a defaults directory reads that
+    /// file: a generated schedule builds on it, and a file schedule's
+    /// injection resolves the profiles the CSV lacks against it, so its
+    /// edit moves numbers under either schedule source and the digest
+    /// composes it for both.
     ///
     /// # Errors
     ///
     /// [`HaresError`] when a path source's file cannot be read for its
     /// digest.
-    fn build_records(
-        inputs: &ParsedInputs,
-        schedule_was_generated: bool,
-    ) -> Result<crate::input::InputRecords, HaresError> {
+    fn build_records(inputs: &ParsedInputs) -> Result<crate::input::InputRecords, HaresError> {
         let hpxml = input_record(inputs.hpxml.record())?;
         let weather_source = inputs.weather.record();
         let weather = weather_record(weather_source)?;
@@ -1211,12 +1210,10 @@ impl ParsedInputs {
         let source = inputs.defaults.record();
         let store = inputs.defaults.store();
         let mut log = store.input_log().to_vec();
-        if schedule_was_generated
-            && let Some(base) = &source.base
-        {
-            // The generated schedule's profiles file: the replacement's
-            // content when the defaults source replaced it, the base
-            // tree's file otherwise — the bytes the profiles load read.
+        if let Some(base) = &source.base {
+            // The schedule profiles file: the replacement's content when
+            // the defaults source replaced it, the base tree's file
+            // otherwise — the bytes the profiles load reads.
             let relative = crate::schedule_resolve::DEFAULT_SCHEDULES_CSV;
             let bytes = match source.files.get(relative) {
                 Some(overrides) => overrides.read()?,

@@ -291,6 +291,66 @@ fn defaults_digest_changes_when_one_file_is_replaced() {
     );
 }
 
+/// A file schedule's run reads the schedule profiles too: the schedule
+/// injection resolves the profiles a CSV schedule lacks against them, so
+/// editing the profiles CSV moves the defaults digest of a file-schedule
+/// run and nothing else.
+#[test]
+fn file_schedule_defaults_digest_moves_with_the_profiles_csv() {
+    let (hpxml, schedule, weather) = cz4a_paths();
+    let tmp = TempDir::new().expect("temp directory");
+    let defaults_before = tmp.path().join("defaults-before");
+    let defaults_after = tmp.path().join("defaults-after");
+    copy_defaults_light(&project_root().join("defaults"), &defaults_before);
+    copy_defaults_light(&project_root().join("defaults"), &defaults_after);
+
+    let profiles = "Default Schedule Parameters.csv";
+    let edited = fs::read_to_string(defaults_after.join(profiles))
+        .expect("the profiles copy")
+        .replacen(
+            "0.035, 0.035, 0.035, 0.035, 0.035, 0.059",
+            "0.036, 0.035, 0.035, 0.035, 0.035, 0.059",
+            1,
+        );
+    assert_ne!(
+        edited,
+        fs::read_to_string(defaults_after.join(profiles)).expect("the profiles read"),
+        "the probe edits the file"
+    );
+    fs::write(defaults_after.join(profiles), edited).expect("the profiles edit");
+
+    let before = run(config_for(
+        hpxml.clone(),
+        Some(schedule.clone()),
+        weather.clone(),
+        Some(defaults_before),
+    ));
+    let after = run(config_for(
+        hpxml,
+        Some(schedule),
+        weather,
+        Some(defaults_after),
+    ));
+
+    assert_ne!(
+        before.defaults_files_sha256, after.defaults_files_sha256,
+        "the edited profiles CSV moves the defaults digest of a file-schedule run"
+    );
+    assert_eq!(before.hpxml, after.hpxml, "the HPXML record is identical");
+    assert_eq!(
+        before.schedule, after.schedule,
+        "the schedule record is identical"
+    );
+    assert_eq!(
+        before.weather, after.weather,
+        "the weather record is identical"
+    );
+    assert_eq!(
+        before.weather_format, after.weather_format,
+        "the weather format is identical"
+    );
+}
+
 /// A schedule generated from the HPXML carries no record: it is a function
 /// of the HPXML record, and the weather format is the detected one.
 #[test]
