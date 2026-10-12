@@ -8,6 +8,7 @@ pub mod epw;
 pub mod forcing;
 pub mod hpxml;
 pub mod hpxml_schedule;
+pub mod input;
 pub mod inputs;
 pub mod output;
 pub mod parse_counts;
@@ -57,6 +58,7 @@ pub use hpxml::{
     Building, EquipmentSpec, HpxmlDataPatches, ValidationReport, parse_hpxml,
     parse_iecc_climate_zone, resolve_equipment,
 };
+pub use input::{InputRecord, InputRecordSource, InputRecords, defaults_files_digest};
 pub use inputs::{
     DefaultsSource, InputSource, ParsedDefaults, ParsedHpxml, ParsedInputs, ParsedInputsCache,
     ParsedSchedule, ParsedWeather, ScheduleGeneration, WeatherInput, read_site_input,
@@ -110,6 +112,6 @@ pub use unavailable_periods::{
 };
 pub use weather::{WeatherField, WeatherMeta, WeatherTimeSeries};
 pub use weather::{
-    WeatherFormat, parse_weather, parse_weather_with_elevation, parse_weather_with_location,
-    read_weather_meta,
+    WeatherFormat, detect_weather_format, parse_weather, parse_weather_with_elevation,
+    parse_weather_with_location, read_weather_meta,
 };

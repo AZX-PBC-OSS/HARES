@@ -498,6 +498,31 @@ def test_python_build_info_equals_run_provenance() -> None:
     assert len(digest) == 64 and int(digest, 16) >= 0, f"a 64 char hex digest: {digest}"
 
 
+def test_provenance_inputs_record_input_digests() -> None:
+    """provenance.inputs records every file input the run read: the HPXML,
+    the schedule and the weather by path and hex digest, the weather format
+    the run parsed the weather as, and the digest over the defaults files;
+    two runs on the same inputs record equal dicts."""
+    import hashlib
+
+    dw = build(result_config())
+    result = dw.simulate()
+
+    inputs = result.provenance.inputs
+    assert inputs is not None, "a run built from files records its inputs"
+    assert inputs["hpxml"]["path"] == HPXML
+    assert inputs["schedule"]["path"] == SCHEDULE
+    assert inputs["weather"]["path"] == WEATHER
+    for name, path in (("hpxml", HPXML), ("schedule", SCHEDULE), ("weather", WEATHER)):
+        expected = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        assert inputs[name]["sha256"] == expected, f"the {name} digest is the file bytes' sha256"
+    assert inputs["weather_format"] == "epw"
+    assert len(inputs["defaults_files_sha256"]) == 64
+
+    second = build(result_config()).simulate().provenance.inputs
+    assert second == inputs, "two runs on the same inputs record equal dicts"
+
+
 def test_python_build_info_repr_is_python() -> None:
     """repr(BuildInfo) follows the Python repr conventions: Python bool
     or None for the dirty flag, a list repr for the features, None for

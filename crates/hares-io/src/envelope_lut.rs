@@ -232,7 +232,7 @@ impl EnvelopeLookup {
     /// `Envelope Boundaries.csv` is optional — when absent, boundary name
     /// resolution falls back to the built-in hardcoded mapping.
     pub fn load(dir: &Path) -> Result<Self, EnvelopeLutError> {
-        Self::load_with_swap(dir, None)
+        Self::load_with_swap_and_log(dir, None, dir, &mut crate::defaults::DefaultsInputLog::new())
     }
 
     /// [`Self::load`] with one CSV's content substituted: the replacement
@@ -242,6 +242,31 @@ impl EnvelopeLookup {
     pub fn load_with_swap(
         dir: &Path,
         swap: Option<(&Path, &str)>,
+    ) -> Result<Self, EnvelopeLutError> {
+        Self::load_with_swap_and_log(dir, swap, dir, &mut crate::defaults::DefaultsInputLog::new())
+    }
+
+    /// [`Self::load`], logging every CSV file the load read into `log` as
+    /// (path relative to `base`, bytes), in load order: the defaults
+    /// load's input digest covers the envelope CSVs it read.
+    pub fn load_with_log(
+        dir: &Path,
+        base: &Path,
+        log: &mut crate::defaults::DefaultsInputLog,
+    ) -> Result<Self, EnvelopeLutError> {
+        Self::load_with_swap_and_log(dir, None, base, log)
+    }
+
+    /// [`Self::load_with_swap`], logging every CSV file the load read into
+    /// `log` as (path relative to `base`, bytes), in load order: the
+    /// defaults load's input digest covers the envelope CSVs it read. A
+    /// swapped file's entry is the replacement's content, the bytes the
+    /// load actually used.
+    pub fn load_with_swap_and_log(
+        dir: &Path,
+        swap: Option<(&Path, &str)>,
+        base: &Path,
+        log: &mut crate::defaults::DefaultsInputLog,
     ) -> Result<Self, EnvelopeLutError> {
         let bt_path = dir.join("Envelope Boundary Types.csv");
         let mat_path = dir.join("Envelope Materials.csv");
@@ -255,9 +280,12 @@ impl EnvelopeLookup {
             return Err(EnvelopeLutError::MissingFile(mat_path));
         }
 
+        crate::defaults::log_used(base, log, &bt_path, swap);
         let boundary_types = Self::load_boundary_types(&bt_path, swap)?;
+        crate::defaults::log_used(base, log, &mat_path, swap);
         let materials = Self::load_materials(&mat_path, swap)?;
         let boundary_names = if boundaries_path.exists() || is_swapped(&boundaries_path) {
+            crate::defaults::log_used(base, log, &boundaries_path, swap);
             Self::load_boundaries(&boundaries_path, swap)?
         } else {
             tracing::warn!(

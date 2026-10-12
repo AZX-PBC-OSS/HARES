@@ -13,10 +13,40 @@ use chrono::{DateTime, Duration as ChronoDuration, FixedOffset};
 use crate::defaults::DefaultsStore;
 use crate::forcing::{ForcingKey, ForcingTable};
 use crate::hpxml::Building;
+use crate::input::{InputRecord, InputRecordSource};
 use crate::schedule::ScheduleTimeSeries;
 use crate::schedule_resolve::{DEFAULT_SCHEDULES_CSV, DefaultProfiles};
 use crate::weather::{WeatherFormat, WeatherMeta, WeatherTimeSeries};
 use hares_types::HaresError;
+use sha2::Digest;
+
+/// The document's record: where it came from and the SHA-256 of the bytes
+/// the parse read. A path source reads the file's bytes (the parse read
+/// the same file), a content source hashes its own.
+fn input_record(source: &InputSource) -> Result<InputRecord, HaresError> {
+    let bytes = source.read()?;
+    Ok(InputRecord {
+        source: match source {
+            InputSource::Path(path) => InputRecordSource::Path(path.clone()),
+            InputSource::Text(_) => InputRecordSource::Text,
+            InputSource::Bytes(_) => InputRecordSource::Bytes,
+        },
+        sha256: sha2::Sha256::digest(&bytes).into(),
+    })
+}
+
+/// The weather input's record, like [`input_record`].
+fn weather_record(source: &WeatherInput) -> Result<InputRecord, HaresError> {
+    match source {
+        WeatherInput::Path(path) => input_record(&InputSource::Path(path.clone())),
+        WeatherInput::Text { content, .. } => {
+            input_record(&InputSource::Text(Arc::clone(content)))
+        }
+        WeatherInput::Bytes { content, .. } => {
+            input_record(&InputSource::Bytes(Arc::clone(content)))
+        }
+    }
+}
 
 // ── Sources ─────────────────────────────────────────────────────────────────
 
@@ -987,6 +1017,12 @@ pub struct ParsedInputs {
     /// when the HPXML declared its own zone or the handles were built from
     /// already-parsed parts.
     pub climate_zone_warning: Option<hares_types::Warning>,
+    /// The input records of the files the parse read, computed once per
+    /// parse and shared with every consumer: the HPXML, the schedule when
+    /// it is a file, the weather with its resolved format, and the
+    /// defaults digest. `None` when the inputs were assembled from
+    /// already-parsed parts whose files the parse did not read.
+    records: Option<crate::input::InputRecords>,
 }
 
 /// The generated schedule's span: the run the schedule covers, the values
@@ -1047,6 +1083,7 @@ impl ParsedInputs {
             defaults,
             effective_climate_zone,
             climate_zone_warning,
+            records: None,
         })
     }
 
@@ -1129,13 +1166,118 @@ impl ParsedInputs {
             None => ParsedDefaults::parse(defaults)?,
         };
         let defaults = Arc::new(defaults_handle);
-        Self::from_handles(
+        let schedule_was_generated = schedule.is_none();
+        let mut inputs = Self::from_handles(
             hpxml,
             schedule.or(generated_schedule),
             weather,
             defaults,
             generation,
-        )
+        )?;
+        // The records ride the parse, computed once and shared: the
+        // handles' sources digested, the defaults load's own log composed
+        // with the generated schedule's profiles file.
+        inputs.records = Some(Self::build_records(&inputs, schedule_was_generated)?);
+        Ok(inputs)
+    }
+
+    /// The input records of the files the parse read: the HPXML, the
+    /// schedule when it is a file, the weather with its resolved format,
+    /// and the defaults digest. The defaults digest runs over every
+    /// defaults file the load read, in load order, then the schedule
+    /// profiles file for a generated schedule (its inputs are the
+    /// profiles too, read after the store).
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when a path source's file cannot be read for its
+    /// digest.
+    fn build_records(
+        inputs: &ParsedInputs,
+        schedule_was_generated: bool,
+    ) -> Result<crate::input::InputRecords, HaresError> {
+        let hpxml = input_record(inputs.hpxml.record())?;
+        let weather_source = inputs.weather.record();
+        let weather = weather_record(weather_source)?;
+        let weather_format = match weather_source {
+            WeatherInput::Path(path) => crate::weather::detect_weather_format(path)
+                .map_err(|err| HaresError::Io(err.to_string()))?,
+            WeatherInput::Text { format, .. } | WeatherInput::Bytes { format, .. } => *format,
+        };
+        let schedule = match inputs.schedule.record() {
+            Some(source) => Some(input_record(source)?),
+            None => None,
+        };
+        let source = inputs.defaults.record();
+        let store = inputs.defaults.store();
+        let mut log = store.input_log().to_vec();
+        if schedule_was_generated
+            && let Some(base) = &source.base
+        {
+            // The generated schedule's profiles file: the replacement's
+            // content when the defaults source replaced it, the base
+            // tree's file otherwise — the bytes the profiles load read.
+            let relative = crate::schedule_resolve::DEFAULT_SCHEDULES_CSV;
+            let bytes = match source.files.get(relative) {
+                Some(overrides) => overrides.read()?,
+                None => {
+                    let profiles = base.join(relative);
+                    std::fs::read(&profiles).map_err(|err| {
+                        HaresError::Io(format!(
+                            "the defaults schedule profiles '{}' could not be read \
+                             for their input record: {err}",
+                            profiles.display()
+                        ))
+                    })?
+                }
+            };
+            log.push((relative.to_string(), bytes));
+        }
+        let defaults_files_sha256 = crate::input::defaults_files_digest(&log);
+        let defaults_replacements = source
+            .files
+            .iter()
+            .map(|(relative, replacement)| {
+                Ok((relative.clone(), input_record(replacement)?))
+            })
+            .collect::<Result<Vec<_>, HaresError>>()?;
+        Ok(crate::input::InputRecords {
+            hpxml,
+            schedule,
+            weather,
+            weather_format,
+            defaults_files_sha256,
+            defaults_replacements,
+        })
+    }
+
+    /// The input records of the files the parse read, `None` when the
+    /// inputs were assembled from already-parsed parts.
+    #[must_use]
+    pub fn records(&self) -> Option<&crate::input::InputRecords> {
+        self.records.as_ref()
+    }
+
+    /// The synthetic assembly: every part already parsed, the effective
+    /// zone the caller resolved, no warning, and no records (the parse
+    /// read no file).
+    #[must_use]
+    pub fn from_parts_with_zone(
+        hpxml: Arc<ParsedHpxml>,
+        schedule: Arc<ParsedSchedule>,
+        weather: Arc<ParsedWeather>,
+        defaults: Arc<ParsedDefaults>,
+        effective_climate_zone: Option<String>,
+    ) -> Self {
+        Self {
+            hpxml,
+            weather,
+            schedule,
+            defaults,
+            effective_climate_zone,
+            climate_zone_warning: None,
+            records: None,
+        }
     }
 }
 

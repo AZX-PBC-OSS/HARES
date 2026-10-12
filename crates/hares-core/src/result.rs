@@ -288,6 +288,12 @@ pub struct Provenance {
     pub site_utc_offset_s: i32,
     /// One entry per equipment, in equipment order.
     pub equipment: Vec<EquipmentProvenance>,
+    /// Every input the run read, recorded when it was parsed: the HPXML,
+    /// the schedule when it is a file, the weather with the format it was
+    /// parsed as, and the digest over the defaults files the load read.
+    /// `None` for a construction that read no files (the synthetic TOML
+    /// dwellings).
+    pub inputs: Option<hares_io::InputRecords>,
 }
 
 /// One simulation run's result: the finalisation every run shares, whether

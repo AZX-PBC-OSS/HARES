@@ -3,6 +3,7 @@
 use std::io::BufRead;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // Re-export from hares-types for use in this crate's fallback logic.
@@ -12,7 +13,8 @@ use crate::epw::DesignConditions;
 use crate::epw::{SkyTempModel, compute_sky_temp_c};
 
 /// Supported weather file formats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WeatherFormat {
     /// EnergyPlus Weather file (.epw), hourly data.
     Epw,

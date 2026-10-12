@@ -4892,6 +4892,7 @@ mod tests {
                 bldg_id: 1,
                 site_utc_offset_s: 0,
                 equipment: Vec::new(),
+                inputs: None,
             },
         };
         let status = |run: &RunResult| home_status(&Ok(run.clone()));

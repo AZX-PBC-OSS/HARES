@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 use pyo3_arrow::PyTable;
 
 use hares_core::{
@@ -16,12 +17,39 @@ use hares_core::{
     RunResult as RustRunResult, WarmupOutcome as RustWarmupOutcome,
     WarmupResiduals as RustWarmupResiduals,
 };
+use hares_io::InputRecord as RustInputRecord;
+use hares_io::InputRecordSource as RustInputRecordSource;
 use hares_types::Warning as RustWarning;
 
 use crate::py_config::PySimulationConfig;
 use crate::py_dwelling::HaresSimulationError;
 use crate::py_metrics::PyRunMetrics;
 use crate::py_report::PyFrequency;
+
+/// The weather format's serde spelling: the string the record's own
+/// serialisation uses, so a Python reader and a TOML reader spell the
+/// format identically.
+fn weather_format_name(format: hares_io::WeatherFormat) -> String {
+    serde_json::to_string(&format)
+        .expect("a WeatherFormat always serialises")
+        .trim_matches('"')
+        .to_string()
+}
+
+/// One input record as a dict: the path it was read from, or the kind it
+/// was supplied as when it is content, and the hex digest.
+fn record_dict<'py>(py: Python<'py>, record: &RustInputRecord) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    match &record.source {
+        RustInputRecordSource::Path(path) => {
+            dict.set_item("path", path.display().to_string())?;
+        }
+        RustInputRecordSource::Text => dict.set_item("kind", "text")?,
+        RustInputRecordSource::Bytes => dict.set_item("kind", "bytes")?,
+    }
+    dict.set_item("sha256", record.hex())?;
+    Ok(dict)
+}
 
 /// One finished run's result: the reports' delivered outputs, the metrics,
 /// the health totals, the warning record and the provenance.
@@ -593,6 +621,42 @@ impl PyProvenance {
     #[getter]
     fn site_utc_offset_s(&self) -> i32 {
         self.inner.site_utc_offset_s
+    }
+
+    /// Every input the run read, recorded when it was parsed: each
+    /// record's path, or the kind it was supplied as when it is content,
+    /// and its hex digest, plus the weather format the run parsed the
+    /// weather as, the digest over the defaults files and the defaults
+    /// replacements. `None` when the run read no files.
+    #[getter]
+    fn inputs<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(inputs) = self.inner.inputs.as_ref() else {
+            return Ok(None);
+        };
+        let dict = PyDict::new(py);
+        dict.set_item("hpxml", record_dict(py, &inputs.hpxml)?)?;
+        match &inputs.schedule {
+            Some(record) => dict.set_item("schedule", record_dict(py, record)?)?,
+            None => dict.set_item("schedule", py.None())?,
+        }
+        dict.set_item("weather", record_dict(py, &inputs.weather)?)?;
+        dict.set_item("weather_format", weather_format_name(inputs.weather_format))?;
+        dict.set_item(
+            "defaults_files_sha256",
+            hares_io::input::hex(&inputs.defaults_files_sha256),
+        )?;
+        let replacements = PyList::new(
+            py,
+            inputs.defaults_replacements.iter().map(|(path, record)| {
+                let entry = record_dict(py, record).expect("a fresh dict does not fail");
+                entry
+                    .set_item("file", path)
+                    .expect("a fresh dict does not fail");
+                entry
+            }),
+        )?;
+        dict.set_item("defaults_replacements", replacements)?;
+        Ok(Some(dict))
     }
 
     /// One entry per equipment, in equipment order.

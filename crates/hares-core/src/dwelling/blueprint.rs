@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_io::{
-    EquipmentSpec, ParsedInputs, SiteLocation, epw::DesignConditions, hpxml::resolve_equipment,
-    site_location::resolve_site_location,
+    EquipmentSpec, InputRecords, ParsedInputs, SiteLocation, epw::DesignConditions,
+    hpxml::resolve_equipment, site_location::resolve_site_location,
 };
 use hares_types::{EndUse, HaresError, Warning};
 
@@ -43,6 +43,12 @@ pub struct DwellingBlueprint {
     #[cfg(feature = "dst")]
     pub(super) parsed_civil_tz: Option<chrono_tz::Tz>,
     pub(super) rng: rand_chacha::ChaCha8Rng,
+    /// The input records of the files the config's parse read: the HPXML,
+    /// the schedule when it is a file, the weather with its resolved
+    /// format, and the defaults digest. `None` when the blueprint was
+    /// built from pre-parsed data whose files the parse did not read
+    /// (the synthetic TOML dwellings).
+    pub(super) input_records: Option<InputRecords>,
 }
 
 impl DwellingBlueprint {
@@ -63,6 +69,15 @@ impl DwellingBlueprint {
     #[must_use]
     pub fn inputs(&self) -> &ParsedInputs {
         &self.inputs
+    }
+
+    /// The input records of the files the config's parse read: the HPXML,
+    /// the schedule when it is a file, the weather with its resolved
+    /// format, and the defaults digest. `None` when the parse read no
+    /// file (the synthetic assemblies).
+    #[must_use]
+    pub fn input_records(&self) -> Option<&InputRecords> {
+        self.input_records.as_ref()
     }
 
     /// The blueprint's settings: the sim config, the overrides, the
@@ -129,6 +144,7 @@ pub struct DwellingBlueprintBuilder {
     pub(super) time_res: std::time::Duration,
     #[cfg(feature = "dst")]
     pub(super) parsed_civil_tz: Option<chrono_tz::Tz>,
+    pub(super) input_records: Option<InputRecords>,
 }
 
 impl DwellingBlueprintBuilder {
@@ -197,6 +213,7 @@ impl DwellingBlueprintBuilder {
         .map_err(|e| HaresError::Io(e.to_string()))?;
 
         Ok(Self {
+            input_records: inputs.records().cloned(),
             inputs,
             settings,
             building,
@@ -338,6 +355,7 @@ impl DwellingBlueprintBuilder {
             time_res,
             #[cfg(feature = "dst")]
             parsed_civil_tz,
+            input_records,
         } = self;
 
         let step_secs = super::conversions::duration_to_u32_secs(settings.sim_config.time_res)?;
@@ -372,6 +390,7 @@ impl DwellingBlueprintBuilder {
             #[cfg(feature = "dst")]
             parsed_civil_tz,
             rng,
+            input_records,
         }))
     }
 }

@@ -2592,6 +2592,10 @@ pub struct Dwelling {
     /// changes: the incremental metrics calculator re-initializes against
     /// the rebuilt schema.
     sim_config: SimulationConfig,
+    /// The input records the parse read, carried to the run's provenance.
+    /// `None` when the dwelling was built from pre-parsed data whose files
+    /// the parse did not read (the synthetic TOML dwellings).
+    inputs: Option<hares_io::InputRecords>,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
     /// Run-total per-actor scheduler-entry timings (one slot per registered
@@ -2837,16 +2841,13 @@ impl Dwelling {
         // store through a missing file: a defaults load failure is an
         // error naming the path.
         let effective_zone = hpxml_building.climate_zone_iecc.clone();
-        let inputs = hares_io::ParsedInputs {
-            hpxml: Arc::new(hares_io::ParsedHpxml::from_building(hpxml_building)),
-            weather: Arc::new(hares_io::ParsedWeather::from_series(weather)),
-            schedule: Arc::new(hares_io::ParsedSchedule::from_series(
-                schedule_result.schedule,
-            )),
-            defaults: Arc::new(hares_io::ParsedDefaults::empty()),
-            effective_climate_zone: effective_zone,
-            climate_zone_warning: None,
-        };
+        let inputs = hares_io::ParsedInputs::from_parts_with_zone(
+            Arc::new(hares_io::ParsedHpxml::from_building(hpxml_building)),
+            Arc::new(hares_io::ParsedSchedule::from_series(schedule_result.schedule)),
+            Arc::new(hares_io::ParsedWeather::from_series(weather)),
+            Arc::new(hares_io::ParsedDefaults::empty()),
+            effective_zone,
+        );
         let builder = DwellingBlueprintBuilder::new(inputs, dwelling_config.settings.clone())?;
         let blueprint = builder.freeze()?;
         build_from_blueprint(&blueprint)
@@ -2970,6 +2971,9 @@ fn build_from_blueprint_inner_with_seed(
     } else {
         derive_dwelling_rng(master_seed, config.bldg_id)
     };
+    // The input records the parse read, carried to the run's provenance:
+    // the parse's own records, `None` when the parse read no file.
+    let inputs = bp.input_records.clone();
 
     let mut equipment_specs = bp.equipment_specs.clone();
 
@@ -3682,6 +3686,7 @@ fn build_from_blueprint_inner_with_seed(
         diagnostics: config.sim_config.diagnostics,
         output_chunk_size: config.sim_config.output_chunk_size,
         sim_config: config.sim_config.clone(),
+        inputs,
         #[cfg(feature = "profiling")]
         profiling: DwellingProfilingSummary::default(),
         #[cfg(feature = "profiling")]
@@ -3969,6 +3974,7 @@ impl Dwelling {
             bldg_id: self.bldg_id,
             site_utc_offset_s: self.clock.start_time.offset().local_minus_utc(),
             equipment,
+            inputs: self.inputs.clone(),
         }
     }
 
@@ -13291,19 +13297,16 @@ occupancy = 1.0
             ),
         };
 
-        let inputs = hares_io::ParsedInputs {
-            hpxml: Arc::new(hares_io::ParsedHpxml::from_building(building)),
-            weather: Arc::new(hares_io::ParsedWeather::from_series(weather)),
-            schedule: Arc::new(hares_io::ParsedSchedule::from_series(
-                schedule_result.schedule,
-            )),
-            defaults: Arc::new(
+        let inputs = hares_io::ParsedInputs::from_parts_with_zone(
+            Arc::new(hares_io::ParsedHpxml::from_building(building)),
+            Arc::new(hares_io::ParsedSchedule::from_series(schedule_result.schedule)),
+            Arc::new(hares_io::ParsedWeather::from_series(weather)),
+            Arc::new(
                 hares_io::ParsedDefaults::parse(&dwelling_config.defaults)
                     .expect("the no-occupancy defaults load"),
             ),
-            effective_climate_zone: None,
-            climate_zone_warning: None,
-        };
+            None,
+        );
         let builder = DwellingBlueprintBuilder::new(inputs, dwelling_config.settings.clone());
 
         match builder.and_then(|builder| builder.build()) {

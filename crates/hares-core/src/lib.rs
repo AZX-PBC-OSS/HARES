@@ -53,6 +53,7 @@ pub use environment::{
     FORCING_NANOS,
 };
 pub use hares_io::SimulationConfig;
+pub use hares_io::{InputRecord, InputRecordSource, InputRecords};
 #[cfg(feature = "profiling")]
 pub use health::{ActorTiming, ActorTimings};
 pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
