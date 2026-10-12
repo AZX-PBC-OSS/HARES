@@ -5336,7 +5336,9 @@ impl Dwelling {
     /// the environment state. The returned handle is the slot the
     /// solver's update is readable through after each step
     /// ([`hares_types::DomainSlots::custom`]); it is resolved once, at
-    /// installation.
+    /// installation. The install records the caller-actor replay
+    /// blocker: the solver is caller code the run steps with, which no
+    /// replay rebuilds.
     ///
     /// # Errors
     ///
@@ -5358,6 +5360,7 @@ impl Dwelling {
             .push(hares_types::DomainUpdate::empty(id));
         self.custom_solver_slots.push(slot);
         self.custom_domain_solvers.push(solver);
+        self.record_replay_blocker(hares_types::ReplayBlocker::CallerActor);
         Ok(slot)
     }
 

@@ -159,8 +159,10 @@ pub enum ReplayBlocker {
     /// Equipment or its lookup tables changed after the build.
     #[error("the dwelling's equipment changed after the build")]
     EquipmentChanged,
-    /// An actor registered by the caller: a replay rebuilds the
-    /// auto-registered actors, not the caller's.
+    /// An actor registered by the caller, or a custom domain solver the
+    /// caller installed (caller code the run steps with): a replay
+    /// rebuilds the auto-registered actors and installs no solver, not
+    /// the caller's.
     #[error("a caller-registered actor is on the dwelling")]
     CallerActor,
     /// A control signal, dispatch, price signal, grid voltage or clamped

@@ -492,6 +492,43 @@ fn replay_of_a_replaced_tariff_is_refused() {
     reject_returns(&result, &[ReplayBlocker::TariffReplaced]);
 }
 
+/// `replay_export_rejects_an_installed_domain_solver`: a custom domain
+/// solver is caller code the run steps with, so the install records the
+/// caller-actor blocker and the export refuses.
+#[test]
+fn replay_export_rejects_an_installed_domain_solver() {
+    use hares_types::{DomainId, DomainSolver, DomainUpdate, EnvironmentState, PortSlots};
+
+    struct StubSolver {
+        id: DomainId,
+    }
+
+    impl DomainSolver for StubSolver {
+        fn domain_id(&self) -> DomainId {
+            self.id
+        }
+        fn resolve(
+            &mut self,
+            _ports: &PortSlots,
+            _env: &EnvironmentState,
+            _dt: std::time::Duration,
+            _out: &mut DomainUpdate,
+        ) -> Result<(), HaresError> {
+            Ok(())
+        }
+    }
+
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+    dwelling
+        .install_domain_solver(Box::new(StubSolver { id: DomainId(42) }))
+        .expect("the solver installs");
+    dwelling.step().expect("the step runs");
+    let result = dwelling.finish().expect("the finish runs");
+    reject_returns(&result, &[ReplayBlocker::CallerActor]);
+}
+
 /// `replay_records_the_exporting_build`: `Replay.recorded_build` equals
 /// the exporting run's `BuildInfo` field for field.
 #[test]
