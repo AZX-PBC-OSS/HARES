@@ -150,10 +150,14 @@ pub fn porcelain_is_dirty(output: &str) -> bool {
 }
 
 /// The rerun paths for a workspace root: the git directory's `HEAD`, the
-/// resolved ref file, the git directory's `index`, and the workspace's
-/// `crates` tree, `Cargo.toml` and `Cargo.lock`. Only paths that exist
-/// come back, because a missing rerun path makes cargo rerun the script
-/// on every build.
+/// resolved ref file, the common directory's `refs/heads` tree and
+/// `packed-refs` file, the git directory's `index`, and the workspace's
+/// `crates` tree, `Cargo.toml` and `Cargo.lock`. The `refs/heads` tree
+/// and `packed-refs` file carry a ref move whose ref is packed or whose
+/// loose file does not exist yet at build time: the directory's mtime
+/// bumps when git writes a loose ref, and `packed-refs` changes when a
+/// gc packs one. Only paths that exist come back, because a missing
+/// rerun path makes cargo rerun the script on every build.
 #[must_use]
 pub fn rerun_paths(workspace_root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -162,6 +166,9 @@ pub fn rerun_paths(workspace_root: &Path) -> Vec<PathBuf> {
         if let Some(ref_file) = head_ref_file(&git_dir) {
             paths.push(ref_file);
         }
+        let common = common_dir(&git_dir);
+        paths.push(common.join("refs/heads"));
+        paths.push(common.join("packed-refs"));
         paths.push(git_dir.join("index"));
     }
     paths.push(workspace_root.join("crates"));
@@ -175,6 +182,8 @@ pub fn rerun_paths(workspace_root: &Path) -> Vec<PathBuf> {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::SystemTime;
 
     use super::{porcelain_is_dirty, rerun_paths, resolve_git_dir, resolve_head};
 
@@ -189,6 +198,51 @@ mod tests {
     }
 
     const HASH: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// Runs git in `root`, asserting success, and returns its stdout.
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} fails: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    /// The rerun fingerprint cargo stores from a build: every rerun path
+    /// the script emitted, with its mtime and length.
+    fn rerun_fingerprint(root: &Path) -> Vec<(String, SystemTime, u64)> {
+        rerun_paths(root)
+            .into_iter()
+            .map(|path| {
+                let meta = fs::metadata(&path).expect("the rerun path exists");
+                (
+                    path.display().to_string(),
+                    meta.modified().expect("the mtime"),
+                    meta.len(),
+                )
+            })
+            .collect()
+    }
+
+    /// Whether cargo reruns the script against a stored fingerprint: any
+    /// stored path changed mtime or length, or disappeared. Paths the
+    /// build did not emit are invisible to cargo, so a ref move that
+    /// only creates such a path cannot trigger the rerun.
+    fn rerun_inputs_changed(stored: &[(String, SystemTime, u64)]) -> bool {
+        stored
+            .iter()
+            .any(|(path, mtime, len)| match fs::metadata(path) {
+                Ok(meta) => meta.modified().expect("the mtime") != *mtime || meta.len() != *len,
+                Err(_) => true,
+            })
+    }
 
     /// `head_commit_resolution` against synthetic `.git` trees written as
     /// plain files in a temporary directory: a detached HEAD, a symbolic
@@ -335,6 +389,63 @@ mod tests {
         let commit = resolve_head(&git_dir).expect("HEAD resolves");
         let info = crate::BuildInfo::get();
         assert_eq!(info.commit, Some(commit.as_str()));
+    }
+
+    /// `a_packed_ref_move_reruns_the_build`: the reviewer's scenario,
+    /// end to end, in a gc'd mini-repo (the branch ref packed, no loose
+    /// ref file). A ref move that leaves `HEAD` and every source alone
+    /// must change a rerun input, so the build script reruns, and the
+    /// identity must follow the move. The common directory's
+    /// `refs/heads` tree and `packed-refs` file carry this: the
+    /// directory's mtime bumps when git writes a loose ref, and
+    /// `packed-refs` changes when a gc packs one.
+    #[test]
+    fn a_packed_ref_move_reruns_the_build() {
+        let tmp = tempfile::tempdir().expect("the temp directory");
+        let root = tmp.path().join("repo");
+        fs::create_dir_all(&root).expect("the repo root");
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "probe@example.com"]);
+        git(&root, &["config", "user.name", "Probe"]);
+        git(&root, &["commit", "--allow-empty", "--quiet", "-m", "one"]);
+        git(&root, &["commit", "--allow-empty", "--quiet", "-m", "two"]);
+        git(&root, &["gc", "--quiet"]);
+
+        let git_dir = resolve_git_dir(&root).expect("the .git directory");
+        let branch = git(&root, &["symbolic-ref", "--short", "HEAD"]);
+        let branch = branch.trim_end().to_string();
+        assert!(
+            !git_dir.join("refs/heads").join(&branch).is_file(),
+            "gc packed the branch ref: {branch} has no loose ref file"
+        );
+        let before = resolve_head(&git_dir).expect("HEAD resolves");
+        let stored = rerun_fingerprint(&root);
+
+        // The ref move: HEAD stays symbolic, no tracked source changes.
+        git(&root, &["update-ref", "HEAD", "HEAD~1"]);
+
+        assert!(
+            rerun_inputs_changed(&stored),
+            "the ref move changes a rerun input, so cargo reruns the script"
+        );
+        let git_dir = resolve_git_dir(&root).expect("the .git directory");
+        let after = resolve_head(&git_dir).expect("HEAD resolves");
+        assert_ne!(after, before, "the ref move moves the identity");
+
+        // Packing the moved ref rewrites `packed-refs`, the rerun input
+        // a gc'ed ref store moves, and the identity survives the pack.
+        let stored = rerun_fingerprint(&root);
+        git(&root, &["pack-refs", "--all"]);
+        assert!(
+            rerun_inputs_changed(&stored),
+            "packing the moved ref changes a rerun input too"
+        );
+        let git_dir = resolve_git_dir(&root).expect("the .git directory");
+        assert_eq!(
+            resolve_head(&git_dir).as_deref(),
+            Some(after.as_str()),
+            "the identity survives the pack"
+        );
     }
 
     /// The recorded identity fields exist and match the build: the
