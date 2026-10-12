@@ -2943,4 +2943,5 @@ Result: the cz4a fixture's validate() 3.3 ms; the cz2a AFUE rejection
 6.6 ms. Both one order of magnitude under the 100 ms target, so no phase
 breakdown was recorded; the dominant cost either way is the assembly's
 own (the environment init and the equipment construction), the warm-up's
-simulated days absent by construction.
+simulated days absent by construction. The re-run on the final head
+(after the row's commits): 3.0 ms and 5.5 ms, the same reading.
