@@ -467,9 +467,14 @@ pub enum DefaultsError {
 pub(crate) type DefaultsInputLog = Vec<(String, Vec<u8>)>;
 
 /// Log one defaults file's bytes for the load's input log: the path
-/// relative to the base, and the bytes. Best effort: a file this re-read
-/// cannot fetch is a file the parse read fails on next, so the load never
-/// succeeds with a silently incomplete log.
+/// relative to the base, and the bytes of this read. The guarantee is
+/// about this read, not the parse's: the digest records the bytes read
+/// at the log's read, and a file changing between the two reads records
+/// a digest over bytes the parse never saw. That window is disclosed
+/// here; the read-once-and-hash-the-consumed-bytes improvement belongs
+/// to the shared-inputs row. A file this re-read cannot fetch is a file
+/// the parse read fails on next, so the load never succeeds with a
+/// silently incomplete log.
 pub(crate) fn log_read(base: &Path, log: &mut DefaultsInputLog, path: &Path) {
     let Ok(bytes) = std::fs::read(path) else {
         return;
