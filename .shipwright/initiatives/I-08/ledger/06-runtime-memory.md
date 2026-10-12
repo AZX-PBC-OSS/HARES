@@ -873,7 +873,72 @@ against 11.01 ms with the full parse; M-3 item 5's three readings flat.
 One test deleted with its premise: the basement-lighting copy-conflict
 probe corrupted the blueprint's public schedule field, and the field is
 private now (a parsed schedule is consistent by construction; the
-injection's own failure paths stay pinned in the schedule tests).
+copy-conflict branch the probe exercised is unreachable from parsed
+inputs and is unpinned: no test covers it).
+
+Independent review round at tip `c7098a38`, five findings fixed in the
+same session (Rust tip `862660b3`, the Python surface `ca267df1`):
+
+1. MAJOR, the fit-path measurement record: the re-measurement with the
+   committed harness in the canonical release build reproduces the
+   recorded numbers (3.58 ms per candidate from shared handles against
+   11.89 ms with the full parse, 3.3x; five runs within 5% of their
+   median, load average 8.25 to 8.44; the log's record carries the
+   command and the load). The review round's own 153.7-209.3 ms with a
+   1.2-1.3x ratio was the debug profile's run of the same test, not the
+   release build the record is taken in.
+2. MAJOR, the per-file replacement did not share: `with_file` re-read
+   and re-parsed the entire tree from disk (a fresh
+   `load_with_overrides`) where the docs claimed every untouched table
+   was shared. Fixed: the handle's store tables are `Arc`s;
+   `with_file` clones the store (every table shared), re-parses only
+   the replaced file's group over the shared rest
+   (`DefaultsStore::with_replaced_group`, the same `apply_override`
+   the fresh parse applies for one file), shares the profiles unless
+   the replacement names the profiles file, and bumps the defaults
+   parse counter once per group re-parse. Pinned by
+   `with_file_shares_the_untouched_tables`: the counter's delta 1,
+   twelve untouched tables' `Arc::ptr_eq` with the source's, the
+   profiles' too, the replaced row present and the source's absent.
+   RED on the old code: the profiles re-parsed (counter delta 1) and
+   every `ptr_eq` failed.
+3. MINOR, the cache key was an allocation address:
+   `SourceIdentity::Content(usize)` keyed the public parse cache on
+   the content's allocation, so a dropped source and a different
+   source at a reused address shared one entry and the second
+   construction silently read the first source's parse. Fixed: content
+   sources key by their content's 64-bit digest, computed when the
+   identity is constructed; the sha256 form belongs to the input-digest
+   row's machinery, not yet landed, so the cheap in-process hash is the
+   key.
+   Pinned by `a_dropped_source_and_a_reused_address_are_distinct_cache_keys`
+   (RED on the old code: the allocator reused the address, both keys
+   read `Content(137342585146448)`), by
+   `equal_content_sources_share_one_cache_key` (equal contents share
+   one parse, counter delta 1; RED on the old code: one parse per
+   allocation), and by
+   `different_content_sources_parse_once_each_through_one_cache`.
+4. MINOR, the deleted probe's record overclaimed: the record said the
+   injection's failure paths stay pinned; the copy-conflict branch is
+   unreachable from parsed inputs and unpinned. The record says that.
+5. MINOR, the Python schedule handles dropped the weather meta:
+   `ParsedSchedule.from_path`/`from_text` parsed with
+   `weather_meta=None`, so a schedule CSV whose timestamps carry no
+   UTC offset failed at the handle where the config path (which passes
+   the weather file's meta) succeeded. Fixed: both take
+   `weather_meta=`, the parsed weather whose meta the offset-less
+   timestamps resolve against, documented in the stub and docs. Pinned
+   by `test_schedule_handle_takes_the_weather_meta_fallback`: the
+   offset-less CSV fails without the meta naming the fallback, parses
+   with it, and the handle-built run is bitwise the config path's run.
+
+Gates at the fix tip: fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace
+--all-features -j 4` 8007/8007 (3 skipped: the ignored kind-pin
+generator and the two hand-run measurement tests); `pytest -m ''` 1725
+passed, 6 xfailed, 0 failed, 0 errors; pyright 0; the goldens bitwise
+(compare-all 8 identical, `full_year_900s_dst` identical, the observe
+set's 8 identical).
 
 ## RT-5: per-run health state, thread safety and reproducibility
 

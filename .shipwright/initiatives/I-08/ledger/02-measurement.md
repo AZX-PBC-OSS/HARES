@@ -1189,6 +1189,18 @@ candidate): the batch's shared parses 6.42 ms once, then 3.20 ms per
 candidate from the shared handles against 11.01 ms per candidate with
 the full parse (about 3.4x less per candidate).
 
+Re-measured at the review round's Rust tip `862660b3` with the
+committed harness, unchanged since the row's commit, in the canonical
+release build (`cargo test --release -p hares-core --test
+fit_path_cost -- --ignored --nocapture`, the pinned toolchain rustc
+1.99.0): five runs, load average 8.25 to 8.44 (1 min), every run within
+5% of its median, the shared parses 6.59 ms once, then 3.58 ms per
+candidate from the shared handles against 11.89 ms per candidate with
+the full parse, 3.3x less per candidate. The recorded numbers above
+reproduce. The same test in the debug profile prints 145.9 ms and
+183.7 ms per candidate (1.3x): the fit path's ratio is a release
+number, and a debug run's wall is not comparable to the record.
+
 M-3 item 5's three memory-growth readings repeated at the commit (the
 same commands, `--discard-output`, VmRSS from the run's own report):
 500 construct-and-simulate repetitions (1-day runs) 49,112 kB at rep 1,
