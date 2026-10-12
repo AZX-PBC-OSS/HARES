@@ -89,12 +89,13 @@ impl InputSource {
     }
 
     /// The source's identity: a path source is its path; a content source
-    /// is its allocation, so the same handle parsed twice is one parse.
+    /// is its content's digest, so the same content parsed twice is one
+    /// parse and a reused allocation is never the same key.
     pub(crate) fn identity(&self) -> SourceIdentity {
         match self {
             Self::Path(path) => SourceIdentity::Path(path.clone()),
-            Self::Text(text) => SourceIdentity::Content(Arc::as_ptr(text).cast::<u8>() as usize),
-            Self::Bytes(bytes) => SourceIdentity::Content(Arc::as_ptr(bytes).cast::<u8>() as usize),
+            Self::Text(text) => SourceIdentity::Content(content_digest(text.as_bytes())),
+            Self::Bytes(bytes) => SourceIdentity::Content(content_digest(bytes)),
         }
     }
 }
@@ -112,11 +113,22 @@ impl From<&Path> for InputSource {
 }
 
 /// A source's identity for the many-home construction's parse cache: a
-/// path source is its path, a content source its allocation.
+/// path source is its path, a content source its content's digest. The
+/// digest, not the allocation's address: a dropped source and a different
+/// source at a reused address must not share a cache entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum SourceIdentity {
     Path(PathBuf),
-    Content(usize),
+    Content(u64),
+}
+
+/// The content's 64-bit digest: the key a content source identities by,
+/// so equal contents share one parse and a reused allocation never does.
+fn content_digest(content: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The weather input: a path (the format detected from the file, today's
@@ -173,11 +185,11 @@ impl WeatherInput {
         match self {
             Self::Path(path) => (SourceIdentity::Path(path.clone()), None),
             Self::Text { content, format } => (
-                SourceIdentity::Content(Arc::as_ptr(content).cast::<u8>() as usize),
+                SourceIdentity::Content(content_digest(content.as_bytes())),
                 Some(*format),
             ),
             Self::Bytes { content, format } => (
-                SourceIdentity::Content(Arc::as_ptr(content).cast::<u8>() as usize),
+                SourceIdentity::Content(content_digest(content)),
                 Some(*format),
             ),
         }
@@ -209,7 +221,7 @@ impl DefaultsSource {
     }
 
     /// The source's identity for the many-home construction's parse cache:
-    /// the base path and every replacement's path and allocation.
+    /// the base path and every replacement's path and content digest.
     pub(crate) fn identity(&self) -> DefaultsIdentity {
         DefaultsIdentity {
             base: self.base.clone(),
@@ -692,9 +704,10 @@ impl ParsedDefaults {
         Arc::clone(&self.profiles)
     }
 
-    /// A handle over the same tree with one file replaced: that one file
-    /// is re-parsed, every other table is shared with this handle. The
-    /// unknown relative path is an error naming the known files.
+    /// A handle over the same tree with one file replaced: the replaced
+    /// file's group is re-parsed over the source handle's shared tables,
+    /// every other table is the source's own `Arc`. The unknown relative
+    /// path is an error naming the known files.
     ///
     /// # Errors
     ///
@@ -712,10 +725,47 @@ impl ParsedDefaults {
             )));
         }
         let mut files = self.source.files.clone();
-        files.insert(relative_path.to_string(), source);
-        Self::parse(&DefaultsSource {
-            base: self.source.base.clone(),
-            files,
+        files.insert(relative_path.to_string(), source.clone());
+        let base = self
+            .source
+            .base
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("defaults"));
+        let content = source.read_text().map_err(|err| {
+            HaresError::Io(format!(
+                "'{}' could not be read: {err}",
+                base.join(relative_path).display()
+            ))
+        })?;
+        let strict_defaults = std::env::var("HARES_STRICT_DEFAULTS").is_ok();
+        let store = self
+            .store
+            .with_replaced_group(&base, relative_path, &content, strict_defaults)
+            .map_err(|err| {
+                HaresError::Io(format!(
+                    "defaults load failed for '{}': {err}",
+                    base.display()
+                ))
+            })?;
+        // The default schedule profiles are the schedule side's table (the
+        // store carries none): the profiles re-parse only when the
+        // replacement names the profiles file, every other replacement
+        // shares this handle's.
+        let profiles = if relative_path == DEFAULT_SCHEDULES_CSV {
+            Arc::new(crate::parse_default_profiles_str(
+                &content,
+                &base.join(DEFAULT_SCHEDULES_CSV),
+            )?)
+        } else {
+            Arc::clone(&self.profiles)
+        };
+        Ok(Self {
+            store: Arc::new(store),
+            profiles,
+            source: DefaultsSource {
+                base: self.source.base.clone(),
+                files,
+            },
         })
     }
 
@@ -1045,5 +1095,111 @@ impl ParsedInputs {
             defaults,
             generation,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// A content source's cache key is its content's digest: equal
+    /// contents share one key (one parse through the cache), whatever
+    /// allocation each source landed at.
+    #[test]
+    fn equal_content_sources_share_one_cache_key() {
+        let document = std::fs::read_to_string(
+            repo_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+        )
+        .expect("the document reads");
+        let first = InputSource::Text(document.clone().into());
+        let second = InputSource::Text(document.into());
+        assert_eq!(
+            first.identity(),
+            second.identity(),
+            "equal contents are one cache key"
+        );
+
+        let weather = WeatherInput::Path(
+            repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        );
+        let defaults = DefaultsSource::directory(repo_root().join("defaults"));
+        let schedule =
+            InputSource::from_path(repo_root().join("data/examples/BEopt_example_schedule.csv"));
+        let cache = ParsedInputsCache::new();
+        let before = crate::parse_counts::parse_counts();
+        let first_inputs = cache
+            .parsed_inputs(&first, Some(&schedule), &weather, &defaults, None)
+            .expect("the first source parses");
+        let second_inputs = cache
+            .parsed_inputs(&second, Some(&schedule), &weather, &defaults, None)
+            .expect("the second source parses");
+        let after = crate::parse_counts::parse_counts();
+        assert!(
+            Arc::ptr_eq(&first_inputs.hpxml, &second_inputs.hpxml),
+            "equal contents share one parse"
+        );
+        assert_eq!(
+            after.hpxml - before.hpxml,
+            1,
+            "equal contents parse once, not once per allocation"
+        );
+    }
+
+    /// A dropped content source and a different source at a reused
+    /// address are distinct cache keys: the key is the content's digest,
+    /// never the allocation's address, so the second source cannot hit
+    /// the first source's cache entry.
+    #[test]
+    fn a_dropped_source_and_a_reused_address_are_distinct_cache_keys() {
+        let first = InputSource::Text("the first document".into());
+        let first_identity = first.identity();
+        drop(first);
+        // The same byte length: the same allocation size class, the
+        // address most likely reused.
+        let second = InputSource::Text("the second docume".into());
+        let second_identity = second.identity();
+        assert_ne!(
+            first_identity, second_identity,
+            "a dropped source and a different source at a reused address \
+             are distinct cache keys"
+        );
+    }
+
+    /// Two different content sources through one cache parse twice: the
+    /// second source's entry is never the first's, however the allocator
+    /// reuses the first source's address after its drop.
+    #[test]
+    fn different_content_sources_parse_once_each_through_one_cache() {
+        let fixture = repo_root().join("tests/fixtures/hpxml/ochre_samples");
+        let first_text =
+            std::fs::read_to_string(fixture.join("base.xml")).expect("the first document reads");
+        let second_text = std::fs::read_to_string(fixture.join("base-pv.xml"))
+            .expect("the second document reads");
+        let weather = WeatherInput::Path(
+            repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        );
+        let defaults = DefaultsSource::directory(repo_root().join("defaults"));
+
+        let cache = ParsedInputsCache::new();
+        let first_source = InputSource::Text(first_text.into());
+        let schedule =
+            InputSource::from_path(repo_root().join("data/examples/BEopt_example_schedule.csv"));
+        let first_inputs = cache
+            .parsed_inputs(&first_source, Some(&schedule), &weather, &defaults, None)
+            .expect("the first source parses");
+        drop(first_source);
+        let second_source = InputSource::Text(second_text.into());
+        let second_inputs = cache
+            .parsed_inputs(&second_source, Some(&schedule), &weather, &defaults, None)
+            .expect("the second source parses");
+
+        assert!(
+            !Arc::ptr_eq(&first_inputs.hpxml, &second_inputs.hpxml),
+            "different contents are different parses"
+        );
     }
 }

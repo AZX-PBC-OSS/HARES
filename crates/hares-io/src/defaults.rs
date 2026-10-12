@@ -408,7 +408,7 @@ impl WaterHeatingDefaults {
 ///
 /// The tables are `Arc`-shared: a store cloned from a loaded handle (the
 /// per-file replacement's `ParsedDefaults::with_file`) shares every table
-/// with the handle and re-parses only the replaced file's table.
+/// with the handle and re-parses only the replaced file's group.
 #[derive(Debug, Clone, Default)]
 pub struct DefaultsStore {
     zip_by_equipment: Arc<HashMap<String, ZipLoad>>,
@@ -570,6 +570,25 @@ impl DefaultsStore {
             })?;
             store.apply_override(&base, relative, &content, strict_defaults)?;
         }
+        Ok(store)
+    }
+
+    /// The store with one file's group re-parsed over the shared tables:
+    /// the receiver's tables are `Arc`-shared with the result, the
+    /// replaced file's group re-parsed from the replacement's content over
+    /// the base's rest. The per-file replacement's
+    /// `ParsedDefaults::with_file` path; the parse counter reads one
+    /// group.
+    pub(crate) fn with_replaced_group(
+        &self,
+        base: &Path,
+        relative: &str,
+        content: &str,
+        strict_defaults: bool,
+    ) -> Result<Self, DefaultsError> {
+        crate::parse_counts::bump_defaults();
+        let mut store = self.clone();
+        store.apply_override(base, relative, content, strict_defaults)?;
         Ok(store)
     }
 
@@ -5243,4 +5262,88 @@ efficiency_ratio = 0.0
         "thermal_r",
         "thermal_c",
     ];
+
+    /// The per-file replacement shares the untouched tables: `with_file`
+    /// re-parses only the replaced file's group over the source handle's
+    /// `Arc`s, the parse counter reads one group, and the replacement
+    /// takes effect.
+    #[test]
+    fn with_file_shares_the_untouched_tables() {
+        use crate::inputs::{DefaultsSource, InputSource, ParsedDefaults};
+        use std::sync::Arc;
+
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("defaults");
+        let source = ParsedDefaults::parse(&DefaultsSource::directory(&defaults_dir))
+            .expect("the repo defaults load");
+
+        let edited = "[probe_equipment]\nzp = 3.0\nip = 0.0\npp = 0.0\nzq = 1.0\niq = 0.0\npq = 0.0\npf = 1.0\n";
+        let before = crate::parse_counts::parse_counts();
+        let replaced = source
+            .with_file(
+                "zip_parameters.toml",
+                InputSource::Text(edited.to_string().into()),
+            )
+            .expect("the replacement loads");
+        let after = crate::parse_counts::parse_counts();
+
+        assert_eq!(
+            after.defaults - before.defaults,
+            1,
+            "one group re-parsed, not a tree load per replaced file"
+        );
+        assert_eq!(
+            after.profiles - before.profiles,
+            0,
+            "the profiles are not the replaced file's group: no profile re-parse"
+        );
+
+        let a = source.store();
+        let b = replaced.store();
+        for (name, shared) in [
+            (
+                "hvac_cooling",
+                Arc::ptr_eq(&a.hvac_cooling, &b.hvac_cooling),
+            ),
+            (
+                "hvac_heating",
+                Arc::ptr_eq(&a.hvac_heating, &b.hvac_heating),
+            ),
+            (
+                "hvac_multispeed",
+                Arc::ptr_eq(&a.hvac_multispeed, &b.hvac_multispeed),
+            ),
+            ("battery", Arc::ptr_eq(&a.battery, &b.battery)),
+            ("envelope", Arc::ptr_eq(&a.envelope, &b.envelope)),
+            ("ev", Arc::ptr_eq(&a.ev, &b.ev)),
+            ("generator", Arc::ptr_eq(&a.generator, &b.generator)),
+            ("loads", Arc::ptr_eq(&a.loads, &b.loads)),
+            ("pv", Arc::ptr_eq(&a.pv, &b.pv)),
+            ("pv_panel", Arc::ptr_eq(&a.pv_panel, &b.pv_panel)),
+            (
+                "water_heating",
+                Arc::ptr_eq(&a.water_heating, &b.water_heating),
+            ),
+        ] {
+            assert!(
+                shared,
+                "the '{name}' table must be the source handle's own Arc"
+            );
+        }
+        assert!(
+            Arc::ptr_eq(&source.profiles(), &replaced.profiles()),
+            "the profiles are not the replaced file's group: shared with the source"
+        );
+
+        // The replacement takes effect, the source's own table unchanged.
+        assert!(a.zip_params("probe equipment").is_none());
+        let probe = b
+            .zip_params("probe equipment")
+            .expect("the replacement's row is in the replaced store");
+        assert!((probe.zp - 3.0).abs() < f64::EPSILON);
+    }
 }

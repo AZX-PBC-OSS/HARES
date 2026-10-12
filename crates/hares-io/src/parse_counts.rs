@@ -23,7 +23,8 @@ pub struct ParseCounts {
     /// Schedule CSV parses (path or content; a generated schedule counts
     /// none: it is computed, not parsed).
     pub schedule: u64,
-    /// Defaults tree loads (`DefaultsStore::load`).
+    /// Defaults tree loads (`DefaultsStore::load`) and the per-file
+    /// replacement's group re-parses (`ParsedDefaults::with_file`).
     pub defaults: u64,
     /// Default schedule profile loads (`load_default_profiles`).
     pub profiles: u64,
