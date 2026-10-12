@@ -25,6 +25,7 @@ use super::conversions::{
     boundary_zone_index, building_to_boundary_inputs, building_to_zone_inputs,
     check_multi_unit_zones, has_vented_crawlspace, shielding_to_class, site_type_to_terrain,
 };
+use crate::resolved::{ResolvedBoundary, ResolvedLayer};
 
 // ── Intermediate representation ─────────────────────────────────────────────
 
@@ -744,6 +745,7 @@ fn compute_opening_azimuth_and_area(
 }
 
 /// Annual weather averages needed for film coefficient computation.
+#[derive(Clone)]
 pub(crate) struct WeatherAverages {
     pub(crate) avg_wind_m_s: f64,
     pub(crate) avg_ambient_c: f64,
@@ -794,7 +796,8 @@ pub(crate) struct SolverBundle {
     /// The envelope's resolved-parameter read-back: the assembled
     /// boundaries' effective R, C and layers, and the resolved windows.
     /// Computed from the same boundary inputs and RC diagnostics every
-    /// build profile already makes, read by `Dwelling::resolved_model`.
+    /// build profile already makes, read by `Dwelling::resolved_model` and
+    /// `DwellingBlueprint::validate`.
     pub resolved_envelope: crate::resolved::ResolvedEnvelope,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     pub envelope_diagnostics: EnvelopeDiagnostics,

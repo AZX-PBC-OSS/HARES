@@ -1,8 +1,10 @@
 //! The resolved-parameter read-back: the model the physics actually uses,
 //! computed at assembly, after defaults, autosizing and overrides and
 //! before warm-up, and read back through [`crate::Dwelling::resolved_model`]
-//! (the runtime-memory ledger's read-back entry). SI units throughout.
+//! and `DwellingBlueprint::validate` (the runtime-memory ledger's read-back
+//! entry). SI units throughout.
 
+use chrono::NaiveDateTime;
 use hares_envelope::boundary_rc::{BoundaryDiagnostic, BoundaryInput, ExteriorTarget, RCPath};
 use hares_io::hpxml::BoundaryType;
 use hares_io::{SetpointSource, SiteLocation};
@@ -28,6 +30,25 @@ pub struct ResolvedModel {
     pub windows: Vec<ResolvedWindow>,
     pub infiltration: ResolvedInfiltration,
     pub site: SiteLocation,
+    /// The run's horizon and clock, so a caller can check a table's row
+    /// count against the engine.
+    pub clock: ResolvedClock,
+}
+
+/// The run's clock at assembly: the first step's local standard time, the
+/// site offset it is labelled at, the step, and the simulated step count
+/// of the configured horizon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedClock {
+    /// The first step's local standard time (the fixed-offset clock's own
+    /// wall clock; DST never moves it).
+    pub start: NaiveDateTime,
+    /// The site's standard-time offset from UTC, in seconds.
+    pub utc_offset_s: i32,
+    /// The step, in seconds.
+    pub time_res_s: u32,
+    /// The simulated step count: the configured duration's whole steps.
+    pub steps: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]

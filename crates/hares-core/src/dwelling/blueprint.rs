@@ -5,14 +5,15 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_io::{
-    EquipmentSpec, InputRecords, ParsedInputs, SiteLocation, epw::DesignConditions,
+    Catalogue, EquipmentSpec, InputRecords, ParsedInputs, SiteLocation, epw::DesignConditions,
     hpxml::resolve_equipment, site_location::resolve_site_location,
 };
 use hares_types::{EndUse, HaresError, Warning};
 
 use super::solver_builder::{WeatherAverages, compute_weather_averages};
 use crate::derive_dwelling_rng;
-use crate::dwelling::{DwellingConfig, DwellingSettings};
+use crate::dwelling::{DwellingConfig, DwellingSettings, WarningLog};
+use crate::resolved::ResolvedModel;
 
 /// The dwelling's pre-build state, immutable and shared as
 /// `Arc<DwellingBlueprint>`: the parsed-input handles (one parse per
@@ -110,6 +111,68 @@ impl DwellingBlueprint {
         super::build_from_blueprint(self)
     }
 
+    /// Run the assembly alone and read the resolved model back: every
+    /// construction-time check `build` runs, through the same code, with
+    /// no warm-up and no step. The returned `ResolvedModel` is the one the
+    /// built dwelling's `resolved_model()` carries. An infeasible input
+    /// fails here with the same error the build fails with, in a fraction
+    /// of its cost (the warm-up's simulated days are the build's cost the
+    /// caller does not pay to learn the input is infeasible).
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the assembly fails, naming the cause the build
+    /// names.
+    pub fn validate(self: &Arc<Self>) -> Result<ResolvedModel, HaresError> {
+        let dwelling = self.assemble_for_readback()?;
+        Ok(dwelling.into_resolved_model())
+    }
+
+    /// Run the assembly alone and return the output variable catalogue:
+    /// the equipment and the auto-registered actors the assembly
+    /// instantiates, with no warm-up and no step. The catalogue equals the
+    /// built dwelling's `catalogue()`; variables of actors a caller
+    /// registers or `set_tariff` adds after build are not in it.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the assembly fails, naming the cause the build
+    /// names.
+    pub fn catalogue(self: &Arc<Self>) -> Result<Arc<Catalogue>, HaresError> {
+        let dwelling = self.assemble_for_readback()?;
+        Ok(dwelling.catalogue())
+    }
+
+    /// The assembly phase alone, with the blueprint's own settings: the
+    /// construction-time warnings seeded the build seeds them, and a
+    /// failure emits them the way the build's failure path emits them.
+    fn assemble_for_readback(self: &Arc<Self>) -> Result<super::Dwelling, HaresError> {
+        let mut warnings = WarningLog::new();
+        for warning in &self.equipment_warnings {
+            warnings.push_warning(warning.clone());
+        }
+        super::assemble_from_blueprint_with_seed(
+            self,
+            &self.settings,
+            self.settings.sim_config.master_seed,
+            &mut warnings,
+        )
+        .map_err(|err| {
+            for entry in warnings.iter() {
+                tracing::warn!("{entry}");
+            }
+            if warnings.dropped() > 0 {
+                tracing::warn!(
+                    "warning log capacity ({}) reached; {} additional warning(s) were dropped",
+                    WarningLog::CAPACITY,
+                    warnings.dropped()
+                );
+            }
+            tracing::warn!("dwelling construction failed: {err}");
+            err
+        })
+    }
+
     /// Build the dwelling from this blueprint with the master seed given,
     /// the rng derived from the seed instead of the blueprint's own.
     ///
@@ -131,7 +194,10 @@ impl DwellingBlueprint {
 /// with the equipment resolved once and mutable until
 /// [`freeze`](DwellingBlueprintBuilder::freeze). The mutators are the
 /// blueprint's former ones: equipment inspection and swap before the
-/// immutable blueprint is frozen.
+/// immutable blueprint is frozen. A read-only call that runs the assembly
+/// without consuming the builder (`validate`, `catalogue` on the Python
+/// surface) clones it: every field is a shared handle or a small vector.
+#[derive(Clone)]
 pub struct DwellingBlueprintBuilder {
     pub(super) inputs: ParsedInputs,
     pub(super) settings: DwellingSettings,

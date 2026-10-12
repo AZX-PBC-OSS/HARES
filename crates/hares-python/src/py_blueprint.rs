@@ -9,7 +9,7 @@ use hares_io::{ParsedDefaults, ParsedHpxml, ParsedSchedule, ParsedWeather};
 use hares_types::EndUse;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyType};
+use pyo3::types::{PyDict, PyList, PyType};
 
 use crate::py_dwelling::{PyDwelling, construct_detached, to_py_err};
 use crate::py_enums::PyEndUse;
@@ -163,6 +163,57 @@ impl PyDwellingBlueprint {
             self.config.clone(),
             blueprint,
         ))
+    }
+
+    /// Run the assembly alone and read the resolved model back as a dict:
+    /// every construction-time check `build` runs, with no warm-up and no
+    /// step. The same dict form `Dwelling.resolved_model()` returns. The
+    /// blueprint is not consumed: the builder is cloned, the frozen
+    /// blueprint the clone freezes is validated and dropped.
+    pub fn validate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let blueprint = self.frozen_for_readback(py, "validate")?;
+        let model = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            construct_detached(py, move || blueprint.validate())
+        }))
+        .map_err(|_| PyValueError::new_err("DwellingBlueprint::validate() panicked"))?
+        .map_err(to_py_err)?;
+        resolved_model_to_py(py, &model)
+    }
+
+    /// Run the assembly alone and return the output variable catalogue:
+    /// the equipment and the auto-registered actors, with no warm-up and
+    /// no step. Equals the built dwelling's `catalogue()`; variables of
+    /// actors a caller registers after build are not in it.
+    pub fn catalogue(&self, py: Python<'_>) -> PyResult<crate::py_catalogue::PyCatalogue> {
+        let blueprint = self.frozen_for_readback(py, "catalogue")?;
+        let catalogue = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            construct_detached(py, move || blueprint.catalogue())
+        }))
+        .map_err(|_| PyValueError::new_err("DwellingBlueprint::catalogue() panicked"))?
+        .map_err(to_py_err)?;
+        Ok(crate::py_catalogue::PyCatalogue { inner: catalogue })
+    }
+}
+
+impl PyDwellingBlueprint {
+    /// The frozen blueprint the read-only calls run on: the builder
+    /// cloned and frozen (the builder itself is untouched, so `build()`
+    /// still works after a `validate()` or `catalogue()`).
+    fn frozen_for_readback(
+        &self,
+        py: Python<'_>,
+        context: &str,
+    ) -> PyResult<std::sync::Arc<hares_core::DwellingBlueprint>> {
+        let builder = self
+            .builder
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("DwellingBlueprint has already been built"))?;
+        let message = format!("DwellingBlueprint::{context}() panicked");
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            construct_detached(py, move || builder.clone().freeze())
+        }))
+        .map_err(|_| PyValueError::new_err(message))?
+        .map_err(to_py_err)
     }
 }
 
@@ -342,4 +393,90 @@ fn py_any_to_equipment_spec(obj: &Bound<'_, PyAny>) -> PyResult<hares_io::Equipm
     Err(PyValueError::new_err(
         "equipment must be a typed HVAC or water heater config object",
     ))
+}
+
+/// The resolved model as the dict the read-back surfaces return: the site
+/// with its per-field sources, the clock, and every boundary's layers.
+/// `Dwelling.resolved_model()` returns the same form.
+pub(crate) fn resolved_model_to_py(
+    py: Python<'_>,
+    model: &hares_core::ResolvedModel,
+) -> PyResult<Py<PyAny>> {
+    use hares_io::hpxml::BoundaryType;
+
+    let site = PyDict::new(py);
+    for (value, name, source) in [
+        (
+            model.site.latitude_deg,
+            "latitude_deg",
+            model.site.latitude_source,
+        ),
+        (
+            model.site.longitude_deg,
+            "longitude_deg",
+            model.site.longitude_source,
+        ),
+        (
+            model.site.elevation_m,
+            "elevation_m",
+            model.site.elevation_source,
+        ),
+        (
+            model.site.utc_offset_h,
+            "utc_offset_h",
+            model.site.utc_offset_source,
+        ),
+    ] {
+        site.set_item(name, value)?;
+        site.set_item(format!("{name}_source"), source.label())?;
+    }
+
+    let clock = PyDict::new(py);
+    clock.set_item(
+        "start",
+        model.clock.start.format("%Y-%m-%dT%H:%M:%S").to_string(),
+    )?;
+    clock.set_item("utc_offset_s", model.clock.utc_offset_s)?;
+    clock.set_item("time_res_s", model.clock.time_res_s)?;
+    clock.set_item("steps", model.clock.steps)?;
+
+    let kind_label = |kind: &BoundaryType| -> String {
+        match kind {
+            BoundaryType::Wall => "Wall".to_string(),
+            BoundaryType::Roof => "Roof".to_string(),
+            BoundaryType::Floor => "Floor".to_string(),
+            BoundaryType::Window => "Window".to_string(),
+            BoundaryType::Skylight => "Skylight".to_string(),
+            BoundaryType::Door => "Door".to_string(),
+            BoundaryType::FoundationWall => "FoundationWall".to_string(),
+            BoundaryType::RimJoist => "RimJoist".to_string(),
+            BoundaryType::Slab => "Slab".to_string(),
+            BoundaryType::Other(raw) => raw.clone(),
+        }
+    };
+    let boundaries = PyList::empty(py);
+    for boundary in &model.boundaries {
+        let entry = PyDict::new(py);
+        entry.set_item("id", boundary.id.clone())?;
+        entry.set_item("kind", kind_label(&boundary.kind))?;
+        entry.set_item("area_m2", boundary.area_m2)?;
+        entry.set_item("r_effective_m2k_w", boundary.r_effective_m2k_w)?;
+        entry.set_item("films_m2k_w", boundary.films_m2k_w)?;
+        entry.set_item("c_j_k", boundary.c_j_k)?;
+        let layers = PyList::empty(py);
+        for layer in &boundary.layers {
+            let item = PyDict::new(py);
+            item.set_item("r_m2k_w", layer.r_m2k_w)?;
+            item.set_item("c_j_m2k", layer.c_j_m2k)?;
+            layers.append(item)?;
+        }
+        entry.set_item("layers", layers)?;
+        boundaries.append(entry)?;
+    }
+
+    let out = PyDict::new(py);
+    out.set_item("site", site)?;
+    out.set_item("clock", clock)?;
+    out.set_item("boundaries", boundaries)?;
+    Ok(out.into_any().unbind())
 }

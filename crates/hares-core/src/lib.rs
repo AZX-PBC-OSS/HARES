@@ -34,6 +34,7 @@ pub mod resolved;
 pub mod result;
 pub mod rng;
 pub mod scheduler;
+pub mod step_counts;
 pub mod telemetry;
 #[cfg(test)]
 #[path = "../../../tests/support/temp_file.rs"]
@@ -60,8 +61,8 @@ pub use health::{ActorTiming, ActorTimings};
 pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
 pub use rand_chacha::ChaCha8Rng;
 pub use resolved::{
-    ResolvedBoundary, ResolvedEnvelope, ResolvedEquipment, ResolvedInfiltration, ResolvedLayer,
-    ResolvedModel, ResolvedWindow,
+    ResolvedBoundary, ResolvedClock, ResolvedEnvelope, ResolvedEquipment, ResolvedInfiltration,
+    ResolvedLayer, ResolvedModel, ResolvedWindow,
 };
 pub use result::{
     BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,

@@ -428,6 +428,20 @@ replacement.
 - Added: `Alignment` (with `instant`, `local_clock`) and the
   `alignment=` keyword on `Fleet.from_buildings` and
   `Fleet.from_resstock`: the fleet's declared time alignment.
+- Added: `DwellingBlueprint.validate()` and
+  `DwellingBlueprint.catalogue()`: the blueprint's assembly alone, with
+  no warm-up and no step. `validate()` reads the resolved model back as
+  a dict: `site` (each resolved field's value beside its `*_source`
+  label), `clock` (`start` as the first step's local standard time,
+  `utc_offset_s`, `time_res_s` and the simulated step count `steps`) and
+  `boundaries` (each boundary's `id`, `kind`, `area_m2`,
+  `r_effective_m2k_w`, `films_m2k_w`, `c_j_k` and its construction
+  `layers`, outside to inside, each layer's `r_m2k_w` and `c_j_m2k`).
+  An infeasible input raises here with the same message `build()` fails
+  with, and a fraction of its cost: the build's warm-up never runs.
+  `catalogue()` returns the `Catalogue` the built dwelling's
+  `catalogue()` returns, without building it. The blueprint is not
+  consumed: `build()` still works after either call.
 - Added: `Catalogue` and `Variable` (every variable's `name`, `unit`,
   `kind`, `aggregation`, `sampling`, `nullable`, `source`, `labels`,
   `across_homes` and `description` readable, the `digest()`, the

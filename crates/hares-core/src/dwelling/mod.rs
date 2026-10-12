@@ -2348,7 +2348,9 @@ pub struct Dwelling {
     blueprint: Arc<DwellingBlueprint>,
     /// The resolved-parameter read-back: the parameters the physics
     /// actually uses, computed at assembly after defaults, autosizing and
-    /// overrides and before warm-up, and never mutated afterwards.
+    /// overrides and before warm-up, and never mutated afterwards. Read
+    /// through [`Dwelling::resolved_model`] and returned by
+    /// `DwellingBlueprint::validate`.
     resolved: crate::resolved::ResolvedModel,
     equipment: Vec<Box<dyn Equipment>>,
     equipment_id_by_name: HashMap<String, EquipmentId>,
@@ -2874,6 +2876,12 @@ impl Dwelling {
     pub fn blueprint(&self) -> &Arc<DwellingBlueprint> {
         &self.blueprint
     }
+
+    /// The resolved model, moved out: the read-back a validate-only
+    /// assembly takes before the dwelling it ran on is dropped.
+    pub(crate) fn into_resolved_model(self) -> crate::resolved::ResolvedModel {
+        self.resolved
+    }
 }
 
 /// The horizon rule for the shared forcing table: every step index a run
@@ -2968,6 +2976,82 @@ fn build_from_blueprint_inner_with_seed(
     master_seed: u64,
     warnings: &mut WarningLog,
 ) -> Result<Dwelling> {
+    let mut dwelling = assemble_from_blueprint_with_seed(bp, settings, master_seed, warnings)?;
+
+    if let Some(_init_dur) = settings.initialization_duration {
+        // Save RNG state before warmup. The clock is reset after warmup for
+        // weather replay; restoring the RNG ensures the production phase
+        // starts from the same RNG position regardless of how many warmup
+        // iterations were needed. Two runs with the same initial seed
+        // produce identical stochastic output even when warmup converges
+        // in a different number of iterations.
+        let rng_seed_before = dwelling.rng.get_seed();
+        let rng_stream_before = dwelling.rng.get_stream();
+        let rng_word_pos_before = dwelling.rng.get_word_pos();
+
+        match dwelling.run_warmup_converged(0.5, 25) {
+            Err(err) => {
+                // The dwelling is about to be dropped carrying the
+                // accumulated warning log; emit it so this failure carries
+                // the context that led here.
+                for entry in dwelling.take_warnings() {
+                    tracing::warn!("{entry}");
+                }
+                return Err(err);
+            }
+            #[cfg(feature = "observe")]
+            Ok(iterations) => tracing::debug!(
+                warmup_iterations = iterations,
+                rng_word_pos_delta =
+                    (dwelling.rng.get_word_pos() as i128) - (rng_word_pos_before as i128),
+                "warmup complete; restoring the RNG for production-phase reproducibility"
+            ),
+            #[cfg(not(feature = "observe"))]
+            Ok(_) => {}
+        }
+
+        // Restore RNG state to pre-warmup position.
+        let mut restored_rng = ChaCha8Rng::from_seed(rng_seed_before);
+        restored_rng.set_stream(rng_stream_before);
+        restored_rng.set_word_pos(rng_word_pos_before);
+        dwelling.rng = restored_rng;
+
+        let clock = SimClock::new(
+            bp.local_start,
+            settings.sim_config.time_res,
+            settings.sim_config.duration,
+        );
+        #[cfg(feature = "dst")]
+        let clock = {
+            let mut civil = clock;
+            civil.civil_tz = bp.parsed_civil_tz;
+            civil
+        };
+        dwelling.clock = clock;
+    } else {
+        tracing::warn!(
+            bldg_id = settings.bldg_id,
+            "initialization_duration is None: no warm-up period will run; \
+             this produces biased heat-transfer predictions for heavyweight \
+             construction. Set initialization_duration to at least 7 days \
+             (604800 s) for concrete/masonry buildings."
+        );
+    }
+
+    Ok(dwelling)
+}
+
+/// The build's assembly phase: every construction-time check, the resolved
+/// model computed, the equipment initialised and the built-in actors
+/// registered. No warm-up and no step: `DwellingBlueprint::validate` and
+/// `DwellingBlueprint::catalogue` run this alone, and the build runs its
+/// warm-up on the dwelling this returns.
+fn assemble_from_blueprint_with_seed(
+    bp: &Arc<DwellingBlueprint>,
+    settings: &DwellingSettings,
+    master_seed: u64,
+    warnings: &mut WarningLog,
+) -> Result<Dwelling> {
     let site_location = bp.site_location;
     let local_start = bp.local_start;
     let defaults = bp.inputs.defaults.store();
@@ -2985,15 +3069,17 @@ fn build_from_blueprint_inner_with_seed(
 
     let mut equipment_specs = bp.equipment_specs.clone();
 
-    let mut clock = SimClock::new(
+    let clock = SimClock::new(
         local_start,
         config.sim_config.time_res,
         config.sim_config.duration + bp.init_chrono,
     );
     #[cfg(feature = "dst")]
-    {
-        clock.civil_tz = bp.parsed_civil_tz;
-    }
+    let clock = {
+        let mut civil = clock;
+        civil.civil_tz = bp.parsed_civil_tz;
+        civil
+    };
 
     let mut environment = EnvironmentManager::new_shared(
         &bp.inputs.weather,
@@ -3561,8 +3647,8 @@ fn build_from_blueprint_inner_with_seed(
     // equipment's own resolved values (the physics's parameters, the
     // autosized capacities included) beside the setpoint sources its spec
     // carries, the envelope's assembled boundaries and windows, the
-    // infiltration inputs and the resolved site. No step and no warm-up
-    // has run, so this is the model the physics will use.
+    // infiltration inputs, the resolved site and the clock. No step and no
+    // warm-up has run, so this is the model the physics will use.
     let resolved = {
         let mut spec_setpoints: HashMap<&str, (&Option<SetpointSource>, &Option<SetpointSource>)> =
             HashMap::with_capacity(equipment_specs.len());
@@ -3595,12 +3681,20 @@ fn build_from_blueprint_inner_with_seed(
             boundaries: resolved_boundaries,
             windows: resolved_windows,
         } = solvers.resolved_envelope;
+        let step_secs = conversions::duration_to_u32_secs(config.sim_config.time_res)?;
         crate::resolved::ResolvedModel {
             equipment: equipment_read_back,
             boundaries: resolved_boundaries,
             windows: resolved_windows,
             infiltration: crate::resolved::resolved_infiltration(&bp.building),
             site: bp.site_location,
+            clock: crate::resolved::ResolvedClock {
+                start: local_start.naive_local(),
+                utc_offset_s: (bp.site_location.utc_offset_h * 3600.0).round() as i32,
+                time_res_s: step_secs,
+                steps: u64::try_from(config.sim_config.duration.num_seconds()).unwrap_or(0)
+                    / u64::from(step_secs),
+            },
         }
     };
 
@@ -3775,67 +3869,6 @@ fn build_from_blueprint_inner_with_seed(
         }
         return Err(err);
     }
-
-    if let Some(_init_dur) = config.initialization_duration {
-        // Save RNG state before warmup. The clock is reset after warmup for
-        // weather replay; restoring the RNG ensures the production phase
-        // starts from the same RNG position regardless of how many warmup
-        // iterations were needed. Two runs with the same initial seed
-        // produce identical stochastic output even when warmup converges
-        // in a different number of iterations.
-        let rng_seed_before = dwelling.rng.get_seed();
-        let rng_stream_before = dwelling.rng.get_stream();
-        let rng_word_pos_before = dwelling.rng.get_word_pos();
-
-        match dwelling.run_warmup_converged(0.5, 25) {
-            Err(err) => {
-                // The dwelling is about to be dropped carrying the
-                // accumulated warning log; emit it so this failure carries
-                // the context that led here.
-                for entry in dwelling.take_warnings() {
-                    tracing::warn!("{entry}");
-                }
-                return Err(err);
-            }
-            #[cfg(feature = "observe")]
-            Ok(iterations) => tracing::debug!(
-                warmup_iterations = iterations,
-                rng_word_pos_delta =
-                    (dwelling.rng.get_word_pos() as i128) - (rng_word_pos_before as i128),
-                "warmup complete; restoring the RNG for production-phase reproducibility"
-            ),
-            #[cfg(not(feature = "observe"))]
-            Ok(_) => {}
-        }
-
-        // Restore RNG state to pre-warmup position.
-        let mut restored_rng = ChaCha8Rng::from_seed(rng_seed_before);
-        restored_rng.set_stream(rng_stream_before);
-        restored_rng.set_word_pos(rng_word_pos_before);
-        dwelling.rng = restored_rng;
-
-        clock = SimClock::new(
-            local_start,
-            config.sim_config.time_res,
-            config.sim_config.duration,
-        );
-        #[cfg(feature = "dst")]
-        {
-            clock.civil_tz = bp.parsed_civil_tz;
-        }
-        dwelling.clock = clock;
-    } else {
-        tracing::warn!(
-            bldg_id = config.bldg_id,
-            "initialization_duration is None — no warm-up period will run; \
-             this produces biased heat-transfer predictions for heavyweight \
-             construction. Set initialization_duration to at least 7 days \
-             (604800 s) for concrete/masonry buildings."
-        );
-    }
-
-    // The diagnostics rider is gone: the diagnostics are a catalogue
-    // report, recorded with the run's frames when the run requests them.
 
     Ok(dwelling)
 }
@@ -5606,6 +5639,9 @@ impl Dwelling {
         self.warnings.set_step(Some(self.clock.current_step()));
         let result = self.run_timestep_inner(record_output);
         self.warnings.set_step(None);
+        if result.is_ok() {
+            crate::step_counts::bump();
+        }
         result
     }
 
