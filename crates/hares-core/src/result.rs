@@ -306,13 +306,19 @@ pub struct Provenance {
 
 /// The electric tariff a run attached, recorded at
 /// `Dwelling::set_tariff`: the tariff (whose serde derives make it
-/// exportable) and the IANA zone it was attached in.
+/// exportable), the IANA zone it was attached in, and the step it
+/// attached at (0 when attached before the first step). A mid-run
+/// attach's billing semantics (the prorated period the attach joins)
+/// reconstruct only from that step, so the replay export carries it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TariffRecord {
     /// The attached tariff.
     pub tariff: hares_tariff::ElectricTariff,
     /// The IANA name of the zone the tariff was attached in.
     pub zone: String,
+    /// The step index the tariff attached at: the clock's current step
+    /// when `set_tariff` succeeded, the first step the evaluator folds.
+    pub attach_step: u64,
 }
 
 /// One simulation run's result: the finalisation every run shares, whether

@@ -105,7 +105,7 @@ struct StoredInputs {
 /// under (the validated config, the building id, the patches and the
 /// warm-up duration; the overrides travel in `overrides.json` because a
 /// JSON `null` has no TOML form), the exported inputs, the attached
-/// tariff's zone, and the build identity.
+/// tariff's zone and the step it attached at, and the build identity.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReplayManifest {
@@ -116,6 +116,7 @@ struct ReplayManifest {
     simulation: SimulationConfig,
     inputs: StoredInputs,
     tariff_zone: Option<String>,
+    tariff_attach_step: Option<u64>,
     build: RecordedBuild,
 }
 
@@ -127,8 +128,8 @@ pub struct Replay {
     /// directory (and the defaults tree at the `defaults_base` the
     /// loader was given), the settings are the run's own.
     pub config: DwellingConfig,
-    /// The tariff the run attached, set on the built dwelling before its
-    /// first step.
+    /// The tariff the run attached, attached at its recorded step: the
+    /// steps before it replay tariff-less, the way the run ran them.
     pub tariff: Option<TariffRecord>,
     /// The build that produced the exported run. The replayed run's own
     /// provenance records the engine that replayed it.
@@ -137,11 +138,17 @@ pub struct Replay {
 
 impl Replay {
     /// Builds the replayed dwelling: the config's construction path,
-    /// then the tariff attached before the first step.
+    /// then the tariff attached at its recorded step. An attach recorded
+    /// after step 0 replays the steps before it (tariff-less, the way
+    /// the run ran them) so the attach happens with the dwelling's clock
+    /// exactly where the run's was: the attach's own semantics (the
+    /// prorated period it joins) fold from the recorded step, and the
+    /// billing reproduces on bits.
     ///
     /// # Errors
     ///
-    /// [`HaresError`] when the construction or the tariff attach fails.
+    /// [`HaresError`] when the construction, a replayed step or the
+    /// tariff attach fails.
     pub fn build(&self) -> Result<Dwelling, HaresError> {
         let mut dwelling = Dwelling::from_config(self.config.clone())?;
         if let Some(record) = &self.tariff {
@@ -151,6 +158,9 @@ impl Replay {
                     record.zone
                 ))
             })?;
+            for _ in 0..record.attach_step {
+                dwelling.step()?;
+            }
             dwelling.set_tariff(record.tariff.clone(), tz)?;
         }
         Ok(dwelling)
@@ -334,6 +344,7 @@ pub(crate) fn export(result: &RunResult, dir: &Path) -> Result<(), HaresError> {
             defaults_replacements: replacements,
         },
         tariff_zone: result.provenance.tariff.as_ref().map(|r| r.zone.clone()),
+        tariff_attach_step: result.provenance.tariff.as_ref().map(|r| r.attach_step),
         build: RecordedBuild::from_build_info(&result.provenance.build),
     };
     let toml = toml::to_string_pretty(&manifest)
@@ -476,6 +487,7 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
                 HaresError::Io(format!("the replay's tariff.json could not be read: {err}"))
             })?,
             zone: zone.clone(),
+            attach_step: manifest.tariff_attach_step.unwrap_or(0),
         }),
         (Some(zone), Err(err)) => {
             return Err(HaresError::Io(format!(

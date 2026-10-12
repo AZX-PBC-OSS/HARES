@@ -173,6 +173,11 @@ pub enum ReplayBlocker {
     /// export carries.
     #[error("the dwelling's state was restored from outside the run")]
     StateRestored,
+    /// A tariff replaced one attached earlier in the run: the switch
+    /// closed the outgoing period with the outgoing tariff's accruals
+    /// through the run's own steps, which no export carries.
+    #[error("the tariff was replaced after an earlier attach")]
+    TariffReplaced,
 }
 
 impl ReplayBlocker {
@@ -185,6 +190,7 @@ impl ReplayBlocker {
             Self::CallerActor => "caller actor",
             Self::ExternalInput => "external input",
             Self::StateRestored => "state restored",
+            Self::TariffReplaced => "tariff replaced",
         }
     }
 }

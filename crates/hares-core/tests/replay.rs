@@ -353,36 +353,143 @@ fn replay_with_attached_tariff_reproduces_billing() {
     let mut replay_dwelling = replayed.build().expect("the replay builds");
     let result = replay_dwelling.simulate().expect("the replay runs");
 
-    let original_summaries = original_dwelling.billing_summaries();
-    let replay_summaries = replay_dwelling.billing_summaries();
+    assert_billing_summaries_bitwise_equal(
+        &original_dwelling,
+        &replay_dwelling,
+        "tariff replay vs original",
+    );
+    assert_runs_bitwise_equal(&original, &result, "tariff replay vs original");
+}
+
+/// The billing summaries of two dwellings, period by period, on bits:
+/// the net bill, the energy, fixed and demand charges, and both energies.
+fn assert_billing_summaries_bitwise_equal(original: &Dwelling, replayed: &Dwelling, context: &str) {
+    let original_summaries = original.billing_summaries();
+    let replay_summaries = replayed.billing_summaries();
     assert_eq!(
         original_summaries.len(),
         replay_summaries.len(),
-        "the same period count"
+        "{context}: the same period count"
     );
     for (period, (left, right)) in original_summaries.iter().zip(replay_summaries).enumerate() {
         assert_eq!(
             left.net_bill_usd.to_bits(),
             right.net_bill_usd.to_bits(),
-            "period {period}: the net bill on bits"
-        );
-        assert_eq!(
-            left.total_import_kwh.to_bits(),
-            right.total_import_kwh.to_bits(),
-            "period {period}: the import energy on bits"
-        );
-        assert_eq!(
-            left.total_export_kwh.to_bits(),
-            right.total_export_kwh.to_bits(),
-            "period {period}: the export energy on bits"
+            "{context}: period {period}: the net bill on bits"
         );
         assert_eq!(
             left.energy_charge_usd.to_bits(),
             right.energy_charge_usd.to_bits(),
-            "period {period}: the energy charge on bits"
+            "{context}: period {period}: the energy charge on bits"
+        );
+        assert_eq!(
+            left.fixed_charge_usd.to_bits(),
+            right.fixed_charge_usd.to_bits(),
+            "{context}: period {period}: the fixed charge on bits"
+        );
+        assert_eq!(
+            left.demand_charge_usd.to_bits(),
+            right.demand_charge_usd.to_bits(),
+            "{context}: period {period}: the demand charge on bits"
+        );
+        assert_eq!(
+            left.total_import_kwh.to_bits(),
+            right.total_import_kwh.to_bits(),
+            "{context}: period {period}: the import energy on bits"
+        );
+        assert_eq!(
+            left.total_export_kwh.to_bits(),
+            right.total_export_kwh.to_bits(),
+            "{context}: period {period}: the export energy on bits"
         );
     }
-    assert_runs_bitwise_equal(&original, &result, "tariff replay vs original");
+}
+
+/// `replay_of_a_mid_run_tariff_attach_reproduces_billing`: a tariff
+/// attached after step 0 exports with the step it attached at, and the
+/// replay attaches at that recorded step (the steps before it replay
+/// tariff-less): the billing summaries equal the original's on bits, the
+/// prorated first period included.
+#[test]
+fn replay_of_a_mid_run_tariff_attach_reproduces_billing() {
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 4 * 3600, None);
+    let mut original_dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+    for _ in 0..4 {
+        original_dwelling.step().expect("the step runs");
+    }
+    let tariff_json =
+        std::fs::read_to_string(repo_root().join("tests/fixtures/urdb/flat_rate.json"))
+            .expect("the tariff file reads");
+    let tariff = hares_tariff::parse_urdb(&tariff_json).expect("the tariff parses");
+    original_dwelling
+        .set_tariff(tariff, chrono_tz::Tz::America__Denver)
+        .expect("the tariff attaches");
+    let original = original_dwelling.simulate().expect("the run completes");
+
+    let export = tempfile::tempdir().expect("the export directory");
+    original
+        .export_replay(export.path())
+        .expect("the export writes");
+    let toml_text =
+        std::fs::read_to_string(exported_file(export.path(), "replay.toml")).expect("replay.toml");
+    assert!(
+        toml_text.contains("tariff_attach_step"),
+        "the manifest carries the attach step: {toml_text}"
+    );
+
+    let replayed =
+        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    assert_eq!(
+        replayed
+            .tariff
+            .as_ref()
+            .expect("the tariff round trips")
+            .attach_step,
+        4,
+        "the recorded attach step round trips"
+    );
+    let mut replay_dwelling = replayed.build().expect("the replay builds");
+    let result = replay_dwelling.simulate().expect("the replay runs");
+
+    assert_billing_summaries_bitwise_equal(
+        &original_dwelling,
+        &replay_dwelling,
+        "mid-run attach replay vs original",
+    );
+    assert_runs_bitwise_equal(&original, &result, "mid-run attach replay vs original");
+}
+
+/// `replay_of_a_replaced_tariff_is_refused`: a tariff replaced mid-run
+/// closes the outgoing period with the outgoing tariff's accruals through
+/// the run's own steps, which no export carries: the export returns
+/// `NotReplayable` naming the replacement and writes nothing.
+#[test]
+fn replay_of_a_replaced_tariff_is_refused() {
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 4 * 3600, None);
+    let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+    let flat = hares_tariff::parse_urdb(
+        &std::fs::read_to_string(repo_root().join("tests/fixtures/urdb/flat_rate.json"))
+            .expect("the flat rate reads"),
+    )
+    .expect("the flat rate parses");
+    dwelling
+        .set_tariff(flat, chrono_tz::Tz::America__Denver)
+        .expect("the first tariff attaches");
+    for _ in 0..4 {
+        dwelling.step().expect("the step runs");
+    }
+    let tou = hares_tariff::parse_urdb(
+        &std::fs::read_to_string(repo_root().join("tests/fixtures/urdb/pge_e_tou_c.json"))
+            .expect("the tou reads"),
+    )
+    .expect("the tou parses");
+    dwelling
+        .set_tariff(tou, chrono_tz::Tz::America__Denver)
+        .expect("the replacement attaches");
+    let result = dwelling.simulate().expect("the run completes");
+    reject_returns(&result, &[ReplayBlocker::TariffReplaced]);
 }
 
 /// `replay_records_the_exporting_build`: `Replay.recorded_build` equals

@@ -559,6 +559,8 @@ impl Dwelling {
     pub fn set_tariff(&mut self, tariff: ElectricTariff, tz: Tz) -> Result<()> {
         let attached_tariff = tariff.clone();
         let parse_warnings = tariff.parse_warnings.clone();
+        let attach_step = self.clock.current_step;
+        let replacing = self.tariff_evaluator.is_some();
         let start = self.clock.start_time.with_timezone(&tz);
         let end = (self.clock.start_time + self.clock.duration).with_timezone(&tz);
         let interval_secs = self.clock.time_res.num_seconds() as u32;
@@ -601,7 +603,15 @@ impl Dwelling {
         self.tariff_record = Some(crate::TariffRecord {
             tariff: attached_tariff,
             zone: tz.name().to_string(),
+            attach_step,
         });
+        // A replacement closes the outgoing period with the outgoing
+        // tariff's accruals through the run's own steps: a replay cannot
+        // rebuild that close without those steps, so the run's export
+        // refuses.
+        if replacing {
+            self.record_replay_blocker(hares_types::ReplayBlocker::TariffReplaced);
+        }
         Ok(())
     }
 
