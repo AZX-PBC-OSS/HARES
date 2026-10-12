@@ -658,6 +658,123 @@ fn replay_export_rejects_a_caller_actor_added_with_equipment() {
     );
 }
 
+/// `replay_of_a_callback_report_replays_memory_batches_bitwise`: the
+/// export rewrites a report's callback destination to `Memory` (the
+/// replay retains what the callback delivered), and the replayed run's
+/// retained batches are bitwise the batches the original's callback
+/// received.
+#[test]
+fn replay_of_a_callback_report_replays_memory_batches_bitwise() {
+    use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
+    use std::sync::{Arc, Mutex};
+
+    struct Collecting {
+        batches: Arc<Mutex<Vec<RecordBatch>>>,
+    }
+
+    impl BatchCallback for Collecting {
+        fn on_batch(
+            &mut self,
+            _ctx: &BatchContext<'_>,
+            batch: &RecordBatch,
+        ) -> Result<(), CallbackError> {
+            self.batches
+                .lock()
+                .expect("the sink lock")
+                .push(batch.clone());
+            Ok(())
+        }
+    }
+
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let mut original_dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    original_dwelling
+        .attach_callback(
+            "frame",
+            Box::new(Collecting {
+                batches: Arc::clone(&delivered),
+            }),
+        )
+        .expect("the callback attaches");
+    let original = original_dwelling.simulate().expect("the run completes");
+    assert!(
+        !delivered.lock().expect("the sink lock").is_empty(),
+        "the callback saw batches"
+    );
+
+    let export = tempfile::tempdir().expect("the export directory");
+    original
+        .export_replay(export.path())
+        .expect("the export writes");
+
+    let replayed =
+        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let result = replayed
+        .build()
+        .expect("the replay builds")
+        .simulate()
+        .expect("the replay runs");
+    let delivered_batches = delivered.lock().expect("the sink lock").clone();
+    assert_batches_bitwise_equal(
+        &delivered_batches,
+        &memory_batches(&result),
+        "callback replay vs delivered",
+    );
+    assert_runs_bitwise_equal(&original, &result, "callback replay vs original");
+}
+
+/// `replay_of_a_file_report_replays_the_file_byte_identical`: the export
+/// rewrites a file destination to its bare name inside the replay
+/// directory, and the replayed run's published file is byte-identical to
+/// the original's.
+#[test]
+fn replay_of_a_file_report_replays_the_file_byte_identical() {
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let outputs = tempfile::tempdir().expect("the outputs directory");
+    let mut config = consumer_shape_config(inputs.path(), 3600, None);
+    config.settings.sim_config.reports[0].destination = hares_io::Destination::Csv {
+        path: outputs.path().join("frame_output.csv"),
+        overwrite: false,
+    };
+    let original = run(config);
+
+    let export = tempfile::tempdir().expect("the export directory");
+    original
+        .export_replay(export.path())
+        .expect("the export writes");
+
+    let replayed =
+        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let replay_report = replayed
+        .config
+        .settings
+        .sim_config
+        .reports
+        .first()
+        .expect("the report round trips");
+    assert_eq!(
+        replay_report.destination.path().expect("the file path"),
+        &export.path().join("frame.csv"),
+        "the bare name resolves inside the export directory"
+    );
+    replayed
+        .build()
+        .expect("the replay builds")
+        .simulate()
+        .expect("the replay runs");
+
+    let original_bytes =
+        std::fs::read(outputs.path().join("frame_output.csv")).expect("the original's file reads");
+    let replayed_bytes =
+        std::fs::read(export.path().join("frame.csv")).expect("the replayed file reads");
+    assert_eq!(
+        original_bytes, replayed_bytes,
+        "the replayed file is byte-identical"
+    );
+}
+
 /// `replay_records_the_exporting_build`: `Replay.recorded_build` equals
 /// the exporting run's `BuildInfo` field for field.
 #[test]
