@@ -85,6 +85,13 @@ pub fn field_schemas<T: DeserializeOwned + serde::Serialize>(
         )
     });
     let defaults = defaults_of::<T>();
+    for (meta_name, _) in metas {
+        assert!(
+            names.iter().any(|name| name == meta_name),
+            "the metadata row '{meta_name}' names no field the config accepts: \
+             the impl and the deserialisation must move together"
+        );
+    }
     let mut out = Vec::new();
     for name in names {
         let (_, meta) = metas
@@ -183,5 +190,20 @@ mod tests {
         assert!(!defaults.is_empty());
         let defaults = defaults_of::<crate::hvac::heating_config::GasFurnaceConfig>();
         assert!(defaults.is_empty(), "capacity_w is required: no defaults");
+    }
+
+    /// A metadata row naming no probed field is the schema bug the doc
+    /// claims: the row panics (the fake-row case).
+    #[test]
+    #[should_panic(expected = "names no field")]
+    fn a_metadata_row_naming_no_probed_field_panics() {
+        field_schemas::<crate::hvac::heating_config::GasFurnaceConfig>(&[(
+            "not_a_furnace_field",
+            FieldMeta {
+                unit: None,
+                bounds: None,
+                description: None,
+            },
+        )]);
     }
 }

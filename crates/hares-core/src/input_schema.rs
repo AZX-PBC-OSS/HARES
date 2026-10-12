@@ -316,5 +316,24 @@ mod tests {
         let schema = schema();
         assert!(!schema.hpxml_elements.is_empty());
         assert!(!schema.rejected_hpxml_elements.is_empty());
+        // The choice children the parser reads and errors on: the
+        // type-element dispatches' vocabulary is declared beside every
+        // other element and published the same way.
+        for name in [
+            "AboveApartment",
+            "Ambient",
+            "Basement",
+            "Crawlspace",
+            "FlatRoof",
+            "SlabOnGrade",
+        ] {
+            assert!(
+                schema
+                    .hpxml_elements
+                    .iter()
+                    .any(|element| element.name == name),
+                "the schema's HPXML elements list the choice child {name}"
+            );
+        }
     }
 }

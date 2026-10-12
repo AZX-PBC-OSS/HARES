@@ -1,7 +1,8 @@
 //! The HPXML elements the parser reads, declared once: every
-//! element-name literal in the parser is one of these statics, and the
-//! accessors take them by reference, so the parser cannot read an
-//! element it has not declared. The input schema publishes this list.
+//! element-name literal in the parser is one of these statics, the
+//! accessors take them by reference, and the choice dispatches match
+//! the nodes against them, so the parser cannot read an element it has
+//! not declared. The input schema publishes this list.
 
 /// One HPXML element the parser reads: its name, the parent path the
 /// parser reads it under, the unit its value carries when that is
@@ -23,6 +24,14 @@ pub struct RejectedHpxmlElement {
     pub context: &'static str,
     pub reason: &'static str,
 }
+
+/// the <AboveApartment> element the parser reads under its parent
+pub static ABOVE_APARTMENT: HpxmlElement = HpxmlElement {
+    name: "AboveApartment",
+    context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/AboveApartment",
+    unit: None,
+    description: "the <AboveApartment> element the parser reads under its parent",
+};
 
 /// the <active_duration_s> element the parser reads under its parent
 pub static ACTIVE_DURATION_S: HpxmlElement = HpxmlElement {
@@ -118,6 +127,22 @@ pub static ALTITUDE: HpxmlElement = HpxmlElement {
     context: "Building/Site (the weather station's altitude; first descendant read)",
     unit: None,
     description: "the weather station's altitude",
+};
+
+/// the <Ambient> element the parser reads under its parent
+pub static AMBIENT: HpxmlElement = HpxmlElement {
+    name: "Ambient",
+    context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/Ambient",
+    unit: None,
+    description: "the <Ambient> element the parser reads under its parent",
+};
+
+/// the <Basement> element the parser reads under its parent
+pub static BASEMENT: HpxmlElement = HpxmlElement {
+    name: "Basement",
+    context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/Basement",
+    unit: None,
+    description: "the <Basement> element the parser reads under its parent",
 };
 
 /// the <AnnualConsumptionkBtu> element the parser reads under its parent
@@ -366,6 +391,14 @@ pub static BACKUP_TYPE: HpxmlElement = HpxmlElement {
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/BackupType",
     unit: None,
     description: "the <BackupType> element the parser reads under its parent",
+};
+
+/// the <Crawlspace> element the parser reads under its parent
+pub static CRAWLSPACE: HpxmlElement = HpxmlElement {
+    name: "Crawlspace",
+    context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/Crawlspace",
+    unit: None,
+    description: "the <Crawlspace> element the parser reads under its parent",
 };
 
 /// the <Batteries> element the parser reads under its parent
@@ -1080,6 +1113,14 @@ pub static FIRST_HOUR_RATING: HpxmlElement = HpxmlElement {
     description: "the <FirstHourRating> element the parser reads under its parent",
 };
 
+/// the <FlatRoof> element the parser reads under its parent
+pub static FLAT_ROOF: HpxmlElement = HpxmlElement {
+    name: "FlatRoof",
+    context: "BuildingDetails/Enclosure/Attics/Attic/AtticType/FlatRoof",
+    unit: None,
+    description: "the <FlatRoof> element the parser reads under its parent",
+};
+
 /// the <Floor> element the parser reads under its parent
 pub static FLOOR: HpxmlElement = HpxmlElement {
     name: "Floor",
@@ -1510,6 +1551,14 @@ pub static HOURS_IN_OPERATION: HpxmlElement = HpxmlElement {
     context: "BuildingDetails/Systems/MechanicalVentilation/VentilationFans/VentilationFan/HoursInOperation",
     unit: None,
     description: "the <HoursInOperation> element the parser reads under its parent",
+};
+
+/// the document root the parse requires
+pub static HPXML: HpxmlElement = HpxmlElement {
+    name: "HPXML",
+    context: "the document root (the parse requires it)",
+    unit: None,
+    description: "the document root the parse requires",
 };
 
 /// the <HSPF> element the parser reads under its parent
@@ -2432,6 +2481,14 @@ pub static SLABS: HpxmlElement = HpxmlElement {
     description: "the <Slabs> element the parser reads under its parent",
 };
 
+/// the <SlabOnGrade> element the parser reads under its parent
+pub static SLAB_ON_GRADE: HpxmlElement = HpxmlElement {
+    name: "SlabOnGrade",
+    context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/SlabOnGrade",
+    unit: None,
+    description: "the <SlabOnGrade> element the parser reads under its parent",
+};
+
 /// the <SoftwareInfo> element the parser reads under its parent
 pub static SOFTWARE_INFO: HpxmlElement = HpxmlElement {
     name: "SoftwareInfo",
@@ -2996,6 +3053,7 @@ pub static WITHIN_INFILTRATION_VOLUME: HpxmlElement = HpxmlElement {
 /// reference, so the list is the parser's own vocabulary, never a
 /// parallel list.
 pub static HPXML_ELEMENTS: &[&HpxmlElement] = &[
+    &ABOVE_APARTMENT,
     &ACTIVE_DURATION_S,
     &ACTIVE_POWER_KW,
     &ADJUSTED_ANNUALK_WH,
@@ -3008,6 +3066,7 @@ pub static HPXML_ELEMENTS: &[&HpxmlElement] = &[
     &AIR_INFILTRATION_MEASUREMENT,
     &AIR_LEAKAGE,
     &ALTITUDE,
+    &AMBIENT,
     &ANNUAL_CONSUMPTIONK_BTU,
     &ANNUAL_COOLING_EFFICIENCY,
     &ANNUAL_HEATING_EFFICIENCY,
@@ -3039,6 +3098,7 @@ pub static HPXML_ELEMENTS: &[&HpxmlElement] = &[
     &BACKUP_HEATING_SWITCHOVER_TEMPERATURE,
     &BACKUP_SYSTEM_FUEL,
     &BACKUP_TYPE,
+    &BASEMENT,
     &BATTERIES,
     &BATTERY,
     &BATTERY_CAPACITY,
@@ -3082,6 +3142,7 @@ pub static HPXML_ELEMENTS: &[&HpxmlElement] = &[
     &COUNT,
     &CRANKCASE_HEATER_POWER_WATTS,
     &CRANKCASE_HEATER_WATTS,
+    &CRAWLSPACE,
     &DEHUMIDIFIER,
     &DEHUMIDISTAT_SETPOINT,
     &DENSITY,
@@ -3128,6 +3189,7 @@ pub static HPXML_ELEMENTS: &[&HpxmlElement] = &[
     &FAN_POWER_WATTS_PER_CFM,
     &FAN_TYPE,
     &FIRST_HOUR_RATING,
+    &FLAT_ROOF,
     &FLOOR,
     &FLOOR_AREA,
     &FLOOR_OR_CEILING,
@@ -3182,6 +3244,7 @@ pub static HPXML_ELEMENTS: &[&HpxmlElement] = &[
     &HOT_WATER_DISTRIBUTION,
     &HOT_WATER_TEMPERATURE,
     &HOURS_IN_OPERATION,
+    &HPXML,
     &HSPF,
     &HSPF_2,
     &HVAC,
@@ -3297,6 +3360,7 @@ pub static HPXML_ELEMENTS: &[&HpxmlElement] = &[
     &SKYLIGHTS,
     &SLAB,
     &SLABS,
+    &SLAB_ON_GRADE,
     &SOFTWARE_INFO,
     &SOLAR_ABSORPTANCE,
     &SPAS,
@@ -3384,6 +3448,28 @@ pub static HAS_FLUE_OR_CHIMNEY_REJECTED: RejectedHpxmlElement = RejectedHpxmlEle
     reason: "deprecated element <HasFlueOrChimney>; rename it to
              <HasFlueOrChimneyInConditionedSpace>",
 };
+
+/// The FoundationType choice children the parser's dispatches name:
+/// the foundation kind's arms and the conditioned and vented reads
+/// under them. The dispatch matches the child against these by
+/// identity, so a choice arm must be one of the declared statics.
+pub static FOUNDATION_TYPE_CHOICES: &[&HpxmlElement] = &[
+    &CRAWLSPACE,
+    &BASEMENT,
+    &SLAB_ON_GRADE,
+    &AMBIENT,
+    &ABOVE_APARTMENT,
+];
+
+/// The type-element children the infiltration reader's space-location
+/// match names, for either type element it reads (an AtticType or a
+/// FoundationType).
+pub static SPACE_LOCATION_CHOICES: &[&HpxmlElement] = &[&ATTIC, &BASEMENT, &CRAWLSPACE];
+
+/// The AtticType choice children the parser's reads name: the attic
+/// cavity kind the zone builder skips (a flat roof means no attic
+/// cavity) and the space-location match's attic kind.
+pub static ATTIC_TYPE_CHOICES: &[&HpxmlElement] = &[&ATTIC, &FLAT_ROOF];
 
 /// Every declared element's name, for the coverage test's membership
 /// check.

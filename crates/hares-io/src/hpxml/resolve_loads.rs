@@ -38,6 +38,38 @@ const DRYER_SENSIBLE_SHARE: f64 = 0.90;
 /// Source: OCHRE hpxml.py parse_clothes_dryer.
 const BTU_PER_KWH: f64 = 3412.0;
 
+/// The appliance kinds the resolver dispatches on, as the declared
+/// elements' identity: the loop's kinds name their elements, so the
+/// dispatch matches the kind and never a raw string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplianceTag {
+    ClothesWasher,
+    ClothesDryer,
+    Dishwasher,
+    Refrigerator,
+    Freezer,
+    CookingRange,
+    Microwave,
+    Dehumidifier,
+}
+
+impl ApplianceTag {
+    /// The declared element the kind's nodes carry: the loop reads the
+    /// nodes through it.
+    fn element(self) -> &'static super::elements::HpxmlElement {
+        match self {
+            Self::ClothesWasher => &CLOTHES_WASHER,
+            Self::ClothesDryer => &CLOTHES_DRYER,
+            Self::Dishwasher => &DISHWASHER,
+            Self::Refrigerator => &REFRIGERATOR,
+            Self::Freezer => &FREEZER,
+            Self::CookingRange => &COOKING_RANGE,
+            Self::Microwave => &MICROWAVE,
+            Self::Dehumidifier => &DEHUMIDIFIER,
+        }
+    }
+}
+
 /// ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default annual electric energy (kWh).
 pub(crate) const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
 
@@ -474,16 +506,17 @@ pub(super) fn resolve_scheduled_loads(
             .and_then(|n| child_f64(n, &CAPACITY))
             .unwrap_or(3.0);
 
-        for (tag, name) in [
-            (&CLOTHES_WASHER, "Clothes Washer"),
-            (&CLOTHES_DRYER, "Clothes Dryer"),
-            (&DISHWASHER, "Dishwasher"),
-            (&REFRIGERATOR, "Refrigerator"),
-            (&FREEZER, "Freezer"),
-            (&COOKING_RANGE, "Cooking Range"),
-            (&MICROWAVE, "Microwave"),
-            (&DEHUMIDIFIER, "Dehumidifier"),
+        for (kind, name) in [
+            (ApplianceTag::ClothesWasher, "Clothes Washer"),
+            (ApplianceTag::ClothesDryer, "Clothes Dryer"),
+            (ApplianceTag::Dishwasher, "Dishwasher"),
+            (ApplianceTag::Refrigerator, "Refrigerator"),
+            (ApplianceTag::Freezer, "Freezer"),
+            (ApplianceTag::CookingRange, "Cooking Range"),
+            (ApplianceTag::Microwave, "Microwave"),
+            (ApplianceTag::Dehumidifier, "Dehumidifier"),
         ] {
+            let tag = kind.element();
             require_unique_appliance_ids(appliances, tag)?;
             let mut counter = 0u32;
             for node in appliances.children_named(tag) {
@@ -492,14 +525,14 @@ pub(super) fn resolve_scheduled_loads(
                 let mut fuel = FuelType::Electric;
                 // Default RatedAnnualkWh: washer=400, dishwasher=467, fridge=637+18*beds, freezer=319.8.
                 // OCHRE falls back to these when HPXML omits the element.
-                let default_kwh = match tag.name {
-                    "ClothesWasher" => Some(400.0),
-                    "Dishwasher" => Some(467.0),
-                    "Refrigerator" => Some(637.0 + 18.0 * n_bedrooms),
-                    "Freezer" => Some(319.8),
-                    other => {
+                let default_kwh = match kind {
+                    ApplianceTag::ClothesWasher => Some(400.0),
+                    ApplianceTag::Dishwasher => Some(467.0),
+                    ApplianceTag::Refrigerator => Some(637.0 + 18.0 * n_bedrooms),
+                    ApplianceTag::Freezer => Some(319.8),
+                    _other => {
                         tracing::warn!(
-                            appliance_tag = other,
+                            appliance_tag = tag.name,
                             "No default RatedAnnualkWh for appliance type; energy will be zero if \
                              HPXML omits the element"
                         );
@@ -525,8 +558,8 @@ pub(super) fn resolve_scheduled_loads(
                 }
 
                 // Appliance-specific parameters
-                match tag.name {
-                    "ClothesWasher" => {
+                match kind {
+                    ApplianceTag::ClothesWasher => {
                         if let Some(capacity_ft3) = child_f64(node, &CAPACITY) {
                             params.insert(
                                 "capacity_m3".to_string(),
@@ -588,7 +621,7 @@ pub(super) fn resolve_scheduled_loads(
                         params.insert("phase_3_power_kw".to_string(), json!(0.8));
                         params.insert("phase_3_duration_s".to_string(), json!(600.0));
                     }
-                    "ClothesDryer" => {
+                    ApplianceTag::ClothesDryer => {
                         if let Some(cef) = child_f64(node, &COMBINED_ENERGY_FACTOR) {
                             params.insert("combined_energy_factor".to_string(), json!(cef));
                         } else if let Some(ef) = child_f64(node, &ENERGY_FACTOR) {
@@ -666,7 +699,7 @@ pub(super) fn resolve_scheduled_loads(
                             }
                         }
                     }
-                    "Dishwasher" => {
+                    ApplianceTag::Dishwasher => {
                         if let Some(cap) = child_f64(node, &PLACE_SETTING_CAPACITY) {
                             params.insert("place_setting_capacity".to_string(), json!(cap));
                         }
@@ -724,7 +757,7 @@ pub(super) fn resolve_scheduled_loads(
                         params.insert("phase_3_power_kw".to_string(), json!(0.8));
                         params.insert("phase_3_duration_s".to_string(), json!(900.0));
                     }
-                    "CookingRange"
+                    ApplianceTag::CookingRange
                         if !params.contains_key("annual_electric_kwh")
                             && !params.contains_key("annual_gas_therms") =>
                     {
@@ -753,7 +786,7 @@ pub(super) fn resolve_scheduled_loads(
                             params.insert("annual_gas_therms".to_string(), json!(annual_therm));
                         }
                     }
-                    "Microwave" if !params.contains_key("annual_electric_kwh") => {
+                    ApplianceTag::Microwave if !params.contains_key("annual_electric_kwh") => {
                         // ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default.
                         // HPXML Microwave element typically carries RatedAnnualkWh or
                         // extension/AdjustedAnnualkWh; this arm applies the default only
@@ -765,7 +798,7 @@ pub(super) fn resolve_scheduled_loads(
                         let annual_kwh = MICROWAVE_DEFAULT_ANNUAL_KWH * multiplier;
                         params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
                     }
-                    "Dehumidifier" => {
+                    ApplianceTag::Dehumidifier => {
                         if let Some(cap_pints_day) = child_f64(node, &CAPACITY) {
                             // HPXML §Dehumidifier/Capacity is in US liquid pints/day per the HPXML 4.x schema
                             // annotation. 1 US liquid pint = 0.473176473 L (exact, NIST Handbook 44).
@@ -794,7 +827,7 @@ pub(super) fn resolve_scheduled_loads(
                             params.insert("target_rh".to_string(), json!(target_rh));
                         }
                     }
-                    "Refrigerator" => {
+                    ApplianceTag::Refrigerator => {
                         let multiplier = node
                             .child(&EXTENSION)
                             .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
@@ -806,7 +839,7 @@ pub(super) fn resolve_scheduled_loads(
                                 .insert("annual_electric_kwh".to_string(), json!(kwh * multiplier));
                         }
                     }
-                    "Freezer" => {
+                    ApplianceTag::Freezer => {
                         let multiplier = node
                             .child(&EXTENSION)
                             .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
@@ -818,9 +851,9 @@ pub(super) fn resolve_scheduled_loads(
                                 .insert("annual_electric_kwh".to_string(), json!(kwh * multiplier));
                         }
                     }
-                    other => {
+                    _other => {
                         tracing::warn!(
-                            appliance_tag = other,
+                            appliance_tag = tag.name,
                             "No appliance-specific parameter extraction for this tag; \
                              only generic fields will be parsed"
                         );
@@ -859,7 +892,7 @@ pub(super) fn resolve_scheduled_loads(
                     params.insert(k, v);
                 }
 
-                let is_non_primary_fridge = tag.name == "Refrigerator"
+                let is_non_primary_fridge = matches!(kind, ApplianceTag::Refrigerator)
                     && !child_bool(
                         node,
                         &PRIMARY_INDICATOR,
@@ -867,11 +900,11 @@ pub(super) fn resolve_scheduled_loads(
                         "Refrigerator",
                     )?
                     .unwrap_or(true);
-                if tag.name != "Dehumidifier" {
+                if !matches!(kind, ApplianceTag::Dehumidifier) {
                     let location = child_text(node, &LOCATION).unwrap_or_else(|| {
                         default_appliance_location(
                             building,
-                            tag.name == "Freezer" || is_non_primary_fridge,
+                            matches!(kind, ApplianceTag::Freezer) || is_non_primary_fridge,
                         )
                         .to_string()
                     });
@@ -895,7 +928,7 @@ pub(super) fn resolve_scheduled_loads(
                 if is_non_primary_fridge {
                     spec.instance_name = Some(format!("{name} (Secondary)"));
                 }
-                if tag.name == "Dehumidifier" {
+                if matches!(kind, ApplianceTag::Dehumidifier) {
                     // HPXML's Dehumidifier schema has no Location element;
                     // OS-HPXML and HARES both model every dehumidifier in the
                     // one conditioned zone. A building with no conditioned

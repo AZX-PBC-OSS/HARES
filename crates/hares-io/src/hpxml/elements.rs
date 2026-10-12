@@ -1,7 +1,8 @@
 //! The HPXML elements the parser reads, declared once: every
-//! element-name literal in the parser is one of these statics, and the
-//! accessors take them by reference, so the parser cannot read an
-//! element it has not declared. The input schema publishes this list.
+//! element-name literal in the parser is one of these statics, the
+//! accessors take them by reference, and the choice dispatches match
+//! the nodes against them, so the parser cannot read an element it has
+//! not declared. The input schema publishes this list.
 
 mod table;
 
@@ -13,7 +14,7 @@ pub(crate) use table::read_recorder;
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     /// Parsing every HPXML fixture under `tests/fixtures/` records only
     /// elements in `HPXML_ELEMENTS`, and every entry of `HPXML_ELEMENTS`
@@ -341,6 +342,96 @@ mod tests {
             if path.is_dir() {
                 collect(&path, out);
             } else if path.extension().is_some_and(|ext| ext == "xml") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The choice dispatch's census: the parser branches on an XML
+    /// node's name only through the declared choices, so a node name
+    /// read for a match (bound for one with as_str, or compared with a
+    /// string literal) in the hpxml module fails the census. The
+    /// equipment specs' name comparisons are not element reads (their
+    /// receivers are the closure parameter `s`, `spec`, `tank_spec`, or
+    /// an indexed `specs` element: the canonical equipment names, not
+    /// XML elements).
+    #[test]
+    fn the_choice_dispatch_reads_no_raw_string_name() {
+        let mut sources = Vec::new();
+        collect_rust_sources(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/hpxml"),
+            &mut sources,
+        );
+        assert!(!sources.is_empty(), "the hpxml sources are present");
+        let hits: Vec<String> = sources
+            .iter()
+            .flat_map(|path| {
+                raw_string_name_reads(&std::fs::read_to_string(path).expect("source reads"))
+                    .into_iter()
+                    .map(move |snippet| format!("{}: {snippet}", path.display()))
+            })
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "a choice dispatch must name declared choices, not raw \
+             strings; found {hits:?}"
+        );
+    }
+
+    /// The snippets around node-name reads that bind the name for a
+    /// match (the as_str form) or compare it with a string literal.
+    /// Comment lines are skipped, and the lines are joined so a read
+    /// wrapped across lines is still seen.
+    fn raw_string_name_reads(text: &str) -> Vec<String> {
+        let flattened = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut hits = Vec::new();
+        for (found, _) in flattened.match_indices(".name") {
+            let after = &flattened[found + ".name".len()..];
+            let tail = after.trim_start();
+            let compared = (tail.starts_with("==") || tail.starts_with("!="))
+                && tail[2..].trim_start().starts_with('"');
+            let bound_for_a_match = tail.starts_with(".as_str");
+            if !(compared || bound_for_a_match) {
+                continue;
+            }
+            let (receiver, indexed) = receiver_of(&flattened[..found]);
+            if indexed || receiver == "s" || receiver == "spec" || receiver == "tank_spec" {
+                continue;
+            }
+            hits.push(flattened[found..].chars().take(72).collect());
+        }
+        hits
+    }
+
+    /// The receiver of a field access: the identifier run ending right
+    /// before it, and whether the access is indexed (a `specs`
+    /// element's field, where the name is an equipment's, not an XML
+    /// element's).
+    fn receiver_of(before: &str) -> (&str, bool) {
+        match before
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
+            .last()
+        {
+            Some((start, _)) => (&before[start..], false),
+            None => ("", before.trim_end().ends_with(']')),
+        }
+    }
+
+    fn collect_rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
                 out.push(path);
             }
         }

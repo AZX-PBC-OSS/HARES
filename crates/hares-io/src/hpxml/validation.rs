@@ -117,7 +117,9 @@ pub fn validate_hpxml_schema_node(
 ) -> Result<Vec<ValidationWarning>, ValidationError> {
     let mut warnings = Vec::new();
 
-    if root.name != "HPXML" {
+    #[cfg(test)]
+    super::elements::read_recorder::record(HPXML.name);
+    if root.name != HPXML.name {
         return Err(ValidationError::new(
             "schema",
             format!("root element must be HPXML, found `{}`", root.name),

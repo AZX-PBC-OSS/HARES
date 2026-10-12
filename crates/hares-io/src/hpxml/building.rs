@@ -463,6 +463,24 @@ impl XmlNode {
         Some(cur)
     }
 
+    /// The choice dispatch's gate: the declared choice element naming
+    /// this node, from the choices the dispatch reads. The choices are
+    /// the table's statics, so the parser cannot branch on an element
+    /// it has not declared, and the read is recorded like the other
+    /// accessors' reads.
+    pub(crate) fn declared_choice(
+        &self,
+        choices: &[&'static super::elements::HpxmlElement],
+    ) -> Option<&'static super::elements::HpxmlElement> {
+        let element = choices
+            .iter()
+            .copied()
+            .find(|element| self.name == element.name)?;
+        #[cfg(test)]
+        super::elements::read_recorder::record(element.name);
+        Some(element)
+    }
+
     fn text_as_f64(&self) -> Option<f64> {
         parse_trimmed_f64(&self.text)
     }
@@ -875,15 +893,17 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 
         match ft_child {
             Some(child) => {
-                let tag = child.name.as_str();
-                match tag {
-                    "Crawlspace" => Some("Crawlspace".to_string()),
-                    "Basement" => {
+                match child.declared_choice(FOUNDATION_TYPE_CHOICES) {
+                    Some(choice) if std::ptr::eq(choice, &CRAWLSPACE) => {
+                        Some("Crawlspace".to_string())
+                    }
+                    Some(choice) if std::ptr::eq(choice, &BASEMENT) => {
                         let foundation_id = details
                             .path(&[&ENCLOSURE, &FOUNDATIONS, &FOUNDATION])
                             .and_then(element_id)
                             .unwrap_or_else(|| "unknown".to_string());
                         let is_finished = foundation_node_is_conditioned(
+                            Some(choice),
                             child,
                             &foundation_id,
                             total_conditioned_floors,
@@ -895,16 +915,18 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                             Some("Unfinished Basement".to_string())
                         }
                     }
-                    "SlabOnGrade" | "Ambient" | "AboveApartment" => None,
-                    other => {
+                    // SlabOnGrade, Ambient and AboveApartment name no
+                    // foundation the parser models a thermal zone for.
+                    Some(_) => None,
+                    None => {
                         tracing::error!(
-                            foundation_type = other,
+                            foundation_type = %child.name,
                             "Unrecognized FoundationType child tag"
                         );
                         return Err(HpxmlError::Parse(
                             format!(
                                 "Unrecognized FoundationType '{}' in <Foundations> group",
-                                other
+                                child.name
                             )
                             .into(),
                         ));
@@ -2733,16 +2755,20 @@ fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
 /// `<Basement>` or `<Crawlspace>`), else the OCHRE finished-basement
 /// inference for a basement (hpxml.py:276-280: total floors above the
 /// above-grade floors). A crawlspace with no explicit flag is
-/// unconditioned.
+/// unconditioned. The choice the type element's child declared names
+/// the kind; a child no choice declares reads as the basement form.
 fn foundation_node_is_conditioned(
+    choice: Option<&'static super::elements::HpxmlElement>,
     ft_child: &XmlNode,
     foundation_id: &str,
     total_conditioned_floors: Option<f64>,
     floors_above_grade: f64,
 ) -> Result<bool, HpxmlError> {
-    let path: &'static str = match ft_child.name.as_str() {
-        "Crawlspace" => "Crawlspace/Conditioned",
-        _ => "Basement/Conditioned",
+    let crawlspace = choice.is_some_and(|choice| std::ptr::eq(choice, &CRAWLSPACE));
+    let path: &'static str = if crawlspace {
+        "Crawlspace/Conditioned"
+    } else {
+        "Basement/Conditioned"
     };
     let explicit = ft_child
         .child(&CONDITIONED)
@@ -2751,7 +2777,7 @@ fn foundation_node_is_conditioned(
     Ok(match explicit {
         Some(flag) => flag,
         None => {
-            ft_child.name == "Basement"
+            choice.is_some_and(|choice| std::ptr::eq(choice, &BASEMENT))
                 && total_conditioned_floors.is_some_and(|total| total > floors_above_grade)
         }
     })
@@ -2791,9 +2817,10 @@ fn build_zone_map(
             for node in group.children_named(&ATTIC) {
                 // <FlatRoof/> means no attic cavity; skip zone creation (OCHRE hpxml.py:575-576).
                 let attic_type_child = node.child(&ATTIC_TYPE).and_then(|at| at.children.first());
-                if let Some(child) = attic_type_child
-                    && child.name == "FlatRoof"
-                {
+                let flat_roof = attic_type_child
+                    .and_then(|child| child.declared_choice(ATTIC_TYPE_CHOICES))
+                    .is_some_and(|choice| std::ptr::eq(choice, &FLAT_ROOF));
+                if flat_roof {
                     continue;
                 }
 
@@ -2867,16 +2894,19 @@ fn build_zone_map(
                 let ft_child = node
                     .child(&FOUNDATION_TYPE)
                     .and_then(|ft| ft.children.first());
-                let foundation_type = ft_child.map(|child| child.name.as_str());
+                let ft_choice =
+                    ft_child.and_then(|child| child.declared_choice(FOUNDATION_TYPE_CHOICES));
+                let foundation_type = ft_choice.map(|choice| choice.name);
 
                 // A conditioned foundation is part of the conditioned space
                 // (OS-HPXML geometry.rb `create_or_get_space`, 1704-1716; the
                 // surfaces name it conditioned through `parse_zone_label`) and
                 // has no Foundation zone of its own.
-                if let Some(ft_child) = ft_child {
+                if let Some(child) = ft_child {
                     let foundation_id = element_id(node).unwrap_or_else(|| "unknown".to_string());
                     if foundation_node_is_conditioned(
-                        ft_child,
+                        ft_choice,
+                        child,
                         &foundation_id,
                         total_conditioned_floors,
                         floors_above_grade,
@@ -2897,9 +2927,13 @@ fn build_zone_map(
                         )
                     })
                     .transpose()?;
-                let vented = match foundation_type {
-                    Some("Crawlspace") => vented_explicit.unwrap_or(true),
-                    Some("Basement") => vented_explicit.unwrap_or(false),
+                let vented = match ft_choice {
+                    Some(choice) if std::ptr::eq(choice, &CRAWLSPACE) => {
+                        vented_explicit.unwrap_or(true)
+                    }
+                    Some(choice) if std::ptr::eq(choice, &BASEMENT) => {
+                        vented_explicit.unwrap_or(false)
+                    }
                     _ => vented_explicit.unwrap_or(false),
                 };
                 if vented_explicit.is_none() {

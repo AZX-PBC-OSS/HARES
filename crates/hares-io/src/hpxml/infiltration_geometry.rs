@@ -117,23 +117,35 @@ fn foundation_top_in(details: &XmlNode) -> Result<f64, HpxmlError> {
 /// The OS-HPXML location an `Attic` or `Foundation` stands for, read in
 /// OS-HPXML's order (hpxml.rb:3515-3523, 3832-3847, and `to_location` at
 /// 3404-3420, 3662-3692), for the types whose location can lie inside the
-/// infiltration volume.
+/// infiltration volume. The type element's child is matched against the
+/// declared space-location choices, so a kind the match reads is a
+/// declared static.
 fn space_location(
     space: &XmlNode,
     type_element: &'static super::elements::HpxmlElement,
 ) -> Option<&'static str> {
     let kind = space.child(type_element)?.children.first()?;
+    let choice = kind.declared_choice(SPACE_LOCATION_CHOICES)?;
     let flag = |element: &'static super::elements::HpxmlElement| {
         child_text(kind, element).map(|text| text == "true")
     };
-    match (kind.name.as_str(), flag(&VENTED), flag(&CONDITIONED)) {
-        ("Attic", Some(false), _) => Some("attic - unvented"),
-        ("Basement", _, Some(false)) => Some("basement - unconditioned"),
-        ("Basement", _, Some(true)) => Some("basement - conditioned"),
-        ("Crawlspace", Some(false), _) => Some("crawlspace - unvented"),
-        ("Crawlspace", Some(true), _) => None,
-        ("Crawlspace", _, Some(true)) => Some("crawlspace - conditioned"),
-        _ => None,
+    if std::ptr::eq(choice, &ATTIC) {
+        (flag(&VENTED) == Some(false)).then_some("attic - unvented")
+    } else if std::ptr::eq(choice, &BASEMENT) {
+        match flag(&CONDITIONED) {
+            Some(false) => Some("basement - unconditioned"),
+            Some(true) => Some("basement - conditioned"),
+            None => None,
+        }
+    } else if std::ptr::eq(choice, &CRAWLSPACE) {
+        match (flag(&VENTED), flag(&CONDITIONED)) {
+            (Some(false), _) => Some("crawlspace - unvented"),
+            (Some(true), _) => None,
+            (_, Some(true)) => Some("crawlspace - conditioned"),
+            _ => None,
+        }
+    } else {
+        None
     }
 }
 

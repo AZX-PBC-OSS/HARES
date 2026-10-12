@@ -467,6 +467,44 @@ kind-pin generator and the two hand-run measurement tests) and `-F dst`
 7979/7979 (3 skipped); `pytest -m ''` 1731 passed, 6 xfailed, 0 failed,
 0 errors; pyright 0; the nine goldens bitwise (compare-all 8 identical).
 
+Review round at this tip, two findings fixed on the branch. First: the
+choice-element reads bypassed the statics, so the census did not hold.
+The type-element dispatches took the type element's first child and
+branched on its name with raw strings: the FoundationType children
+(the foundation-name match, the conditioned and vented reads), the
+AtticType FlatRoof child and the space-location type children the
+infiltration reader matches. Those elements were read and erred on
+undeclared, the published schema's hpxml_elements omitted them, and
+nothing guarded the read path. Fixed: the table declares the seven
+missing statics (the six choice children and the document root; 378
+elements now) and the three choice slices; the dispatch gate is
+`XmlNode::declared_choice`, which matches a node against the declared
+choices by identity and records the read like the other accessors', so
+a choice arm must be a declared static (the compile gate covers the
+choice path); the foundation-name dispatch, the conditioned and vented
+reads, the flat-roof skip, the space-location match and the
+document-root check route through the declared elements, and the
+appliance kinds' dispatch matches an `ApplianceTag` kind the loop's
+declared elements name, never a raw string. The census covers the
+choice path: a node name read for a match (the as_str binding or a
+literal comparison, outside the equipment specs' receivers) fails the
+source-scan census in elements.rs, and the census command gains the
+same pattern; both print nothing. RED first: the scan flagged the
+sites this fixes (the review's three choice sites, the appliance
+kinds', and the root's) and the schema pin failed on the missing
+choice children; GREEN holds the coverage test with no new exemptions
+(every choice child is read by checked-in fixtures). Second:
+describe_fields' doc claimed a metadata row naming no probed field
+panics, but the check existed only in the other direction;
+`field_schemas` now asserts it the same way the shared `describe`
+helper does, pinned by the fake-row test (RED: the test did not panic
+on the unfixed tree). Gates after the fixes: fmt clean; clippy
+`--workspace --all-targets --all-features -D warnings` clean; nextest
+`--workspace --all-features -j 4` 8053/8053 (3 skipped); `pytest -m ''`
+1734 passed, 6 xfailed, 0 failed, 0 errors; pyright 0; the nine
+goldens bitwise (compare-all 8 identical, dst identical); the census
+commands print nothing.
+
 ## IN-4: `resample_weather`, the engine's own per-step weather channels
 
 **Kind:** initiative work (`dl-i08-architecture.new_capability`).
