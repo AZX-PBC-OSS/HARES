@@ -563,6 +563,66 @@ prints nothing at HEAD `872cf289`.
 
 **Commit:** `fix: resolve thermostat setpoints by the OpenStudio-HPXML rule and record the active source`
 
+**State:** DONE as `08c010ed` (branch `row/r64-in5`, cut from
+`9cc6d578`). Landed: `SetpointSource` (`crates/hares-io/src/setpoint_source.rs`,
+new; the plan §2.7 shape without `GeneratedConstant`: the generated
+schedule has carried no setpoint column since the phase-1 commit
+`c561eb69`, so nothing remains for the variant to record) with the three
+live tiers, a serde-tagged round-trip test, and the provenance `label()`;
+the `EquipmentSpec` fields `heating_setpoint_source` and
+`cooling_setpoint_source`, set by `inject_setpoint_schedules` for every
+heating and cooling spec and `None` for every other, and carried across
+the blueprint's override merge; the overlap warning, one per side, naming
+the column and the ignored HPXML elements by name
+(`SetpointTemp*Season` and the `Weekday/WeekendSetpointTemps*Season`
+arrays), where OS-HPXML warns only for the simple element
+(hvac.rb:1669-1675) — HARES warns for every ignored input, so no choice
+is silent; the construction error for a `water_heater_setpoint` column,
+naming the column and stating HARES does not apply it; the rule in
+`inject_setpoint_schedules`'s doc comment and in
+`docs/PHYSICS_DECISIONS.md` (the file exists since the strictness sweep's
+commits, so the entry's "until then" is spent and the section is added
+now), citing hvac.rb:1641-1741, `get_hvac_setpoints` :1768-1829 (the
+hourly arrays, else the constant element with its setback, :1785-1798)
+and the manual-thermostat defaults `defaults.rb:2827-2848` — the 68/78 F
+defaults the strict-setpoint-defaults sites cite are this rule's third
+tier, not the whole rule; the default tier keeps its substitution
+warning. RED: the differential is the parity fixture's schedule with a
+constant `heating_setpoint` column appended beside its HPXML's declared
+setpoints (hourly heating arrays, a simple cooling element): at the
+parent the run recorded no warning (the only warning is the unrelated
+`TemperatureCapacitanceMultiplier` one) and carried no provenance (the
+fields did not exist: the hares-io tests compile RED on
+`SetpointSource`), and the values already matched the rule —
+`hpxml_setpoints_used_without_a_column` passed at the parent and after,
+so the fix changes no value. Adaptation: the generated-schedule
+acceptance test's premise died with the phase-1 removal of the generated
+setpoint columns; the adapted pin
+`missing_setpoints_resolve_to_the_default_profile_source` runs a
+synthetic home with no `HVACControl` and asserts both sides resolve to
+`DefaultProfile` with the cited values; a generated schedule raises no
+setpoint warning and resolves `Hpxml` (pinned by the no-column tests on
+both levels). Fleet movement attributed honestly: the fleet and
+regression schedule fixtures carried `heating_setpoint` (and cooling)
+columns beside `base.xml`'s declared `SetpointTemp*Season` elements —
+exactly the overlap the rule warns — and every fleet home degraded
+through the warned-home-never-a-success contract, so the fixtures drop
+the setpoint columns (the ResStock convention; the census at this head:
+0 of the 33 `in.schedules.csv` under `tests/fixtures/resstock/` carries a
+setpoint column, and `grep -l water_heater_setpoint -r tests/fixtures
+data` prints nothing); no committed golden moved. OCHRE parity: the
+setpoints feed the HVAC unchanged; OCHRE lets the column win silently
+(`vendors/OCHRE/ochre/utils/schedule.py:408-427`) and the warning follows
+OS-HPXML, not OCHRE, recorded in the physics-decisions section. Setpoint
+movement declared: none; the nine goldens (compare-all 8 + dst 1) are
+bitwise identical, compared twice on the final state, so nothing was
+re-captured. Gates: fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace --all-features
+-j 4` 8005/8005 (1 skipped: the parent's ignored kind-pin generator) and
+`-F dst` 7935/7935 (1 skipped); `pytest -m ''` 1723 passed, 6 xfailed,
+0 failed, 0 errors; pyright 0. The resolved-parameter read-back entry
+copies the two fields into `ResolvedEquipment` next.
+
 **Dependencies:** IN-1; `06-runtime-memory.md` RT-4; `11-other-defects.md`
 OD-19 (the strict profiles it reads) and OD-17 (the default profile, read
 from `ParsedDefaults`, fails loudly). Lands before RT-6.
