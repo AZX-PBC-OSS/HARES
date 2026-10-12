@@ -64,6 +64,7 @@ from ._hares import TanklessWaterHeater
 # Actor system
 from ._hares import Actor
 from ._hares import DispatchRequest
+from ._hares import OutputVariable
 from ._hares import Priority
 from ._hares import Signal
 
@@ -218,6 +219,7 @@ __all__ = [
     # Actor system
     "Actor",
     "DispatchRequest",
+    "OutputVariable",
     "Priority",
     "Signal",
     # Enums

@@ -444,6 +444,11 @@ replacement.
   `Provenance.catalogue_digest` (the catalogue digest as a 64 char hex
   string): every run's provenance now records what built it and the
   catalogue the run's reports are typed by.
+- Added: `OutputVariable` and the `Actor` methods `output_variables()`
+  and `set_output()`: a Python actor declares its output variables (name,
+  unit, kind, aggregation, across homes, sampling, labels, description)
+  and publishes their per-step values during `decide()`; the declared
+  variables enter the output catalogue as `actor:<name>:<var>` columns.
 
 ## Troubleshooting
 

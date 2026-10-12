@@ -1024,7 +1024,7 @@ impl PyDwelling {
     /// Adds a Python actor to the dwelling's decision-making loop.
     pub fn add_actor(&self, py: Python<'_>, actor: Py<PyActor>) -> PyResult<()> {
         let mut dwelling = self.acquire()?;
-        let wrapper = crate::py_actor::PyActorWrapper::new(py, actor);
+        let wrapper = crate::py_actor::PyActorWrapper::new(py, actor)?;
         dwelling.add_actor(Box::new(wrapper)).map_err(to_py_err)?;
         Ok(())
     }

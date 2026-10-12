@@ -1398,6 +1398,80 @@ the catalogue);
 **Dependencies:** OR-1, OR-5, PY-9, PY-4 (the Python `Variable` the
 tests read).
 
+**State (committed):** the surface landed on this row's branch. The
+declaration surface: `hares.OutputVariable` (a pyclass whose constructor
+carries every rule of the declaration: the unit parses through
+`Unit::from_symbol` (new in `hares-types`; every variant round-trips its
+symbol), the kind is one of `energy`/`power`/`temperature`/`ratio`/
+`state`/`enum`/`quantity`, the aggregation defaults to the rule the
+decision log gives the kind and is required for `quantity`
+(`sum`/`mean`/`last`, `None` naming the choices), an aggregation the kind
+does not allow is a `ValueError`, `across_homes` (`sum`/`mean`) is
+required exactly for `quantity` and refused otherwise, `labels` are
+required exactly for `enum` (the parsed labels become
+`VariableKind::Enum { labels: EnumLabels::Runtime }`), `sampling`
+defaults to `interval_mean`, `nullable` to false, `description` carries
+through to the catalogue variable). The base `Actor` grows
+`output_variables()` (a default that declares nothing) and
+`set_output(name, value)`; the pyi stub declares both, and
+`hares/__init__.py` exports `OutputVariable`. The registration path:
+`add_actor` reads `output_variables()` once through the wrapper (whose
+constructor is fallible now, so the Python errors surface typed through
+`add_actor`: a raising method propagates, a wrong element type is a
+`TypeError`, a malformed declaration raises its `ValueError`),
+converts the declarations to `TelemetryField`, builds the sealed
+telemetry with `Telemetry::from_fields`, and installs the declared key
+set on the actor object; the wrapper answers `Actor::output_variables()`
+with the declarations and `Actor::telemetry()` with the sealed map, so
+the registration validation (unsealed, disagreeing keys) and the
+step-end latch checks cover the Python actor like any actor's, and the
+variables enter the catalogue as `actor:<name>:<var>` columns at every
+verbosity. The publish path: `set_output` records the publication, then
+raises `KeyError` at once for an undeclared name; the wrapper drains the
+recorded publications into the sealed map after the Python `decide()`
+returns (a declared key updates its value, an attempted undeclared
+publication latches even when its `KeyError` is caught, and a non-finite
+value latches like any actor's write). Enforcement proofs for a Python
+actor (Rust unit tests over the wrapper): the sealed map latches an
+undeclared set; `decide()`'s publications land in the map; an undeclared
+publication fails the `decide` naming the key and latches; the catalogue
+built from the wrapper's declarations (`build_catalogue` over
+`CatalogueActor`) carries the declared unit, the enum's runtime labels
+and the quantity's `AcrossHomes` and `Last` aggregation. RED first: the
+17 Python acceptance tests failed on `ImportError: cannot import name
+'OutputVariable'` (the two registration-path tests `DID NOT RAISE`, the
+wrapper read no declarations), the Rust tests on compile errors over the
+missing surface; GREEN after. Python acceptance
+(`tests/python/test_py_actor_outputs.py`, the `cz4a_ashp_hpwh` inputs,
+24 h at 900 s): the published value lands in the actor column and the
+schema's field metadata carries the declared unit; the enum column
+carries the published codes; the quantity variable registers and runs;
+the constructor `ValueError`s (enum without labels, quantity without
+across_homes, quantity without aggregation naming the choices,
+across_homes on a power variable, unknown unit, kind and sampling, a
+disallowed aggregation); `set_output` of an undeclared name raises
+`KeyError` at once; a caught `KeyError` still fails the step naming the
+actor and the key; a NaN publication fails the run naming the actor and
+the key; a malformed declaration, a wrong element type and a raising
+`output_variables()` surface through `add_actor`. One deviation, stated:
+the run-based tests' `Memory` report rides `Selection.verbosity(0)`, not
+`Selection.named`: a report's selection resolves at assembly, before
+`add_actor` can register a caller actor, so a `Named` selection naming
+`actor:<name>:<var>` cannot be configured on `from_hpxml`; the actor
+columns ride every verbosity tier and the fresh-schema plan re-resolves
+the selection at registration, and the `Named` resolution of the actor's
+variables is pinned in the Rust catalogue test. The docs'
+changes section lists `OutputVariable` and the two `Actor` methods (the
+stub-changes gate reads it); the `pyarrow` typings stub gains
+`RecordBatchReader.from_stream`/`read_all` and `Schema.field`/
+`Field.metadata` for the metadata read. Gates: fmt clean; clippy
+`--workspace --all-targets --all-features -- -D warnings` clean (the
+default, `dst` and `profiling` sets too); nextest `--workspace
+--all-features -j 4` 7978/7978 (1 skipped: the ignored kind-pin
+generator); pytest `-m ''` 1701 passed, 6 xfailed, 0 failed, 0 skipped;
+pyright 0 errors; the goldens bitwise (compare-all 8 identical on the
+default build, `full_year_900s_dst` identical on the dst build).
+
 ## PY-12: ResStock sample weights name what is missing and never default silently
 
 **Kind:** fix (found defect; requirement R24).

@@ -954,6 +954,52 @@ class DispatchRequest:
     ) -> DispatchRequest: ...
     def __repr__(self) -> str: ...
 
+class OutputVariable:
+    """One declared output variable of a Python actor.
+
+    Returned from ``Actor.output_variables()``; the declared surface the
+    output catalogue and the actor's sealed telemetry are built from.
+    ``unit`` must be a ``Unit`` symbol (``"kW"``, ``"C"``, ``"count"``,
+    ...). ``aggregation`` defaults to the rule the kind takes and is
+    required for ``kind="quantity"`` (``"sum"``, ``"mean"`` or ``"last"``).
+    ``across_homes`` (``"sum"`` or ``"mean"``) is required exactly for
+    ``kind="quantity"``; ``labels`` (a list of strings decoding the codes)
+    exactly for ``kind="enum"``.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        unit: str,
+        kind: str,
+        aggregation: str | None = None,
+        across_homes: str | None = None,
+        sampling: str = "interval_mean",
+        nullable: bool = False,
+        labels: list[str] | None = None,
+        description: str = "",
+    ) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def unit(self) -> str: ...
+    @property
+    def kind(self) -> str: ...
+    @property
+    def aggregation(self) -> str | None: ...
+    @property
+    def across_homes(self) -> str | None: ...
+    @property
+    def sampling(self) -> str: ...
+    @property
+    def nullable(self) -> bool: ...
+    @property
+    def labels(self) -> list[str] | None: ...
+    @property
+    def description(self) -> str: ...
+    def __repr__(self) -> str: ...
+
+
 class Actor:
     def __init__(self) -> None: ...
     @property
@@ -962,6 +1008,17 @@ class Actor:
     def name(self, value: str) -> None: ...
     @abstractmethod
     def decide(self, env: dict[str, Any]) -> list[DispatchRequest]: ...
+    def output_variables(self) -> list[OutputVariable]:
+        """The declared output variables; override to declare. Read once by
+        ``Dwelling.add_actor``."""
+        ...
+    def set_output(self, name: str, value: float) -> None:
+        """Publishes one declared output variable's value for this step.
+
+        Raises ``KeyError`` for an undeclared name at once; the attempted
+        publication still fails the step naming the actor and the key.
+        """
+        ...
 
 # ---------------------------------------------------------------------------
 # Telemetry

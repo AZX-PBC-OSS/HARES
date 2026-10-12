@@ -83,6 +83,47 @@ pub enum Unit {
 }
 
 impl Unit {
+    /// Every variant, for symbol round-trips and validation messages.
+    pub const ALL: &[Unit] = &[
+        Self::None,
+        Self::Dimensionless,
+        Self::Celsius,
+        Self::Watt,
+        Self::Kilowatt,
+        Self::KilowattHour,
+        Self::VoltAmpereReactive,
+        Self::ThermPerHour,
+        Self::WattPerSquareMeter,
+        Self::Second,
+        Self::Minute,
+        Self::Degree,
+        Self::Volt,
+        Self::Ampere,
+        Self::AmpereHour,
+        Self::JoulePerKilogramKelvin,
+        Self::KilowattHourPerMile,
+        Self::KilogramPerSecond,
+        Self::KilogramPerCubicMeter,
+        Self::LitrePerDay,
+        Self::Count,
+        Self::Byte,
+        Self::Percent,
+        Self::Fraction,
+        Self::Code,
+        Self::Enum,
+        Self::Boolean,
+    ];
+
+    /// The variant whose [`Unit::symbol()`] is `symbol`, or `None` for any
+    /// other spelling: the parse the declaring surfaces validate against.
+    #[must_use]
+    pub fn from_symbol(symbol: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|unit| unit.symbol() == symbol)
+    }
+
     /// The spelling today's column names and metadata use.
     #[must_use]
     pub fn symbol(self) -> &'static str {
@@ -800,6 +841,15 @@ mod tests {
         assert_eq!(Unit::Code.symbol(), "code");
         assert_eq!(Unit::Enum.symbol(), "enum");
         assert_eq!(Unit::Boolean.symbol(), "bool");
+    }
+
+    #[test]
+    fn unit_from_symbol_round_trips_every_variant() {
+        for unit in Unit::ALL {
+            assert_eq!(Unit::from_symbol(unit.symbol()), Some(*unit));
+        }
+        assert_eq!(Unit::from_symbol("furlongs"), None);
+        assert_eq!(Unit::from_symbol(""), Some(Unit::None));
     }
 
     #[test]

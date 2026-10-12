@@ -25,7 +25,9 @@ mod py_water_heater;
 mod py_weather;
 mod utils;
 
-use py_actor::{PyActor, PyDRLevel, PyDispatchRequest, PyMode, PyPriority, PySignal};
+use py_actor::{
+    PyActor, PyDRLevel, PyDispatchRequest, PyMode, PyOutputVariable, PyPriority, PySignal,
+};
 use py_config::{PyDwellingConfig, PyHealthPolicy, PySimulationConfig, PySiteLocationOverride};
 use py_control::PyControlSignal;
 use py_dwelling::{PyDwelling, PyTimestepsIter};
@@ -100,6 +102,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<py_fleet::PyFleetTable>()?;
     m.add_class::<PyCoverage>()?;
     m.add_class::<PyActor>()?;
+    m.add_class::<PyOutputVariable>()?;
     m.add_class::<PyDispatchRequest>()?;
     m.add_class::<PyMode>()?;
     m.add_class::<PyPriority>()?;
