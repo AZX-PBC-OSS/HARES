@@ -404,6 +404,69 @@ the census command above; `uv run --no-sync pytest tests/python`.
 override fields); `05-python-surface.md` PY-8; `11-other-defects.md` OD-2,
 OD-10's structural commit and OD-19 (the rejections this entry declares).
 
+**State:** committed `16517eb7` (2026-10-12, branch `row/r67-in3-in4`,
+cut from `228eecbe`). Landed: the schema's vocabulary in `hares-types`
+(`crates/hares-types/src/schema.rs`: `ValueType`, `Bounds`,
+`FieldSchema`, the `FieldMeta` rows and the `describe` helper; serde_json
+added to the crate's `[dependencies]`), `InputSchema` and its section
+types in `hares-io` (`crates/hares-io/src/input_schema.rs`: the removed
+keys from `REMOVED_KEYS` itself, the schedule columns from the column
+table through `schedule_resolve::schedule_column_schemas`, the defaults
+files from `ParsedDefaults::read_files` (the store's input log, the
+digest's material — the read list, never a parallel list), the HPXML
+elements from the declared lists), and `hares_core::input_schema()`
+(`crates/hares-core/src/input_schema.rs`) assembling it, the config
+fields from `SimulationConfig`'s, `HealthPolicy`'s and
+`SiteLocationOverride`'s `DescribeFields` impls beside their definitions,
+the dwelling and settings fields from `DwellingConfig`'s and
+`DwellingSettings`'s, and the override classes from the registry's
+`known_names()` through `sample_config::override_fields_for_class` — the
+typed configs' field lists from the deserialiser's own unknown-field
+probe (its "expected one of" list is the complete accepted set), the
+raw-parameter classes' from the parameter lists' `field_schemas`, and the
+reserved `equipment_id` filtered out (the assembly assigns ids; an
+override of it is rejected naming the reservation, so it is not a field
+the override accepts). The HPXML elements:
+`crates/hares-io/src/hpxml/elements/table.rs` declares 371 elements the
+parser reads — `HpxmlElement { name, context, unit, description }` statics
+whose contexts are the fixture-harvested parent paths (a throwaway walk of
+every fixture's parsed tree; the elements no fixture carries contexted
+from the call sites' receivers) — and the type change is the gate:
+`XmlNode`'s `child`, `children_named`, `first_descendant`, `descendants`
+and `path`, and every name-taking helper (`child_text`, `child_f64`,
+`child_bool`, `child_energy_kwh`, `child_power_w`,
+`find_descendant_f64`, `descendants_named`, `resolve_local_ref`), take
+`&'static HpxmlElement`; the parser's rejections go through
+`HPXML_REJECTED_ELEMENTS` (`RejectedHpxmlElement`), scanned where the
+document parses (the scan searches the tree's own names, both entrances:
+`parse_hpxml_str` and `parse_building`), and OD-10's legacy
+`HasFlueOrChimney` moved into it from building.rs's inline check. The
+census command prints nothing. Python: `hares.input_schema() -> dict`,
+the `ParsedDefaults.read_files()` getter, the stubs' sections and the
+docs' changes lines. RED first: the acceptance files failed to compile on
+the missing API and the Python test on the missing function, witnessed at
+the base with only the tests applied. Two adaptations, both recorded for
+the fold that lands their prerequisites (the branch was cut from a base
+the two dependencies had not folded into): (1) IN-7's `EnvelopeScales`
+does not exist on this base, so `impl DescribeFields for EnvelopeScales`,
+the `envelope` reserved key and the `envelope_scales_described_with_bounds`
+acceptance are the fold's additions beside IN-7's definition, not this
+commit's; (2) OD-19's setback and setup elements are still read on this
+base (the parser applies them), so they are declared in `HPXML_ELEMENTS`
+(the coverage reads them) and move to `HPXML_REJECTED_ELEMENTS` at OD-19's
+fold, whose rejections then go through the same scan. The override
+acceptance's per-class in-bounds value comes from the class's sample
+config (`sample_config_for_class`, the lifecycle helpers moved into
+production code beside the registry), the enforcement's own merge
+(`merged_equipment_config`) the acceptance's surface: an override of
+every schema field is accepted; a field name not in the schema is
+rejected naming the class and the field. Gates: fmt clean; clippy
+`--workspace --all-targets --all-features -D warnings` clean; nextest
+`--workspace --all-features -j 4` 8049/8049 (3 skipped: the ignored
+kind-pin generator and the two hand-run measurement tests) and `-F dst`
+7979/7979 (3 skipped); `pytest -m ''` 1731 passed, 6 xfailed, 0 failed,
+0 errors; pyright 0; the nine goldens bitwise (compare-all 8 identical).
+
 ## IN-4: `resample_weather`, the engine's own per-step weather channels
 
 **Kind:** initiative work (`dl-i08-architecture.new_capability`).
@@ -476,6 +539,61 @@ through `hares.resample_weather` with the `site` dict from
 
 **Dependencies:** IN-2; `06-runtime-memory.md` RT-2 (the forcing tables
 the environment update reads from).
+
+**State:** committed `9d6e6b53` (2026-10-12, branch `row/r67-in3-in4`,
+one commit with the input schema row's). Landed: the per-step weather
+evaluation factored out of `update_in_place` into
+`StepWeatherEvaluator::evaluate` (`crates/hares-core/src/environment.rs`),
+one function the environment update and `hares_core::resample_weather`
+call — the resampled series, the resolved metadata (the site's values),
+the start offset, the mains constants, the hemisphere and phase rules,
+the civil timezone and the forcing table for the time grid, constructed
+through the same derivation `from_resampled` runs (the manager's Step-1
+fields replaced by the evaluator field; the forcing table still resolved
+on the parsed-weather handle, shared with the handle's other
+constructions; the observe capture (the raw day-of-year pair and the raw
+mains °F) rides the evaluation's step struct). `hares_core::resample_weather(weather,
+site, config) -> RecordBatch`: one row per step of the configured
+horizon, `Time` (the step's naive local wall clock, the report's own
+convention) and the ten channels in the catalogue's order; the wind
+direction not among them. The catalogue: the seven new weather variables
+in the dwelling-level static table at level 9 — in the catalogue (a named
+selection resolves them; `build_schema`'s verbosity gate keeps them out
+of every preset, so no golden schema changes), the kind pin regenerated
+(`kinds.json` gains exactly the seven: the humidity ratio a `Ratio` in
+`kg/kg`, the pressure and wind speed `Quantity`-`Mean` in the new
+`Kilopascal` and `MeterPerSecond`, the sky temperature a `Temperature`,
+the three irradiances `Quantity`-`Mean` in `W/m2` with `IntervalMean`
+sampling, the rest `InstantAtEnd`) — and the row plan's dwelling columns
+carry the seven slots, written per step from the environment's own
+weather state. `Unit` gained `KilogramPerKilogram`, `Kilopascal` and
+`MeterPerSecond`. Python: `hares.resample_weather(weather, site, config)
+-> polars.DataFrame` (a path, a `(text, format)` pair or a
+`ParsedWeather`; the site dict's four values with every field's source
+the caller's override, a missing coordinate a `KeyError` naming it; the
+parse and resample with the GIL released), the `ParsedWeather` header
+getters the site dict's construction reads, the stub's section and the
+docs' changes line. RED first: the Rust acceptance file failed to compile
+on the missing function and the Python test on the missing import,
+witnessed at the IN-3 tip with only the tests applied. One adaptation,
+recorded for the fold: IN-2's `validate()` is not on this base, so the
+Python test's site dict is the fixture's own resolution (the HPXML's
+latitude, longitude and UTC offset, the elevation falling back to the
+weather header, read through the new getters) — the form
+`validate()`'s `site` entry carries; the fold switches the dict's source
+to `validate()` and the acceptance re-runs (the exposed channels match
+the run's series bitwise either way: the values are the resolved site's,
+whatever names them). The bitwise acceptance:
+`resample_weather_equals_run_weather_columns_at_900_and_3600` (the
+cz4a fixture's inputs, 48 h, 900 s and 3600 s, the run's report and the
+exposed rows equal on bits, every f64 by `to_bits()`, the Time column
+included) and `resample_weather_matches_in_python`. Gates: fmt clean;
+clippy `--workspace --all-targets --all-features -D warnings` clean;
+nextest `--workspace --all-features -j 4` 8051/8051 (3 skipped: the
+ignored kind-pin generator and the two hand-run measurement tests) and
+`-F dst` 7981/7981 (3 skipped); `pytest -m ''` 1734 passed, 6 xfailed,
+0 failed, 0 errors; pyright 0; the nine goldens bitwise (compare-all 8
+identical).
 
 ## IN-5: thermostat setpoint source by the OpenStudio-HPXML rule
 
