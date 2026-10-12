@@ -27,6 +27,9 @@ use crate::py_report::PyFrequency;
 #[pyclass(frozen, name = "RunResult")]
 pub struct PyRunResult {
     pub(crate) inner: Arc<RustRunResult>,
+    /// The run's catalogue: the dwelling's own, read at the finalisation
+    /// (the run never changes it).
+    pub(crate) catalogue: Arc<hares_io::Catalogue>,
 }
 
 #[pymethods]
@@ -51,6 +54,16 @@ impl PyRunResult {
         self.inner.metrics.as_ref().map(|metrics| PyRunMetrics {
             inner: metrics.clone(),
         })
+    }
+
+    /// The catalogue the run's model declared: the same catalogue
+    /// `Dwelling.catalogue()` reads, the run's variables with their units,
+    /// kinds and labels.
+    #[getter]
+    fn catalogue(&self) -> crate::py_catalogue::PyCatalogue {
+        crate::py_catalogue::PyCatalogue {
+            inner: self.catalogue.clone(),
+        }
     }
 
     /// The run's health totals, recorded unconditionally in every build.

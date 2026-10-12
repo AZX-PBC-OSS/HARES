@@ -319,6 +319,42 @@ impl Catalogue {
         &self.equipment_names
     }
 
+    /// Builds a catalogue from explicit variable definitions, in order:
+    /// the shape `to_json` round trips. The schema-derivation tags default
+    /// (every variable at minimum verbosity 0, none observe-only, none
+    /// diagnostics) and no column reads a telemetry key: the definitions
+    /// carry the catalogue's variables alone. A duplicate name is an
+    /// error naming both sources.
+    pub fn from_defs(defs: Vec<VariableDef>) -> Result<Self, CatalogueError> {
+        let mut index: HashMap<String, usize> = HashMap::with_capacity(defs.len());
+        for (i, def) in defs.iter().enumerate() {
+            let name = def.name.to_string();
+            if let Some(&first) = index.get(&name) {
+                return Err(CatalogueError::DuplicateName {
+                    name,
+                    first: defs[first].source.tag(),
+                    second: def.source.tag(),
+                });
+            }
+            index.insert(name, i);
+        }
+        let tags = vec![
+            VarTag {
+                min_verbosity: 0,
+                observe_only: false,
+                diagnostics: false,
+            };
+            defs.len()
+        ];
+        Ok(Self {
+            defs,
+            tags,
+            index,
+            telemetry_keys: HashMap::new(),
+            equipment_names: Vec::new(),
+        })
+    }
+
     /// The number of variables.
     #[must_use]
     pub fn len(&self) -> usize {

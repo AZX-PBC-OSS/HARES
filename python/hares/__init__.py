@@ -28,6 +28,9 @@ from ._hares import RunResult
 from ._hares import WarmupOutcome
 from ._hares import WarmupResiduals
 from ._hares import Warning
+from ._hares import Catalogue
+from ._hares import Variable
+from ._hares import metrics_from_table
 
 from hares.simulation_plan import SimulationPlan, SimulationSegment
 
@@ -180,6 +183,9 @@ __all__ = [
     "Warning",
     "Provenance",
     "EquipmentProvenance",
+    "Catalogue",
+    "Variable",
+    "metrics_from_table",
     "ControlSignal",
     "Telemetry",
     # Equipment

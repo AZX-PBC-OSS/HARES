@@ -877,7 +877,11 @@ impl PyDwelling {
             );
         }
 
-        Ok(PyRunResult { inner: result })
+        let catalogue = { self.acquire()?.catalogue() };
+        Ok(PyRunResult {
+            inner: result,
+            catalogue,
+        })
     }
 
     /// Finalises the run in place: the billing close, the post-hoc
@@ -914,7 +918,13 @@ impl PyDwelling {
             }
         };
         match finish_result {
-            Ok(result) => Ok(PyRunResult { inner: result }),
+            Ok(result) => {
+                let catalogue = { self.acquire()?.catalogue() };
+                Ok(PyRunResult {
+                    inner: result,
+                    catalogue,
+                })
+            }
             Err(e) => {
                 if self.poisoned.load(Ordering::Acquire) {
                     return Err(FatalDwellingError::new_err(e.to_string()));
@@ -1116,6 +1126,17 @@ impl PyDwelling {
             ))
         })?;
         Ok(PyTelemetry::new(dwelling.telemetry().map_err(to_py_err)?))
+    }
+
+    /// The dwelling's output variable catalogue: every variable the built
+    /// model can produce, declared once, typed, with its source. Readable
+    /// from build on, before the first step; rebuilt on every equipment or
+    /// actor roster change.
+    pub fn catalogue(&self) -> PyResult<crate::py_catalogue::PyCatalogue> {
+        let dwelling = self.acquire()?;
+        Ok(crate::py_catalogue::PyCatalogue {
+            inner: dwelling.catalogue(),
+        })
     }
 
     #[getter]

@@ -6,6 +6,7 @@ mod conversions;
 mod py_actor;
 mod py_blueprint;
 mod py_callback;
+mod py_catalogue;
 mod py_config;
 mod py_control;
 mod py_dwelling;
@@ -132,6 +133,8 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDepartureConstraint>()?;
     m.add_class::<PyExtrapolationStrategy>()?;
     m.add_class::<PyRunMetrics>()?;
+    m.add_class::<py_catalogue::PyCatalogue>()?;
+    m.add_class::<py_catalogue::PyVariable>()?;
     m.add_class::<py_result::PyRunResult>()?;
     m.add_class::<py_result::PyReportResult>()?;
     m.add_class::<py_result::PyRunHealth>()?;
@@ -201,6 +204,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_gym::clip_action_py, m)?)?;
     m.add_function(wrap_pyfunction!(py_gym::field_bounds_py, m)?)?;
     m.add_function(wrap_pyfunction!(py_gym::field_bounds_table_py, m)?)?;
+    m.add_function(wrap_pyfunction!(py_catalogue::metrics_from_table, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_weather, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_epw, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_psm3, m)?)?;

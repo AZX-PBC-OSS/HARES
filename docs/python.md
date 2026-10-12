@@ -423,6 +423,15 @@ replacement.
 - Added: `Alignment` (with `instant`, `local_clock`) and the
   `alignment=` keyword on `Fleet.from_buildings` and
   `Fleet.from_resstock`: the fleet's declared time alignment.
+- Added: `Catalogue` and `Variable` (every variable's `name`, `unit`,
+  `kind`, `aggregation`, `sampling`, `nullable`, `source`, `labels`,
+  `across_homes` and `description` readable, the `digest()`, the
+  iteration, `to_json()`/`from_json()`), `Dwelling.catalogue()` and
+  `RunResult.catalogue`, and `metrics_from_table(table, catalogue,
+  time_res, setpoint_deadband_c=None)`: any `__arrow_c_stream__`
+  results table scored through the catalogue with the run's own
+  accumulator (`time_res` in whole seconds; a reduced or non-Timestep
+  table raises, naming the mismatch).
 
 ## Troubleshooting
 
