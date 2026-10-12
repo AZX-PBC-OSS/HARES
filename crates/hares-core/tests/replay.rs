@@ -529,6 +529,135 @@ fn replay_export_rejects_an_installed_domain_solver() {
     reject_returns(&result, &[ReplayBlocker::CallerActor]);
 }
 
+/// `replay_export_rejects_a_caller_actor_added_with_equipment`: the
+/// caller actors `add_equipment_with_actors` joins with the equipment
+/// are caller-registered actors, so the change records the caller-actor
+/// blocker beside the equipment-changed one.
+#[test]
+fn replay_export_rejects_a_caller_actor_added_with_equipment() {
+    use hares_core::actor::Actor;
+    use hares_equipment::{Equipment, apply_identity_write};
+    use hares_types::{
+        ControlCapabilities, CoreOutput, EndUse, EnvironmentState, EquipmentDescriptor,
+        EquipmentId, ExecutionStage, FuelType, OperatingMode, PortDeclaration, PortSlots,
+        Telemetry, TelemetryField,
+    };
+    use std::borrow::Cow;
+
+    struct ProbeEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+    }
+
+    impl ProbeEquipment {
+        fn new(name: &str) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(0),
+                    name: name.to_string(),
+                    end_use: EndUse::HVAC_HEATING,
+                    equipment_type: Cow::Borrowed("ProbeEquipment"),
+                    zone: None,
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Independent,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: hares_types::CoreCapabilities::empty(),
+                    telemetry_fields: vec![],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::with_capacity(0),
+                core_output: CoreOutput::default(),
+            }
+        }
+    }
+
+    impl Equipment for ProbeEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+        fn set_equipment_id(&mut self, id: EquipmentId) -> hares_equipment::Result<()> {
+            apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+        fn ports(&self) -> &[PortDeclaration] {
+            &[]
+        }
+        fn init(
+            &mut self,
+            _config: &hares_equipment::EquipmentConfig,
+            _env: &EnvironmentState,
+        ) -> Result<(), HaresError> {
+            Ok(())
+        }
+        fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
+            OperatingMode::On
+        }
+        fn step(
+            &mut self,
+            _env: &EnvironmentState,
+            _dt: std::time::Duration,
+            _ports: &mut PortSlots,
+        ) -> Result<(), HaresError> {
+            Ok(())
+        }
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+        fn save_state(&self) -> Result<Vec<u8>, HaresError> {
+            Ok(vec![])
+        }
+        fn load_state(&mut self, _state: &[u8]) -> Result<(), HaresError> {
+            Ok(())
+        }
+        fn apply_signal(&mut self, _signal: &hares_types::ControlSignal) -> Result<(), HaresError> {
+            Ok(())
+        }
+    }
+
+    struct IdleActor {
+        actor_name: String,
+    }
+
+    impl Actor for IdleActor {
+        fn name(&self) -> &str {
+            &self.actor_name
+        }
+        fn decide(
+            &mut self,
+            _env: &EnvironmentState,
+            _out: &mut Vec<hares_control::DispatchRequest>,
+        ) {
+        }
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
+        }
+    }
+
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+    dwelling
+        .add_equipment_with_actors(
+            Box::new(ProbeEquipment::new("Probe Unit")),
+            vec![Box::new(IdleActor {
+                actor_name: "Probe Actor".to_string(),
+            })],
+        )
+        .expect("the equipment and its actor join");
+    dwelling.step().expect("the step runs");
+    let result = dwelling.finish().expect("the finish runs");
+    reject_returns(
+        &result,
+        &[ReplayBlocker::CallerActor, ReplayBlocker::EquipmentChanged],
+    );
+}
+
 /// `replay_records_the_exporting_build`: `Replay.recorded_build` equals
 /// the exporting run's `BuildInfo` field for field.
 #[test]

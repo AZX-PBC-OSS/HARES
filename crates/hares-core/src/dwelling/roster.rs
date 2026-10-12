@@ -655,6 +655,7 @@ impl Dwelling {
         mut eq: Box<dyn Equipment>,
         actors: Vec<Box<dyn Actor>>,
     ) -> Result<()> {
+        let supplies_actors = !actors.is_empty();
         let planned = self
             .validate_candidate_equipment(&mut eq)
             .and_then(|next_equipment_id| {
@@ -688,6 +689,12 @@ impl Dwelling {
         self.equipment.push(eq);
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        // The caller's supplied actors register with the equipment: the
+        // same caller-actor surface `add_actor` records, beside the
+        // equipment change the call is also one.
+        if supplies_actors {
+            self.record_replay_blocker(hares_types::ReplayBlocker::CallerActor);
+        }
         self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         Ok(())
     }

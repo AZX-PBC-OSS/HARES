@@ -149,6 +149,11 @@ pub enum HaresError {
 /// Why a run cannot be exported for exact replay: one category per way
 /// the dwelling was changed after its build, each recorded the first
 /// time it happened (`03-output-reporting.md` OR-16).
+///
+/// A warning the caller pushed in (`Dwelling::push_warning`, the
+/// injected-warning surface's producer) records no blocker: it changes
+/// no frame, metric or bill the export carries. A replayed run's
+/// warning record will not carry caller-pushed entries.
 #[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplayBlocker {
     /// A `DwellingBlueprintBuilder` mutator changed the parsed equipment
