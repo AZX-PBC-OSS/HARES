@@ -542,6 +542,53 @@ fn replay_export_fails_if_input_file_changed_since_parse() {
     );
 }
 
+/// `replay_load_fails_on_a_tampered_stored_input`: an intact export
+/// loads; one flipped byte in a stored input afterwards fails the load
+/// with a typed error naming the stored file's path and both digests
+/// (the manifest's record and the file's own), instead of replaying on
+/// silently different inputs.
+#[test]
+fn replay_load_fails_on_a_tampered_stored_input() {
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let original = run(config);
+
+    let export = tempfile::tempdir().expect("the export directory");
+    original
+        .export_replay(export.path())
+        .expect("the export writes");
+    replay::load(export.path(), &repo_root().join("defaults")).expect("the intact export loads");
+
+    let weather = export.path().join("inputs/weather.csv");
+    let mut bytes = std::fs::read(&weather).expect("the stored weather reads");
+    bytes[0] ^= 0x01;
+    std::fs::write(&weather, &bytes).expect("the byte flips");
+
+    let err = replay::load(export.path(), &repo_root().join("defaults"))
+        .expect_err("the load over a tampered input fails");
+    assert!(matches!(err, HaresError::Io(_)), "the typed error: {err:?}");
+    let message = err.to_string();
+    assert!(
+        message.contains("weather.csv"),
+        "the error names the stored file's path: {message}"
+    );
+    let manifest: toml::Value = toml::from_str(
+        &std::fs::read_to_string(exported_file(export.path(), "replay.toml")).expect("replay.toml"),
+    )
+    .expect("the manifest parses");
+    let recorded = manifest["inputs"]["weather"]["sha256"]
+        .as_str()
+        .expect("the manifest records the weather digest");
+    assert!(
+        message.contains(recorded),
+        "the error names the manifest's digest: {message}"
+    );
+    assert!(
+        message.contains("digest"),
+        "the error names both digests: {message}"
+    );
+}
+
 /// `replay_load_fails_on_defaults_digest_mismatch`: an export of the same
 /// 1 h run loaded with `defaults_base` a temporary copy of the defaults
 /// tree with one byte of a file the load reads changed fails naming the

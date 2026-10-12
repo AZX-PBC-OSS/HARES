@@ -377,6 +377,9 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
     }
 
     // The exported inputs, read back from the export directory as content.
+    // Every stored file's digest is compared against the manifest's record
+    // first: a flipped byte must fail the load naming the path and both
+    // digests, never replay on silently different inputs.
     let read_stored = |stored: &StoredInput, what: &str| -> Result<Arc<str>, HaresError> {
         let path = dir.join(&stored.file);
         let bytes = std::fs::read(&path).map_err(|err| {
@@ -385,6 +388,17 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
                 path.display()
             ))
         })?;
+        let digest: [u8; 32] = sha2::Sha256::digest(&bytes).into();
+        let recorded = decode_hex_digest(&stored.sha256)?;
+        if digest != recorded {
+            return Err(HaresError::Io(format!(
+                "the replay's {what} input '{}' is not the file the export stored: the manifest \
+                 records digest {}, the file on disk digests {}",
+                path.display(),
+                stored.sha256,
+                hares_io::input::hex(&digest),
+            )));
+        }
         String::from_utf8(bytes)
             .map(Into::into)
             .map_err(|err| HaresError::Io(format!("the replay's {what} input is not UTF-8: {err}")))
@@ -404,6 +418,17 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
                 path.display()
             ))
         })?;
+        let digest: [u8; 32] = sha2::Sha256::digest(&bytes).into();
+        let recorded = decode_hex_digest(&replacement.sha256)?;
+        if digest != recorded {
+            return Err(HaresError::Io(format!(
+                "the replay's defaults replacement '{}' is not the file the export stored: the \
+                 manifest records digest {}, the file on disk digests {}",
+                path.display(),
+                replacement.sha256,
+                hares_io::input::hex(&digest),
+            )));
+        }
         let text = String::from_utf8(bytes).map_err(|err| {
             HaresError::Io(format!(
                 "the replay's defaults replacement '{}' is not valid UTF-8: {err}",
