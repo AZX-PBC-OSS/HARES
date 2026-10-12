@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 
 use arrow::array::{Float64Array, RecordBatch};
-use hares_core::{Dwelling, DwellingConfig};
+use hares_core::{Dwelling, DwellingConfig, DwellingSettings};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -76,15 +76,17 @@ destination = "memory"
 
 fn dwelling_with_schedule(schedule_path: PathBuf) -> Dwelling {
     let config = DwellingConfig {
-        hpxml_path: fixture().join("building.xml"),
-        schedule_path: Some(schedule_path),
-        weather_path: fixture().join("weather.epw"),
-        defaults_path: Some(repo_root().join("defaults")),
-        sim_config: hares_io::SimulationConfig::from_toml(&sim_toml()).expect("the config parses"),
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        patches: None,
+        hpxml: hares_io::InputSource::Path(fixture().join("building.xml")),
+        schedule: Some(hares_io::InputSource::Path(schedule_path)),
+        weather: hares_io::WeatherInput::Path(fixture().join("weather.epw")),
+        defaults: hares_io::DefaultsSource::directory(repo_root().join("defaults")),
+        settings: DwellingSettings::new(
+            hares_io::SimulationConfig::from_toml(&sim_toml()).expect("the config parses"),
+            None,
+            1,
+            None,
+            None,
+        ),
     };
     Dwelling::from_config(config).expect("the dwelling builds")
 }

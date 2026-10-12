@@ -53,7 +53,7 @@ fn repo_defaults() -> DefaultsStore {
 fn fixture_specs() -> Vec<EquipmentSpec> {
     let building =
         parse_hpxml(&fixture().join("building.xml")).expect("the fixture's HPXML parses");
-    resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
+    resolve_equipment(&building, None, None, &repo_defaults(), None, &mut Vec::new())
         .expect("the fixture's equipment resolves")
 }
 
@@ -136,7 +136,7 @@ fn schedule_column_wins_over_hpxml_and_warns() {
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&defaults_dir),
+        Some(&hares_io::load_default_profiles(&defaults_dir).expect("the profiles load")),
         &repo_defaults(),
         &mut warnings,
     )
@@ -202,7 +202,7 @@ fn sides_resolve_independently() {
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&defaults_dir),
+        Some(&hares_io::load_default_profiles(&defaults_dir).expect("the profiles load")),
         &repo_defaults(),
         &mut warnings,
     )
@@ -243,7 +243,7 @@ fn hpxml_setpoints_used_without_a_column() {
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&defaults_dir),
+        Some(&hares_io::load_default_profiles(&defaults_dir).expect("the profiles load")),
         &repo_defaults(),
         &mut warnings,
     )
@@ -334,8 +334,9 @@ fn missing_setpoints_resolve_to_the_default_profile_source() {
   </Building>
 </HPXML>"#;
     let building = hares_io::hpxml::building::parse_building(xml).expect("the HPXML parses");
-    let mut specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
-        .expect("the equipment resolves");
+    let mut specs =
+        resolve_equipment(&building, None, None, &repo_defaults(), None, &mut Vec::new())
+            .expect("the equipment resolves");
     let start =
         chrono::DateTime::parse_from_rfc3339("2026-03-18T00:00:00+00:00").expect("valid timestamp");
     let mut schedule = ScheduleTimeSeries {
@@ -351,7 +352,7 @@ fn missing_setpoints_resolve_to_the_default_profile_source() {
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&defaults_dir),
+        Some(&hares_io::load_default_profiles(&defaults_dir).expect("the profiles load")),
         &repo_defaults(),
         &mut warnings,
     )
@@ -413,7 +414,7 @@ fn water_heater_setpoint_column_is_an_error() {
     let error = inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&defaults_dir),
+        Some(&hares_io::load_default_profiles(&defaults_dir).expect("the profiles load")),
         &repo_defaults(),
         &mut warnings,
     )
