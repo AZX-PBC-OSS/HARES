@@ -2845,7 +2845,9 @@ impl Dwelling {
         let effective_zone = hpxml_building.climate_zone_iecc.clone();
         let inputs = hares_io::ParsedInputs::from_parts_with_zone(
             Arc::new(hares_io::ParsedHpxml::from_building(hpxml_building)),
-            Arc::new(hares_io::ParsedSchedule::from_series(schedule_result.schedule)),
+            Arc::new(hares_io::ParsedSchedule::from_series(
+                schedule_result.schedule,
+            )),
             Arc::new(hares_io::ParsedWeather::from_series(weather)),
             Arc::new(hares_io::ParsedDefaults::empty()),
             effective_zone,
@@ -13301,7 +13303,9 @@ occupancy = 1.0
 
         let inputs = hares_io::ParsedInputs::from_parts_with_zone(
             Arc::new(hares_io::ParsedHpxml::from_building(building)),
-            Arc::new(hares_io::ParsedSchedule::from_series(schedule_result.schedule)),
+            Arc::new(hares_io::ParsedSchedule::from_series(
+                schedule_result.schedule,
+            )),
             Arc::new(hares_io::ParsedWeather::from_series(weather)),
             Arc::new(
                 hares_io::ParsedDefaults::parse(&dwelling_config.defaults)

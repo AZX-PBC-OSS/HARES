@@ -39,9 +39,7 @@ fn input_record(source: &InputSource) -> Result<InputRecord, HaresError> {
 fn weather_record(source: &WeatherInput) -> Result<InputRecord, HaresError> {
     match source {
         WeatherInput::Path(path) => input_record(&InputSource::Path(path.clone())),
-        WeatherInput::Text { content, .. } => {
-            input_record(&InputSource::Text(Arc::clone(content)))
-        }
+        WeatherInput::Text { content, .. } => input_record(&InputSource::Text(Arc::clone(content))),
         WeatherInput::Bytes { content, .. } => {
             input_record(&InputSource::Bytes(Arc::clone(content)))
         }
@@ -1234,9 +1232,7 @@ impl ParsedInputs {
         let defaults_replacements = source
             .files
             .iter()
-            .map(|(relative, replacement)| {
-                Ok((relative.clone(), input_record(replacement)?))
-            })
+            .map(|(relative, replacement)| Ok((relative.clone(), input_record(replacement)?)))
             .collect::<Result<Vec<_>, HaresError>>()?;
         Ok(crate::input::InputRecords {
             hpxml,

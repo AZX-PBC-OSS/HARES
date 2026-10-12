@@ -53,8 +53,15 @@ fn repo_defaults() -> DefaultsStore {
 fn fixture_specs() -> Vec<EquipmentSpec> {
     let building =
         parse_hpxml(&fixture().join("building.xml")).expect("the fixture's HPXML parses");
-    resolve_equipment(&building, None, None, &repo_defaults(), None, &mut Vec::new())
-        .expect("the fixture's equipment resolves")
+    resolve_equipment(
+        &building,
+        None,
+        None,
+        &repo_defaults(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("the fixture's equipment resolves")
 }
 
 /// The fixture's schedule with one constant column appended, read the way
@@ -334,9 +341,15 @@ fn missing_setpoints_resolve_to_the_default_profile_source() {
   </Building>
 </HPXML>"#;
     let building = hares_io::hpxml::building::parse_building(xml).expect("the HPXML parses");
-    let mut specs =
-        resolve_equipment(&building, None, None, &repo_defaults(), None, &mut Vec::new())
-            .expect("the equipment resolves");
+    let mut specs = resolve_equipment(
+        &building,
+        None,
+        None,
+        &repo_defaults(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("the equipment resolves");
     let start =
         chrono::DateTime::parse_from_rfc3339("2026-03-18T00:00:00+00:00").expect("valid timestamp");
     let mut schedule = ScheduleTimeSeries {

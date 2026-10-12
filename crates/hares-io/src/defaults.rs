@@ -757,12 +757,8 @@ impl DefaultsStore {
         let mut log = DefaultsInputLog::new();
         match relative {
             "zip_parameters.toml" => {
-                self.zip_by_equipment = Arc::new(load_zip_parameters(
-                    base,
-                    &mut log,
-                    &display,
-                    swap,
-                )?);
+                self.zip_by_equipment =
+                    Arc::new(load_zip_parameters(base, &mut log, &display, swap)?);
             }
             "HVAC Multispeed Parameters.csv" => {
                 self.hvac_multispeed = Arc::new(load_hvac_multispeed_csv(
@@ -777,12 +773,7 @@ impl DefaultsStore {
                 self.water_heating_csv = load_water_heating_csv(base, &mut log, &display, swap);
             }
             "ev/vehicle_mapping.csv" => {
-                self.ev_mapping = Some(load_vehicle_mapping_csv(
-                    base,
-                    &mut log,
-                    &display,
-                    swap,
-                )?);
+                self.ev_mapping = Some(load_vehicle_mapping_csv(base, &mut log, &display, swap)?);
             }
             DEFAULT_SCHEDULES_CSV => {
                 // The default schedule profiles are the schedule side's
@@ -842,10 +833,7 @@ impl DefaultsStore {
                                 // swap, each skipping what it does not read.
                                 self.pv = Arc::new(map);
                                 self.pv_panel = Arc::new(load_pv_panel_defaults(
-                                    base,
-                                    &mut log,
-                                    &toml_dir,
-                                    swap,
+                                    base, &mut log, &toml_dir, swap,
                                 )?);
                             }
                             "water_heating" => self.water_heating = Arc::new(map),
@@ -3053,13 +3041,8 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
         // The loader itself: strict must error, non-strict must degrade to
         // empty with a warning.
         let missing = dir.path().join("HVAC Multispeed Parameters.csv");
-        let result = load_hvac_multispeed_csv(
-            &missing,
-            &mut DefaultsInputLog::new(),
-            &missing,
-            true,
-            None,
-        );
+        let result =
+            load_hvac_multispeed_csv(&missing, &mut DefaultsInputLog::new(), &missing, true, None);
         assert!(
             matches!(result, Err(DefaultsError::MissingFile(_))),
             "strict mode must error on a missing multispeed CSV, got: {result:?}"

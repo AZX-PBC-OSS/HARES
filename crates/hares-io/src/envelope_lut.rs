@@ -232,7 +232,12 @@ impl EnvelopeLookup {
     /// `Envelope Boundaries.csv` is optional — when absent, boundary name
     /// resolution falls back to the built-in hardcoded mapping.
     pub fn load(dir: &Path) -> Result<Self, EnvelopeLutError> {
-        Self::load_with_swap_and_log(dir, None, dir, &mut crate::defaults::DefaultsInputLog::new())
+        Self::load_with_swap_and_log(
+            dir,
+            None,
+            dir,
+            &mut crate::defaults::DefaultsInputLog::new(),
+        )
     }
 
     /// [`Self::load`] with one CSV's content substituted: the replacement
@@ -243,7 +248,12 @@ impl EnvelopeLookup {
         dir: &Path,
         swap: Option<(&Path, &str)>,
     ) -> Result<Self, EnvelopeLutError> {
-        Self::load_with_swap_and_log(dir, swap, dir, &mut crate::defaults::DefaultsInputLog::new())
+        Self::load_with_swap_and_log(
+            dir,
+            swap,
+            dir,
+            &mut crate::defaults::DefaultsInputLog::new(),
+        )
     }
 
     /// [`Self::load`], logging every CSV file the load read into `log` as
