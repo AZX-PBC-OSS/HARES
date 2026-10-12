@@ -558,15 +558,22 @@ mod tests {
 
     /// The `full_year_hourly` manifest's run, its report retained in
     /// memory: the run the capsule export's acceptance tests read.
-    fn full_year_hourly_report() -> hares_core::ReportResult {
+    /// `output_chunk_size` overrides the config's default (10 000,
+    /// which holds this frame's 8 760 rows in one batch): a test
+    /// asserting the rechunk cache's buffer sharing needs a
+    /// multi-batch report, because `concat_batches` short-circuits one
+    /// input to a slice and the pointers are equal with or without the
+    /// cache.
+    fn full_year_hourly_report(output_chunk_size: usize) -> hares_core::ReportResult {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let manifest = frame_golden::GoldenManifest::load(
             &root.join("tests/fixtures/golden/full_year_hourly.toml"),
         )
         .expect("the manifest loads");
-        let sim = manifest
+        let mut sim = manifest
             .simulation_config()
             .expect("the manifest's sim config");
+        sim.output_chunk_size = output_chunk_size;
         let home = &manifest.home[0];
         let config = DwellingConfig {
             hpxml_path: frame_golden::manifest::repo_path(&root, &home.hpxml),
@@ -602,7 +609,7 @@ mod tests {
     /// batches column by column, floats by bit pattern.
     #[test]
     fn capsule_export_is_bitwise_identical() {
-        let report = full_year_hourly_report();
+        let report = full_year_hourly_report(10_000);
         let expected: Vec<RecordBatch> = report.batches().to_vec();
         Python::attach(|py| {
             let wrapper = pyo3::Py::new(
@@ -637,10 +644,19 @@ mod tests {
 
     /// Two `arrow()` calls on one `ReportResult` share the rechunked
     /// batch: every column buffer's data pointer is equal, nothing is
-    /// recopied.
+    /// recopied. The report is multi-batch (`output_chunk_size` 40
+    /// flushes 219 batches over the year): on a single-batch report
+    /// this pin is vacuous, arrow's `concat` short-circuits one input
+    /// to a slice and the pointers are equal with or without the
+    /// cache.
     #[test]
     fn second_export_does_not_recopy() {
-        let report = full_year_hourly_report();
+        let report = full_year_hourly_report(40);
+        assert!(
+            report.batches().len() > 1,
+            "the fixture report is multi-batch: on one batch the concat \
+             short-circuits and the pin is vacuous"
+        );
         Python::attach(|py| {
             let wrapper = pyo3::Py::new(
                 py,

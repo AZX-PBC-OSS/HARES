@@ -2730,43 +2730,78 @@ the built dwellings, owns the fix; until it lands this record bounds
 the pre-pass at well under a millisecond per home on these fixtures.
 ### The result tables' conversion: IPC versus the Arrow PyCapsule export, 2026-10-11
 
-Row 55 (PY-1), on branch `row/r55-py1` cut from `5a9c4ac8`; the "before"
-numbers run on a worktree of `5a9c4ac8` with its own release extension
-(`uv run maturin develop --release`), the "after" numbers on the branch's,
-the same script both sides, minimum of the repeats. Load average at write
-time 14.12 on 28 cores (the host is otherwise busy; both sides ran minutes
-apart under the same ambient load).
-
-Conversion time of the `full_year_hourly` report's frame (8 760 rows, 36
-columns, verbosity 2, metrics off), one report read, minimum of 5:
-
-- before (IPC: `FileWriter` bytes through `BytesIO`, `polars.read_ipc`):
-  0.318 ms
-- after (capsule: pyo3-arrow's `PyTable` over the report's batches,
-  `polars.DataFrame(table)`): 0.056 ms rechunked, 0.047 ms with
-  `rechunk=False`; the `arrow()` export itself 0.0024 ms on the first
-  (rechunking and caching) call and 0.0005 ms on later calls, which share
-  the cached batch's buffers; 5.7x lower on the frame read. The entry's
-  context figures (about 6.5 ms IPC, about 2.7 ms capsule rechunked) were
-  measured on a slower host against a denser frame; the ratio's direction
-  is the row's point, the IPC serialize-and-parse round trip is gone and
-  the buffers are shared.
+The branch `row/r55-py1`, cut from `5a9c4ac8`. The first version of
+this record ran its "before" numbers in the parent's own venv (Python
+3.13) against the branch's here (Python 3.12) and took cross-process
+minima of alternating pairs; the independent review found the callback
+pair does not reproduce (paired medians reverse the direction, the
+method swings about 100 percent) and the interpreter mismatch went
+unnoted. This record re-derives the pairs soundly: the parent's
+release extension built into THIS venv (`maturin develop --release`
+with `VIRTUAL_ENV` pointed here, the same CPython 3.12.7 interpreter
+both sides, the parent's `python/` package first on `PYTHONPATH`), the
+same script both sides, the ambient load 1.5 to 3.4 on 28 cores.
 
 The batch callback's delivery over a building-year run at 900 s steps
 (876 batches at `output_chunk_size` 40, cz4a_ashp_hpwh, verbosity 2,
-metrics off), end to end, plain run versus a run with a no-op callback
-attached, minimum of 7 alternating pairs:
+metrics off), end to end, fifteen in-process alternating pairs per
+side (each pair one plain run and one run with a no-op callback
+attached, the pair's order alternating, the dwelling built and
+initialized outside the timed region), the pair delta (callback minus
+plain) the statistic:
 
-- before (the frame delivered through the IPC conversion): +0.129 ms per
-  batch (plain 1.256 s, callback 1.370 s)
-- after (the frame delivered through the capsule): +0.057 ms per batch
-  (plain 1.134 s, callback 1.184 s)
+- before (the frame delivered through the IPC conversion): median pair
+  delta +0.092 s per building-year, +0.104 ms per batch (pair deltas
+  0.052 to 0.140 s, quartiles 0.078 and 0.117)
+- after (the frame delivered through the capsule): median pair delta
+  +0.105 s per building-year, +0.119 ms per batch (pair deltas 0.060
+  to 0.126 s, quartiles 0.097 and 0.113)
 
-The r40 record's per-batch figures (about 0.1 ms per batch end to end at
-verbosity 2, about 0.8 ms per batch from the review's instrumentation) and
-this before pair agree on the base; after the row the end-to-end delta
-halved and what remains is the delivery machinery (the GIL re-acquisition,
-the info object, the callable dispatch), the frame build itself now the
-capsule read. The plain wall's own run-to-run spread on this host (about
-10 percent, 0.93 s to 1.26 s across rounds) bounds the end-to-end method;
-the full-year frame pair above is the conversion's direct measure.
+The paired medians reverse the direction: on this method the
+callback's end-to-end delivery cost is within run-to-run noise,
+indistinguishable between the IPC delivery and the capsule delivery,
+and the record claims no per-batch improvement from the row. The
+honest bound: within run-to-run noise; the structural win is the
+removed IPC machinery, the frame-read pair is the solid number. (The
+callback destination entry's own per-batch figure, about 0.1 ms per
+batch end to end at verbosity 2, agrees with both medians here; the
+first record's 0.129-to-0.057 pair and the review's 0.8 ms
+instrumentation figure were the same cost read through looser
+methods.)
+
+The frame-read pair, the same venv (the `full_year_hourly` report's
+frame, 8 760 rows, 32 columns, verbosity 2, metrics off; median of 20
+report reads in the warm process; the first record's 0.318 ms and "36
+columns" did not reproduce, 32 is what verbosity 2 builds on both
+sides):
+
+- before (IPC: `FileWriter` bytes through `BytesIO`, `polars.read_ipc`):
+  0.224 ms (min 0.175)
+- after (capsule: pyo3-arrow's `PyTable` over the report's batches,
+  `polars.DataFrame(table)`): 0.050 ms rechunked (min 0.047), 0.049 ms
+  with `rechunk=False`; about 4.5x lower on the median. On a
+  multi-batch chunking of the same frame (`output_chunk_size` 1 000,
+  nine batches) the IPC read is 2.45 ms and the capsule's rechunked
+  read 0.12 ms: the IPC round trip pays per batch, the capsule does
+  not. The entry's context figures (about 6.5 ms IPC, about 2.7 ms
+  capsule rechunked) were measured on a slower host against a denser
+  frame; the ratio's direction is the row's point, the IPC
+  serialize-and-parse round trip is gone and the buffers are shared.
+
+The export call's own costs, on fresh reports in the warm process (the
+first record's "0.0024 ms on the first (rechunking and caching) call"
+was a cached call mislabeled):
+
+- the first rechunked call on a fresh report: about 0.04 to 0.05 ms on
+  a multi-batch report (2 to 18 batches over this frame: the one real
+  2.2 MB `concat_batches` copy), 0.11 ms at 219 batches
+  (`output_chunk_size` 40), and 0.002 ms on the default single-batch
+  chunking (8 760 rows under the 10 000 default: arrow's `concat`
+  short-circuits one input to a slice, no copy, so on this shape the
+  cache buys nothing measurable);
+- the process's first-ever materialization of a report's table: 3.8 ms
+  with only polars' native path warm (the capsule importer's one-time
+  init); the next reads decay through 0.29, 0.12, 0.10 and 0.065 ms to
+  the steady read;
+- a cached call (the held wrapper's later `arrow()`): 0.0005 to
+  0.0009 ms, which share the cached batch's buffers.

@@ -1064,7 +1064,7 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   the head, this entry's number unchanged by the fold. The branch's
   committed goldens predated the wet-appliance volume fold and were
   re-captured at it (`282244b2`, `abb4ab95` on the branch, then
-  `b0dcf2e6`), the eight goldens identical at the fold gates.
+  `b0dcf2e6`), the nine goldens identical at the fold gates.
 
 ## D-021: The HPWH's low-power compressor class is a continuous UEF transition
 

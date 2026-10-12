@@ -390,7 +390,7 @@ duplicate `tests/fixtures/schema/` pin copy, which
 crate copies; the test now reads the canonical copies. Gates after the
 fixes: fmt clean; clippy `-D warnings` clean (default, dst, observe,
 all-features); nextest --all-features 7607/7607; pytest 1523 passed /
-0 failed; pyright 0 errors; the eight goldens bitwise identical through
+0 failed; pyright 0 errors; the nine goldens bitwise identical through
 `frame_golden compare-all` in both profiles (values and schemas
 unchanged: the unit movement is field metadata, which the goldens do
 not compare).
@@ -734,7 +734,7 @@ The mapping from the old booleans, with the differential: a
 `Destination.parquet(path)` report at `Selection.verbosity(n)` is the old
 `write_output = true, output_format = "parquet", output_path = Some(path),
 output_verbosity = n` (and `Destination.memory()` is the old
-`retain_batches = true` half), proven by the gates: the eight goldens run
+`retain_batches = true` half), proven by the gates: the nine goldens run
 through the migrated manifests' `[[simulation.reports]]` (every capture
 unchanged, `output_verbosity = 2` moved into the report's selection) and
 every frame is bitwise identical in both profiles, and
@@ -3626,7 +3626,7 @@ new sections. Gates at `6b609568`: fmt clean, clippy `--workspace
 `--all-features -j 4` 7943/7943 (the parent 7923, +20) and `-F dst`
 7873/7873, pytest `-m ''` 1676 passed 0 failed 0 errors 6 xfailed (the
 parent 1672, +4: the Python `save_state`/`load_state` path passes the
-mid-billing restore), pyright 0, the eight goldens bitwise (compare-all
+mid-billing restore), pyright 0, the nine goldens bitwise (compare-all
 7 + `full_year_900s_dst` 1); the residue base-verified on a worktree of
 `16b3c993` (pytest 1672 passed 0 failed, pyright 0).
 (`float_roundtrip`).
@@ -3966,7 +3966,7 @@ round-trip live with the destination model. RED first: the Rust tests
 failed to compile against the base (no callback module), the Python tests
 failed on the missing attach. Gates: fmt; clippy `--all-features
 --all-targets -D warnings`; nextest `--all-features` 7634/7634; pytest
-1544 passed, 0 failed, 0 skipped; pyright 0; the eight goldens bitwise
+1544 passed, 0 failed, 0 skipped; pyright 0; the nine goldens bitwise
 (`compare-all` 7 manifests identical, `full_year_900s_dst` identical).
 The base commit failed every Rust suite there on one stale test file (the
 catalogue tests' synthetic TOML still carried the removed
@@ -3997,7 +3997,7 @@ recorded about 0.8 ms per batch (about 0.7 s per building-year). The
 review-fix tree's gates: fmt; clippy with no new diagnostics on the
 touched crates (the workspace's known base diagnostics unchanged);
 nextest `--all-features` 7638/7638; pytest 1545 passed, 0 failed,
-0 skipped; pyright 0; the eight goldens bitwise (`compare-all` 7
+0 skipped; pyright 0; the nine goldens bitwise (`compare-all` 7
 manifests identical, `full_year_900s_dst` identical).
 
 ## OR-15: `metrics_from_table`

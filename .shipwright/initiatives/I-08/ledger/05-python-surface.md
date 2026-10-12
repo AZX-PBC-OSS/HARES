@@ -148,7 +148,7 @@ that wants the batch schema or `metrics()` opts in explicitly with
 `run()` returns `results()`, so the plan's own kwargs default it true,
 overridable by an explicit caller pass). Gates: fmt, clippy
 --all-features --all-targets clean, nextest --all-features 7595/7595,
-pytest 1537 passed 0 failed 0 skipped, pyright 0, the eight goldens
+pytest 1537 passed 0 failed 0 skipped, pyright 0, the nine goldens
 bitwise (compare-all 7 identical, -F dst identical), no golden moved.
 
 ## PY-8: one config type across TOML, synthetic TOML and Python
@@ -516,7 +516,11 @@ pyo3-arrow's `PyTable` (the class named in the entry, module
 concatenated once (`arrow::compute::concat_batches`) on the first
 export and the `OnceLock<RecordBatch>` field of the pyclass hands every
 later export the same buffers (`second_export_does_not_recopy` pins
-equal column-buffer data pointers); with `rechunk=False` the stream
+equal column-buffer data pointers, on a multi-batch report: the test's
+config sets `output_chunk_size` 40, 219 batches over the year, because
+on the default single-batch chunking `concat_batches` short-circuits
+one input to a slice and the pointers are equal with or without the
+cache, the pin vacuous there); with `rechunk=False` the stream
 carries one chunk per built batch. `ReportResult.table(rechunk=True)`
 is `polars.DataFrame(self.arrow(rechunk))` exactly as the entry says.
 A file or callback report's `arrow()` and `table()` raise
@@ -548,14 +552,30 @@ pyclass and the stream import. Gates: fmt; clippy `--workspace
 --all-targets --all-features -D warnings` clean; nextest `--workspace
 --all-features -j 4` 7952/7952 (1 skipped: the ignored kind-pin
 generator); pytest `-m ''` 1678 passed, 6 xfailed, 0 failed, 0
-skipped; pyright 0; the eight goldens bitwise (compare-all 8
+skipped; pyright 0; the nine goldens bitwise (compare-all 8
 identical, `full_year_900s_dst` identical). The measurement (the
-entry's Measurement section): the `full_year_hourly` frame read 0.318
-ms over IPC to 0.056 ms capsule rechunked and 0.047 not rechunked, the
-`arrow()` export itself 0.0024 ms first call and 0.0005 cached; the
-callback delivery 0.129 to 0.057 ms per batch end to end over a
-building-year at 876 batches; in `02-measurement.md` with the method
-and the host's noise bound.
+entry's Measurement section): the `full_year_hourly` frame read 0.224
+ms over IPC to 0.050 ms capsule rechunked and 0.049 not rechunked,
+about 4.5x lower on the medians, the `arrow()` export itself 0.04 to
+0.05 ms on a multi-batch report's first rechunked call, 3.8 ms the
+process's first-ever materialization and 0.0005 to 0.0009 ms cached;
+the callback delivery within run-to-run noise on the paired method,
+the paired medians reversing the direction (the structural win is the
+removed IPC machinery, the frame-read pair the solid number); in
+`02-measurement.md` with the method and the spreads. Independent
+review round at tip `513e1770`, four findings fixed on the branch (the
+conversion section of `02-measurement.md` carries the account): the
+callback claim re-derived on one interpreter's fifteen in-process
+paired runs per side and recorded as the honest noise bound, the
+pointer pin re-pointed at a multi-batch report (219 batches) and
+mutation-proven both ways, the export's first-call figure re-measured
+as the three honest numbers, the goldens' count phrase corrected to
+nine. Review-fix gates: nextest `--workspace --all-features -j 4`
+7952/7952 (1 skipped: the ignored kind-pin generator), pytest `-m ''`
+1678 passed, 6 xfailed, 0 failed, 0 skipped (one xdist flake of the
+gym action test on the first round, green in isolation and on the
+re-run), pyright 0, fmt and clippy clean, the nine goldens bitwise
+(compare-all 8 identical, `full_year_900s_dst` identical).
 
 **Measurement:** conversion time of a full-year frame, IPC versus capsule,
 rechunked and not, in `02-measurement.md` (`context.md`: about 6.5 ms

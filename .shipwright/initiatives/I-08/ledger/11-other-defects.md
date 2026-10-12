@@ -3323,7 +3323,7 @@ folds as **D-033** (the HPXML "other" location family): d020's
 multispeed Air Flow Ratio entry keeps D-032, `building.rs`'s comment
 renumbered with the heading. The fold gates: nextest 7575
 (`--all-features`), 7508 (`-F dst`), 7557 (`-F observe`), pytest 1483,
-pyright 0 errors, the eight goldens identical. Site-by-site disposition
+pyright 0 errors, the nine goldens identical. Site-by-site disposition
 at the branch's head. Already strict on the base commit (the
 silent-default sweep's content, folded in `c561eb69`, and the fixes it
 carried; each verified in the branch's code, not assumed): the zone-text
@@ -3389,7 +3389,7 @@ removed (`wh_autosize_unreasonable_mains_temp_uses_default`,
 contract. Gates: fmt, clippy `--all-features --all-targets -D warnings`,
 nextest 7518 (`--all-features`), 7670 (`-F dst`), 7719 (`-F observe`),
 7663 (`-F profiling`), 7611 (`--release`), pytest 1483, pyright 0 errors
-with notebooks included. The eight goldens bitwise identical
+with notebooks included. The nine goldens bitwise identical
 (`compare-all` plus `-F dst`); no re-capture: the committed homes'
 inputs already resolved to the values the strict sites demand (the
 subsurface inheritance lands on the zone the fallback named, the loop
