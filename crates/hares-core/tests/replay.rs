@@ -905,12 +905,14 @@ fn replay_load_fails_on_defaults_digest_mismatch() {
     );
 }
 
-/// `replay_export_rejects_mutated_run`, one case per `ReplayBlocker` on
-/// the same inputs over 1 h: a blueprint with one `remove_equipment`, a
-/// dwelling with one `remove_equipment` after build, one
-/// `add_actor_by_name`, one `apply_control`, one `load_checkpoint`; each
-/// `export_replay` returns `NotReplayable` naming exactly that category
-/// and writes nothing into the directory.
+/// `replay_export_rejects_mutated_run`, one case per pre-existing
+/// `ReplayBlocker` on the same inputs over 1 h: a blueprint with one
+/// `remove_equipment`, a dwelling with one `remove_equipment` after
+/// build, one `add_actor_by_name`, one `apply_control`, one
+/// `load_checkpoint`; each `export_replay` returns `NotReplayable`
+/// naming exactly that category and writes nothing into the directory.
+/// (The tariff replacement and the caller actors joined with equipment
+/// have their own tests above.)
 #[test]
 fn replay_export_rejects_mutated_run() {
     // BlueprintEdited: the builder's mutator ran before the freeze.
