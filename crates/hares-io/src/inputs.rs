@@ -1251,6 +1251,23 @@ impl ParsedInputs {
         self.records.as_ref()
     }
 
+    /// [`Self::parse`]'s records for an assembly from sources: the
+    /// handles' sources digested (the HPXML, the schedule when it is a
+    /// file, the weather with its resolved format) and the defaults
+    /// load's log composed with the schedule profiles file. A caller that
+    /// assembled the handles from its own sources calls this once, the
+    /// parse's one records computation; an assembly from pre-parsed parts
+    /// records nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when a path source's file cannot be read for its
+    /// digest.
+    pub fn compute_records(&mut self) -> Result<(), HaresError> {
+        self.records = Some(Self::build_records(self)?);
+        Ok(())
+    }
+
     /// The synthetic assembly: every part already parsed, the effective
     /// zone the caller resolved, no warning, and no records (the parse
     /// read no file).

@@ -194,13 +194,30 @@ pub(crate) fn builder_inputs(
         )?)),
         None => None,
     };
-    hares_io::ParsedInputs::from_handles(
+    let mut parsed = hares_io::ParsedInputs::from_handles(
         hpxml_handle,
         schedule_handle,
         weather_handle,
         defaults_handle,
         inputs.generation,
-    )
+    )?;
+    // Every argument a source (the caller's path or content): the run
+    // built from them records its inputs, the parse's own records. An
+    // argument a pre-parsed handle: this construction read no file for
+    // it, the handle's own parse recorded it where it happened, and a
+    // mixed assembly records nothing (the records' `None` discloses
+    // that not every input was a source here).
+    let all_sources = matches!(inputs.hpxml, crate::py_inputs::HpxmlArg::Source(_))
+        && matches!(inputs.weather, crate::py_inputs::WeatherArg::Source(_))
+        && matches!(inputs.defaults, DefaultsArg::Source(_))
+        && inputs
+            .schedule
+            .as_ref()
+            .is_none_or(|schedule| matches!(schedule, ScheduleArg::Source(_)));
+    if all_sources {
+        parsed.compute_records()?;
+    }
+    Ok(parsed)
 }
 
 /// A read-only reference to the frozen blueprint a dwelling was built
