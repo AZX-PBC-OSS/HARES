@@ -3138,7 +3138,7 @@ fn build_from_blueprint_inner_with_seed(
         let rng_stream_before = dwelling.rng.get_stream();
         let rng_word_pos_before = dwelling.rng.get_word_pos();
 
-        match dwelling.run_warmup_converged(0.5, 25) {
+        match dwelling.run_warmup_converged_inner(0.5, 25) {
             Err(err) => {
                 // The dwelling is about to be dropped carrying the
                 // accumulated warning log; emit it so this failure carries

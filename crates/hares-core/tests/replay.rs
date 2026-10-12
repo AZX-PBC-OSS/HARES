@@ -573,6 +573,9 @@ fn replay_export_rejects_a_caller_actor_added_with_equipment() {
     }
 
     impl Equipment for ProbeEquipment {
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
         }

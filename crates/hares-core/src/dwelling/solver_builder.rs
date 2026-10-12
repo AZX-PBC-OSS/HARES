@@ -25,7 +25,6 @@ use super::conversions::{
     boundary_zone_index, building_to_boundary_inputs, building_to_zone_inputs,
     check_multi_unit_zones, has_vented_crawlspace, shielding_to_class, site_type_to_terrain,
 };
-use crate::resolved::{ResolvedBoundary, ResolvedLayer};
 
 // ── Intermediate representation ─────────────────────────────────────────────
 
