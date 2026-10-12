@@ -4240,3 +4240,113 @@ directory.
 (the blueprint builder whose mutators set `BlueprintEdited`),
 `05-python-surface.md` PY-6 (`BuildInfo`) and PY-9 (the Python
 `RunResult`).
+
+**State:** committed `27a715c6` + the changed-input error's path fix
+`00bac514` (branch `row/r69-or16`, worktree of `228eecbe`).
+
+*The export.* `RunResult::export_replay(dir)`
+(`crates/hares-core/src/replay.rs`, `crate::replay::export`) refuses
+first (`HaresError::NotReplayable` naming every recorded category,
+nothing written) and then writes, into `dir`:
+
+- `replay.toml`, the manifest (`schema_version = 1`): `bldg_id`,
+  `initialization_duration_s` (absent when `None`), `patches`
+  (`HpxmlDataPatches`, which gained its serde derives here), the
+  `[simulation]` table (the validated `SimulationConfig` the run ran
+  under, the master seed in effect included, with `Callback`
+  destinations rewritten to `Memory` and file destinations rewritten to
+  bare file names inside the replay directory), the `[inputs]` table
+  (each input's stored file name and the digest the parse recorded,
+  `weather_format`, the composed defaults digest, and the defaults
+  replacements' stored names and digests), `tariff_zone` and the
+  `[build]` table (from `BuildInfo`).
+- `overrides.json`, the overrides value as JSON; absent when the run
+  carried none.
+- `tariff.json`, the attached tariff as JSON, its `parse_warnings`
+  travelling in it; absent when none was attached.
+- The HPXML, schedule and weather content verbatim under `inputs/`
+  (`hpxml.xml`, `schedule.csv`, `weather.epw` or `weather.csv` by the
+  recorded format), and each overridden defaults table under
+  `defaults/<its relative path>`. The defaults tree is not copied.
+
+`load(dir, defaults_base)` reads the manifest, the overrides and the
+tariff back, rebuilds the `DwellingConfig` (the weather as
+`WeatherInput::Text` with the recorded format), verifies the defaults
+tree at `defaults_base` plus the export's replacement files against the
+recorded composed digest (failing naming both digests), and resolves the
+config's relative file destinations inside the export directory.
+`Replay::build` builds the dwelling and attaches the tariff before the
+first step; the replayed run's `Provenance.build` records the engine
+that replayed it, `Replay.recorded_build` the one that exported it.
+
+*The provenance surface the export reads.* The settings-field
+replacement IN-1 deferred (its State's note) landed here:
+`Provenance.settings: DwellingSettings` replaces `config` and `bldg_id`
+(the plan §2.1 final form), so patches and the warm-up duration ride the
+provenance and every export field reads it; the Python `config` and
+`bldg_id` getters are unchanged, reading through the settings. The input
+records carry content (`InputRecordSource::Text(Arc<str>)` and
+`Bytes(Arc<[u8]>)`): row 63's metadata-only spelling could not feed a
+content input's export; the path records stay metadata, read at export
+with the digest verified against the parse's record, the failure naming
+the file. `Provenance.tariff` (`TariffRecord { tariff, zone }`) is
+filled by `set_tariff` on success (the zone the IANA name of the `Tz`
+attached in); `Provenance.replay_blockers` records each `ReplayBlocker`
+category once, in the order first seen: `BlueprintEdited` from the
+`blueprint_edited` flag the builder's mutators set and the freeze
+carries; `EquipmentChanged` on `add_equipment`, `clear_equipment`,
+`remove_equipment`, `remove_equipment_by_end_use`, `replace_equipment`
+and the battery and EV LUT setters; `CallerActor` on `add_actor` and
+`add_actor_by_name` (the auto-registered actors record nothing);
+`ExternalInput` on `apply_control`, `apply_control_validated`,
+`queue_end_use_control`, `queue_dispatch`, `set_price_signal`,
+`set_grid_voltage` and `record_clamped_actions`; `StateRestored` on
+`load_checkpoint`, `restore_building_state` and a caller's
+`run_warmup_converged` (the build's own warm-up goes through the private
+inner, as the entry says). Attaching a callback, enabling the observer
+and draining warnings record nothing.
+
+*The seeds, and the r43 reviewer's claim.* The export's seed record is
+the config's master seed (beside the building id); every stream derives
+from the pair the construction derives it: `derive_dwelling_rng(master,
+bldg_id)` for the dwelling's stream 0, the EV drivers' sub-streams from
+1, the event loads' tagged streams, per the r43 review's derivation
+notes. `replay_derivation_chain_reproduces_every_stream` verifies the
+claim end to end: the derivation computed from the export's manifest
+alone equals the original dwelling's stream identity, the replayed
+dwelling holds the same (seed, stream) at the same word position, and
+the cz5a EV fixture's replayed frames are bitwise the original's, so the
+derived sub-streams drew the same words. The provenance was sufficient.
+
+*Acceptance.* All green: `replay_export_reproduces_frame_bitwise` (the
+inputs copied, run 48 h with metrics, export, the input directory
+deleted, the replay constructed from the export alone, every report and
+the metrics on bits), `replay_export_writes_dwelling_settings`,
+`replay_overrides_null_round_trips` (the null-valued entry is the water
+heater's `pilot_power_w`, whose typed config takes `null` as `None`;
+`equipment_id` is refused by the override merge),
+`replay_of_text_weather_round_trips`,
+`replay_with_attached_tariff_reproduces_billing`,
+`replay_records_the_exporting_build`,
+`replay_export_fails_if_input_file_changed_since_parse`,
+`replay_load_fails_on_defaults_digest_mismatch` (one reconciliation: the
+entry's example edits the replaced file's original in the base copy,
+whose log entry the override swap carries, so the composed digest does
+not read it; the test edits the schedule profiles file, one the digest
+composes), `replay_export_rejects_mutated_run` (one case per blocker,
+each `NotReplayable` naming exactly that category and the directory
+empty) and the Python `replay_round_trip_in_python` with the
+defaults-required and the `Provenance.tariff` pins.
+
+*RED first:* the acceptance file's 17 compile errors on the missing API
+(`replay`, `export_replay`, `NotReplayable`, `ReplayBlocker`,
+`Provenance.settings`) and the Python tests' `AttributeError`, witnessed
+at the base `228eecbe` with only the tests applied.
+
+*Gates* at `00bac514`: fmt clean; clippy `--workspace --all-targets
+--all-features -- -D warnings` clean; nextest `--workspace
+--all-features -j 4` 8046/8046 (3 skipped: the ignored kind-pin
+generator and the two hand-run measurement tests); `pytest -m ''` 1730
+passed + 6 xfailed, 0 failed, 0 errors; pyright 0; the goldens bitwise
+(compare-all 8 + dst 1 + observe 8), the export additive, no golden
+touched.
