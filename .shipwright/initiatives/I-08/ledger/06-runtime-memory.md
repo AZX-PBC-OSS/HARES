@@ -1257,6 +1257,92 @@ tests/python`.
 **Dependencies:** RT-4; `12-inputs.md` IN-5 (the setpoint-source rule it
 records).
 
+**State:** committed `cb4c09d2` (2026-10-12, branch `row/r65-rt6`, based
+on `228eecbe`). The read-back landed as the entry defines it.
+
+The types: `hares-types`' `ResolvedParameter`
+(`crates/hares-types/src/resolved.rs`: the name, the SI value, the unit)
+and `hares-core`'s `ResolvedModel` (`crates/hares-core/src/resolved.rs`:
+`ResolvedEquipment`, `ResolvedBoundary`, `ResolvedLayer`,
+`ResolvedWindow`, `ResolvedInfiltration`, no `clock` — the next commit
+adds it). The `Unit` enum gained the Joule, CubicMeter,
+CubicMeterPerSecond and WattPerKelvin spellings the SI read-back spells.
+
+The surface: `Dwelling::resolved_model() -> &ResolvedModel`, computed in
+the build after defaults, autosizing and overrides and before warm-up,
+never rebuilt afterwards; Python's `Dwelling.resolved_model()` returns
+the same values as a dict of SI floats and strings (the setpoint sources
+as their provenance labels), the stub documented.
+
+The parameters, per equipment through the new `Equipment`
+trait method `resolved_parameters` (no default implementation; the
+delegation macro forwards for the wrapped units; the test-only stubs
+report none): the HVAC classes read the staging config's first-stage
+capacity and EIR (the coolers the rated SHR the latent degradation
+reads; the heat-pump heater its backup capacity and EIR); the fuel
+classes the AFUE; the resistance classes the efficiency — the reciprocal
+of the EIR the physics stores — with the EIR reported beside it; the
+element- and burner-heated tanks the capacity, setpoint, volume and UA
+(the HPWH the rated COP the curve anchors to, now stored at init); the
+indirect tank its tank parameters and the heat-exchanger UA (it has no
+element: the boiler loop heats it); PV the nameplate (kW→W); the battery
+the energy capacity (kWh→J), the charge×discharge product as the
+round-trip efficiency and the max charge power (kW→W); the EV the rated
+pack (kWh→J) and the clamped charge power (kW→W); the scheduled loads
+the usage multiplier they applied, kept on the load now because the
+applied scaling no longer shows it. The kW→J/W conversions run through
+uom. The setpoint sources are copied from the spec fields the
+setpoint-source resolution stamps, matched by instance name.
+
+The envelope half is computed where the RC network assembles (the solver
+bundle carries it in every build profile), from the same boundary inputs
+and RC diagnostics the network was built from: per boundary the
+diagnostic's total resistance (films included) and capacitance, and the
+layers as built — the LUT layers, the material layers' framing-corrected
+resistances, or the fallback's one lumped layer; none for slabs (the
+F-factor method); per window the config's resolved effective SHGC and
+U-factor in the sorted surface order; the infiltration from the parsed
+building's ACH50, ELA (cm²→m²) and constant ACH.
+
+Found on base.xml's same-zone surfaces: the auto-generated interior
+partition wall and the furniture mass face no outside, and their RC
+construction keeps the interior half of the stack as a dead-end fin, so
+the read-back reports the layers the network keeps and the effective
+resistance that series plus the one interior film. The RC diagnostics'
+same-zone total uses a different convention (the full stack halved),
+which neither the kept layers nor the network's series equals; the
+physics is unaffected (that number feeds only the per-component
+heat-gain tracking), and the read-back reports the network's actual
+resistance.
+
+RED first: the acceptance file failed to compile at the base with only
+the tests applied (no `ResolvedModel`, no `ResolvedParameter`, no
+`resolved_model()`, no `resolved_parameters()`), the every-class test on
+the missing trait method, the Python test on AttributeError; 15
+test-only `Equipment` stubs and 21 in-crate ones gained the method.
+GREEN: `resolved_model_available_before_simulating`;
+`resolved_model_reflects_hpxml_efficiency_edit` (only the furnace's AFUE
+moves, to 0.80, every boundary, window and infiltration value equal);
+`resolved_model_reports_autosized_capacity`;
+`every_equipment_class_reports_its_required_parameters` (the table keyed
+per class; the indirect tank's element-less water heating and the
+scheduled-EV class's schedule physics documented in the test);
+`resolved_layers_sum_to_the_boundary_resistance` (every non-slab opaque
+boundary, 1e-12 relative); and the input-vs-default pin: base.xml's
+declared AFUE and capacity read back at the input's values (the capacity
+in SI watts, the Btu/h input converted) and its setpoints as the HPXML
+source with the 24 hourly values, while the minimal fixture's furnace
+(no HVACControl, no setpoint column) reads back the manual-thermostat
+default profile.
+
+Gates (canonical env `uv sync --locked --all-extras --all-groups` +
+`uv run maturin develop`), on the staged change and again on the commit:
+fmt clean; clippy `--workspace --all-targets --all-features -D warnings`
+clean; nextest `--workspace --all-features -j 4` 8041 passed, 3 skipped
+(the ignored kind-pin generator and the two hand-run measurement tests);
+pytest `-m ''` 1730 passed, 6 xfailed, 0 failed, 0 errors; pyright 0;
+the goldens bitwise (compare-all 8, `full_year_900s_dst` 1).
+
 ## RT-7: the per-step RL observation is built without allocation
 
 **Kind:** initiative work (`dl-i08-architecture.rl_observation_allocation`:
