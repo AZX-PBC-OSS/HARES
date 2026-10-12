@@ -481,6 +481,17 @@ replacement.
   the dwelling was built from (`DwellingBlueprintRef`, whose
   `parsed_inputs()` is the `ParsedInputs` record holding the handles'
   shared `Arc`s).
+- Added: `Dwelling.resolved_model()`: the resolved-parameter read-back,
+  the parameters the physics actually uses, computed at assembly after
+  defaults, autosizing and overrides and before warm-up and never
+  rebuilt afterwards. A dict of SI floats and strings: `equipment`
+  (each entry's `name`, `id`, `end_use`, `parameters` as
+  `name`/`value`/`unit` dicts and the active `heating_setpoint` and
+  `cooling_setpoint` provenance labels), `boundaries` (the RC network's
+  `r_effective_m2k_w`, `films_m2k_w`, `c_j_k` and the layers'
+  `r_m2k_w`/`c_j_m2k`), `windows` (the resolved effective `u_w_m2k` and
+  `shgc`), `infiltration` (`ach50`, `ela_m2`, `constant_ach`) and
+  `site`.
 
 ## Troubleshooting
 
