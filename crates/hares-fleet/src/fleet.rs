@@ -4892,11 +4892,18 @@ mod tests {
             provenance: Provenance {
                 build: hares_core::BuildInfo::get(),
                 catalogue_digest: [0; 32],
-                config: simulation_config(PathBuf::from("unused.csv")),
-                bldg_id: 1,
+                settings: DwellingSettings::new(
+                    simulation_config(PathBuf::from("unused.csv")),
+                    None,
+                    1,
+                    None,
+                    None,
+                ),
                 site_utc_offset_s: 0,
                 equipment: Vec::new(),
                 inputs: None,
+                tariff: None,
+                replay_blockers: Vec::new(),
             },
         };
         let status = |run: &RunResult| home_status(&Ok(run.clone()));

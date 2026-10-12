@@ -31,6 +31,7 @@ pub mod invariants;
 pub mod observer;
 #[cfg(feature = "observe")]
 mod observer_capture;
+pub mod replay;
 pub mod resolved;
 pub mod result;
 pub mod rng;
@@ -62,12 +63,14 @@ pub use health::{ActorTiming, ActorTimings};
 pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
 pub use input_schema::input_schema;
 pub use rand_chacha::ChaCha8Rng;
+pub use replay::{RecordedBuild, Replay};
 pub use resolved::{
     ResolvedBoundary, ResolvedClock, ResolvedEnvelope, ResolvedEquipment, ResolvedInfiltration,
     ResolvedLayer, ResolvedModel, ResolvedWindow,
 };
 pub use result::{
     BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
+    TariffRecord,
 };
 pub use rng::derive_dwelling_rng;
 pub use telemetry::DwellingTelemetry;

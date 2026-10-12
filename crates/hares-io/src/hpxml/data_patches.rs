@@ -3,13 +3,16 @@
 //! external data sources that provide ground-truth values.
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 /// Typed patches that supplement or correct HPXML-parsed data.
 ///
 /// When the HPXML parser encounters a missing or invalid field, the
 /// resolver consults these patches as a fallback before using a
 /// documented default. This struct carries **no** ResStock-specific
 /// knowledge — column-to-field mapping is handled by the constructor.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HpxmlDataPatches {
     pub number_of_bedrooms: Option<f64>,
 }

@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,16 +14,17 @@ use sha2::{Digest, Sha256};
 use crate::weather::WeatherFormat;
 
 /// Where an input came from. A path source keeps the path the input was
-/// read from; content keeps the kind it was supplied as.
+/// read from beside its digest; content keeps the content itself (shared,
+/// the parse's own allocation), so a replay export writes it verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputRecordSource {
     /// A file the input was read from, kept as metadata beside the digest.
     Path(PathBuf),
-    /// Content supplied as text.
-    Text,
-    /// Content supplied as bytes.
-    Bytes,
+    /// Content supplied as text, carried for the replay export.
+    Text(Arc<str>),
+    /// Content supplied as bytes, carried for the replay export.
+    Bytes(Arc<[u8]>),
 }
 
 /// One input's record: where it came from and the SHA-256 of the bytes
@@ -104,7 +106,7 @@ mod tests {
     #[test]
     fn input_record_hex_is_lowercase_sha256_hex() {
         let record = InputRecord {
-            source: InputRecordSource::Bytes,
+            source: InputRecordSource::Bytes(b"abc".as_slice().into()),
             sha256: Sha256::digest(b"abc").into(),
         };
         assert_eq!(

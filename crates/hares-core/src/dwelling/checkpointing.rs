@@ -239,6 +239,7 @@ impl Dwelling {
         if self.terminal_error.take().is_some() {
             self.ports.zero();
         }
+        self.record_replay_blocker(hares_types::ReplayBlocker::StateRestored);
         Ok(())
     }
 
@@ -273,6 +274,7 @@ impl Dwelling {
         self.clock.current_step = 0;
         self.snapshot_equipment_state();
         self.run_result = None;
+        self.record_replay_blocker(hares_types::ReplayBlocker::StateRestored);
         Ok(())
     }
 

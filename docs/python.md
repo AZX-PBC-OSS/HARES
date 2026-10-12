@@ -532,6 +532,21 @@ replacement.
   `r_m2k_w`/`c_j_m2k`), `windows` (the resolved effective `u_w_m2k` and
   `shgc`), `infiltration` (`ach50`, `ela_m2`, `constant_ach`) and
   `site`.
+- Added: `RunResult.export_replay(dir)`, `replay(dir, defaults=None)`
+  and `Provenance.tariff`: the replay export. `export_replay` writes the
+  run's resolved configuration, inputs, seeds and build identity into
+  `dir` (`replay.toml`, `overrides.json` when the run carried overrides,
+  `tariff.json` when it attached a tariff, and the inputs' content);
+  `hares.replay(dir, defaults=...)` loads it, builds the dwelling and
+  simulates, returning the replayed run's `RunResult`, its frames
+  bitwise the original's (the `defaults` directory is required until the
+  packaged defaults land). A run whose dwelling was changed in a way a
+  replay cannot rebuild (an edited blueprint, equipment or LUT changes,
+  a caller-registered actor, caller-supplied control inputs, a restored
+  state) fails the export with `HaresConfigError` naming every such
+  category, nothing written. `Provenance.tariff` reads the attached
+  tariff as a dict holding `tariff` (the tariff's own dict) and `zone`
+  (the IANA name), or `None`.
 
 ## Troubleshooting
 

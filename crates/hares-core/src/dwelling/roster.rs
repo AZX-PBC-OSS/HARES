@@ -264,6 +264,7 @@ impl Dwelling {
             self.plan_roster_caches(&self.equipment_refs(), &change.prospective(&self.actors))?;
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.record_replay_blocker(hares_types::ReplayBlocker::CallerActor);
         Ok(())
     }
 
@@ -315,7 +316,6 @@ impl Dwelling {
         let actor = registry.create(config)?;
         self.add_actor(actor)
     }
-
     fn ensure_actor_names_free(&self, actors: &[Box<dyn Actor>]) -> Result<()> {
         for (i, actor) in actors.iter().enumerate() {
             let name = actor.name();
@@ -557,6 +557,7 @@ impl Dwelling {
     /// The evaluator's or the roster plan's error. On `Err` the dwelling
     /// keeps its previous tariff, actors, billing summaries and warning log.
     pub fn set_tariff(&mut self, tariff: ElectricTariff, tz: Tz) -> Result<()> {
+        let attached_tariff = tariff.clone();
         let parse_warnings = tariff.parse_warnings.clone();
         let start = self.clock.start_time.with_timezone(&tz);
         let end = (self.clock.start_time + self.clock.duration).with_timezone(&tz);
@@ -597,6 +598,10 @@ impl Dwelling {
         self.tariff_evaluator = Some(evaluator);
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.tariff_record = Some(crate::TariffRecord {
+            tariff: attached_tariff,
+            zone: tz.name().to_string(),
+        });
         Ok(())
     }
 
@@ -673,6 +678,7 @@ impl Dwelling {
         self.equipment.push(eq);
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         Ok(())
     }
 
@@ -871,6 +877,7 @@ impl Dwelling {
         self.equipment.clear();
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         Ok(())
     }
 
@@ -906,6 +913,7 @@ impl Dwelling {
         let removed = self.equipment.remove(pos);
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         Ok(removed)
     }
 
@@ -942,6 +950,7 @@ impl Dwelling {
             .retain(|e| !end_uses.contains(&e.descriptor().end_use));
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         Ok(removed_count)
     }
 
@@ -1040,6 +1049,7 @@ impl Dwelling {
         let old = std::mem::replace(&mut self.equipment[pos], new_equipment);
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         Ok(old)
     }
 

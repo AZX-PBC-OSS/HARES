@@ -44,6 +44,11 @@ pub struct DwellingBlueprint {
     #[cfg(feature = "dst")]
     pub(super) parsed_civil_tz: Option<chrono_tz::Tz>,
     pub(super) rng: rand_chacha::ChaCha8Rng,
+    /// Whether a `DwellingBlueprintBuilder` mutator changed the parsed
+    /// equipment before this blueprint froze: a run built from it is not
+    /// the inputs' resolution a replay would rebuild, so the dwelling
+    /// records `ReplayBlocker::BlueprintEdited` for it.
+    pub(super) blueprint_edited: bool,
     /// The input records of the files the config's parse read: the HPXML,
     /// the schedule when it is a file, the weather with its resolved
     /// format, and the defaults digest. `None` for the synthetic TOML
@@ -211,6 +216,9 @@ pub struct DwellingBlueprintBuilder {
     #[cfg(feature = "dst")]
     pub(super) parsed_civil_tz: Option<chrono_tz::Tz>,
     pub(super) input_records: Option<InputRecords>,
+    /// Whether a mutator changed the parsed equipment: frozen into the
+    /// blueprint as the blueprint-edited replay blocker's record.
+    pub(super) blueprint_edited: bool,
 }
 
 impl DwellingBlueprintBuilder {
@@ -291,6 +299,7 @@ impl DwellingBlueprintBuilder {
             time_res,
             #[cfg(feature = "dst")]
             parsed_civil_tz,
+            blueprint_edited: false,
         })
     }
 
@@ -354,6 +363,7 @@ impl DwellingBlueprintBuilder {
             .ok_or_else(|| {
                 HaresError::Dwelling(format!("equipment '{name}' not found in blueprint"))
             })?;
+        self.blueprint_edited = true;
         Ok(self.equipment_specs.remove(pos))
     }
 
@@ -365,6 +375,9 @@ impl DwellingBlueprintBuilder {
             s.name == "Occupancy"
                 || !end_uses.contains(&hares_io::equipment_name_to_end_use(&s.name))
         });
+        if self.equipment_specs.len() != before {
+            self.blueprint_edited = true;
+        }
         before - self.equipment_specs.len()
     }
 
@@ -387,6 +400,7 @@ impl DwellingBlueprintBuilder {
                 "duplicate equipment name '{name}' — each equipment must have a unique name"
             )));
         }
+        self.blueprint_edited = true;
         self.equipment_specs.push(spec);
         Ok(())
     }
@@ -422,6 +436,7 @@ impl DwellingBlueprintBuilder {
             #[cfg(feature = "dst")]
             parsed_civil_tz,
             input_records,
+            blueprint_edited,
         } = self;
 
         let step_secs = super::conversions::duration_to_u32_secs(settings.sim_config.time_res)?;
@@ -456,6 +471,7 @@ impl DwellingBlueprintBuilder {
             #[cfg(feature = "dst")]
             parsed_civil_tz,
             rng,
+            blueprint_edited,
             input_records,
         }))
     }

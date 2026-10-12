@@ -4,17 +4,18 @@
 //! delivered outputs, the run's metrics, its health totals, its warning
 //! record and its provenance.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use arrow::record_batch::RecordBatch;
+use hares_io::Frequency;
 use hares_io::output::metrics::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, GasEnergyMetrics,
     GridInteractionMetrics, PeakPowerKw, Reliability, RollingPeakKw, SimulationCoverage,
     SimulationMetrics, TotalEnergyKwh,
 };
-use hares_io::{Frequency, SimulationConfig};
-use hares_types::{Warning, ZoneId};
+use hares_types::{HaresError, Warning, ZoneId};
 
+use crate::dwelling::DwellingSettings;
 use crate::health::RunHealth;
 
 /// The metrics of a finished run: the full metric set, gas included
@@ -277,12 +278,12 @@ pub struct Provenance {
     /// `Catalogue::digest()` prints (the same value the report schema's
     /// `hares:catalogue_digest` metadata carries).
     pub catalogue_digest: [u8; 32],
-    /// The validated configuration the run ran under (the master seed in
-    /// effect). The entries that add fields to the config after this one
-    /// are recorded here as the config itself carries them.
-    pub config: SimulationConfig,
-    /// The building id the run ran for.
-    pub bldg_id: i64,
+    /// The settings the run ran under: the validated `SimulationConfig`
+    /// (the master seed in effect), the building id, the overrides, the
+    /// HPXML patches and the warm-up duration. Every random stream the
+    /// run drew derives from the seed and the building id
+    /// (`derive_dwelling_rng`), so those two carry the seeds.
+    pub settings: DwellingSettings,
     /// The site's UTC offset in seconds, from the simulation start's fixed
     /// offset.
     pub site_utc_offset_s: i32,
@@ -294,6 +295,24 @@ pub struct Provenance {
     /// `None` for the synthetic TOML dwellings: that path reads the TOML,
     /// recorded nowhere in the records, and the absence discloses that.
     pub inputs: Option<hares_io::InputRecords>,
+    /// The electric tariff attached with `Dwelling::set_tariff`, `None`
+    /// when the run attached none.
+    pub tariff: Option<TariffRecord>,
+    /// Why the run cannot be exported for exact replay, each category
+    /// once in the order first seen. Empty for a run a replay can
+    /// rebuild from its settings, inputs and tariff.
+    pub replay_blockers: Vec<hares_types::ReplayBlocker>,
+}
+
+/// The electric tariff a run attached, recorded at
+/// `Dwelling::set_tariff`: the tariff (whose serde derives make it
+/// exportable) and the IANA zone it was attached in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TariffRecord {
+    /// The attached tariff.
+    pub tariff: hares_tariff::ElectricTariff,
+    /// The IANA name of the zone the tariff was attached in.
+    pub zone: String,
 }
 
 /// One simulation run's result: the finalisation every run shares, whether
@@ -316,4 +335,21 @@ pub struct RunResult {
     pub warnings_dropped: u64,
     /// What produced the run.
     pub provenance: Provenance,
+}
+
+impl RunResult {
+    /// Writes the run's resolved configuration, inputs, seeds and build
+    /// identity into `dir` for exact replay
+    /// (`crates/hares-core/src/replay.rs`). Reads only the provenance and
+    /// the report outputs; fails without writing anything when the run
+    /// took inputs a replay cannot rebuild
+    /// (`HaresError::NotReplayable`).
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError::NotReplayable`] naming every recorded blocker, or
+    /// [`HaresError::Io`] when the directory or a file write fails.
+    pub fn export_replay(&self, dir: &Path) -> std::result::Result<(), HaresError> {
+        crate::replay::export(self, dir)
+    }
 }

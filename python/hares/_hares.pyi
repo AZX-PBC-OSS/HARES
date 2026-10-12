@@ -2703,6 +2703,14 @@ class RunResult:
     def warnings_dropped(self) -> int: ...
     @property
     def provenance(self) -> Provenance: ...
+    def export_replay(self, dir: str) -> None:
+        """Writes the run's resolved configuration, inputs, seeds and
+        build identity into ``dir`` for exact replay: a run reconstructed
+        with ``hares.replay(dir, defaults=...)`` from the export alone
+        reproduces this run's frames bitwise. Fails with
+        ``HaresConfigError`` naming every blocker when the dwelling was
+        changed in a way a replay cannot rebuild, and nothing is
+        written."""
     def __repr__(self) -> str: ...
 
 class RunHealth:
@@ -2793,6 +2801,11 @@ class Provenance:
     def equipment(self) -> list[EquipmentProvenance]: ...
     @property
     def inputs(self) -> dict[str, Any] | None: ...
+    @property
+    def tariff(self) -> dict[str, Any] | None:
+        """The electric tariff the run attached: a dict holding the
+        tariff's own dict (``tariff``) and the IANA zone it was attached
+        in (``zone``), or ``None`` when the run attached none."""
     def __repr__(self) -> str: ...
 
 class EquipmentProvenance:
@@ -3316,6 +3329,7 @@ def metrics_from_table(
 def build_info() -> BuildInfo: ...
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Input schema
 # ---------------------------------------------------------------------------
 
@@ -3345,3 +3359,14 @@ def resample_weather(
     site: dict[str, float],
     config: SimulationConfig,
 ) -> pl.DataFrame: ...
+
+# ---------------------------------------------------------------------------
+# Replay
+# ---------------------------------------------------------------------------
+
+# replay: rebuilds a run from its replay export (RunResult.export_replay's
+# directory): load, the build, then simulate(), returning the replayed
+# run's RunResult, its frames bitwise the original's. `defaults` is the
+# defaults directory the replay reads the exported run's tree from (the
+# export verifies its digest); required until the packaged defaults land.
+def replay(dir: str, defaults: str | None = None) -> RunResult: ...

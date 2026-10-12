@@ -28,8 +28,8 @@ fn input_record(source: &InputSource) -> Result<InputRecord, HaresError> {
     Ok(InputRecord {
         source: match source {
             InputSource::Path(path) => InputRecordSource::Path(path.clone()),
-            InputSource::Text(_) => InputRecordSource::Text,
-            InputSource::Bytes(_) => InputRecordSource::Bytes,
+            InputSource::Text(text) => InputRecordSource::Text(Arc::clone(text)),
+            InputSource::Bytes(bytes) => InputRecordSource::Bytes(Arc::clone(bytes)),
         },
         sha256: sha2::Sha256::digest(&bytes).into(),
     })
@@ -874,6 +874,42 @@ impl ParsedDefaults {
     pub fn record(&self) -> &DefaultsSource {
         &self.source
     }
+
+    /// The digest over every defaults file this handle's load read, in
+    /// load order: the store's input log (the replaced files' entries
+    /// carry the replacements' bytes) composed with the schedule profiles
+    /// file, which every run with a defaults directory reads. The one
+    /// composition the provenance's defaults digest and a replay export's
+    /// verification share.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the profiles file cannot be read.
+    pub fn composed_digest(&self) -> Result<[u8; 32], HaresError> {
+        let source = &self.source;
+        let mut log = self.store.input_log().to_vec();
+        if let Some(base) = &source.base {
+            // The schedule profiles file: the replacement's content when
+            // the defaults source replaced it, the base tree's file
+            // otherwise — the bytes the profiles load reads.
+            let relative = crate::schedule_resolve::DEFAULT_SCHEDULES_CSV;
+            let bytes = match source.files.get(relative) {
+                Some(overrides) => overrides.read()?,
+                None => {
+                    let profiles = base.join(relative);
+                    std::fs::read(&profiles).map_err(|err| {
+                        HaresError::Io(format!(
+                            "the defaults schedule profiles '{}' could not be read \
+                             for their input record: {err}",
+                            profiles.display()
+                        ))
+                    })?
+                }
+            };
+            log.push((relative.to_string(), bytes));
+        }
+        Ok(crate::input::defaults_files_digest(&log))
+    }
 }
 
 /// Every file under `dir`, relative, recursive.
@@ -1217,31 +1253,10 @@ impl ParsedInputs {
             Some(source) => Some(input_record(source)?),
             None => None,
         };
-        let source = inputs.defaults.record();
-        let store = inputs.defaults.store();
-        let mut log = store.input_log().to_vec();
-        if let Some(base) = &source.base {
-            // The schedule profiles file: the replacement's content when
-            // the defaults source replaced it, the base tree's file
-            // otherwise — the bytes the profiles load reads.
-            let relative = crate::schedule_resolve::DEFAULT_SCHEDULES_CSV;
-            let bytes = match source.files.get(relative) {
-                Some(overrides) => overrides.read()?,
-                None => {
-                    let profiles = base.join(relative);
-                    std::fs::read(&profiles).map_err(|err| {
-                        HaresError::Io(format!(
-                            "the defaults schedule profiles '{}' could not be read \
-                             for their input record: {err}",
-                            profiles.display()
-                        ))
-                    })?
-                }
-            };
-            log.push((relative.to_string(), bytes));
-        }
-        let defaults_files_sha256 = crate::input::defaults_files_digest(&log);
-        let defaults_replacements = source
+        let defaults_files_sha256 = inputs.defaults.composed_digest()?;
+        let defaults_replacements = inputs
+            .defaults
+            .record()
             .files
             .iter()
             .map(|(relative, replacement)| Ok((relative.clone(), input_record(replacement)?)))

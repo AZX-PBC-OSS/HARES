@@ -102,6 +102,7 @@ use crate::invariants::InvariantChecker;
 use crate::invariants::check_basement_lighting_foundation;
 use crate::result::{
     BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
+    TariffRecord,
 };
 use crate::rng::{advance_dwelling_rng, derive_sub_rng, ev_driver_stream};
 use crate::scheduler::{ExecutionPhase, StepScheduler};
@@ -2585,6 +2586,13 @@ pub struct Dwelling {
     /// every later `finish()` returns the same Arc, and a step past it is
     /// a typed error.
     run_result: Option<Arc<RunResult>>,
+    /// The electric tariff attached with `set_tariff`, recorded for the
+    /// run's provenance and its replay export.
+    tariff_record: Option<TariffRecord>,
+    /// Why the run cannot be exported for exact replay, each category
+    /// once in the order first seen, recorded the first time the change
+    /// happened.
+    replay_blockers: Vec<hares_types::ReplayBlocker>,
     custom_domain_solvers: Vec<Box<dyn DomainSolver>>,
     /// The custom domain slot handle of each installed solver, in the
     /// same order: resolved once at installation, read every step.
@@ -3931,6 +3939,12 @@ fn assemble_from_blueprint_with_seed(
         prior_electrical_summary: ElectricalSummary::default(),
         latest_env: initial_env,
         run_result: None,
+        tariff_record: None,
+        replay_blockers: if bp.blueprint_edited {
+            vec![hares_types::ReplayBlocker::BlueprintEdited]
+        } else {
+            Vec::new()
+        },
         custom_domain_solvers: Vec::new(),
         custom_solver_slots: Vec::new(),
         active_equipment_ids: HashSet::new(),
@@ -4204,14 +4218,30 @@ impl Dwelling {
         {
             report.destination = Destination::Callback;
         }
+        let settings = self.blueprint.settings.clone();
         Provenance {
             build: BuildInfo::get(),
             catalogue_digest: crate::result::catalogue_digest_bytes(&self.catalogue()),
-            config,
-            bldg_id: self.bldg_id,
+            settings: DwellingSettings {
+                sim_config: config,
+                overrides: settings.overrides,
+                bldg_id: self.bldg_id,
+                initialization_duration: settings.initialization_duration,
+                patches: settings.patches,
+            },
             site_utc_offset_s: self.clock.start_time.offset().local_minus_utc(),
             equipment,
             inputs: self.inputs.clone(),
+            tariff: self.tariff_record.clone(),
+            replay_blockers: self.replay_blockers.clone(),
+        }
+    }
+
+    /// Records one replay-blocker category the first time it happens:
+    /// each category once, in the order first seen.
+    pub(crate) fn record_replay_blocker(&mut self, blocker: hares_types::ReplayBlocker) {
+        if !self.replay_blockers.contains(&blocker) {
+            self.replay_blockers.push(blocker);
         }
     }
 
@@ -4330,6 +4360,7 @@ impl Dwelling {
             signal,
             priority,
         });
+        self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
     }
 
     /// Checks, changing nothing, that the named equipment exists and accepts
@@ -4398,6 +4429,7 @@ impl Dwelling {
             signal,
             priority,
         });
+        self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
         Ok(())
     }
 
@@ -4412,11 +4444,13 @@ impl Dwelling {
             signal,
             priority,
         });
+        self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
     }
 
     /// Queues a typed dispatch request.
     pub fn queue_dispatch(&mut self, request: DispatchRequest) {
         self.control_dispatcher.queue(request);
+        self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
     }
 
     /// Returns the number of registered actors.
@@ -4496,7 +4530,7 @@ impl Dwelling {
             .find(|e| e.descriptor().name == name)
             .ok_or_else(|| HaresError::Equipment(format!("equipment '{}' not found", name)))?;
 
-        match (lut_type, lut) {
+        let result = match (lut_type, lut) {
             (BatteryLutType::ChargingCurve, BatteryLutData::ChargingCurve(interp)) => {
                 eq.unmark_initialized();
                 let result = eq.set_charging_curve_lut(Some(*interp));
@@ -4519,7 +4553,11 @@ impl Dwelling {
                 "mismatched lut_type and data for equipment '{}'",
                 name
             ))),
+        };
+        if result.is_ok() {
+            self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         }
+        result
     }
 
     /// Clear / reset a LUT on a battery equipment by name.
@@ -4530,7 +4568,7 @@ impl Dwelling {
             .find(|e| e.descriptor().name == name)
             .ok_or_else(|| HaresError::Equipment(format!("equipment '{}' not found", name)))?;
 
-        match lut_type {
+        let result = match lut_type {
             BatteryLutType::ChargingCurve => {
                 eq.unmark_initialized();
                 let result = eq.set_charging_curve_lut(None);
@@ -4539,7 +4577,11 @@ impl Dwelling {
             }
             BatteryLutType::Ocv => eq.reset_ocv_table(),
             BatteryLutType::UNeg => eq.reset_u_neg_table(),
+        };
+        if result.is_ok() {
+            self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         }
+        result
     }
 
     /// Set a 4D charging curve LUT on an EV equipment by name.
@@ -4557,6 +4599,9 @@ impl Dwelling {
         eq.unmark_initialized();
         let result = eq.set_charging_curve_lut(Some(lut));
         eq.mark_initialized();
+        if result.is_ok() {
+            self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
+        }
         result
     }
 
@@ -4571,6 +4616,9 @@ impl Dwelling {
         eq.unmark_initialized();
         let result = eq.set_charging_curve_lut(None);
         eq.mark_initialized();
+        if result.is_ok() {
+            self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
+        }
         result
     }
 
@@ -4617,6 +4665,7 @@ impl Dwelling {
     /// Stores the active price signal for equipment controllers.
     pub fn set_price_signal(&mut self, signal: PriceSignal) {
         self.price_signal = signal;
+        self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
     }
 
     /// Returns the current price signal.
@@ -4647,6 +4696,7 @@ impl Dwelling {
             frequency_hz: DEFAULT_GRID_FREQUENCY_HZ,
             island_bus_voltage_pu: None,
         });
+        self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
     }
 
     /// Returns current observable state.
@@ -4966,6 +5016,7 @@ impl Dwelling {
     /// run (the counter still lands first).
     pub fn record_clamped_actions(&mut self, count: u64) -> Result<()> {
         self.health.clamped_actions = self.health.clamped_actions.saturating_add(count);
+        self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
         let total = self.health.clamped_actions;
         self.escalate_on_limit(
             HealthEvent::ClampedAction,
@@ -5383,6 +5434,15 @@ impl Dwelling {
     /// The outcome (days run, convergence, day-over-day residuals) is recorded
     /// on [`Self::health`] at every return path once warm-up runs.
     pub fn run_warmup_converged(&mut self, threshold_c: f64, max_iter: u32) -> Result<u32> {
+        self.record_replay_blocker(hares_types::ReplayBlocker::StateRestored);
+        self.run_warmup_converged_inner(threshold_c, max_iter)
+    }
+
+    /// The convergence loop's body, the record nothing path: the build's
+    /// own warm-up runs through here (a caller's
+    /// [`Self::run_warmup_converged`] records the state-restored replay
+    /// blocker first, the build's own warm-up records nothing).
+    fn run_warmup_converged_inner(&mut self, threshold_c: f64, max_iter: u32) -> Result<u32> {
         let time_res_s = u64::try_from(self.clock.time_res.num_seconds())
             .map_err(|_| HaresError::Io("invalid time resolution".to_string()))?;
         let steps_per_day = (24u64 * 3600).checked_div(time_res_s).unwrap_or(0);

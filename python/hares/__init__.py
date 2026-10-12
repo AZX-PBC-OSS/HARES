@@ -153,6 +153,9 @@ from ._hares import input_schema
 # The engine's per-step weather channels
 from ._hares import resample_weather
 
+# Replay
+from ._hares import replay
+
 # Standalone PV sizing functions
 from ._hares import (
     compute_annual_diffuse_fraction,
@@ -318,6 +321,8 @@ __all__ = [
     # Per-step weather channels
     "resample_weather",
     "__version__",
+    # Replay
+    "replay",
     # Gym / RL
     "batch_step",
     # Multi-segment simulation

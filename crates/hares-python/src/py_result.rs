@@ -22,7 +22,7 @@ use hares_io::InputRecordSource as RustInputRecordSource;
 use hares_types::Warning as RustWarning;
 
 use crate::py_config::PySimulationConfig;
-use crate::py_dwelling::HaresSimulationError;
+use crate::py_dwelling::{HaresSimulationError, to_py_err};
 use crate::py_metrics::PyRunMetrics;
 use crate::py_report::PyFrequency;
 
@@ -44,8 +44,8 @@ fn record_dict<'py>(py: Python<'py>, record: &RustInputRecord) -> PyResult<Bound
         RustInputRecordSource::Path(path) => {
             dict.set_item("path", path.display().to_string())?;
         }
-        RustInputRecordSource::Text => dict.set_item("kind", "text")?,
-        RustInputRecordSource::Bytes => dict.set_item("kind", "bytes")?,
+        RustInputRecordSource::Text(_) => dict.set_item("kind", "text")?,
+        RustInputRecordSource::Bytes(_) => dict.set_item("kind", "bytes")?,
     }
     dict.set_item("sha256", record.hex())?;
     Ok(dict)
@@ -127,6 +127,16 @@ impl PyRunResult {
         PyProvenance {
             inner: self.inner.provenance.clone(),
         }
+    }
+
+    /// Writes the run's resolved configuration, inputs, seeds and build
+    /// identity into `dir` for exact replay: `hares.replay(dir,
+    /// defaults=...)` reconstructs the run from the export alone, frames
+    /// bitwise equal.
+    pub fn export_replay(&self, dir: &str) -> PyResult<()> {
+        self.inner
+            .export_replay(std::path::Path::new(dir))
+            .map_err(to_py_err)
     }
 
     fn __repr__(&self) -> String {
@@ -576,6 +586,31 @@ pub fn build_info() -> PyBuildInfo {
     }
 }
 
+/// Rebuilds a run from its replay export (`RunResult.export_replay`'s
+/// directory): `load`, the build, then `simulate()`, returning the
+/// replayed run's `RunResult`. The `defaults` directory is required until
+/// the packaged defaults land.
+#[pyfunction]
+#[pyo3(signature = (dir, defaults=None))]
+pub fn replay(dir: &str, defaults: Option<&str>) -> PyResult<PyRunResult> {
+    let Some(defaults) = defaults else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "replay requires defaults=<the defaults directory>: the packaged defaults \
+             have not landed yet",
+        ));
+    };
+    let replay =
+        hares_core::replay::load(std::path::Path::new(dir), std::path::Path::new(defaults))
+            .map_err(to_py_err)?;
+    let mut dwelling = replay.build().map_err(to_py_err)?;
+    let result = dwelling.simulate().map_err(to_py_err)?;
+    let catalogue = dwelling.catalogue();
+    Ok(PyRunResult {
+        inner: result,
+        catalogue,
+    })
+}
+
 /// The run's provenance: what produced it.
 #[pyclass(frozen, name = "Provenance")]
 pub struct PyProvenance {
@@ -608,13 +643,13 @@ impl PyProvenance {
     /// The validated configuration the run ran under.
     #[getter]
     fn config(&self) -> PySimulationConfig {
-        PySimulationConfig(self.inner.config.clone())
+        PySimulationConfig(self.inner.settings.sim_config.clone())
     }
 
     /// The building id the run ran for.
     #[getter]
     fn bldg_id(&self) -> i64 {
-        self.inner.bldg_id
+        self.inner.settings.bldg_id
     }
 
     /// The site's UTC offset in seconds.
@@ -673,10 +708,26 @@ impl PyProvenance {
             .collect()
     }
 
+    /// The electric tariff the run attached, as a dict holding the
+    /// tariff's own dict and its zone, or `None` when the run attached
+    /// none.
+    #[getter]
+    fn tariff<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(record) = self.inner.tariff.as_ref() else {
+            return Ok(None);
+        };
+        let json = serde_json::to_value(&record.tariff)
+            .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+        let dict = PyDict::new(py);
+        dict.set_item("tariff", crate::py_tariff::json_value_to_py(py, &json)?)?;
+        dict.set_item("zone", record.zone.clone())?;
+        Ok(Some(dict))
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Provenance(bldg_id={}, site_utc_offset_s={}, equipment={})",
-            self.inner.bldg_id,
+            self.inner.settings.bldg_id,
             self.inner.site_utc_offset_s,
             self.inner.equipment.len(),
         )

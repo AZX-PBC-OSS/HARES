@@ -559,7 +559,8 @@ fn provenance_records_callback_destination_marker() {
 
     let frame = result
         .provenance
-        .config
+        .settings
+        .sim_config
         .reports
         .iter()
         .find(|report| report.name == "frame")

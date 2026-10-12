@@ -2654,7 +2654,11 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         | HaresError::ThermostatBand { .. }
         | HaresError::SolarOverrideMissingSurface { .. }
         | HaresError::MissingInput { .. }
-        | HaresError::PreconditioningAxis { .. } => HaresConfigError::new_err(msg),
+        | HaresError::PreconditioningAxis { .. }
+        // A run that cannot be exported for exact replay is the caller's
+        // configuration mistake: the dwelling was changed in a way a
+        // replay cannot rebuild.
+        | HaresError::NotReplayable { .. } => HaresConfigError::new_err(msg),
         HaresError::Equipment(_) | HaresError::InvalidEquipmentParameter { .. } => {
             HaresEquipmentError::new_err(msg)
         }
