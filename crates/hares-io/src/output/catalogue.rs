@@ -880,6 +880,11 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         }
     }
 
+    // ── The engine's per-step weather channels: in no verbosity preset ─────
+    // In the catalogue (a named selection resolves them) with a minimum
+    // verbosity no preset reaches, so no preset's schema carries them.
+    push_statics(&mut defs, &mut tags, 9)?;
+
     // ── Diagnostics block: the per-step diagnostics, appended last ────────
     // Never emitted by a verbosity preset; the diagnostics request selects
     // the whole block. The order is the pre-catalogue CSV writer's column
@@ -2363,6 +2368,124 @@ static DWELLING_VARIABLES: &[(&str, VariableDef, u8, bool)] = &[
             description: Cow::Borrowed("Runtime-override cooling setpoint"),
         },
         7,
+        false,
+    ),
+    // The engine's per-step weather channels (the resample_weather row):
+    // in no verbosity preset (no preset's schema carries them, so no
+    // golden moves), selected by name.
+    (
+        "Outdoor Humidity Ratio (kg/kg)",
+        VariableDef {
+            name: Cow::Borrowed("Outdoor Humidity Ratio (kg/kg)"),
+            unit: Unit::KilogramPerKilogram,
+            kind: VariableKind::Ratio,
+            aggregation: Aggregation::Mean,
+            sampling: Sampling::InstantAtEnd,
+            nullable: true,
+            source: VariableSource::Dwelling,
+            description: Cow::Borrowed("Outdoor humidity ratio"),
+        },
+        9,
+        false,
+    ),
+    (
+        "Outdoor Pressure (kPa)",
+        VariableDef {
+            name: Cow::Borrowed("Outdoor Pressure (kPa)"),
+            unit: Unit::Kilopascal,
+            kind: VariableKind::Quantity {
+                across_homes: AcrossHomes::Mean,
+            },
+            aggregation: Aggregation::Mean,
+            sampling: Sampling::InstantAtEnd,
+            nullable: true,
+            source: VariableSource::Dwelling,
+            description: Cow::Borrowed("Outdoor air pressure"),
+        },
+        9,
+        false,
+    ),
+    (
+        "Wind Speed (m/s)",
+        VariableDef {
+            name: Cow::Borrowed("Wind Speed (m/s)"),
+            unit: Unit::MeterPerSecond,
+            kind: VariableKind::Quantity {
+                across_homes: AcrossHomes::Mean,
+            },
+            aggregation: Aggregation::Mean,
+            sampling: Sampling::InstantAtEnd,
+            nullable: true,
+            source: VariableSource::Dwelling,
+            description: Cow::Borrowed("Outdoor wind speed"),
+        },
+        9,
+        false,
+    ),
+    (
+        "Sky Temperature (C)",
+        VariableDef {
+            name: Cow::Borrowed("Sky Temperature (C)"),
+            unit: Unit::Celsius,
+            kind: VariableKind::Temperature,
+            aggregation: Aggregation::Mean,
+            sampling: Sampling::InstantAtEnd,
+            nullable: true,
+            source: VariableSource::Dwelling,
+            description: Cow::Borrowed("Sky temperature"),
+        },
+        9,
+        false,
+    ),
+    (
+        "GHI (W/m2)",
+        VariableDef {
+            name: Cow::Borrowed("GHI (W/m2)"),
+            unit: Unit::WattPerSquareMeter,
+            kind: VariableKind::Quantity {
+                across_homes: AcrossHomes::Mean,
+            },
+            aggregation: Aggregation::Mean,
+            sampling: Sampling::IntervalMean,
+            nullable: true,
+            source: VariableSource::Dwelling,
+            description: Cow::Borrowed("Horizontal global irradiance"),
+        },
+        9,
+        false,
+    ),
+    (
+        "DNI (W/m2)",
+        VariableDef {
+            name: Cow::Borrowed("DNI (W/m2)"),
+            unit: Unit::WattPerSquareMeter,
+            kind: VariableKind::Quantity {
+                across_homes: AcrossHomes::Mean,
+            },
+            aggregation: Aggregation::Mean,
+            sampling: Sampling::IntervalMean,
+            nullable: true,
+            source: VariableSource::Dwelling,
+            description: Cow::Borrowed("Direct normal irradiance"),
+        },
+        9,
+        false,
+    ),
+    (
+        "DHI (W/m2)",
+        VariableDef {
+            name: Cow::Borrowed("DHI (W/m2)"),
+            unit: Unit::WattPerSquareMeter,
+            kind: VariableKind::Quantity {
+                across_homes: AcrossHomes::Mean,
+            },
+            aggregation: Aggregation::Mean,
+            sampling: Sampling::IntervalMean,
+            nullable: true,
+            source: VariableSource::Dwelling,
+            description: Cow::Borrowed("Diffuse horizontal irradiance"),
+        },
+        9,
         false,
     ),
 ];

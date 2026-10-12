@@ -3016,6 +3016,14 @@ class ParsedWeather:
     def from_path(cls, path: str) -> ParsedWeather: ...
     @classmethod
     def from_text(cls, text: str, format: str) -> ParsedWeather: ...
+    @property
+    def elevation_m(self) -> float: ...
+    @property
+    def latitude(self) -> float: ...
+    @property
+    def longitude(self) -> float: ...
+    @property
+    def timezone_offset_h(self) -> float: ...
 
 class ParsedSchedule:
     @classmethod
@@ -3318,3 +3326,22 @@ def build_info() -> BuildInfo: ...
 # rejected_hpxml_elements). Every section derives from the engine's own
 # typed definitions; the JSON of the dict is the schema's serialisation.
 def input_schema() -> dict[str, Any]: ...
+
+# ---------------------------------------------------------------------------
+# Per-step weather channels
+# ---------------------------------------------------------------------------
+
+# resample_weather: the engine's own per-step weather channels for one
+# weather input, site and config: one row per step of the configured
+# horizon, the Time column and the weather channels the run's own state
+# carries, in the catalogue's names. The evaluation is the environment
+# update's own, so the channels match the run's internal series bitwise.
+# `weather` is a path, a (text, format) pair, or a ParsedWeather; `site`
+# is the resolved site dict (latitude_deg, longitude_deg, elevation_m,
+# utc_offset_h; a missing coordinate is a KeyError naming it); `config`
+# is the run's SimulationConfig. Returns a polars DataFrame.
+def resample_weather(
+    weather: str | tuple[str, str] | ParsedWeather,
+    site: dict[str, float],
+    config: SimulationConfig,
+) -> pl.DataFrame: ...

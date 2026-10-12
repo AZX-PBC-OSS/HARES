@@ -62,6 +62,12 @@ pub enum Unit {
     CubicMeterPerSecond,
     /// Kilograms per cubic metre (moist-air density).
     KilogramPerCubicMeter,
+    /// Kilograms per kilogram (a humidity ratio).
+    KilogramPerKilogram,
+    /// Kilopascals (the outdoor pressure).
+    Kilopascal,
+    /// Metres per second (the wind speed).
+    MeterPerSecond,
     /// Litres per day.
     LitrePerDay,
     /// Joules.
@@ -113,6 +119,9 @@ impl Unit {
         Self::KilogramPerSecond,
         Self::CubicMeterPerSecond,
         Self::KilogramPerCubicMeter,
+        Self::KilogramPerKilogram,
+        Self::Kilopascal,
+        Self::MeterPerSecond,
         Self::LitrePerDay,
         Self::Joule,
         Self::CubicMeter,
@@ -160,6 +169,9 @@ impl Unit {
             Self::KilogramPerSecond => "kg/s",
             Self::CubicMeterPerSecond => "m3/s",
             Self::KilogramPerCubicMeter => "kg/m3",
+            Self::KilogramPerKilogram => "kg/kg",
+            Self::Kilopascal => "kPa",
+            Self::MeterPerSecond => "m/s",
             Self::LitrePerDay => "L/day",
             Self::Joule => "J",
             Self::CubicMeter => "m3",

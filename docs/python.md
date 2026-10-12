@@ -467,7 +467,23 @@ replacement.
   section derives from the engine's own typed definitions, so a consumer
   that classifies its fields reads the schema instead of HARES source.
 - Added: `ParsedDefaults.read_files()`: the defaults files the load read,
-  in load order (the read list the schema's `defaults_files` publishes).
+  in load order (the read list the schema's `defaults_files` publishes);
+  and the `ParsedWeather` header getters `latitude`, `longitude`,
+  `elevation_m` and `timezone_offset_h` (the header's own values, the
+  site resolution's fallbacks).
+- Added: `resample_weather(weather, site, config)`: the engine's own
+  per-step weather channels as a polars frame, one row per step of the
+  configured horizon — the `Time` column and `Outdoor Dry Bulb (C)`,
+  `Outdoor Humidity Ratio (kg/kg)`, `Outdoor Pressure (kPa)`,
+  `Wind Speed (m/s)`, `Sky Temperature (C)`, `GHI (W/m2)`, `DNI (W/m2)`,
+  `DHI (W/m2)`, `Temperature - Ground (C)` and `Hot Water Mains
+  Temperature (C)`. The evaluation is the environment update's own, so
+  the channels match the run's internal series bitwise. `weather` is a
+  path, a `(text, format)` pair or a `ParsedWeather`; `site` is the
+  resolved site dict (a missing coordinate a `KeyError` naming it);
+  `config` the run's `SimulationConfig`. The wind direction is not one
+  of the channels: a direction has no mean over a period, so it is not a
+  catalogue variable.
 - Added: `Provenance.inputs`: what the run read, recorded when each input
   was parsed. `None` for a synthetic TOML dwelling (that path reads the
   TOML, recorded nowhere in the records, and the absence discloses that);

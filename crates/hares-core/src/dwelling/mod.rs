@@ -1114,6 +1114,13 @@ struct DwellingColumns {
     outdoor_dry_bulb: Option<usize>,
     ground_temp: Option<usize>,
     mains_temp: Option<usize>,
+    outdoor_humidity_ratio: Option<usize>,
+    pressure_kpa: Option<usize>,
+    wind_speed_m_s: Option<usize>,
+    sky_temp_c: Option<usize>,
+    ghi_w_m2: Option<usize>,
+    dni_w_m2: Option<usize>,
+    dhi_w_m2: Option<usize>,
     /// Position of the first HVAC or water-heater equipment, whose
     /// telemetry feeds the setpoint chain columns.
     first_hvac: Option<usize>,
@@ -1235,6 +1242,13 @@ fn build_dwelling_columns(
         outdoor_dry_bulb: resolve("Outdoor Dry Bulb (C)"),
         ground_temp: resolve("Temperature - Ground (C)"),
         mains_temp: resolve("Hot Water Mains Temperature (C)"),
+        outdoor_humidity_ratio: resolve("Outdoor Humidity Ratio (kg/kg)"),
+        pressure_kpa: resolve("Outdoor Pressure (kPa)"),
+        wind_speed_m_s: resolve("Wind Speed (m/s)"),
+        sky_temp_c: resolve("Sky Temperature (C)"),
+        ghi_w_m2: resolve("GHI (W/m2)"),
+        dni_w_m2: resolve("DNI (W/m2)"),
+        dhi_w_m2: resolve("DHI (W/m2)"),
         first_hvac,
         scheduled_heating_setpoint: resolve(SCHEDULED_HEATING_SETPOINT_COL),
         scheduled_cooling_setpoint: resolve(SCHEDULED_COOLING_SETPOINT_COL),
@@ -5959,7 +5973,7 @@ impl Dwelling {
         if self.observer_buf.is_some() {
             obs_phases.post_environment = Some(observer_capture::capture_environment(
                 &self.latest_env,
-                self.environment.weather_meta.wf_allows_leap_years,
+                self.environment.weather_meta().wf_allows_leap_years,
                 self.environment.raw_mains_temp_f,
                 self.environment.obs_raw_day_of_year,
                 self.environment.obs_civil_day_of_year,
@@ -7537,6 +7551,30 @@ impl Dwelling {
         }
         if let Some(idx) = dwelling_columns.mains_temp {
             row[idx] = self.latest_env.weather.mains_temp_c;
+        }
+        // The engine's per-step weather channels (the resample_weather
+        // row): the run's internal series, the values the environment's
+        // evaluation carried this step.
+        if let Some(idx) = dwelling_columns.outdoor_humidity_ratio {
+            row[idx] = self.latest_env.weather.outdoor_humidity_ratio;
+        }
+        if let Some(idx) = dwelling_columns.pressure_kpa {
+            row[idx] = self.latest_env.weather.pressure_kpa;
+        }
+        if let Some(idx) = dwelling_columns.wind_speed_m_s {
+            row[idx] = self.latest_env.weather.wind_speed_m_s;
+        }
+        if let Some(idx) = dwelling_columns.sky_temp_c {
+            row[idx] = self.latest_env.weather.sky_temp_c;
+        }
+        if let Some(idx) = dwelling_columns.ghi_w_m2 {
+            row[idx] = self.latest_env.weather.ghi_w_m2;
+        }
+        if let Some(idx) = dwelling_columns.dni_w_m2 {
+            row[idx] = self.latest_env.weather.dni_w_m2;
+        }
+        if let Some(idx) = dwelling_columns.dhi_w_m2 {
+            row[idx] = self.latest_env.weather.dhi_w_m2;
         }
 
         // Setpoint chain: dwelling-level context columns for control auditing.

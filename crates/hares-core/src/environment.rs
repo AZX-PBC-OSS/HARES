@@ -9,8 +9,8 @@ use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use hares_io::forcing::{ForcingKey, ForcingRow, ForcingTable};
 use hares_io::hpxml::building::{BoundaryType, ZoneType};
 use hares_io::{
-    Building, ParsedWeather, ScheduleTimeSeries, SiteLocation, WeatherMeta, WeatherTimeSeries,
-    monthly_day_counts,
+    Building, ParsedWeather, ScheduleTimeSeries, SiteLocation, WeatherInput, WeatherMeta,
+    WeatherTimeSeries, monthly_day_counts,
 };
 use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherField};
 use hares_physics::{
@@ -63,6 +63,396 @@ pub static FORCING_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 /// flag's process scope races nothing.
 pub static FORCE_PER_STEP_FORCING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// One step's weather: the channels `update_in_place` writes into the
+/// state's weather and the forcing derivations the step's readers use.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StepWeather {
+    pub outdoor_temp_c: f64,
+    pub outdoor_humidity_ratio: f64,
+    pub outdoor_wet_bulb_c: f64,
+    pub outdoor_enthalpy_j_kg: f64,
+    pub wind_speed_m_s: f64,
+    pub wind_dir_deg: f64,
+    pub ground_temp_c: f64,
+    pub sky_temp_c: f64,
+    pub pressure_kpa: f64,
+    pub ghi_w_m2: f64,
+    pub dni_w_m2: f64,
+    pub dhi_w_m2: f64,
+    pub rainfall_m: f64,
+    pub ground_albedo: f64,
+    pub mains_temp_c: f64,
+    pub ground_t_mean_c: f64,
+    pub ground_t_amplitude_c: f64,
+    pub ground_phase_day: f64,
+    pub day_of_year: u32,
+    pub solar_position: SolarPosition,
+    /// The observe capture: the raw (fixed-offset) day of year, the UTC
+    /// day of year and the raw (pre-clamp) mains temperature in °F, the
+    /// forcing row's diagnostics the observer reads.
+    #[cfg(feature = "observe")]
+    pub raw_day_of_year: u32,
+    #[cfg(feature = "observe")]
+    pub utc_day_of_year: u32,
+    #[cfg(feature = "observe")]
+    pub raw_mains_temp_f: f64,
+}
+
+/// The per-step weather evaluation's inputs: the resampled series, the
+/// resolved metadata (the site's values), the start offset, the mains
+/// constants and the forcing table for the time grid. The environment
+/// update and [`crate::resample_weather`] evaluate steps through it, so
+/// the run's internal series and the exposed one are one computation.
+#[derive(Clone)]
+pub(crate) struct StepWeatherEvaluator {
+    weather: Arc<WeatherTimeSeries>,
+    weather_meta: WeatherMeta,
+    weather_start_offset: usize,
+    mains_t_annual_avg_c: f64,
+    mains_dt_annual_range_c: f64,
+    mains_hemisphere: Hemisphere,
+    ground_t_mean_c: f64,
+    ground_t_amplitude_c: f64,
+    ground_phase_day: f64,
+    #[cfg(feature = "dst")]
+    civil_tz: Option<chrono_tz::Tz>,
+    forcing: Option<Arc<ForcingTable>>,
+    forcing_key: ForcingKey,
+}
+
+/// The evaluator's construction inputs and the failure a construction or
+/// a step reports.
+#[derive(Debug, Error)]
+pub enum StepWeatherError {
+    #[error("the weather series is empty")]
+    EmptyWeather,
+    #[error(transparent)]
+    Manager(#[from] EnvironmentManagerError),
+    #[error(transparent)]
+    Hares(#[from] HaresError),
+    /// A civil timezone name no timezone database resolves.
+    #[error("invalid timezone: {0}")]
+    #[cfg(feature = "dst")]
+    InvalidTimezone(String),
+}
+
+impl std::fmt::Debug for StepWeatherEvaluator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepWeatherEvaluator")
+            .field("weather_len", &self.weather.len())
+            .field("weather_start_offset", &self.weather_start_offset)
+            .field("mains_t_annual_avg_c", &self.mains_t_annual_avg_c)
+            .field("mains_dt_annual_range_c", &self.mains_dt_annual_range_c)
+            .field("ground_phase_day", &self.ground_phase_day)
+            .field("forcing_rows", &self.forcing.as_ref().map(|t| t.len()))
+            .finish()
+    }
+}
+
+impl StepWeatherEvaluator {
+    /// The evaluator for one weather and time grid: the same derivation
+    /// the manager's construction runs after the resample — the resolved
+    /// site's values into the manager's own metadata copy, the start
+    /// offset, the mains inputs, the hemisphere and phase rules, the
+    /// civil timezone, and the forcing table resolved on the
+    /// parsed-weather handle when the caller carries one (a table shared
+    /// with the handle's other constructions), built privately when not.
+    ///
+    /// `horizon_steps` sizes a privately built table; `None` sizes it to
+    /// the weather series' length, the run's own default.
+    pub(crate) fn new(
+        weather: Arc<WeatherTimeSeries>,
+        resolved_site: Option<&SiteLocation>,
+        step_secs: u32,
+        start_time: DateTime<FixedOffset>,
+        civil_timezone: Option<&str>,
+        horizon_steps: Option<u64>,
+        weather_handle: Option<&ParsedWeather>,
+    ) -> Result<Self, StepWeatherError> {
+        if weather.is_empty() {
+            return Err(StepWeatherError::EmptyWeather);
+        }
+
+        // The manager's own metadata copy: the shared weather series is
+        // never mutated, so the resolved site location (the blueprint's
+        // resolution of the HPXML site, the weather header and the
+        // config's override) is written into this copy, the values every
+        // reader here (the solar position's latitude and longitude, the
+        // hemisphere rule, the barometric elevation, the start-offset
+        // warning) read.
+        let mut weather_meta = weather.meta.clone();
+        if let Some(site_location) = resolved_site {
+            weather_meta.latitude = site_location.latitude_deg;
+            weather_meta.longitude = site_location.longitude_deg;
+            weather_meta.elevation_m = site_location.elevation_m;
+            weather_meta.timezone_offset_h = site_location.utc_offset_h;
+            weather_meta.has_embedded_location = true;
+        }
+
+        // Validate timezone offset: mismatched offset silently produces wrong solar position.
+        // The caller is responsible for providing a correctly-offset local time; this
+        // warning makes the error detectable without a breaking API change.
+        let entry_offset_secs = start_time.offset().local_minus_utc();
+        let weather_offset_secs = (weather_meta.timezone_offset_h * 3600.0).round() as i32;
+        if (entry_offset_secs - weather_offset_secs).abs() > 1800 {
+            tracing::warn!(
+                entry_offset_h = entry_offset_secs as f64 / 3600.0,
+                weather_offset_h = weather_meta.timezone_offset_h,
+                "start_time timezone offset ({:.1}h) differs from weather file timezone offset \
+                 ({:.1}h) by more than 0.5 hours; solar position will be incorrect",
+                entry_offset_secs as f64 / 3600.0,
+                weather_meta.timezone_offset_h,
+            );
+        }
+
+        // Compute start offsets: weather and schedule time series are annual starting Jan 1.
+        // Offset into them based on the simulation start time so step 0 reads the correct row.
+        let weather_start_offset =
+            compute_annual_offset(&weather.meta, start_time, step_secs, weather.len());
+        let (mains_t_annual_avg_c, mains_dt_annual_range_c) =
+            compute_mains_inputs(&weather, step_secs);
+
+        let is_southern = weather_meta.latitude < 0.0;
+        let mains_hemisphere = if is_southern {
+            Hemisphere::Southern
+        } else {
+            Hemisphere::Northern
+        };
+        let ground_phase_day = if is_southern {
+            hares_physics::ground::DEFAULT_PHASE_DAY_SOUTHERN
+        } else {
+            hares_physics::ground::DEFAULT_PHASE_DAY_NORTHERN
+        };
+        let ground_t_mean_c = mains_t_annual_avg_c;
+        let ground_t_amplitude_c = mains_dt_annual_range_c / 2.0;
+
+        // Parse civil timezone for DST-aware schedule indexing.
+        #[cfg(feature = "dst")]
+        let civil_tz: Option<chrono_tz::Tz> = match civil_timezone {
+            Some(name) => Some(
+                name.parse::<chrono_tz::Tz>()
+                    .map_err(|_| StepWeatherError::InvalidTimezone(name.to_owned()))?,
+            ),
+            None => None,
+        };
+        #[cfg(not(feature = "dst"))]
+        if civil_timezone.is_some() {
+            return Err(StepWeatherError::Manager(
+                EnvironmentManagerError::DstNotEnabled,
+            ));
+        }
+
+        let forcing_key = ForcingKey {
+            time_res_secs: step_secs,
+            local_start: start_time.naive_local(),
+            utc_offset_secs: start_time.offset().local_minus_utc(),
+            horizon_steps: horizon_steps.unwrap_or_else(|| weather.len() as u64).max(1),
+            latitude_bits: weather_meta.latitude.to_bits(),
+            longitude_bits: weather_meta.longitude.to_bits(),
+            elevation_bits: weather_meta.elevation_m.to_bits(),
+            civil_timezone: civil_timezone.map(str::to_owned),
+        };
+        let forcing = if FORCE_PER_STEP_FORCING.load(std::sync::atomic::Ordering::Relaxed) {
+            None
+        } else {
+            let horizon_steps = forcing_key.horizon_steps;
+            let build = || {
+                build_forcing_table(
+                    &weather,
+                    &weather_meta,
+                    weather_start_offset,
+                    step_secs,
+                    start_time,
+                    horizon_steps,
+                    #[cfg(feature = "dst")]
+                    civil_tz.as_ref(),
+                )
+            };
+            Some(match weather_handle {
+                Some(handle) => handle.forcing_table(&forcing_key, build)?,
+                None => {
+                    let built = Arc::new(build()?);
+                    FORCING_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    built
+                }
+            })
+        };
+
+        Ok(Self {
+            weather,
+            weather_meta,
+            weather_start_offset,
+            mains_t_annual_avg_c,
+            mains_dt_annual_range_c,
+            mains_hemisphere,
+            ground_t_mean_c,
+            ground_t_amplitude_c,
+            ground_phase_day,
+            #[cfg(feature = "dst")]
+            civil_tz,
+            forcing,
+            forcing_key,
+        })
+    }
+
+    /// The forcing row for one step, when the step's time is the row the
+    /// table holds (the manager's `forcing_row`, shared with the
+    /// evaluator's own construction key).
+    fn forcing_row(&self, now: DateTime<FixedOffset>, step: usize) -> Option<ForcingRow> {
+        let table = self.forcing.as_ref()?;
+        let res_secs = i64::from(self.forcing_key.time_res_secs);
+        let expected = self.forcing_key.local_start
+            + chrono::Duration::seconds(
+                res_secs.saturating_mul(i64::try_from(step).unwrap_or(i64::MAX)),
+            );
+        if now.naive_local() != expected
+            || now.offset().local_minus_utc() != self.forcing_key.utc_offset_secs
+        {
+            return None;
+        }
+        table.get_row(step).copied()
+    }
+
+    /// One step's weather: the channels the state's weather carries, the
+    /// values the environment update's Step 1 computes and the exposed
+    /// `resample_weather` rows carry.
+    pub(crate) fn evaluate(
+        &self,
+        now: DateTime<FixedOffset>,
+        step: u64,
+    ) -> Result<StepWeather, HaresError> {
+        let step = usize::try_from(step)
+            .map_err(|_| HaresError::InvalidState("the step counter exceeds usize".to_string()))?;
+        let weather_len = self.weather.len();
+        let weather_idx = if weather_len == 0 {
+            0
+        } else {
+            (step + self.weather_start_offset) % weather_len
+        };
+
+        let outdoor_temp_c = self.weather.get(WeatherField::DryBulbC, weather_idx);
+        let dew_point_c = self.weather.get(WeatherField::DewPointC, weather_idx);
+        let pressure_kpa = self.weather.get(WeatherField::PressureKpa, weather_idx);
+        let pressure_pa = pressure_kpa * 1000.0;
+        let ghi = self.weather.get(WeatherField::GhiWM2, weather_idx);
+        let dni = self.weather.get(WeatherField::DniWM2, weather_idx);
+        let dhi = self.weather.get(WeatherField::DhiWM2, weather_idx);
+        // The table's rows are indexed by the step and built against the
+        // construction start's wall clock. A stepping clock whose time base
+        // is not the construction's (a direct-construction caller stepping
+        // its own clock, or a step past the horizon) reads the per-step
+        // computation, whose time base is the clock's own.
+        let row = self.forcing_row(now, step);
+        let (
+            outdoor_humidity_ratio,
+            outdoor_wet_bulb_c,
+            outdoor_enthalpy_j_kg,
+            day_of_year,
+            pos,
+            mains_temp_c,
+        ) = match row {
+            Some(row) => (
+                row.humidity_ratio,
+                row.wet_bulb_c,
+                row.enthalpy_j_kg,
+                row.day_of_year,
+                SolarPosition {
+                    altitude_deg: row.solar_altitude_deg,
+                    azimuth_deg: row.solar_azimuth_deg,
+                },
+                row.mains_temp_c,
+            ),
+            None => {
+                let outdoor_humidity_ratio = humidity_ratio_from_tdp(dew_point_c, pressure_pa);
+                let outdoor_wet_bulb_c = wet_bulb_from_humidity_ratio(
+                    outdoor_temp_c,
+                    outdoor_humidity_ratio,
+                    pressure_pa,
+                );
+                let outdoor_enthalpy_j_kg =
+                    moist_air_enthalpy(outdoor_temp_c, outdoor_humidity_ratio);
+                FORCING_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                // Day-of-year from DST-aware civil time when a timezone is configured,
+                // so that consumers (solar_position, Perez irradiance, mains temp, weather field)
+                // observe the civil wall-clock day, not the fixed-offset day which may
+                // be wrong across DST transitions.
+                #[cfg(feature = "dst")]
+                let day_of_year = self
+                    .civil_tz
+                    .as_ref()
+                    .map(|tz| now.with_timezone(tz).ordinal())
+                    .unwrap_or_else(|| now.ordinal());
+                #[cfg(not(feature = "dst"))]
+                let day_of_year = now.ordinal();
+
+                let pos = solar_position(
+                    self.weather_meta.latitude,
+                    self.weather_meta.longitude,
+                    now,
+                    day_of_year,
+                );
+                let mains_temp_c = water_mains_temperature_c(
+                    self.mains_t_annual_avg_c,
+                    self.mains_dt_annual_range_c,
+                    u16::try_from(day_of_year).unwrap_or(366),
+                    self.mains_hemisphere,
+                )?;
+                (
+                    outdoor_humidity_ratio,
+                    outdoor_wet_bulb_c,
+                    outdoor_enthalpy_j_kg,
+                    day_of_year,
+                    pos,
+                    mains_temp_c,
+                )
+            }
+        };
+        #[cfg(all(feature = "dst", debug_assertions))]
+        if let Some(ref tz) = self.civil_tz {
+            let civil_ordinal = now.with_timezone(tz).ordinal();
+            debug_assert!(
+                civil_ordinal == day_of_year,
+                "DST-aware civil day-of-year ({civil_ordinal}) does not match computed day_of_year ({day_of_year})"
+            );
+        }
+
+        Ok(StepWeather {
+            outdoor_temp_c,
+            outdoor_humidity_ratio,
+            outdoor_wet_bulb_c,
+            outdoor_enthalpy_j_kg,
+            wind_speed_m_s: self.weather.get(WeatherField::WindSpeedMS, weather_idx),
+            wind_dir_deg: self.weather.get(WeatherField::WindDirDeg, weather_idx),
+            ground_temp_c: self.weather.get(WeatherField::GroundTempC, weather_idx),
+            sky_temp_c: self.weather.get(WeatherField::SkyTempC, weather_idx),
+            pressure_kpa,
+            ghi_w_m2: ghi,
+            dni_w_m2: dni,
+            dhi_w_m2: dhi,
+            rainfall_m: self.weather.get(WeatherField::LiquidPrecipM, weather_idx),
+            ground_albedo: self.weather.get(WeatherField::SurfaceAlbedo, weather_idx),
+            mains_temp_c,
+            ground_t_mean_c: self.ground_t_mean_c,
+            ground_t_amplitude_c: self.ground_t_amplitude_c,
+            ground_phase_day: self.ground_phase_day,
+            day_of_year,
+            solar_position: pos,
+            #[cfg(feature = "observe")]
+            raw_day_of_year: row.map_or_else(|| now.ordinal(), |row| row.raw_day_of_year),
+            #[cfg(feature = "observe")]
+            utc_day_of_year: row.map_or_else(|| now.to_utc().ordinal(), |row| row.utc_day_of_year),
+            #[cfg(feature = "observe")]
+            raw_mains_temp_f: water_mains_raw_fahrenheit(
+                self.mains_t_annual_avg_c,
+                self.mains_dt_annual_range_c,
+                u16::try_from(day_of_year).unwrap_or(366),
+                self.mains_hemisphere,
+            ),
+        })
+    }
+}
 
 /// Geometry required for solar irradiance projection.
 ///
@@ -156,16 +546,11 @@ pub struct EnvironmentInitOptions<'a> {
 /// Produces a complete [`EnvironmentState`] at each timestep.
 #[derive(Debug, Clone)]
 pub struct EnvironmentManager {
-    /// The weather series at the step resolution, shared with the
-    /// blueprint and every other build of it: the manager never mutates
-    /// it, so the build's `Arc` clone shares the parse and the resample.
-    weather: Arc<WeatherTimeSeries>,
     /// The schedule at the step resolution, owned per build: the
     /// assembly's unavailable-period zeroing and the schedule injection
     /// add columns to the build's own copy, cloned from the blueprint's
     /// shared series.
     schedule: ScheduleTimeSeries,
-    pub(crate) weather_meta: WeatherMeta,
     zone_types: Vec<hares_io::hpxml::ZoneType>,
     /// The building's one conditioned zone, if it has one.
     conditioned_zone: Option<ZoneId>,
@@ -175,13 +560,6 @@ pub struct EnvironmentManager {
     surfaces: Vec<SurfaceGeometry>,
     grid_override: Option<GridState>,
     zones: Vec<ZoneState>,
-    /// Offset into weather/schedule arrays for simulation start.
-    /// EPW files are annual starting Jan 1; if the simulation starts
-    /// mid-year, this shifts the index so step 0 reads the right row.
-    weather_start_offset: usize,
-    mains_t_annual_avg_c: f64,
-    mains_dt_annual_range_c: f64,
-    mains_hemisphere: Hemisphere,
     /// Raw (pre-clamp) water mains temperature in °F for the current step.
     /// Computed by `update_in_place` and consumed by observer capture.
     #[cfg(feature = "observe")]
@@ -199,12 +577,6 @@ pub struct EnvironmentManager {
     /// civil day-of-year across DST transition boundaries.
     #[cfg(feature = "observe")]
     pub(crate) obs_utc_day_of_year: u32,
-    /// Annual mean ground surface temperature [°C] for Kusuda-Achenbach model.
-    ground_t_mean_c: f64,
-    /// Half-amplitude of yearly ground surface temperature variation [°C].
-    ground_t_amplitude_c: f64,
-    /// Day of minimum ground surface temperature (phase shift).
-    ground_phase_day: f64,
     /// When set, schedule indexing uses DST-aware civil time from this IANA
     /// timezone instead of the fixed UTC offset. Weather indexing is unaffected.
     #[cfg(feature = "dst")]
@@ -224,14 +596,12 @@ pub struct EnvironmentManager {
     // Pre-allocated buffers reused each step to avoid per-step allocations.
     solar_irradiance_buf: Vec<SurfaceIrradiance>,
     schedule_values_buf: Vec<f64>,
-    /// The shared surface-independent forcing for this weather and time
-    /// grid: resolved once per grid on the construction's parsed-weather
-    /// handle (shared with every manager built from that handle, dropped
-    /// with it) and read-only afterwards. `None` when
-    /// [`FORCE_PER_STEP_FORCING`] selects the per-step computation.
-    forcing: Option<Arc<ForcingTable>>,
-    /// The grid key the forcing table was found or built under.
-    forcing_key: ForcingKey,
+    /// The per-step weather evaluation: the resampled series, the resolved
+    /// metadata (the site's values), the start offset, the mains constants
+    /// and the forcing table. The environment update and
+    /// [`crate::resample_weather`] evaluate steps through it, so the run's
+    /// internal series and the exposed one are one computation.
+    weather_evaluator: StepWeatherEvaluator,
     /// The slot writes' allocation accumulator; this crate's test build
     /// only. The dwelling's snapshot-allocation test reads it.
     #[cfg(test)]
@@ -384,56 +754,30 @@ impl EnvironmentManager {
             return Err(EnvironmentManagerError::DstNotEnabled);
         }
 
-        // The manager's own metadata copy: the shared weather series is
-        // never mutated, so the resolved site location (the blueprint's
-        // resolution of the HPXML site, the weather header and the
-        // config's override) is written into this copy, the values every
-        // reader here (the solar position's latitude and longitude, the
-        // hemisphere rule, the barometric elevation, the start-offset
-        // warning) read.
-        let mut weather_meta = weather.meta.clone();
-        if let Some(site_location) = site_location {
-            weather_meta.latitude = site_location.latitude_deg;
-            weather_meta.longitude = site_location.longitude_deg;
-            weather_meta.elevation_m = site_location.elevation_m;
-            weather_meta.timezone_offset_h = site_location.utc_offset_h;
-            weather_meta.has_embedded_location = true;
-        }
+        // The per-step weather evaluation: the same construction the
+        // exposed `resample_weather` runs, so the run's internal series
+        // and the exposed one are one computation. The manager's own
+        // metadata copy (the site's values) is the evaluator's, shared
+        // through its field.
+        let weather_evaluator = StepWeatherEvaluator::new(
+            Arc::clone(&weather),
+            site_location,
+            step_secs,
+            start_time,
+            options.civil_timezone,
+            options.horizon_steps,
+            weather_handle,
+        )
+        .map_err(|err| match err {
+            StepWeatherError::Manager(manager_error) => manager_error,
+            StepWeatherError::EmptyWeather => EnvironmentManagerError::EmptyWeather,
+            StepWeatherError::Hares(hares_error) => EnvironmentManagerError::Forcing(hares_error),
+            #[cfg(feature = "dst")]
+            StepWeatherError::InvalidTimezone(name) => {
+                EnvironmentManagerError::InvalidTimezone(name)
+            }
+        })?;
 
-        // Validate timezone offset: mismatched offset silently produces wrong solar position.
-        // The caller is responsible for providing a correctly-offset local time; this
-        // warning makes the error detectable without a breaking API change.
-        let entry_offset_secs = start_time.offset().local_minus_utc();
-        let weather_offset_secs = (weather_meta.timezone_offset_h * 3600.0).round() as i32;
-        if (entry_offset_secs - weather_offset_secs).abs() > 1800 {
-            tracing::warn!(
-                entry_offset_h = entry_offset_secs as f64 / 3600.0,
-                weather_offset_h = weather_meta.timezone_offset_h,
-                "start_time timezone offset ({:.1}h) differs from weather file timezone offset \
-                 ({:.1}h) by more than 0.5 hours; solar position will be incorrect",
-                entry_offset_secs as f64 / 3600.0,
-                weather_meta.timezone_offset_h,
-            );
-        }
-
-        // Compute start offsets: weather and schedule time series are annual starting Jan 1.
-        // Offset into them based on the simulation start time so step 0 reads the correct row.
-        let weather_start_offset =
-            compute_annual_offset(&weather.meta, start_time, step_secs, weather.len());
-        let (mains_t_annual_avg_c, mains_dt_annual_range_c) =
-            compute_mains_inputs(&weather, step_secs);
-
-        let is_southern = weather_meta.latitude < 0.0;
-        let mains_hemisphere = if is_southern {
-            Hemisphere::Southern
-        } else {
-            Hemisphere::Northern
-        };
-        let ground_phase_day = if is_southern {
-            hares_physics::ground::DEFAULT_PHASE_DAY_SOUTHERN
-        } else {
-            hares_physics::ground::DEFAULT_PHASE_DAY_NORTHERN
-        };
         let zone_types = building
             .zones
             .iter()
@@ -494,61 +838,14 @@ impl EnvironmentManager {
         let num_surfaces = surfaces.len();
         let num_schedule_cols = schedule.columns.len();
 
-        let forcing_key = ForcingKey {
-            time_res_secs: step_secs,
-            local_start: start_time.naive_local(),
-            utc_offset_secs: start_time.offset().local_minus_utc(),
-            horizon_steps: options
-                .horizon_steps
-                .unwrap_or_else(|| weather.len() as u64)
-                .max(1),
-            latitude_bits: weather_meta.latitude.to_bits(),
-            longitude_bits: weather_meta.longitude.to_bits(),
-            elevation_bits: weather_meta.elevation_m.to_bits(),
-            civil_timezone: options.civil_timezone.map(str::to_owned),
-        };
-        let forcing = if FORCE_PER_STEP_FORCING.load(std::sync::atomic::Ordering::Relaxed) {
-            None
-        } else {
-            let horizon_steps = forcing_key.horizon_steps;
-            let build = || {
-                build_forcing_table(
-                    &weather,
-                    &weather_meta,
-                    weather_start_offset,
-                    step_secs,
-                    start_time,
-                    horizon_steps,
-                    #[cfg(feature = "dst")]
-                    civil_tz.as_ref(),
-                )
-            };
-            Some(match weather_handle {
-                Some(handle) => handle.forcing_table(&forcing_key, build)?,
-                None => {
-                    let built = Arc::new(build()?);
-                    FORCING_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    built
-                }
-            })
-        };
-
         Ok(Self {
-            weather,
             schedule,
-            weather_meta,
             zone_types,
             conditioned_zone,
             ambient_locations: Vec::new(),
             surfaces,
             grid_override: None,
             zones,
-            weather_start_offset,
-            mains_t_annual_avg_c,
-            mains_dt_annual_range_c,
-            mains_hemisphere,
-            forcing,
-            forcing_key,
             #[cfg(feature = "observe")]
             raw_mains_temp_f: 0.0,
             #[cfg(feature = "observe")]
@@ -557,9 +854,6 @@ impl EnvironmentManager {
             obs_civil_day_of_year: 0,
             #[cfg(feature = "observe")]
             obs_utc_day_of_year: 0,
-            ground_t_mean_c: mains_t_annual_avg_c,
-            ground_t_amplitude_c: mains_dt_annual_range_c / 2.0,
-            ground_phase_day,
             #[cfg(feature = "dst")]
             civil_tz,
             solar_override: None,
@@ -567,6 +861,7 @@ impl EnvironmentManager {
             pv_roof_coverage: std::collections::HashMap::new(),
             solar_irradiance_buf: Vec::with_capacity(num_surfaces),
             schedule_values_buf: Vec::with_capacity(num_schedule_cols),
+            weather_evaluator,
             #[cfg(test)]
             slot_write_allocations: 0,
         })
@@ -677,9 +972,9 @@ impl EnvironmentManager {
         hares_physics::ground::kusuda_achenbach_temp(
             depth_m,
             day_of_year,
-            self.ground_t_mean_c,
-            self.ground_t_amplitude_c,
-            self.ground_phase_day,
+            self.weather_evaluator.ground_t_mean_c,
+            self.weather_evaluator.ground_t_amplitude_c,
+            self.weather_evaluator.ground_phase_day,
             hares_physics::ground::DEFAULT_SOIL_DIFFUSIVITY_M2_PER_DAY,
         )
     }
@@ -900,12 +1195,7 @@ impl EnvironmentManager {
     ) -> Result<(), HaresError> {
         let step = usize::try_from(clock.current_step())
             .expect("step counter exceeds usize on this target");
-        let weather_len = self.weather.len();
-        let weather_idx = if weather_len == 0 {
-            0
-        } else {
-            (step + self.weather_start_offset) % weather_len
-        };
+        let now = clock.current_time();
         let schedule_idx = self.compute_schedule_idx(clock);
 
         // Step 1: weather lookup and psychrometric derivations. The
@@ -913,92 +1203,20 @@ impl EnvironmentManager {
         // day of year, solar position, mains temperature) reads the shared
         // table when one was built for this weather and time grid, and is
         // computed per step when [`FORCE_PER_STEP_FORCING`] selects the
-        // pre-table path.
+        // pre-table path. The evaluation is one function, the environment
+        // update's and `resample_weather`'s own.
         #[cfg(feature = "profiling")]
         let forcing_started = std::time::Instant::now();
-        let outdoor_temp_c = self.weather.get(WeatherField::DryBulbC, weather_idx);
-        let dew_point_c = self.weather.get(WeatherField::DewPointC, weather_idx);
-        let pressure_kpa = self.weather.get(WeatherField::PressureKpa, weather_idx);
-        let pressure_pa = pressure_kpa * 1000.0;
-        let ghi = self.weather.get(WeatherField::GhiWM2, weather_idx);
-        let dni = self.weather.get(WeatherField::DniWM2, weather_idx);
-        let dhi = self.weather.get(WeatherField::DhiWM2, weather_idx);
-        let now = clock.current_time();
-        // The table's rows are indexed by the step and built against the
-        // construction start's wall clock. A stepping clock whose time base
-        // is not the construction's (a direct-construction caller stepping
-        // its own clock, or a step past the horizon) reads the per-step
-        // computation, whose time base is the clock's own.
-        let row = self.forcing_row(now, step);
-        let (
-            outdoor_humidity_ratio,
-            outdoor_wet_bulb_c,
-            outdoor_enthalpy_j_kg,
-            day_of_year,
-            pos,
-            solar_zenith_deg,
-            mains_temp_c,
-        ) = match row {
-            Some(row) => (
-                row.humidity_ratio,
-                row.wet_bulb_c,
-                row.enthalpy_j_kg,
-                row.day_of_year,
-                SolarPosition {
-                    altitude_deg: row.solar_altitude_deg,
-                    azimuth_deg: row.solar_azimuth_deg,
-                },
-                row.solar_zenith_deg,
-                row.mains_temp_c,
-            ),
-            None => {
-                let outdoor_humidity_ratio = humidity_ratio_from_tdp(dew_point_c, pressure_pa);
-                let outdoor_wet_bulb_c = wet_bulb_from_humidity_ratio(
-                    outdoor_temp_c,
-                    outdoor_humidity_ratio,
-                    pressure_pa,
-                );
-                let outdoor_enthalpy_j_kg =
-                    moist_air_enthalpy(outdoor_temp_c, outdoor_humidity_ratio);
-                FORCING_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                // Day-of-year from DST-aware civil time when a timezone is configured,
-                // so that consumers (solar_position, Perez irradiance, mains temp, weather field)
-                // observe the civil wall-clock day, not the fixed-offset day which may
-                // be wrong across DST transitions.
-                #[cfg(feature = "dst")]
-                let day_of_year = self
-                    .civil_tz
-                    .as_ref()
-                    .map(|tz| now.with_timezone(tz).ordinal())
-                    .unwrap_or_else(|| now.ordinal());
-                #[cfg(not(feature = "dst"))]
-                let day_of_year = now.ordinal();
-
-                let pos = solar_position(
-                    self.weather_meta.latitude,
-                    self.weather_meta.longitude,
-                    now,
-                    day_of_year,
-                );
-                let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
-                let mains_temp_c = water_mains_temperature_c(
-                    self.mains_t_annual_avg_c,
-                    self.mains_dt_annual_range_c,
-                    u16::try_from(day_of_year).unwrap_or(366),
-                    self.mains_hemisphere,
-                )?;
-                (
-                    outdoor_humidity_ratio,
-                    outdoor_wet_bulb_c,
-                    outdoor_enthalpy_j_kg,
-                    day_of_year,
-                    pos,
-                    solar_zenith_deg,
-                    mains_temp_c,
-                )
-            }
-        };
+        let weather = self.weather_evaluator.evaluate(now, clock.current_step())?;
+        let outdoor_temp_c = weather.outdoor_temp_c;
+        let pressure_pa = weather.pressure_kpa * 1000.0;
+        let ghi = weather.ghi_w_m2;
+        let dni = weather.dni_w_m2;
+        let dhi = weather.dhi_w_m2;
+        let day_of_year = weather.day_of_year;
+        let pos = weather.solar_position;
+        let solar_zenith_deg = (90.0 - pos.altitude_deg).max(0.0);
+        let outdoor_humidity_ratio = weather.outdoor_humidity_ratio;
         #[cfg(feature = "profiling")]
         FORCING_NANOS.fetch_add(
             forcing_started.elapsed().as_nanos() as u64,
@@ -1014,19 +1232,19 @@ impl EnvironmentManager {
             );
         }
 
-        // day_of_year is computed once (above) and passed unchanged to solar_position(),
+        // day_of_year is computed once (in the evaluator) and passed unchanged to solar_position(),
         // omni_directional_irradiance(), and perez_tilted_irradiance(). All three consumers
         // read the same let-binding, so UTC-vs-civil divergence during DST transitions
         // cannot produce a split between solar geometry and irradiance computation.
 
-        let ground_albedo = self.weather.get(WeatherField::SurfaceAlbedo, weather_idx);
+        let ground_albedo = weather.ground_albedo;
 
         // Step 2: per-surface solar irradiance -- compute into self.solar_irradiance_buf,
         // then swap into state.weather.solar_irradiance so the old Vec's capacity is
         // returned to self.solar_irradiance_buf for reuse next step.
         self.solar_irradiance_buf.clear();
         if let Some(ref overrides) = self.solar_override {
-            let idx = (step + self.weather_start_offset) % overrides.len();
+            let idx = (step + self.weather_evaluator.weather_start_offset) % overrides.len();
             self.solar_irradiance_buf.extend_from_slice(&overrides[idx]);
         } else {
             self.solar_irradiance_buf
@@ -1050,7 +1268,7 @@ impl EnvironmentManager {
                             surface.tilt_deg,
                             ground_albedo,
                             OMNI_AZIMUTH_SAMPLES,
-                            self.weather_meta.elevation_m,
+                            self.weather_evaluator.weather_meta.elevation_m,
                         )
                     } else {
                         perez_tilted_irradiance(
@@ -1066,7 +1284,7 @@ impl EnvironmentManager {
                                 azimuth_deg: surface.azimuth_deg,
                             },
                             ground_albedo,
-                            self.weather_meta.elevation_m,
+                            self.weather_evaluator.weather_meta.elevation_m,
                         )
                     }
                 }));
@@ -1142,7 +1360,7 @@ impl EnvironmentManager {
 
         let mains_payload = state.domains.mains_water.payload_mut();
         mains_payload.clear();
-        mains_payload.push(mains_temp_c);
+        mains_payload.push(weather.mains_temp_c);
         state.schedule_row = Some(schedule_idx);
         #[cfg(test)]
         if let (Some(before), Some(after)) =
@@ -1151,48 +1369,34 @@ impl EnvironmentManager {
             self.slot_write_allocations += after.saturating_sub(before);
         }
 
-        // Step 7: weather scalar fields
-        state.weather.outdoor_temp_c = outdoor_temp_c;
-        state.weather.outdoor_humidity_ratio = outdoor_humidity_ratio;
-        state.weather.outdoor_wet_bulb_c = outdoor_wet_bulb_c;
-        state.weather.outdoor_enthalpy_j_kg = outdoor_enthalpy_j_kg;
-        state.weather.wind_speed_m_s = self.weather.get(WeatherField::WindSpeedMS, weather_idx);
-        state.weather.wind_dir_deg = self.weather.get(WeatherField::WindDirDeg, weather_idx);
-        state.weather.ground_temp_c = self.weather.get(WeatherField::GroundTempC, weather_idx);
-        state.weather.sky_temp_c = self.weather.get(WeatherField::SkyTempC, weather_idx);
-        state.weather.pressure_kpa = pressure_kpa;
+        // Step 7: weather scalar fields, the evaluator's own evaluation.
+        state.weather.outdoor_temp_c = weather.outdoor_temp_c;
+        state.weather.outdoor_humidity_ratio = weather.outdoor_humidity_ratio;
+        state.weather.outdoor_wet_bulb_c = weather.outdoor_wet_bulb_c;
+        state.weather.outdoor_enthalpy_j_kg = weather.outdoor_enthalpy_j_kg;
+        state.weather.wind_speed_m_s = weather.wind_speed_m_s;
+        state.weather.wind_dir_deg = weather.wind_dir_deg;
+        state.weather.ground_temp_c = weather.ground_temp_c;
+        state.weather.sky_temp_c = weather.sky_temp_c;
+        state.weather.pressure_kpa = weather.pressure_kpa;
         state.weather.ghi_w_m2 = ghi;
         state.weather.dni_w_m2 = dni;
         state.weather.dhi_w_m2 = dhi;
         state.weather.solar_altitude_deg = pos.altitude_deg;
         state.weather.solar_azimuth_deg = pos.azimuth_deg;
-        state.weather.mains_temp_c = mains_temp_c;
+        state.weather.mains_temp_c = weather.mains_temp_c;
         #[cfg(feature = "observe")]
         {
-            self.raw_mains_temp_f = water_mains_raw_fahrenheit(
-                self.mains_t_annual_avg_c,
-                self.mains_dt_annual_range_c,
-                u16::try_from(day_of_year).unwrap_or(366),
-                self.mains_hemisphere,
-            );
-            match row {
-                Some(row) => {
-                    self.obs_raw_day_of_year = row.raw_day_of_year;
-                    self.obs_civil_day_of_year = row.day_of_year;
-                    self.obs_utc_day_of_year = row.utc_day_of_year;
-                }
-                None => {
-                    self.obs_raw_day_of_year = now.ordinal();
-                    self.obs_civil_day_of_year = day_of_year;
-                    self.obs_utc_day_of_year = now.to_utc().ordinal();
-                }
-            }
+            self.raw_mains_temp_f = weather.raw_mains_temp_f;
+            self.obs_raw_day_of_year = weather.raw_day_of_year;
+            self.obs_civil_day_of_year = day_of_year;
+            self.obs_utc_day_of_year = weather.utc_day_of_year;
         }
-        state.weather.rainfall_m = self.weather.get(WeatherField::LiquidPrecipM, weather_idx);
-        state.weather.ground_albedo = ground_albedo;
-        state.weather.ground_t_mean_c = self.ground_t_mean_c;
-        state.weather.ground_t_amplitude_c = self.ground_t_amplitude_c;
-        state.weather.ground_phase_day = self.ground_phase_day;
+        state.weather.rainfall_m = weather.rainfall_m;
+        state.weather.ground_albedo = weather.ground_albedo;
+        state.weather.ground_t_mean_c = weather.ground_t_mean_c;
+        state.weather.ground_t_amplitude_c = weather.ground_t_amplitude_c;
+        state.weather.ground_phase_day = weather.ground_phase_day;
         // Because `day_of_year` above may differ from `current_time().ordinal()`
         // when DST is active, use the DST-aware value stored in `day_of_year`
         // for consistency with mains temperature and other calendar-sensitive fields.
@@ -1237,7 +1441,15 @@ impl EnvironmentManager {
     /// The grid key this manager's forcing table was found or built under.
     #[must_use]
     pub fn forcing_key(&self) -> &ForcingKey {
-        &self.forcing_key
+        &self.weather_evaluator.forcing_key
+    }
+
+    /// The resolved weather metadata: the site's values, the leap-year
+    /// rule and the header's own fields, the copy the per-step weather
+    /// evaluation reads.
+    #[must_use]
+    pub fn weather_meta(&self) -> &WeatherMeta {
+        &self.weather_evaluator.weather_meta
     }
 
     /// The shared surface-independent forcing table this manager reads,
@@ -1245,29 +1457,7 @@ impl EnvironmentManager {
     /// computation.
     #[must_use]
     pub fn forcing_table(&self) -> Option<&Arc<ForcingTable>> {
-        self.forcing.as_ref()
-    }
-
-    /// The table's row for one step, when the step's time is the row the
-    /// table holds: the stepping clock's time must be the construction
-    /// start's wall clock advanced by the step's resolution, and the step
-    /// must sit inside the horizon. Every other step reads `None` and the
-    /// caller computes per step against the clock's own time. The row is
-    /// copied out (plain data), so no borrow of the manager lives past the
-    /// lookup.
-    fn forcing_row(&self, now: DateTime<FixedOffset>, step: usize) -> Option<ForcingRow> {
-        let table = self.forcing.as_ref()?;
-        let res_secs = i64::from(self.forcing_key.time_res_secs);
-        let expected = self.forcing_key.local_start
-            + chrono::Duration::seconds(
-                res_secs.saturating_mul(i64::try_from(step).unwrap_or(i64::MAX)),
-            );
-        if now.naive_local() != expected
-            || now.offset().local_minus_utc() != self.forcing_key.utc_offset_secs
-        {
-            return None;
-        }
-        table.get_row(step).copied()
+        self.weather_evaluator.forcing.as_ref()
     }
 }
 
@@ -1766,6 +1956,142 @@ fn determine_initial_indoor_temp_c(
             outdoor_temp_c
         }
     }
+}
+
+/// The engine's own per-step weather channels, exposed: one row per step
+/// of the configured horizon, `Time` and the weather channels of
+/// [`WeatherState`] the weather file drives, in the catalogue's names —
+/// `Outdoor Dry Bulb (C)`, `Outdoor Humidity Ratio (kg/kg)`,
+/// `Outdoor Pressure (kPa)`, `Wind Speed (m/s)`, `Sky Temperature (C)`,
+/// `GHI (W/m2)`, `DNI (W/m2)`, `DHI (W/m2)`, `Temperature - Ground (C)`
+/// and `Hot Water Mains Temperature (C)`.
+///
+/// The rows are the run's internal series: the evaluation is the same
+/// [`StepWeatherEvaluator`] the environment update calls, so the exposed
+/// channels match the run's own on bits. The wind direction is not one
+/// of them: a direction has no mean over a period, so it is not a
+/// catalogue variable.
+///
+/// # Errors
+///
+/// The weather input cannot be parsed or resampled, the timestep is not
+/// a whole positive number of seconds, or a step's evaluation fails (a
+/// non-finite mains input).
+pub fn resample_weather(
+    weather: &WeatherInput,
+    site: &SiteLocation,
+    config: &hares_io::SimulationConfig,
+) -> Result<arrow::array::RecordBatch, HaresError> {
+    use arrow::array::{Float64Array, RecordBatch, TimestampMillisecondArray};
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+
+    let step_secs = u32::try_from(config.time_res.num_seconds())
+        .map_err(|_| HaresError::InvalidState("the timestep exceeds u32 seconds".to_string()))?;
+    if step_secs == 0 {
+        return Err(HaresError::InvalidState(
+            "the timestep must be a positive number of seconds".to_string(),
+        ));
+    }
+    let steps = u64::try_from(config.duration.num_seconds())
+        .map_err(|_| HaresError::InvalidState("the duration exceeds u64 seconds".to_string()))?
+        / u64::from(step_secs);
+
+    let handle = ParsedWeather::parse(weather)?;
+    let series = handle.resampled(step_secs)?;
+    let evaluator = StepWeatherEvaluator::new(
+        series,
+        Some(site),
+        step_secs,
+        config.start_time,
+        config.civil_timezone.as_deref(),
+        // The horizon the run's own table is sized to: the weather
+        // series' length covers every step of the horizon.
+        None,
+        Some(&handle),
+    )
+    .map_err(|err| match err {
+        StepWeatherError::Manager(manager_error) => HaresError::Io(manager_error.to_string()),
+        StepWeatherError::EmptyWeather => {
+            HaresError::InvalidState("the weather series is empty".to_string())
+        }
+        StepWeatherError::Hares(hares_error) => hares_error,
+        #[cfg(feature = "dst")]
+        StepWeatherError::InvalidTimezone(name) => {
+            HaresError::InvalidState(format!("invalid civil timezone: {name}"))
+        }
+    })?;
+
+    // The channels, in the catalogue's order: the row plan's order.
+    let mut time = Vec::with_capacity(steps as usize);
+    let mut outdoor_temp = Vec::with_capacity(steps as usize);
+    let mut humidity_ratio = Vec::with_capacity(steps as usize);
+    let mut pressure = Vec::with_capacity(steps as usize);
+    let mut wind_speed = Vec::with_capacity(steps as usize);
+    let mut sky_temp = Vec::with_capacity(steps as usize);
+    let mut ghi = Vec::with_capacity(steps as usize);
+    let mut dni = Vec::with_capacity(steps as usize);
+    let mut dhi = Vec::with_capacity(steps as usize);
+    let mut ground_temp = Vec::with_capacity(steps as usize);
+    let mut mains_temp = Vec::with_capacity(steps as usize);
+
+    for step in 0..steps {
+        let now = config.start_time
+            + chrono::Duration::seconds(
+                i64::from(step_secs).saturating_mul(i64::try_from(step).unwrap_or(i64::MAX)),
+            );
+        let weather = evaluator.evaluate(now, step)?;
+        // The Time column: the step's naive local wall clock, the same
+        // convention the report's Time column carries (the wall-clock
+        // digits, read as UTC epoch milliseconds).
+        time.push(now.naive_local().and_utc().timestamp_millis());
+        outdoor_temp.push(weather.outdoor_temp_c);
+        humidity_ratio.push(weather.outdoor_humidity_ratio);
+        pressure.push(weather.pressure_kpa);
+        wind_speed.push(weather.wind_speed_m_s);
+        sky_temp.push(weather.sky_temp_c);
+        ghi.push(weather.ghi_w_m2);
+        dni.push(weather.dni_w_m2);
+        dhi.push(weather.dhi_w_m2);
+        ground_temp.push(weather.ground_temp_c);
+        mains_temp.push(weather.mains_temp_c);
+    }
+
+    let null = false;
+    let schema = Schema::new(vec![
+        Field::new(
+            "Time",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            null,
+        ),
+        Field::new("Outdoor Dry Bulb (C)", DataType::Float64, null),
+        Field::new("Outdoor Humidity Ratio (kg/kg)", DataType::Float64, null),
+        Field::new("Outdoor Pressure (kPa)", DataType::Float64, null),
+        Field::new("Wind Speed (m/s)", DataType::Float64, null),
+        Field::new("Sky Temperature (C)", DataType::Float64, null),
+        Field::new("GHI (W/m2)", DataType::Float64, null),
+        Field::new("DNI (W/m2)", DataType::Float64, null),
+        Field::new("DHI (W/m2)", DataType::Float64, null),
+        Field::new("Temperature - Ground (C)", DataType::Float64, null),
+        Field::new("Hot Water Mains Temperature (C)", DataType::Float64, null),
+    ]);
+    let batch = RecordBatch::try_new(
+        std::sync::Arc::new(schema),
+        vec![
+            std::sync::Arc::new(TimestampMillisecondArray::from(time)),
+            std::sync::Arc::new(Float64Array::from(outdoor_temp)),
+            std::sync::Arc::new(Float64Array::from(humidity_ratio)),
+            std::sync::Arc::new(Float64Array::from(pressure)),
+            std::sync::Arc::new(Float64Array::from(wind_speed)),
+            std::sync::Arc::new(Float64Array::from(sky_temp)),
+            std::sync::Arc::new(Float64Array::from(ghi)),
+            std::sync::Arc::new(Float64Array::from(dni)),
+            std::sync::Arc::new(Float64Array::from(dhi)),
+            std::sync::Arc::new(Float64Array::from(ground_temp)),
+            std::sync::Arc::new(Float64Array::from(mains_temp)),
+        ],
+    )
+    .map_err(|err| HaresError::Io(format!("the weather batch failed to build: {err}")))?;
+    Ok(batch)
 }
 
 #[cfg(test)]

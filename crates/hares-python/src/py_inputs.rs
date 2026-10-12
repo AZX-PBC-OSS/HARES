@@ -106,6 +106,31 @@ impl PyParsedWeather {
             inner: Arc::new(inner),
         })
     }
+
+    /// The file header's elevation, metres (the site resolution's
+    /// fallback when the HPXML's site declares none).
+    #[getter]
+    fn elevation_m(&self) -> f64 {
+        self.inner.meta().elevation_m
+    }
+
+    /// The file header's latitude, degrees.
+    #[getter]
+    fn latitude(&self) -> f64 {
+        self.inner.meta().latitude
+    }
+
+    /// The file header's longitude, degrees.
+    #[getter]
+    fn longitude(&self) -> f64 {
+        self.inner.meta().longitude
+    }
+
+    /// The file header's UTC offset, hours.
+    #[getter]
+    fn timezone_offset_h(&self) -> f64 {
+        self.inner.meta().timezone_offset_h
+    }
 }
 
 /// One parsed schedule (a CSV or the generated schedule), shared by

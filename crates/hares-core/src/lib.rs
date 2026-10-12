@@ -53,7 +53,7 @@ pub use dwelling::{
 pub use engine::{KernelTimer, SimulationEngine};
 pub use environment::{
     EnvironmentInitOptions, EnvironmentManager, FORCE_PER_STEP_FORCING, FORCING_COMPUTATIONS,
-    FORCING_NANOS,
+    FORCING_NANOS, resample_weather,
 };
 pub use hares_io::SimulationConfig;
 pub use hares_io::{InputRecord, InputRecordSource, InputRecords};

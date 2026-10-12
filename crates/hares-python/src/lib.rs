@@ -25,6 +25,7 @@ mod py_tariff;
 mod py_telemetry;
 mod py_water_heater;
 mod py_weather;
+mod py_weather_resample;
 mod utils;
 
 use py_actor::{
@@ -224,6 +225,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_catalogue::metrics_from_table, m)?)?;
     m.add_function(wrap_pyfunction!(py_result::build_info, m)?)?;
     m.add_function(wrap_pyfunction!(py_schema::input_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(py_weather_resample::resample_weather, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_weather, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_epw, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_psm3, m)?)?;
