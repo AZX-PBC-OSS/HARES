@@ -523,6 +523,86 @@ def test_provenance_inputs_record_input_digests() -> None:
     assert second == inputs, "two runs on the same inputs record equal dicts"
 
 
+def store_read_walk(defaults: Path):
+    """The defaults store's read set for the repo's defaults tree, walked
+    independently in load order: the loaders' rules, mirrored. Each entry
+    is (path relative to the defaults dir, bytes). A loader that stops
+    reading a file this walk covers, or reads it in another order, digests
+    a different byte stream and the pin below fails."""
+    def tomls(rel: str):
+        d = defaults / rel
+        if not d.is_dir():
+            return
+        for p in sorted(d.iterdir(), key=lambda p: p.name):
+            if p.is_file() and p.suffix == ".toml":
+                yield p.relative_to(defaults).as_posix(), p.read_bytes()
+
+    def hvac(rel: str):
+        d = defaults / rel
+        if not d.is_dir():
+            return
+        for p in sorted(d.iterdir(), key=lambda p: p.name):
+            if p.is_file() and p.suffix in (".toml", ".csv"):
+                yield p.relative_to(defaults).as_posix(), p.read_bytes()
+
+    def csv_at(rel: str):
+        p = defaults / rel
+        if p.is_file():
+            yield rel, p.read_bytes()
+
+    yield from csv_at("zip_parameters.toml")
+    yield from hvac("hvac_cooling")
+    yield from hvac("hvac_heating")
+    yield from csv_at("HVAC Multispeed Parameters.csv")
+    # The envelope LUT: the two required CSVs, then the optional one.
+    yield from csv_at("envelope/Envelope Boundary Types.csv")
+    yield from csv_at("envelope/Envelope Materials.csv")
+    yield from csv_at("envelope/Envelope Boundaries.csv")
+    yield from tomls("battery")
+    yield from tomls("envelope")
+    yield from tomls("ev")
+    yield from tomls("generator")
+    # The generator curve's typed loader rereads the curve file.
+    yield from csv_at("generator/efficiency_curve.toml")
+    yield from tomls("loads")
+    # The PV equipment defaults and the typed panel specs each read the
+    # directory, so every panel TOML is logged twice.
+    yield from tomls("pv")
+    yield from tomls("pv")
+    yield from tomls("water_heating")
+    yield from csv_at("water_heating/default_paramters.csv")
+    yield from csv_at("ev/vehicle_mapping.csv")
+
+
+def test_defaults_files_sha256_matches_an_independent_hashlib_walk() -> None:
+    """The provenance defaults digest equals an independent hashlib
+    recomputation over the store's read set in load order: each file's
+    relative path, a 0x00 separator and its bytes, concatenated, with the
+    schedule profiles file composed after the store's read (every run with
+    a defaults dir reads it)."""
+    import hashlib
+
+    dw = build(result_config())
+    result = dw.simulate()
+
+    inputs = result.provenance.inputs
+    assert inputs is not None, "a run built from files records its inputs"
+
+    hasher = hashlib.sha256()
+    for rel, data in store_read_walk(HARES_DEFAULTS):
+        hasher.update(rel.encode())
+        hasher.update(b"\x00")
+        hasher.update(data)
+    profiles = "Default Schedule Parameters.csv"
+    hasher.update(profiles.encode())
+    hasher.update(b"\x00")
+    hasher.update(Path(HARES_DEFAULTS, profiles).read_bytes())
+
+    assert inputs["defaults_files_sha256"] == hasher.hexdigest(), (
+        "the defaults digest equals the independent walk of the read set"
+    )
+
+
 def test_python_build_info_repr_is_python() -> None:
     """repr(BuildInfo) follows the Python repr conventions: Python bool
     or None for the dirty flag, a list repr for the features, None for
