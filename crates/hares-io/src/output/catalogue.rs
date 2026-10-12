@@ -83,6 +83,9 @@ pub enum CatalogueError {
         /// The second declaration's source and properties.
         second: String,
     },
+    /// A catalogue built from no variables at all.
+    #[error("a catalogue must carry variables: the definitions list is empty")]
+    NoVariables,
 }
 
 /// Where a catalogue variable comes from.
@@ -323,9 +326,18 @@ impl Catalogue {
     /// the shape `to_json` round trips. The schema-derivation tags default
     /// (every variable at minimum verbosity 0, none observe-only, none
     /// diagnostics) and no column reads a telemetry key: the definitions
-    /// carry the catalogue's variables alone. A duplicate name is an
-    /// error naming both sources.
+    /// carry the catalogue's variables alone. Every definition is
+    /// validated (`AggregationMismatch` for an aggregation that
+    /// contradicts its kind) and an empty definitions list is refused (a
+    /// catalogue must carry variables). A duplicate name is an error
+    /// naming both sources.
     pub fn from_defs(defs: Vec<VariableDef>) -> Result<Self, CatalogueError> {
+        if defs.is_empty() {
+            return Err(CatalogueError::NoVariables);
+        }
+        for def in &defs {
+            def.validate()?;
+        }
         let mut index: HashMap<String, usize> = HashMap::with_capacity(defs.len());
         for (i, def) in defs.iter().enumerate() {
             let name = def.name.to_string();
@@ -2522,7 +2534,7 @@ mod digest_tests {
 
     use hares_types::{Aggregation, Sampling, Unit, VariableKind};
 
-    use super::{Catalogue, VarTag, VariableDef, VariableSource};
+    use super::{Catalogue, CatalogueError, VarTag, VariableDef, VariableSource};
 
     fn def(name: &str, unit: Unit, kind: VariableKind, nullable: bool) -> VariableDef {
         VariableDef {
@@ -2659,6 +2671,40 @@ mod digest_tests {
                 .map(String::as_str),
             Some(digest.as_str()),
             "the schema's digest metadata is the hex of Catalogue::digest()"
+        );
+    }
+
+    #[test]
+    fn catalogue_from_defs_validates_every_definition() {
+        let mut mismatch = def(
+            "Total Energy (kWh)",
+            Unit::KilowattHour,
+            VariableKind::Energy,
+            false,
+        );
+        mismatch.aggregation = Aggregation::Mean;
+        let err = Catalogue::from_defs(vec![
+            def(
+                "Total Electric Power (kW)",
+                Unit::Kilowatt,
+                VariableKind::Power,
+                false,
+            ),
+            mismatch,
+        ])
+        .expect_err("an aggregation that contradicts the kind is refused");
+        assert!(
+            matches!(err, CatalogueError::AggregationMismatch { .. }),
+            "the typed error names the variable's mismatch: {err}"
+        );
+    }
+
+    #[test]
+    fn catalogue_from_defs_refuses_an_empty_list() {
+        let err = Catalogue::from_defs(Vec::new()).expect_err("a catalogue must carry variables");
+        assert!(
+            matches!(err, CatalogueError::NoVariables),
+            "the empty list is the no-variables error: {err}"
         );
     }
 }

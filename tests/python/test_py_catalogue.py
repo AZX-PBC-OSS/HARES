@@ -220,3 +220,85 @@ def test_metrics_from_table_rejects_a_non_stream_table(result) -> None:
     not_a_table: Any = "not a table"
     with pytest.raises(TypeError, match="__arrow_c_stream__"):
         metrics_from_table(not_a_table, result.catalogue, 900)
+
+
+def test_metrics_from_table_names_the_type_when_the_stream_is_not_a_capsule(
+    result,
+) -> None:
+    """A table whose __arrow_c_stream__ returns something else is a
+    TypeError naming the returned type and the required protocol (the
+    method must return an Arrow stream capsule)."""
+    from hares import metrics_from_table
+
+    class EvilStream:
+        def __arrow_c_stream__(
+            self, requested_schema: object | None = None
+        ) -> object:
+            return "not a capsule"
+
+    with pytest.raises(
+        TypeError, match=r"returned str, which is not an Arrow stream capsule"
+    ):
+        metrics_from_table(EvilStream(), result.catalogue, 900)
+
+
+def test_metrics_from_table_flags_a_stream_that_breaks_the_ffi_contract(
+    result,
+) -> None:
+    """A stream whose second batch carries a column the stream schema does
+    not declare violates the Arrow C stream contract: the Arrow FFI import
+    asserts on the drift. That must surface as the typed simulation error
+    naming the stream's defect, never a PanicException through the untyped
+    panic path."""
+    import pyarrow as pa
+
+    from hares import metrics_from_table
+    from hares._hares import HaresSimulationError
+
+    frame = result.reports[0].table()
+    pa_table = frame.select(
+        [TIME_COLUMN, "Total Electric Power (kW)", "Temperature - Indoor (C)"]
+    ).to_arrow()
+    batches = pa_table.to_batches(max_chunksize=40)
+    assert len(batches) >= 2, "the fixture's report carries more than one batch"
+    drifted = [
+        batch.append_column("Extra", pa.array([0.0] * batch.num_rows, pa.float64()))
+        for batch in batches[1:]
+    ]
+    reader = pa.RecordBatchReader.from_batches(batches[0].schema, [batches[0], *drifted])
+    with pytest.raises(HaresSimulationError, match="Arrow C stream contract"):
+        metrics_from_table(reader, result.catalogue, 900)
+
+
+def test_catalogue_from_json_refuses_an_empty_list() -> None:
+    """from_json('[]') is the typed error, not a 0-variable catalogue: a
+    catalogue must carry variables."""
+    from hares import Catalogue
+
+    with pytest.raises(ValueError, match="carry variables"):
+        Catalogue.from_json("[]")
+
+
+def test_catalogue_from_json_refuses_an_aggregation_mismatch(result) -> None:
+    """from_json validates every definition: an Energy variable declared
+    with the Mean aggregation, the combo the assembly path rejects, is
+    the typed error naming the mismatch, not a rebuilt catalogue."""
+    import json
+
+    from hares import Catalogue
+
+    defs: list[dict[str, Any]] = json.loads(result.catalogue.to_json())
+    energy = next(d for d in defs if d["kind"] == "Energy")
+    energy["aggregation"] = "Mean"
+    with pytest.raises(ValueError, match="contradicts its kind"):
+        Catalogue.from_json(json.dumps(defs))
+
+
+def test_catalogues_from_different_dwellings_compare_equal(result) -> None:
+    """Two identical-def catalogues from different dwellings are equal:
+    the catalogue's equality reads the variables alone, not which dwelling
+    produced it. One side is a fresh build, the other the finished run's
+    catalogue."""
+    first = build(result_config()).catalogue()
+    assert first == result.catalogue
+    assert first.digest() == result.catalogue.digest()

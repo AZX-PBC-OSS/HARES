@@ -3142,7 +3142,10 @@ def field_bounds_table() -> dict[str, tuple[float, float]]: ...
 # table), `time_res` the step resolution in whole seconds. A table whose
 # consecutive Time values are not exactly time_res apart, or that carries
 # a Step Count column, raises HaresSimulationError naming the mismatch,
-# never wrong metrics.
+# never wrong metrics. Per-batch schema drift below the stream schema
+# (Float32 under Float64) is reinterpreted by the Arrow C stream interface
+# itself (pyarrow's pa.table behaves identically); the guarantee covers
+# schema-level mismatches (verified caught).
 def metrics_from_table(
     table: ArrowStreamExportable,
     catalogue: Catalogue,

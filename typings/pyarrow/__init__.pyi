@@ -3,8 +3,9 @@
 The published ``pyarrow`` wheel ships no py.typed marker and the community
 ``pyarrow-stubs`` package stops at pyarrow 20 with unknowns in its parquet
 signatures, so this stub models the Arrow surface HARES uses: building
-numeric and string tables, attaching schema metadata, and reading float
-columns back.
+numeric and string tables, attaching schema metadata, reading float
+columns back, and the record-batch stream surface the Arrow C stream
+interface pins build their streams with.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ class Table:
 
     def column(self, i: int | str) -> ChunkedArray: ...
     def replace_schema_metadata(self, metadata: dict[bytes, bytes] | None) -> Table: ...
+    def to_batches(self, max_chunksize: int | None = ...) -> list[RecordBatch]: ...
 
     @classmethod
     def from_pandas(
@@ -52,6 +54,24 @@ class Table:
     ) -> Table: ...
 
     def __repr__(self) -> str: ...
+
+
+class RecordBatch:
+    num_rows: int
+    schema: Schema
+
+    def append_column(self, name: str, column: Array) -> RecordBatch: ...
+
+
+class RecordBatchReader:
+    schema: Schema
+
+    def __arrow_c_stream__(self, requested_schema: object | None = None) -> object: ...
+
+    @classmethod
+    def from_batches(
+        cls, schema: Schema, batches: Sequence[RecordBatch]
+    ) -> RecordBatchReader: ...
 
 
 def array(values: Sequence[float] | Sequence[str], type: DataType | None = ...) -> Array: ...

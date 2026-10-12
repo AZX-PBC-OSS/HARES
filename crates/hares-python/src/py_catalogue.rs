@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyCapsule, PyList, PyType};
 use pyo3_arrow::PyTable;
 
+use hares_types::panic_hook::panic_payload_to_string;
 use hares_types::{AcrossHomes, Aggregation, Sampling, VariableKind};
 
 use crate::py_config::WholeSeconds;
@@ -271,8 +272,12 @@ impl PyCatalogue {
 /// resolution in whole seconds (`int` or `datetime.timedelta`): a table
 /// whose consecutive `Time` values are not exactly `time_res` apart, or
 /// that carries a `Step Count` column, is an error naming the mismatch,
-/// never wrong metrics. `setpoint_deadband_c` is the config's comfort
-/// band when the run declared one.
+/// never wrong metrics. Per-batch schema drift below the stream schema
+/// (Float32 under Float64) is reinterpreted by the Arrow C stream
+/// interface itself (pyarrow's `pa.table` behaves identically); the
+/// guarantee covers schema-level mismatches (verified caught).
+/// `setpoint_deadband_c` is the config's comfort band when the run
+/// declared one.
 #[pyfunction(name = "metrics_from_table")]
 #[pyo3(signature = (table, catalogue, time_res, setpoint_deadband_c = None))]
 pub fn metrics_from_table(
@@ -294,13 +299,34 @@ pub fn metrics_from_table(
         ))
     })?;
     let capsule = capsule.cast::<PyCapsule>().map_err(|_| {
+        let returned = capsule
+            .get_type()
+            .name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "<unknown>".to_string());
         PyTypeError::new_err(format!(
             "metrics_from_table: the object's __arrow_c_stream__ returned \
-             {type_name}'s something that is not an Arrow stream capsule"
+             {returned}, which is not an Arrow stream capsule (the protocol \
+             requires __arrow_c_stream__ to return a PyCapsule)"
         ))
     })?;
-    let table = PyTable::from_arrow_pycapsule(capsule)
-        .map_err(|err| PyValueError::new_err(format!("metrics_from_table: {err}")))?;
+    // A stream whose batches disagree with the stream's schema trips an
+    // arrow-rs assert inside the FFI import, so the error mapping above
+    // never sees it and the panic would surface as a PanicException. The
+    // import is caught here and the defect reported as the typed error.
+    let table = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PyTable::from_arrow_pycapsule(capsule)
+    })) {
+        Ok(Ok(table)) => table,
+        Ok(Err(err)) => return Err(PyValueError::new_err(format!("metrics_from_table: {err}"))),
+        Err(payload) => {
+            let defect = panic_payload_to_string(payload);
+            return Err(HaresSimulationError::new_err(format!(
+                "metrics_from_table: the stream violates the Arrow C stream \
+                 contract (a batch does not match the stream's schema): {defect}"
+            )));
+        }
+    };
     let batches: Vec<arrow::record_batch::RecordBatch> = table.batches().to_vec();
     let catalogue: Arc<hares_io::Catalogue> = catalogue.borrow().inner.clone();
 
@@ -322,17 +348,20 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use arrow::record_batch::RecordBatch;
+    use arrow::array::Float64Array;
+    use arrow::datatypes::Field;
+    use arrow::record_batch::{RecordBatch, RecordBatchIterator};
     use hares_core::{Dwelling, DwellingConfig, RunMetrics, SimulationEngine};
     use hares_io::Catalogue;
     use pyo3::Py;
     use pyo3::Python;
     use pyo3::types::{PyAnyMethods, PyCapsule};
-    use pyo3_arrow::PyTable;
+    use pyo3_arrow::{PyRecordBatchReader, PyTable};
 
     use super::{PyCatalogue, metrics_from_table};
     use crate::conversions::batches_to_py_table;
     use crate::py_config::WholeSeconds;
+    use crate::py_dwelling::HaresSimulationError;
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -619,6 +648,52 @@ mod tests {
                 &in_run,
                 &from_binding.inner,
                 "the python binding vs the run's own",
+            );
+        });
+    }
+
+    /// A stream whose second batch carries a column the stream schema does
+    /// not declare violates the Arrow C stream contract: the Arrow FFI
+    /// import asserts on the drift. That must surface as the typed
+    /// simulation error naming the stream's defect, never a PanicException
+    /// through the untyped panic path.
+    #[test]
+    fn metrics_from_table_flags_a_stream_that_breaks_the_ffi_contract() {
+        use arrow::array::ArrayRef;
+        use arrow::datatypes::{DataType, Schema};
+
+        let (_, catalogue, batches) = acceptance_run();
+        let (batch_schema, mut columns, row_count) = batches[1].clone().into_parts();
+        let mut fields: Vec<_> = batch_schema.fields().iter().cloned().collect();
+        fields.push(Arc::new(Field::new("Extra", DataType::Float64, false)));
+        columns.push(Arc::new(Float64Array::from(vec![0.0; row_count])) as ArrayRef);
+        let drifted = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .expect("the drifted batch builds");
+        let reader = RecordBatchIterator::new(
+            vec![Ok(batches[0].clone()), Ok(drifted)],
+            batches[0].schema(),
+        );
+        Python::attach(|py| {
+            let stream =
+                Py::new(py, PyRecordBatchReader::new(Box::new(reader))).expect("the reader holds");
+            let py_catalogue =
+                Py::new(py, PyCatalogue { inner: catalogue }).expect("the catalogue holds");
+            let Err(err) = metrics_from_table(
+                py,
+                stream.bind(py).as_any(),
+                py_catalogue.bind(py),
+                WholeSeconds(900),
+                None,
+            ) else {
+                panic!("the contract-violating stream is refused");
+            };
+            assert!(
+                err.is_instance_of::<HaresSimulationError>(py),
+                "the FFI assert surfaces as the typed simulation error, got: {err}"
+            );
+            assert!(
+                err.to_string().contains("Arrow C stream contract"),
+                "the error names the stream's defect: {err}"
             );
         });
     }
