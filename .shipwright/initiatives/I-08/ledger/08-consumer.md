@@ -1169,10 +1169,12 @@ no gated field hashes the frame, and `probe.py`'s hashes are compared only
 within one engine build (consumer `AGENTS.md`: "do not compare numbers
 across engine builds").
 
-**State:** committed the consumer `02bd468` (branch `row/cn1-report-api`, cut
+**State:** committed the consumer `f21e34c` (branch `row/cn1-report-api`, cut
 from the closed rename row's tip `cf7f2c3` — the branch `main` still sits at
 the pre-rename pin `78568b5`, which cannot drive this engine) and the engine
-`d790a6f3` (branch `row/r72-cn1`, a worktree of the row base `e3bc4870`).
+`d790a6f3` + `d3119aa9` (branch `row/r72-cn1`, a worktree of the row base
+`e3bc4870`; the rename on the first, the report pyclasses' equality and
+pickling and the setpoint readback on the second).
 The surface audit first: the RunResult/reports/health surfaces rows 43a, 55
 and 57 landed satisfy the entry's list as it stands — `RunResult.reports`
 (the memory report's `table()` frame), `.metrics` (the named `RunMetrics`
@@ -1183,10 +1185,10 @@ provenance's build identity and catalogue digest, the parsed-content handles
 `ParsedDefaults(base, files=...)`), `input_schema()` with its override
 classes and removed keys, and the `ReportSpec`/`Selection`/`Destination`/
 `Frequency` constructors — and three pieces were missing, all landed on the
-engine commit. One: the dwelling-level defaults keyword is still
+engine commits. One: the dwelling-level defaults keyword is still
 `defaults_path` — the PY-2 rename the phase-1 fold did not carry (the folded
-row-35 commit kept the old keyword and added no removed-keys row). Landed
-here: the three constructors take `defaults=`, the `defaults_path`
+row-35 commit kept the old keyword and added no removed-keys row). Landed on
+`d790a6f3`: the three constructors take `defaults=`, the `defaults_path`
 `PythonKeyword` REMOVED_KEYS row names it, the gym's `GymDwellingConfig`
 field and `SimulationPlan` renamed with it, the stub and docs updated, and
 every engine caller migrated (about 40 test files); RED first, four failures
@@ -1200,19 +1202,20 @@ selection and died on the pyclass instead. Three: `validate()`'s
 resolved-model readback carries the active `SetpointSource` per side (the
 `setpoints` section, the first non-None across the equipment specs, serde's
 own tagged form), which the injector's setpoint guard reads; pinned by
-`test_validate_readback_carries_the_active_setpoint_sources`. The consumer
-commit then lands the entry's Change list whole, as the row 72 record in
-`00-schedule.md` carries; the acceptance cases (fifteen, added or replacing,
-across seven suites), the RED witnesses (the four rename failures at the
-engine base; the consumer's RED is the forced migration itself — the old
-consumer against this engine fails 87 of 360 cases at the removed surface,
-witnessed before the migration ran), the gates on both repos, the census's
-residual hits (the tests' own absence-pins, the coverage rule's split
-literal, the mandated case name, and the second grep's exclusions grown by
-the consumer's own `Grid`/`TwinOutput` constructors — no call site among
-them) and the B0 account (twice identical at the final engine state; the
-shipped baseline's compare the recorded 260-path divergent-audit-line delta)
-are all in the row 72 State, which is the row's record.
+`test_validate_readback_carries_the_active_setpoint_sources`. Both landed on
+`d3119aa9`. The consumer commit then lands the entry's Change list whole, as
+the row 72 record in `00-schedule.md` carries; the acceptance cases
+(fifteen, added or replacing, across seven suites), the RED witnesses (the
+four rename failures at the engine base; the consumer's RED is the forced
+migration itself — the old consumer against this engine fails 87 of 360
+cases at the removed surface, witnessed before the migration ran), the gates
+on both repos, the census's residual hits (the tests' own absence-pins, the
+coverage rule's split literal, the mandated case name, and the second grep's
+exclusions grown by the consumer's own `Grid`/`TwinOutput` constructors — no
+call site among them) and the B0 account (twice identical at the final
+engine state; the shipped baseline's compare the recorded 260-path
+divergent-audit-line delta) are all in the row 72 State, which is the row's
+record.
 
 ## CN-2: the calibration system arms a strict health policy
 
