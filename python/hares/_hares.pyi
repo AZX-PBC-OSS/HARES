@@ -3293,6 +3293,10 @@ class Dwelling:
 # whose deadband target holds a narrower band, or a dwelling whose
 # equipment is missing or would reject its signal raises ValueError before
 # any signal reaches any dwelling.
+#
+# A step whose observation read fails ends that environment with its
+# error: terminated=True, info["error_msg"] holding the error, and its
+# row of the buffer set to NaN; no substitute vector is produced.
 def batch_step(
     dwellings: list[Dwelling],
     actions: list[list[float]],

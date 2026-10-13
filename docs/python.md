@@ -252,6 +252,13 @@ that buffer by default; a `VecDwellingGymEnv` constructed with
 `copy=False` returns the buffer itself, overwritten by the next `step()` or
 `reset()`, for callers that consume each observation before stepping again.
 
+Two contracts the batched step inherits from the engine. A step whose
+observation read fails ends that environment with its error:
+`terminated=True`, the error named in `info["error_msg"]`, and its row of
+the buffer set to NaN. And a Python actor's publication made outside
+`decide()` lands at the next drain (the next `decide()`'s return); one
+made after the last drain is dropped.
+
 ## Results
 
 One run carries one result: `Dwelling.simulate()` and

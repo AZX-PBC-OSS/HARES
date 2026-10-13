@@ -10953,6 +10953,166 @@ fn cfg_gated_helper() {
         );
     }
 
+    /// The trait-default `reseed` pin's stub: it declares a random stream
+    /// and every other trait requirement, and deliberately keeps the
+    /// trait-default `reseed` refusal.
+    struct NonReseedingEquipment {
+        descriptor: EquipmentDescriptor,
+        telemetry: Telemetry,
+        core_output: CoreOutput,
+    }
+
+    impl NonReseedingEquipment {
+        fn new(name: &str) -> Self {
+            Self {
+                descriptor: EquipmentDescriptor {
+                    id: EquipmentId(0),
+                    name: name.to_string(),
+                    end_use: EndUse::OTHER,
+                    equipment_type: Cow::Borrowed("NonReseedingEquipment"),
+                    zone: Some(ZoneId(1)),
+                    fuel: FuelType::Electric,
+                    stage: ExecutionStage::Independent,
+                    control_capabilities: ControlCapabilities::empty(),
+                    core_capabilities: CoreCapabilities::empty(),
+                    telemetry_fields: vec![],
+                    zone_type: None,
+                },
+                telemetry: Telemetry::with_capacity(0),
+                core_output: CoreOutput::default(),
+            }
+        }
+    }
+
+    impl Equipment for NonReseedingEquipment {
+        fn descriptor(&self) -> &EquipmentDescriptor {
+            &self.descriptor
+        }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
+        fn rename(&mut self, name: String) {
+            self.descriptor.name = name;
+        }
+
+        fn set_equipment_id(
+            &mut self,
+            id: EquipmentId,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+        }
+
+        fn ports(&self) -> &[PortDeclaration] {
+            &[]
+        }
+
+        fn init(
+            &mut self,
+            _config: &EquipmentConfig,
+            _env: &hares_types::EnvironmentState,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn update_control(&mut self, _env: &hares_types::EnvironmentState) -> OperatingMode {
+            OperatingMode::Off
+        }
+
+        fn step(
+            &mut self,
+            _env: &hares_types::EnvironmentState,
+            _dt: Duration,
+            _ports: &mut PortSlots,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn telemetry(&self) -> &Telemetry {
+            &self.telemetry
+        }
+
+        fn core_output(&self) -> &CoreOutput {
+            &self.core_output
+        }
+
+        fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+            Ok(vec![])
+        }
+
+        fn load_state(
+            &mut self,
+            _state: &[u8],
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn apply_signal(
+            &mut self,
+            _signal: &ControlSignal,
+        ) -> std::result::Result<(), hares_types::HaresError> {
+            Ok(())
+        }
+
+        fn uses_rng_stream(&self) -> bool {
+            true
+        }
+
+        // `reseed` deliberately left at its trait default: the refusal
+        // this pin's test asserts.
+    }
+
+    /// A seeded component whose class does not implement the trait's
+    /// `reseed` fails the dwelling's reseed naming it (the
+    /// 'reseeding equipment ...' / 'reseeding actor ...' wrap), instead
+    /// of silently keeping its old stream.
+    #[test]
+    fn reseed_refuses_when_a_seeded_component_keeps_the_default_reseed() {
+        let base_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
+
+        // Equipment: the stub declares a random stream (`uses_rng_stream`)
+        // and does not implement `reseed`.
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
+            .expect("build dwelling");
+        replace_equipment_for_test(
+            &mut dwelling,
+            vec![Box::new(NonReseedingEquipment::new("StreamlessEq"))],
+        );
+        let err = dwelling
+            .reseed(7)
+            .expect_err("the trait-default reseed must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("reseeding equipment 'StreamlessEq'")
+                && msg.contains("no reseedable random stream"),
+            "the equipment's refusal must wrap naming it, got: {msg}"
+        );
+
+        // Actor: a registered stub whose name the seeded-stream record
+        // lists, its class not implementing `reseed` either.
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&base_path, Some(Vec::new()))
+            .expect("build dwelling");
+        dwelling
+            .add_actor(Box::new(StubActor {
+                name: "StreamlessActor".to_string(),
+            }))
+            .expect("the actor registers");
+        dwelling
+            .seeded_stream_actors
+            .push("StreamlessActor".to_string());
+        let err = dwelling
+            .reseed(7)
+            .expect_err("the trait-default reseed must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("reseeding actor 'StreamlessActor'")
+                && msg.contains("no reseedable random stream"),
+            "the actor's refusal must wrap naming it, got: {msg}"
+        );
+    }
+
     /// The water-heater bug class: equipment deposits reactive power at the
     /// electrical port while reporting `flows.reactive_power_kvar = None` in
     /// `CoreOutput`. The port/core consistency validator must fail the step.
