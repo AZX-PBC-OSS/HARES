@@ -1024,6 +1024,18 @@ class Actor:
 # Telemetry
 # ---------------------------------------------------------------------------
 
+class ObservationPlan:
+    """The frozen per-step observation layout: every field of an
+    environment's field list resolved once, at plan build, to a typed
+    source, failing there on an unknown field and naming it. Every step
+    reads through the plan into a caller-owned buffer, the values and NaN
+    handling ``to_observation_vec`` reports."""
+
+    @property
+    def n_fields(self) -> int: ...
+    @property
+    def fields(self) -> list[str]: ...
+
 class Telemetry:
     def zone(self) -> dict[str, Any]: ...
     # Non-authoritative diagnostics dict; use Dwelling.equipment()[...].core_output
@@ -3232,6 +3244,8 @@ class Dwelling:
     def has_equipment_lut(self, name: str, lut_type: LutType) -> bool: ...
     def validate_control(self, name: str, signal: ControlSignal) -> bool: ...
     def reset_with_seed(self, seed: int) -> None: ...
+    def observation_plan(self, fields: list[str]) -> ObservationPlan: ...
+    def observe_into(self, plan: ObservationPlan, out: Any) -> None: ...
     def save_state(self) -> bytes: ...
     def load_state(self, state: bytes) -> None: ...
     def save_checkpoint(self) -> bytes: ...
@@ -3281,10 +3295,11 @@ class Dwelling:
 def batch_step(
     dwellings: list[Dwelling],
     actions: list[list[float]],
-    observation_fields: list[str],
+    plans: list[ObservationPlan],
     action_layout: list[tuple[str, str]],
     signal_type_by_equipment: dict[str, str],
     action_bounds: list[tuple[float, float]],
+    obs_out: Any,
 ) -> list[dict[str, Any]]: ...
 
 def clip_action(

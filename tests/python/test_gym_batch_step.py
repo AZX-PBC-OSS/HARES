@@ -2,15 +2,31 @@
 
 Lives outside test_gym_env.py because ``batch_step`` needs neither numpy nor
 gymnasium — these tests must run even where those optional deps are absent.
+The batch's observations are read into the caller's own buffer through its
+buffer protocol, so every call here passes a stdlib ``array.array('d')``
+buffer: the same protocol a numpy array exposes, without numpy.
 """
 
 from __future__ import annotations
+
+from array import array
 
 import pytest
 from conftest import make_dwelling
 
 _OBS_FIELDS = ["total_power_kw", "outdoor_temp"]
 _SETPOINT_BOUNDS = [(-50.0, 80.0)]
+
+
+def _zero_buffer(n_rows: int, width: int) -> array:
+    """A zeroed float64 buffer for ``n_rows`` environments of ``width``
+    observation fields: any writable C-contiguous float64 buffer protocol
+    view is accepted, a numpy array among them."""
+    return array("d", bytes(8 * width * n_rows))
+
+
+def _plan(dwelling, fields=_OBS_FIELDS):
+    return dwelling.observation_plan(fields)
 
 
 def test_batch_step_clips_a_deadband_to_the_bounds_it_is_given():
@@ -28,10 +44,11 @@ def test_batch_step_clips_a_deadband_to_the_bounds_it_is_given():
     results = batch_step(
         [dwelling],
         [[30.0, 21.0]],
-        _OBS_FIELDS,
+        [_plan(dwelling)],
         [("Gas Furnace", "deadband_c"), ("Gas Furnace", "heat_c")],
         {"Gas Furnace": "ThermalSetpoint"},
         [band, (-50.0, 80.0)],
+        _zero_buffer(1, len(_OBS_FIELDS)),
     )
     assert results[0]["info"]["warning_count"] == 0.0
 
@@ -44,10 +61,11 @@ def test_batch_step_refuses_bounds_that_do_not_match_the_layout():
         batch_step(
             [dwelling],
             [[21.0]],
-            _OBS_FIELDS,
+            [_plan(dwelling)],
             [("Gas Furnace", "heat_c")],
             {"Gas Furnace": "ThermalSetpoint"},
             [],
+            _zero_buffer(1, len(_OBS_FIELDS)),
         )
 
 
@@ -67,10 +85,11 @@ def test_batch_step_refuses_a_bad_bounds_pair(pair, reason):
         batch_step(
             [dwelling],
             [[21.0]],
-            _OBS_FIELDS,
+            [_plan(dwelling)],
             [("Gas Furnace", "heat_c")],
             {"Gas Furnace": "ThermalSetpoint"},
             [pair],
+            _zero_buffer(1, len(_OBS_FIELDS)),
         )
 
 
@@ -87,10 +106,11 @@ def test_batch_step_refuses_deadband_bounds_wider_than_a_dwellings_band():
         batch_step(
             [dwelling],
             [[1.0, 21.0]],
-            _OBS_FIELDS,
+            [_plan(dwelling)],
             [("Gas Furnace", "deadband_c"), ("Gas Furnace", "heat_c")],
             {"Gas Furnace": "ThermalSetpoint"},
             [(low, MAX_TANK_THERMOSTAT_BAND_C), (-50.0, 80.0)],
+            _zero_buffer(1, len(_OBS_FIELDS)),
         )
 
 
@@ -117,10 +137,11 @@ def test_batch_step_refusal_reaches_no_dwelling():
         batch_step(
             [first, second],
             [[70.0], [float("nan")]],
-            _OBS_FIELDS,
+            [_plan(first), _plan(second)],
             [("Gas Furnace", "cool_c")],
             {"Gas Furnace": "ThermalSetpoint"},
             _SETPOINT_BOUNDS,
+            _zero_buffer(2, len(_OBS_FIELDS)),
         )
     first.step()
     assert not any("control apply failed" in w for w in first.take_warnings())
@@ -143,10 +164,11 @@ def test_batch_step_refuses_a_missing_unit_before_any_dwelling_changes():
         batch_step(
             [first, second],
             [[27.0], [27.0]],
-            _OBS_FIELDS,
+            [_plan(first), _plan(second)],
             [("Gas Furnace", "heat_c")],
             {"Gas Furnace": "ThermalSetpoint"},
             _SETPOINT_BOUNDS,
+            _zero_buffer(2, len(_OBS_FIELDS)),
         )
     first.step()
     untouched.step()
@@ -157,7 +179,10 @@ def test_batch_step_refuses_a_missing_unit_before_any_dwelling_changes():
 def test_batch_step_with_no_actions_steps_every_dwelling():
     from hares._hares import batch_step
 
-    results = batch_step([make_dwelling(duration_s=600)], [], _OBS_FIELDS, [], {}, [])
+    dwelling = make_dwelling(duration_s=600)
+    results = batch_step(
+        [dwelling], [], [_plan(dwelling)], [], {}, [], _zero_buffer(1, len(_OBS_FIELDS))
+    )
     assert len(results) == 1
 
 
@@ -168,8 +193,10 @@ def test_a_failed_row_carries_the_last_observation():
     from hares._hares import batch_step
 
     short, living = make_dwelling(duration_s=120), make_dwelling(duration_s=600)
+    plans = [_plan(short), _plan(living)]
+    buffer = _zero_buffer(2, len(_OBS_FIELDS))
     args = (
-        _OBS_FIELDS,
+        plans,
         [("Gas Furnace", "heat_c")],
         {"Gas Furnace": "ThermalSetpoint"},
         _SETPOINT_BOUNDS,
@@ -177,25 +204,25 @@ def test_a_failed_row_carries_the_last_observation():
     actions = [[21.0], [21.0]]
 
     # The short home's sim holds two steps of 60 s; both homes step them.
-    batch_step([short, living], actions, *args)
-    second = batch_step([short, living], actions, *args)
+    batch_step([short, living], actions, *args, buffer)
+    second = batch_step([short, living], actions, *args, buffer)
     assert second[0]["step"] is not None
+    last_obs = bytes(buffer)
 
     # The third step fails the short home (past its end) while the living
     # home steps on.
-    third = batch_step([short, living], actions, *args)
+    third = batch_step([short, living], actions, *args, buffer)
     failed, ok = third
     assert failed["step"] is None
     assert failed["terminated"] is True
     assert ok["step"] is not None
     assert ok["terminated"] is False
-    assert len(failed["obs"]) == len(_OBS_FIELDS), (
-        "the failed row's obs must be the last observation, not an empty list"
-    )
-    assert len(ok["obs"]) == len(_OBS_FIELDS)
-    assert failed["obs"] == second[0]["obs"], (
-        "the failed row's obs must be the dwelling's last observation: the "
-        "failed step changed nothing"
+    width = len(_OBS_FIELDS)
+    failed_row = buffer[:width]
+    second_row = array("d", last_obs[: 8 * width])
+    assert failed_row == second_row, (
+        "the failed row's observation must be the dwelling's last "
+        "observation: the failed step changed nothing"
     )
 
 
@@ -210,10 +237,11 @@ def test_batch_step_rows_carry_no_reward_key():
     results = batch_step(
         [dwelling],
         [[21.0]],
-        _OBS_FIELDS,
+        [_plan(dwelling)],
         [("Gas Furnace", "heat_c")],
         {"Gas Furnace": "ThermalSetpoint"},
         _SETPOINT_BOUNDS,
+        _zero_buffer(1, len(_OBS_FIELDS)),
     )
     row = results[0]
     assert "reward" not in row
@@ -231,10 +259,11 @@ def test_batch_step_info_reports_zero_warnings_on_clean_step():
     results = batch_step(
         [dwelling],
         [[21.0]],
-        _OBS_FIELDS,
+        [_plan(dwelling)],
         [("Gas Furnace", "heat_c")],
         {"Gas Furnace": "ThermalSetpoint"},
         _SETPOINT_BOUNDS,
+        _zero_buffer(1, len(_OBS_FIELDS)),
     )
     info = results[0]["info"]
     assert info["warning_count"] == 0.0
@@ -255,10 +284,11 @@ def test_batch_step_surfaces_rejected_control_signal_in_info():
     results = batch_step(
         [dwelling],
         [[70.0]],
-        _OBS_FIELDS,
+        [_plan(dwelling)],
         [("Gas Furnace", "cool_c")],
         {"Gas Furnace": "ThermalSetpoint"},
         _SETPOINT_BOUNDS,
+        _zero_buffer(1, len(_OBS_FIELDS)),
     )
     info = results[0]["info"]
     assert info["warning_count"] >= 1.0

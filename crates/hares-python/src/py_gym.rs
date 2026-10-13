@@ -1,10 +1,17 @@
 //! Python bindings for Gymnasium RL environment.
 
 use std::collections::HashMap;
+use std::slice;
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 use hares_types::ControlSignal;
 use hares_types::panic_hook::{self, PanicHookGuard};
 use pyo3::Python;
+use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -15,10 +22,45 @@ use crate::py_dwelling::{
     FATAL_DWELLING_PREFIX, PyDwelling, step_result_to_py_dict, zone_keys_for_step,
 };
 
-/// One batched RL step result.
+/// The frozen observation plan, built once per episode against a built
+/// dwelling and read every step: the Python handle over
+/// [`hares_core::ObservationPlan`].
+#[pyclass(name = "ObservationPlan")]
+pub struct PyObservationPlan {
+    pub(crate) plan: Arc<hares_core::ObservationPlan>,
+}
+
+#[pymethods]
+impl PyObservationPlan {
+    /// The number of fields the plan fills, in plan order.
+    #[getter]
+    pub fn n_fields(&self) -> usize {
+        self.plan.len()
+    }
+
+    /// The field names the plan was built from, in plan order.
+    #[getter]
+    pub fn fields(&self) -> Vec<String> {
+        self.plan.field_names()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ObservationPlan(n_fields={})", self.plan.len())
+    }
+}
+
+/// Test-only fault switch for the batch observation read: the environment
+/// index whose observation read fails. `usize::MAX` faults nobody. Lives
+/// in `hares-python` (the crate under test), never in `hares-core`'s
+/// `observe_into`: `cfg(test)` is set only for the crate under test.
+#[cfg(test)]
+pub(crate) static TEST_OBSERVATION_FAULT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// One batched RL step result. The observation is not carried here: the
+/// batch writes each environment's row into the caller's buffer, in
+/// place, through its buffer protocol.
 #[derive(Debug, Clone)]
 struct StepResult {
-    obs: Vec<f64>,
     /// The step dict `PyDwelling.step()` returns, so the caller's
     /// `reward_fn` sees the same context on the batch path as on a single
     /// dwelling's step. `None` when the step failed: a failed step carries
@@ -26,7 +68,10 @@ struct StepResult {
     step: Option<hares_core::StepResult>,
     terminated: bool,
     truncated: bool,
-    info: HashMap<String, f64>,
+    /// The per-step info entries, `&'static str` keys so a step allocates
+    /// no key strings; the dict is built only for the keys set in that
+    /// step.
+    info: Vec<(&'static str, f64)>,
     error_msg: Option<String>,
     /// Warnings drained from the dwelling after this step (e.g.
     /// control-dispatch rejections). Surfaced under `info["warnings"]` so RL
@@ -34,11 +79,71 @@ struct StepResult {
     warnings: Vec<String>,
 }
 
-fn observation_for_fields(dwelling: &PyDwelling, fields: &[String]) -> Result<Vec<f64>, String> {
-    let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
-    let mut guard = dwelling.acquire_string()?;
-    guard.observation_vec(&refs).map_err(|e| e.to_string())
+/// The batch path reads each environment's observation through this one
+/// wrapper around `Dwelling::observe_into`: the plan fills the
+/// environment's row of the caller's buffer in place, no per-row lists
+/// and no Python object per field.
+fn observe_environment_into(
+    dwelling: &PyDwelling,
+    plan: &hares_core::ObservationPlan,
+    out: &mut [f64],
+    env_index: usize,
+) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        if TEST_OBSERVATION_FAULT.load(Ordering::Relaxed) == env_index {
+            return Err(format!(
+                "injected observation fault for environment {env_index}"
+            ));
+        }
+    }
+    let _ = env_index;
+    let guard = dwelling.acquire_string()?;
+    guard.observe_into(plan, out).map_err(|err| err.to_string())
 }
+
+/// A writable `f64` view of `obj`'s buffer. The batch's observation
+/// buffer is the vector environment's own `(n_envs, n_fields)` array,
+/// filled in place through its buffer protocol.
+fn writable_f64_buffer(obj: &Bound<'_, PyAny>) -> PyResult<PyBuffer<f64>> {
+    let buffer = PyBuffer::<f64>::get(obj).map_err(|_| {
+        PyValueError::new_err(
+            "the observation buffer must expose a writable float64 buffer protocol view",
+        )
+    })?;
+    if buffer.readonly() {
+        return Err(PyValueError::new_err(
+            "the observation buffer must be writable",
+        ));
+    }
+    Ok(buffer)
+}
+
+/// The C-contiguity the flat row writes assume.
+fn assert_contiguous_f64(buffer: &PyBuffer<f64>) -> PyResult<()> {
+    if !buffer.is_c_contiguous() {
+        return Err(PyValueError::new_err(
+            "the observation buffer must be C-contiguous",
+        ));
+    }
+    Ok(())
+}
+
+/// The observation buffer's base pointer, `Send` for the parallel row
+/// writes: the PyBuffer export is held alive across the parallel section,
+/// the buffer is writable and C-contiguous, and no other writer touches it
+/// while the batch runs.
+struct SendObsPtr(*mut f64);
+unsafe impl Send for SendObsPtr {}
+unsafe impl Sync for SendObsPtr {}
+
+impl Clone for SendObsPtr {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl Copy for SendObsPtr {}
 
 /// Thin wrapper around a raw pointer to [`PyDwelling`] that is `Send + Sync`.
 ///
@@ -492,14 +597,22 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// releases the GIL so Rayon threads can step dwellings in true parallel.
 /// The GIL is only re-acquired afterwards for Python dict construction.
 ///
+/// Each environment's observation is read through the environment's own
+/// frozen plan (`plans`, built at the environment's `reset`) into `obs_out`,
+/// the vector environment's `(n_envs, n_fields)` float64 buffer, filled in
+/// place through its buffer protocol: no per-row lists and no Python object
+/// per field. The buffer's row width is the plan's field count.
+///
 /// Each result dict carries `"step"`, the same dict `Dwelling.step()`
 /// returns (both go through one conversion), so the caller's `reward_fn`
-/// sees the same context on the batch path as on a single dwelling's step;
-/// a failed step carries `"step": None` and `"obs"` holds the dwelling's
-/// last observation (the failed step changed nothing, so the telemetry on
-/// hand is that state), keeping the batch a rectangular obs matrix. Its
-/// `info` dict always carries
-/// `"warning_count"` (float), the
+/// sees the same context on the batch path as on a single dwelling's step.
+/// A failed step carries `"step": None` and keeps the batch rectangular:
+/// its row of the buffer holds the dwelling's last observation (the failed
+/// step changed nothing, so the telemetry on hand is that state). A step
+/// whose observation read fails ends that environment with its error:
+/// `terminated=True`, `info["error_msg"]` holding the error, and its row of
+/// the buffer set to NaN; no substitute vector is produced. Its `info`
+/// dict always carries `"warning_count"` (float), the
 /// number of warnings the dwelling accumulated during the step (e.g. control
 /// signals rejected at dispatch time). When non-zero, `"warnings"`
 /// (list of str) holds the drained messages; they are consumed here, so a
@@ -514,15 +627,17 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// or would reject its signal) is a `ValueError` raised before a signal
 /// reaches any dwelling.
 #[pyfunction(name = "batch_step")]
-#[pyo3(signature = (dwellings, actions, observation_fields, action_layout, signal_type_by_equipment, action_bounds))]
+#[pyo3(signature = (dwellings, actions, plans, action_layout, signal_type_by_equipment, action_bounds, obs_out))]
+#[allow(clippy::too_many_arguments)]
 pub fn batch_step_py(
     py: Python<'_>,
     dwellings: Vec<Py<PyDwelling>>,
     actions: Vec<Vec<f64>>,
-    observation_fields: Vec<String>,
+    plans: Vec<Py<PyObservationPlan>>,
     action_layout: Vec<(String, String)>,
     signal_type_by_equipment: HashMap<String, String>,
     action_bounds: Vec<(f64, f64)>,
+    obs_out: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<Py<PyAny>>> {
     // Dimension check first (useful error regardless of mapping status).
     if !actions.is_empty() && actions.len() != dwellings.len() {
@@ -532,6 +647,47 @@ pub fn batch_step_py(
             dwellings.len(),
         )));
     }
+    if plans.len() != dwellings.len() {
+        return Err(PyValueError::new_err(format!(
+            "plans length ({}) must match dwellings length ({})",
+            plans.len(),
+            dwellings.len(),
+        )));
+    }
+    // One plan per environment, all freezing the same field list: the
+    // observation buffer's width is the plan's, one row per environment.
+    let plan_handles: Vec<Arc<hares_core::ObservationPlan>> = plans
+        .iter()
+        .map(|plan| Arc::clone(&plan.bind(py).borrow().plan))
+        .collect();
+    let n_fields = plan_handles.first().map(|plan| plan.len()).unwrap_or(0);
+    if plan_handles.iter().any(|plan| plan.len() != n_fields) {
+        return Err(PyValueError::new_err(
+            "the plans must freeze the same field list: one observation buffer serves the batch",
+        ));
+    }
+
+    // The buffer is the vector environment's own: filled in place, row by
+    // row, through its buffer protocol. The PyBuffer keeps the export
+    // alive while the parallel section writes through the pointer.
+    let obs_buffer = writable_f64_buffer(obs_out)?;
+    if obs_buffer.item_count() != dwellings.len() * n_fields {
+        return Err(PyValueError::new_err(format!(
+            "the observation buffer holds {} floats for {} environments of {} fields",
+            obs_buffer.item_count(),
+            dwellings.len(),
+            n_fields,
+        )));
+    }
+    assert_contiguous_f64(&obs_buffer)?;
+    let obs_ptr = SendObsPtr(obs_buffer.buf_ptr().cast::<f64>());
+    let obs_row = |env_index: usize, ptr: SendObsPtr, width: usize| -> &mut [f64] {
+        // SAFETY: the buffer is writable, C-contiguous, holds
+        // dwellings.len() * n_fields floats, and the PyBuffer keeps the
+        // export alive for the write's duration; no other writer touches
+        // the buffer while the GIL is held or released by this call.
+        unsafe { slice::from_raw_parts_mut((ptr.0).add(env_index * width), width) }
+    };
 
     // Hold borrows alive for the duration of the parallel section.
     // The Py<PyDwelling> vec keeps every object alive for the entire function.
@@ -596,13 +752,13 @@ pub fn batch_step_py(
     let results: Vec<StepResult> = py.detach(|| {
         ptrs.par_iter()
             .enumerate()
-            .map(|(_idx, SendDwellingPtr(ptr))| {
+            .map(|(idx, SendDwellingPtr(ptr))| {
                 // SAFETY: the PyRef borrows in `borrows` and Py<PyDwelling> handles keep the
                 // objects alive. step_core() and observation() are GIL-free
                 // (they only lock the internal Mutex<Dwelling>).
                 let dwelling = unsafe { &**ptr };
 
-                let mut info = HashMap::new();
+                let mut info: Vec<(&'static str, f64)> = Vec::new();
                 let step_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     dwelling.step_core_string()
                 }));
@@ -633,32 +789,41 @@ pub fn batch_step_py(
                             .collect::<Vec<String>>()
                     })
                     .unwrap_or_default();
-                info.insert("warning_count".to_string(), warnings.len() as f64);
+                info.push(("warning_count", warnings.len() as f64));
                 match step_result {
                     Ok(step) => {
-                        let (obs, obs_err) =
-                            match observation_for_fields(dwelling, &observation_fields) {
-                                Ok(o) => (o, None),
-                                Err(e) => {
-                                    info.insert("observation_error".to_string(), 1.0);
-                                    (dwelling.observation().unwrap_or_default(), Some(e))
-                                }
-                            };
-                        StepResult {
-                            obs,
-                            step: Some(step),
-                            terminated: false,
-                            truncated: false,
-                            info,
-                            error_msg: obs_err,
-                            warnings,
+                        let plan = &plan_handles[idx];
+                        let row = obs_row(idx, obs_ptr, n_fields);
+                        if let Err(e) = observe_environment_into(dwelling, plan, row, idx) {
+                            // A step whose observation fails ends that
+                            // environment with its error: no substitute
+                            // vector, the row NaN, the environment done.
+                            info.push(("observation_error", 1.0));
+                            row.fill(f64::NAN);
+                            StepResult {
+                                step: Some(step),
+                                terminated: true,
+                                truncated: false,
+                                info,
+                                error_msg: Some(e),
+                                warnings,
+                            }
+                        } else {
+                            StepResult {
+                                step: Some(step),
+                                terminated: false,
+                                truncated: false,
+                                info,
+                                error_msg: None,
+                                warnings,
+                            }
                         }
                     }
                     Err(e) => {
                         let is_fatal = e.starts_with(FATAL_DWELLING_PREFIX);
-                        info.insert("error".to_string(), 1.0);
+                        info.push(("error", 1.0));
                         if is_fatal {
-                            info.insert("dwelling_fatal".to_string(), 1.0);
+                            info.push(("dwelling_fatal", 1.0));
                         }
                         // A failed row carries the dwelling's last
                         // observation: the failed step changed nothing, so
@@ -669,15 +834,13 @@ pub fn batch_step_py(
                         // gets a NaN row of the right width; the step error
                         // stays the headline in `error_msg` and the
                         // observation failure is flagged in `info`.
-                        let obs = match observation_for_fields(dwelling, &observation_fields) {
-                            Ok(o) => o,
-                            Err(_) => {
-                                info.insert("observation_error".to_string(), 1.0);
-                                vec![f64::NAN; observation_fields.len()]
-                            }
-                        };
+                        let row = obs_row(idx, obs_ptr, n_fields);
+                        if observe_environment_into(dwelling, &plan_handles[idx], row, idx).is_err()
+                        {
+                            info.push(("observation_error", 1.0));
+                            row.fill(f64::NAN);
+                        }
                         StepResult {
-                            obs,
                             step: None,
                             terminated: true,
                             truncated: false,
@@ -690,12 +853,12 @@ pub fn batch_step_py(
             })
             .collect()
     });
+    drop(obs_buffer);
 
     // GIL re-acquired here -- convert results to Python dicts.
     let mut out = Vec::with_capacity(results.len());
     for item in results {
         let d = PyDict::new(py);
-        d.set_item("obs", item.obs)?;
         match item.step {
             Some(step) => {
                 let zone_keys = zone_keys_for_step(&step);
@@ -772,6 +935,7 @@ pub fn field_bounds_table_py() -> HashMap<String, (f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use numpy::PyArrayMethods;
     use pyo3::types::PyString;
 
     /// A stepable base.xml dwelling for the batch health tests.
@@ -846,14 +1010,28 @@ mod tests {
             let mut signal_types = HashMap::new();
             signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
 
+            let plans: Vec<Py<PyObservationPlan>> = [&first, &second]
+                .into_iter()
+                .map(|dwelling| {
+                    let plan = dwelling
+                        .bind(py)
+                        .borrow()
+                        .observation_plan(vec!["total_power_kw".to_string()])
+                        .expect("the plan builds");
+                    Py::new(py, plan).expect("the plan wraps")
+                })
+                .collect();
+            let buffer = numpy::PyArray2::<f64>::zeros(py, (2, 1), false);
+
             batch_step_py(
                 py,
                 vec![first.clone_ref(py), second.clone_ref(py)],
                 vec![vec![100.0], vec![20.0]],
-                vec!["total_power_kw".to_string()],
+                plans,
                 layout,
                 signal_types,
                 vec![(-50.0, 80.0)],
+                buffer.as_any(),
             )
             .expect("the batch step must run");
 
@@ -873,6 +1051,86 @@ mod tests {
                 .clamped_actions;
             assert_eq!(first_clamped, 1, "the 100.0 action is one clamped value");
             assert_eq!(second_clamped, 0, "the in-bounds action clamps nothing");
+        });
+    }
+
+    /// A step whose observation read fails ends that environment with its
+    /// error: `terminated=True`, `info["error_msg"]` holding the error and
+    /// its row of the buffer NaN, while the other environment steps
+    /// normally. The fault is the test-only switch in the batch's one
+    /// observation wrapper, naming the environment index to fail; no
+    /// substitute vector is produced.
+    #[test]
+    fn observation_failure_terminates_the_environment() {
+        Python::attach(|py| {
+            let first = base_dwelling(py);
+            let second = base_dwelling(py);
+            let fields = vec!["total_power_kw".to_string()];
+            let plans: Vec<Py<PyObservationPlan>> =
+                vec![first.bind(py).borrow(), second.bind(py).borrow()]
+                    .into_iter()
+                    .map(|dwelling| {
+                        let plan = dwelling
+                            .observation_plan(fields.clone())
+                            .expect("the plan builds");
+                        Py::new(py, plan).expect("the plan wraps")
+                    })
+                    .collect();
+
+            let layout = vec![("Gas Furnace".to_string(), "heating_setpoint_c".to_string())];
+            let mut signal_types = HashMap::new();
+            signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
+
+            let buffer = numpy::PyArray2::<f64>::zeros(py, (2, 1), false);
+
+            TEST_OBSERVATION_FAULT.store(0, Ordering::Relaxed);
+            let result = batch_step_py(
+                py,
+                vec![first.clone_ref(py), second.clone_ref(py)],
+                vec![vec![20.0], vec![20.0]],
+                plans,
+                layout,
+                signal_types,
+                vec![(-50.0, 80.0)],
+                buffer.as_any(),
+            );
+            TEST_OBSERVATION_FAULT.store(usize::MAX, Ordering::Relaxed);
+            let rows = result.expect("the batch step itself runs");
+
+            let terminated: Vec<bool> = rows
+                .iter()
+                .map(|row| {
+                    row.bind(py)
+                        .get_item("terminated")
+                        .and_then(|v| v.extract())
+                        .expect("terminated is a bool")
+                })
+                .collect();
+            assert!(terminated[0], "the failed observation ends environment 0");
+            assert!(!terminated[1], "environment 1 steps normally");
+
+            let error_msg: String = rows[0]
+                .bind(py)
+                .get_item("info")
+                .and_then(|info| info.get_item("error_msg"))
+                .and_then(|v| v.extract())
+                .expect("the failed environment's info carries its error");
+            assert!(
+                error_msg.contains("injected observation fault for environment 0"),
+                "the error names the environment: {error_msg}"
+            );
+
+            let read = buffer.readonly();
+            let view = read.as_array();
+            assert!(
+                view[[0, 0]].is_nan(),
+                "the failed environment's row is NaN, got {}",
+                view[[0, 0]]
+            );
+            assert!(
+                view[[1, 0]].is_finite(),
+                "the stepping environment's row is a real observation"
+            );
         });
     }
 
@@ -1492,5 +1750,76 @@ mod tests {
             err.contains("not finite"),
             "error should mention not finite, got: {err}"
         );
+    }
+
+    /// Hand-run measurement (ignored; `cargo test -p hares-python --all-features
+    /// --release --lib batch_step_allocation_counts -- --ignored --nocapture`):
+    /// the counting allocator's per-call allocation delta for whole
+    /// `batch_step` calls at 1 and 8 environments, 20 calls each after 10
+    /// warm ones. The count is the calling thread's own: the parallel
+    /// section's worker-thread allocations are not in it, so the 8-environment
+    /// figure covers the GIL-held conversion section, and the per-environment
+    /// observation read's own count is pinned exactly by hares-core's
+    /// `observe_into_allocates_nothing_after_the_first_step`.
+    #[test]
+    #[ignore]
+    fn batch_step_allocation_counts() {
+        use hares_types::alloc_count::thread_allocations;
+
+        Python::attach(|py| {
+            let mut signal_types = HashMap::new();
+            signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
+            let layout = vec![("Gas Furnace".to_string(), "heating_setpoint_c".to_string())];
+            let bounds_pair = vec![(-50.0, 80.0)];
+
+            for n_envs in [1usize, 8] {
+                let dwellings: Vec<Py<PyDwelling>> =
+                    (0..n_envs).map(|_| base_dwelling(py)).collect();
+                let plans: Vec<Py<PyObservationPlan>> = dwellings
+                    .iter()
+                    .map(|dwelling| {
+                        let plan = dwelling
+                            .bind(py)
+                            .borrow()
+                            .observation_plan(vec!["total_power_kw".to_string()])
+                            .expect("the plan builds");
+                        Py::new(py, plan).expect("the plan wraps")
+                    })
+                    .collect();
+                let buffer = numpy::PyArray2::<f64>::zeros(py, (n_envs, 1), false);
+
+                let mut deltas: Vec<u64> = Vec::new();
+                for call in 0..30 {
+                    let before = thread_allocations().expect("the counting allocator");
+                    batch_step_py(
+                        py,
+                        dwellings
+                            .iter()
+                            .map(|dwelling| dwelling.clone_ref(py))
+                            .collect(),
+                        vec![vec![21.0]; n_envs],
+                        plans.iter().map(|plan| plan.clone_ref(py)).collect(),
+                        layout.clone(),
+                        signal_types.clone(),
+                        bounds_pair.clone(),
+                        buffer.as_any(),
+                    )
+                    .expect("the batch step runs");
+                    let after = thread_allocations().expect("the counting allocator");
+                    if call >= 10 {
+                        deltas.push(after - before);
+                    }
+                }
+                deltas.sort_unstable();
+                let median = deltas[deltas.len() / 2];
+                println!(
+                    "batch_step n_envs={n_envs}: per-call calling-thread allocations \
+                     median {median}, min {}, max {} over {} calls",
+                    deltas[0],
+                    deltas[deltas.len() - 1],
+                    deltas.len()
+                );
+            }
+        });
     }
 }

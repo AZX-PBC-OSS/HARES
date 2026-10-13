@@ -27,6 +27,7 @@ pub mod environment;
 pub mod health;
 pub mod input_schema;
 pub mod invariants;
+pub mod observation;
 #[cfg(feature = "observe")]
 pub mod observer;
 #[cfg(feature = "observe")]
@@ -62,6 +63,7 @@ pub use hares_io::{InputRecord, InputRecordSource, InputRecords};
 pub use health::{ActorTiming, ActorTimings};
 pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
 pub use input_schema::input_schema;
+pub use observation::ObservationPlan;
 pub use rand_chacha::ChaCha8Rng;
 pub use replay::{RecordedBuild, Replay};
 pub use resolved::{

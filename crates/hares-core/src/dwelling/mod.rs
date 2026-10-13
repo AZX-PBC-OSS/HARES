@@ -27,7 +27,7 @@ pub fn shipped_defaults_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
 }
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -100,6 +100,9 @@ use crate::health::{ActorTiming, ActorTimings};
 use crate::health::{RejectionGate, RunHealth, WarmupOutcome, WarmupResiduals};
 use crate::invariants::InvariantChecker;
 use crate::invariants::check_basement_lighting_foundation;
+use crate::observation::{
+    ObservationKind, ObservationPlan, ObservationSource, ObservationSurface, SetpointSide,
+};
 use crate::result::{
     BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
     TariffRecord,
@@ -4969,6 +4972,268 @@ impl Dwelling {
         };
 
         Ok(telem)
+    }
+
+    /// Freezes the observation plan for `fields` against this dwelling:
+    /// every field resolved once to a typed source (an outdoor scalar, a
+    /// zone or equipment index, a time feature, an actor channel), the
+    /// resolution `DwellingTelemetry::to_observation_vec` repeats every
+    /// step. An unknown field fails here, naming it.
+    ///
+    /// # Errors
+    ///
+    /// `HaresError::Control` naming the first field that resolves to
+    /// nothing this dwelling carries.
+    pub fn observation_plan(&self, fields: &[String]) -> Result<ObservationPlan> {
+        let mut zone_ids: Vec<ZoneId> = self.latest_env.zones.iter().map(|z| z.id).collect();
+        zone_ids.sort_unstable();
+        let zone_names: Vec<(String, ZoneId)> = zone_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, zone)| {
+                let name = if idx == 0 {
+                    "Indoor".to_string()
+                } else {
+                    format!("Zone{}", zone.0)
+                };
+                (name, *zone)
+            })
+            .collect();
+        let equipment_names: Vec<String> = self
+            .equipment
+            .iter()
+            .map(|eq| eq.descriptor().name.clone())
+            .collect();
+        // BTreeMap: the same sorted-name order the telemetry's
+        // actor_telemetry map reports, so a plan's bare-name fallback
+        // searches in the same order on both executors.
+        let mut actor_channels: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        if let Some(tel) = self.solver_feedback_actor.telemetry() {
+            actor_channels.insert(
+                self.solver_feedback_actor.name().to_string(),
+                tel.0.keys().cloned().collect(),
+            );
+        }
+        for actor in &self.actors {
+            if let Some(tel) = actor.telemetry() {
+                actor_channels.insert(actor.name().to_string(), tel.0.keys().cloned().collect());
+            }
+        }
+        let surface = ObservationSurface {
+            zone_names,
+            equipment_names,
+            actors: actor_channels.into_iter().collect(),
+        };
+        let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+        let mut warned = ObservationWarnOnce::default();
+        ObservationPlan::from_surface(&surface, &refs, &mut warned)
+    }
+
+    /// Writes the planned observation into `out`, allocation-free: the
+    /// plan's typed sources read the dwelling's live state directly, in
+    /// the plan's field order, the values and NaN handling of
+    /// `DwellingTelemetry::to_observation_vec` on the same state. Before
+    /// the first step (and after a checkpoint restore to step 0) every
+    /// slot is NaN.
+    ///
+    /// # Errors
+    ///
+    /// `HaresError::Control` when `out`'s length is not the plan's field
+    /// count, or when a planned actor channel no longer resolves (the
+    /// plan froze a field the dwelling's actors no longer publish).
+    pub fn observe_into(&self, plan: &ObservationPlan, out: &mut [f64]) -> Result<()> {
+        if out.len() != plan.len() {
+            return Err(HaresError::Control(format!(
+                "the observation buffer holds {} slots for {} planned fields",
+                out.len(),
+                plan.len()
+            )));
+        }
+        if self.clock.current_step() == 0 {
+            out.fill(f64::NAN);
+            return Ok(());
+        }
+        for (slot, source) in out.iter_mut().zip(plan.sources()) {
+            *slot = self.observation_value(source, plan)?;
+        }
+        Ok(())
+    }
+
+    /// One planned field's value, read the way `telemetry()`'s snapshot
+    /// builds it: the same sources, the same write order, the same
+    /// last-write-wins results, with none of the allocations.
+    fn observation_value(&self, source: &ObservationSource, plan: &ObservationPlan) -> Result<f64> {
+        let field = source.field.as_str();
+        Ok(match &source.kind {
+            ObservationKind::OutdoorTemp => self.latest_env.weather.outdoor_temp_c,
+            ObservationKind::OutdoorHumidityRatio => self.latest_env.weather.outdoor_humidity_ratio,
+            ObservationKind::TotalPowerKw => self.electrical_solver.net_active_kw(),
+            ObservationKind::ReactivePowerKvar => self.electrical_solver.net_reactive_kvar(),
+            ObservationKind::ZoneTemperature { id, .. } => self.zone_temperature_c(*id)?,
+            ObservationKind::SetpointHeat { id, .. } => {
+                self.zone_setpoint_c(*id, SetpointSide::Heat)?
+            }
+            ObservationKind::SetpointCool { id, .. } => {
+                self.zone_setpoint_c(*id, SetpointSide::Cool)?
+            }
+            ObservationKind::ZoneEnergyBalance { id, .. } => self.zone_energy_balance_w(*id),
+            ObservationKind::EquipmentSoc { index } => self.equipment[*index]
+                .core_output()
+                .state
+                .soc
+                .map_or(0.0, |s| s.get()),
+            ObservationKind::EquipmentPower { index } => self
+                .delivered_output(*index)
+                .and_then(|delivered| delivered.flows.electric_kw)
+                .map_or(0.0, |e| e.net_consumption_kw()),
+            ObservationKind::TimeSin => self.time_feature(false),
+            ObservationKind::TimeCos => self.time_feature(true),
+            ObservationKind::ActorDot { actor, channel } => {
+                match self.actor_channel_value(actor, channel) {
+                    Some(value) => value,
+                    // The dot resolution missed at read time (the actor's
+                    // published channel set moved under the plan): the
+                    // bare search of the whole field, as the string walk
+                    // fell through.
+                    None => self.bare_actor_value(field, field, plan)?,
+                }
+            }
+            ObservationKind::ActorBare { channel } => {
+                self.bare_actor_value(channel, field, plan)?
+            }
+        })
+    }
+
+    /// A zone's temperature by id, the value the sorted snapshot reports
+    /// at the zone's position.
+    fn zone_temperature_c(&self, id: ZoneId) -> Result<f64> {
+        self.latest_env
+            .zones
+            .iter()
+            .find(|z| z.id == id)
+            .map(|z| z.temperature_c)
+            .ok_or_else(|| {
+                HaresError::Control(format!(
+                    "planned zone {id:?} is no longer in the dwelling's zone list"
+                ))
+            })
+    }
+
+    /// The per-zone setpoint the telemetry snapshot reports: the zone
+    /// temperature as the base, overridden by the LAST equipment in
+    /// dwelling order whose zone matches, that holds a setpoint and runs
+    /// the matching operating mode.
+    fn zone_setpoint_c(&self, id: ZoneId, side: SetpointSide) -> Result<f64> {
+        let mut value = self.zone_temperature_c(id)?;
+        for eq in &self.equipment {
+            if eq.descriptor().zone != Some(id) {
+                continue;
+            }
+            let co = eq.core_output();
+            let Some(sp) = co.state.setpoint_c else {
+                continue;
+            };
+            let heating = matches!(
+                co.state.operating_mode,
+                Some(
+                    hares_types::OperatingMode::Heating
+                        | hares_types::OperatingMode::HeatingHP
+                        | hares_types::OperatingMode::HeatingER
+                        | hares_types::OperatingMode::HeatingHPAndER
+                )
+            );
+            let cooling = matches!(
+                co.state.operating_mode,
+                Some(hares_types::OperatingMode::Cooling)
+            );
+            if matches!(side, SetpointSide::Heat) && heating {
+                value = sp;
+            }
+            if matches!(side, SetpointSide::Cool) && cooling {
+                value = sp;
+            }
+        }
+        Ok(value)
+    }
+
+    /// The per-zone energy-balance residual the snapshot reports: the last
+    /// thermal payload quintuple naming the zone wins, 0.0 when none does.
+    fn zone_energy_balance_w(&self, id: ZoneId) -> f64 {
+        let mut value = 0.0;
+        if let Some(thermal_update) = self.latest_env.domains.thermal.get()
+            && let Some(payload) = &thermal_update.custom_payload
+        {
+            for quint in payload.as_chunks::<5>().0 {
+                let zone_raw = quint[0];
+                if zone_raw.is_finite() && zone_raw >= 0.0 && ZoneId(zone_raw as u16) == id {
+                    value = quint[4];
+                }
+            }
+        }
+        value
+    }
+
+    /// The `time_sin` / `time_cos` feature off the live clock.
+    fn time_feature(&self, cos: bool) -> f64 {
+        use chrono::Timelike;
+        let t = &self.latest_env.current_time;
+        let fhour = t.hour() as f64 + t.minute() as f64 / 60.0 + t.second() as f64 / 3600.0;
+        let phase = 2.0 * std::f64::consts::PI * fhour / 24.0;
+        if cos { phase.cos() } else { phase.sin() }
+    }
+
+    /// The value one actor's published telemetry holds for `channel`: the
+    /// last actor registered under `actor` that publishes telemetry wins,
+    /// the solver-feedback actor having been inserted first.
+    fn actor_channel_value(&self, actor: &str, channel: &str) -> Option<f64> {
+        let mut found: Option<&hares_types::Telemetry> = None;
+        if self.solver_feedback_actor.name() == actor
+            && let Some(tel) = self.solver_feedback_actor.telemetry()
+        {
+            found = Some(tel);
+        }
+        for candidate in &self.actors {
+            if candidate.name() == actor
+                && let Some(tel) = candidate.telemetry()
+            {
+                found = Some(tel);
+            }
+        }
+        // allowed: the actor's telemetry keys are the actor's own declared
+        // output channels, user-defined strings; the plan froze the
+        // channel's spelling at build.
+        found.and_then(|tel| tel.get(channel))
+    }
+
+    /// The bare-name fallback: the first actor in the plan's sorted-name
+    /// order whose published telemetry holds `channel`.
+    fn bare_actor_value(&self, channel: &str, field: &str, plan: &ObservationPlan) -> Result<f64> {
+        for actor_name in plan.actor_order() {
+            let mut found: Option<&hares_types::Telemetry> = None;
+            if self.solver_feedback_actor.name() == actor_name.as_str()
+                && let Some(tel) = self.solver_feedback_actor.telemetry()
+            {
+                found = Some(tel);
+            }
+            for candidate in &self.actors {
+                if candidate.name() == actor_name.as_str()
+                    && let Some(tel) = candidate.telemetry()
+                {
+                    found = Some(tel);
+                }
+            }
+            // allowed: the actor's telemetry keys are the actor's own
+            // declared output channels, user-defined strings; the plan
+            // froze the channel's spelling at build.
+            if let Some(tel) = found
+                && let Some(value) = tel.get(channel)
+            {
+                return Ok(value);
+            }
+        }
+        Err(HaresError::Control(format!(
+            "unknown telemetry field key `{field}`"
+        )))
     }
 
     /// Per-zone thermal consistency check: compares HVAC heating and cooling

@@ -17,10 +17,12 @@ use hares_equipment::{
 };
 use hares_types::panic_hook::{self, PanicHookGuard};
 use hares_types::{BatteryChemistry, EvConnectionState, HaresError, SurfaceIrradiance};
+use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyType};
 use rand::SeedableRng;
+use std::slice;
 use std::sync::MutexGuard;
 
 // The exceptions register under the extension module's importable path, so
@@ -1795,6 +1797,67 @@ impl PyDwelling {
         Ok(())
     }
 
+    /// Freezes the observation plan for `fields` against this dwelling:
+    /// every field resolved once to a typed source, failing on an unknown
+    /// field and naming it. The gym environments build their plans at
+    /// `reset()` and read every step through them.
+    pub fn observation_plan(
+        &self,
+        fields: Vec<String>,
+    ) -> PyResult<crate::py_gym::PyObservationPlan> {
+        let dwelling = self.acquire()?;
+        let plan = dwelling.observation_plan(&fields).map_err(to_py_err)?;
+        Ok(crate::py_gym::PyObservationPlan {
+            plan: std::sync::Arc::new(plan),
+        })
+    }
+
+    /// Writes the planned observation into `out` (any object exposing a
+    /// writable C-contiguous float64 buffer, a numpy row among them), in
+    /// place, allocation-free: the plan's typed sources read the
+    /// dwelling's live state directly, the values and NaN handling
+    /// `to_observation_vec` reports on the same state.
+    pub fn observe_into(
+        &self,
+        plan: &crate::py_gym::PyObservationPlan,
+        out: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let buffer = PyBuffer::<f64>::get(out).map_err(|_| {
+            PyValueError::new_err(
+                "the observation row must expose a writable float64 buffer protocol view",
+            )
+        })?;
+        if buffer.readonly() {
+            return Err(PyValueError::new_err(
+                "the observation row must be writable",
+            ));
+        }
+        if buffer.item_count() != plan.plan.len() {
+            return Err(PyValueError::new_err(format!(
+                "the observation row holds {} slots for {} planned fields",
+                buffer.item_count(),
+                plan.plan.len()
+            )));
+        }
+        match buffer.strides() {
+            [stride] if *stride == size_of::<f64>() as isize => {}
+            _ => {
+                return Err(PyValueError::new_err(
+                    "the observation row must be C-contiguous",
+                ));
+            }
+        }
+        // SAFETY: the buffer is writable, C-contiguous, holds the plan's
+        // field count, and the PyBuffer keeps the export alive for the
+        // synchronous write below.
+        let out_slice =
+            unsafe { slice::from_raw_parts_mut(buffer.buf_ptr().cast::<f64>(), plan.plan.len()) };
+        let dwelling = self.acquire()?;
+        dwelling
+            .observe_into(&plan.plan, out_slice)
+            .map_err(to_py_err)
+    }
+
     pub fn reset_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<()> {
         // The reset reuses the blueprint: the shared parses are the same
         // `Arc`s, the rng derives from the seed, and the settings carry
@@ -2402,13 +2465,6 @@ impl PyDwelling {
         Ok(eq
             .thermostat_band_class()
             .map(hares_types::ThermostatBandClass::range_c))
-    }
-
-    pub(crate) fn observation(&self) -> Result<Vec<f64>, String> {
-        let mut dwelling = self.acquire_string()?;
-        dwelling
-            .observation_vec(&["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio"])
-            .map_err(|err| err.to_string())
     }
 
     /// Convert a Python equipment config object (Battery, PV, or EV) to a boxed Equipment.

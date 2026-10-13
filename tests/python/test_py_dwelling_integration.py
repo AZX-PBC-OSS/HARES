@@ -7,6 +7,7 @@ GIL safety stress tests for batch_step.
 
 import math
 import threading
+from array import array
 from datetime import datetime
 
 import polars as pl
@@ -504,11 +505,12 @@ class TestBatchStep:
         from hares import batch_step
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        results = batch_step([dw], [[]], ["total_power_kw"], [], {}, [])
+        plan = dw.observation_plan(["total_power_kw"])
+        buf = array("d", bytes(8))
+        results = batch_step([dw], [[]], [plan], [], {}, [], buf)
         assert isinstance(results, list)
         assert len(results) == 1
         r = results[0]
-        assert "obs" in r
         assert "step" in r
         assert "terminated" in r
         assert "truncated" in r
@@ -528,18 +530,20 @@ class TestBatchStep:
 
         def worker(dw_list):
             try:
+                plans = [d.observation_plan(["total_power_kw"]) for d in dw_list]
+                buf = array("d", bytes(8 * len(dw_list)))
                 for _ in range(5):
                     results = batch_step(
                         dw_list,
                         [[]] * len(dw_list),
-                        ["total_power_kw"],
+                        plans,
                         [],
                         {},
                         [],
+                        buf,
                     )
                     for r in results:
                         assert isinstance(r, dict)
-                        assert "obs" in r
             except Exception as e:
                 errors.append(e)
 
@@ -560,7 +564,7 @@ class TestBatchStep:
         """batch_step with empty dwellings list returns empty results."""
         from hares import batch_step
 
-        results = batch_step([], [], ["total_power_kw"], [], {}, [])
+        results = batch_step([], [], [], [], {}, [], array("d"))
         assert isinstance(results, list)
         assert len(results) == 0
 
@@ -577,19 +581,21 @@ class TestBatchStep:
 
         def worker(dw_list):
             try:
+                plans = [d.observation_plan(["total_power_kw"]) for d in dw_list]
+                buf = array("d", bytes(8 * len(dw_list)))
                 for _ in range(3):
                     results = batch_step(
                         dw_list,
                         [[]] * len(dw_list),
-                        ["total_power_kw"],
+                        plans,
                         [],
                         {},
                         [],
+                        buf,
                     )
                     assert len(results) == len(dw_list)
                     for r in results:
                         assert isinstance(r, dict)
-                        assert "obs" in r
             except Exception as e:
                 errors.append(e)
 

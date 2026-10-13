@@ -1228,115 +1228,95 @@ def test_telemetry_to_observation_bracket_keys_no_keyerror():
 
 
 # ---------------------------------------------------------------------------
-# Dual-path observation equivalence verification (T-0342)
+# The frozen observation plan: the batch's observations are read into the
+# environment's own buffer through the plan, in place.
 # ---------------------------------------------------------------------------
 
 
-def test_vec_gym_verify_observation_equivalence_no_crash():
-    """VecDwellingGymEnv with verify_observation_equivalence=True steps without crashing.
+def test_unknown_observation_field_fails_at_reset():
+    """An unknown observation field fails the plan's build at reset,
+    naming the field, on both gym environments: the field list is frozen
+    per episode, so a name the dwelling cannot answer never reaches a
+    step."""
+    dwellings = [_make_dwelling(seed=0)]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=["total_power_kw", "bogus_field"],
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    with pytest.raises(Exception, match="bogus_field"):
+        env.reset(seed=0)
 
-    When Rust batch_step and Python telemetry_to_observation produce equivalent
-    observations, the comparison should emit no false-positive warnings.
-    """
-    import warnings
+    single = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=["total_power_kw", "bogus_field"],
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(minutes=5),
+    )
+    with pytest.raises(Exception, match="bogus_field"):
+        single.reset(seed=0)
 
-    dwellings = [_make_dwelling(seed=i) for i in range(2)]
+
+def test_batch_step_returns_a_fresh_observation_by_default():
+    """The default step returns a fresh array per step: two consecutive
+    steps give different objects, the first is unchanged by the second
+    step, and each equals the pure-Python path's observation on bits."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
     env = VecDwellingGymEnv(
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
         reward_fn=lambda ctx: -ctx["total_power_kw"],
         episode_length=timedelta(minutes=5),
-        verify_observation_equivalence=True,
     )
+    env.reset(seed=0)
 
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        for _step_index in range(3):
-            env.step(np.full((2, 1), 21.0, dtype=np.float64))
-        equivalence_warnings = [
-            _w for _w in w
-            if "Rust-Python observation mismatch" in str(_w.message)
-        ]
-        assert len(equivalence_warnings) == 0, (
-            f"unexpected mismatch warnings: {[str(_w.message) for _w in equivalence_warnings]}"
-        )
+    action = np.full((2, 1), 21.0, dtype=np.float64)
+    first, _reward1, _done1, _trunc1, _info1 = env.step(action)
+    plans = env._env_plans()
+    direct1 = np.empty((2, len(_OBS_FIELDS)), dtype=np.float64)
+    for idx, dwelling in enumerate(dwellings):
+        dwelling.observe_into(plans[idx], direct1[idx])
+    assert first is not direct1
+    assert first.tobytes() == direct1.tobytes(), (
+        "the returned observation must equal the pure-Python path's "
+        "observation on bits"
+    )
+    first_snapshot = first.copy()
+
+    second, _reward2, _done2, _trunc2, _info2 = env.step(action)
+    assert second is not first, "two consecutive steps give different objects"
+    assert first.tobytes() == first_snapshot.tobytes(), (
+        "an observation a caller keeps is never overwritten by the next step"
+    )
+    direct2 = np.empty((2, len(_OBS_FIELDS)), dtype=np.float64)
+    for idx, dwelling in enumerate(dwellings):
+        dwelling.observe_into(plans[idx], direct2[idx])
+    assert second.tobytes() == direct2.tobytes()
 
 
-def test_vec_gym_verify_observation_equivalence_flag_defaults_off():
-    """VecDwellingGymEnv does not run the verification when flag is not set."""
-    import warnings
-
-    dwellings = [_make_dwelling(seed=i) for i in range(2)]
+def test_batch_step_copy_false_returns_the_shared_buffer():
+    """With copy=False two consecutive steps return the same object: the
+    environment's own buffer, overwritten by the next step or reset."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
     env = VecDwellingGymEnv(
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
         reward_fn=lambda ctx: -ctx["total_power_kw"],
         episode_length=timedelta(minutes=5),
+        copy=False,
     )
+    env.reset(seed=0)
 
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        for _step_index in range(3):
-            env.step(np.full((2, 1), 21.0, dtype=np.float64))
-        equivalence_warnings = [
-            _w for _w in w
-            if "Rust-Python observation mismatch" in str(_w.message)
-        ]
-        assert len(equivalence_warnings) == 0, (
-            f"verification warnings emitted with flag off: "
-            f"{[str(_w.message) for _w in equivalence_warnings]}"
-        )
-
-
-def test_vec_gym_verify_observation_equivalence_reports_nan_mismatch():
-    """NaN mismatch diagnostic names the divergent field, not a non-divergent one."""
-    import warnings
-    from unittest.mock import patch
-
-    import hares.rl.vec_env as vec_env_module
-
-    dwellings = [_make_dwelling(seed=0) for _ in range(1)]
-    env = VecDwellingGymEnv(
-        dwellings=dwellings,
-        observation_fields=_OBS_FIELDS,
-        action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
-        episode_length=timedelta(minutes=5),
-        verify_observation_equivalence=True,
-    )
-
-    # Inject a one-sided NaN at index 0 ("total_power_kw") in the Python path.
-    def divergent_telemetry(telemetry, fields):
-        result = np.asarray(
-            telemetry_to_observation(telemetry, fields), dtype=np.float64
-        )
-        result[0] = np.nan
-        return result
-
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        with patch.object(
-            vec_env_module, "telemetry_to_observation",
-            new=divergent_telemetry,
-        ):
-            env.step(np.full((1, 1), 21.0, dtype=np.float64))
-        mismatch_warnings = [
-            _w for _w in w
-            if "Rust-Python observation mismatch" in str(_w.message)
-        ]
-    assert len(mismatch_warnings) == 1, (
-        f"expected exactly one mismatch warning, got {len(mismatch_warnings)}: "
-        f"{[str(_w.message) for _w in mismatch_warnings]}"
-    )
-    warning_text = str(mismatch_warnings[0].message)
-    assert "total_power_kw" in warning_text, (
-        f"warning should name 'total_power_kw', got: {warning_text}"
-    )
-    assert "NaN mismatch" in warning_text, (
-        f"warning should report 'NaN mismatch', got: {warning_text}"
-    )
+    action = np.full((2, 1), 21.0, dtype=np.float64)
+    first, _r1, _d1, _t1, _i1 = env.step(action)
+    second, _r2, _d2, _t2, _i2 = env.step(action)
+    assert first is second, "copy=False returns the environment's own buffer"
+    assert first is env._obs_buffer
 
 
 # ---------------------------------------------------------------------------

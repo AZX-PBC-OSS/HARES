@@ -236,6 +236,14 @@ through `finish()`; the finished `RunResult` is the wrapper's `run_result`
 (one dwelling) or `run_results` (the vector), and the underlying dwellings
 are reachable (`env.dwelling`, `envs`), so `health()` reads at any step.
 
+The observations are read through a frozen observation plan
+(`Dwelling.observation_plan(fields)`, built once per episode at reset):
+every step fills the environment's own buffer in place through its buffer
+protocol, and `step()` returns a copy of that buffer by default; a
+`VecDwellingGymEnv` constructed with `copy=False` returns the buffer
+itself, overwritten by the next `step()` or `reset()`, for callers that
+consume each observation before stepping again.
+
 ## Results
 
 One run carries one result: `Dwelling.simulate()` and
@@ -428,6 +436,15 @@ replacement.
 - Added: `Alignment` (with `instant`, `local_clock`) and the
   `alignment=` keyword on `Fleet.from_buildings` and
   `Fleet.from_resstock`: the fleet's declared time alignment.
+- Added: `ObservationPlan`, `Dwelling.observation_plan(fields)` and
+  `Dwelling.observe_into(plan, out)`: the frozen per-step observation
+  layout the RL environments read through. The plan is built once per
+  episode against a built dwelling (an unknown field fails there, naming
+  it); every step fills a caller-owned buffer in place through its
+  buffer protocol, allocation-free, the values and NaN handling
+  `to_observation_vec` reports. `batch_step` takes the plans and the
+  batch's own `(n_envs, n_fields)` buffer instead of the field list, and
+  its rows no longer carry `obs`: the buffer is the observation.
 - Added: `DwellingBlueprint.validate()` and
   `DwellingBlueprint.catalogue()`: the blueprint's assembly alone, with
   no warm-up and no step. `validate()` reads the resolved model back as

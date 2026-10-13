@@ -1,5 +1,15 @@
 //! PyO3 bindings for the HARES simulation engine.
 
+// The unit-test binary installs the workspace's shared counting allocator
+// so the RL batch path's hand-run allocation measurements read real
+// per-thread counts; it applies to this crate's test build alone. Under
+// the profiling feature the dev-dependency `frame_golden`'s library
+// installs the same allocator, and a binary holds one.
+#[cfg(all(test, not(feature = "profiling")))]
+#[global_allocator]
+static TEST_ALLOCATOR: hares_types::alloc_count::CountingAllocator =
+    hares_types::alloc_count::CountingAllocator;
+
 use pyo3::prelude::*;
 
 mod conversions;
@@ -62,6 +72,7 @@ use py_weather::PyWeatherTimeSeries;
 #[pymodule]
 fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDwelling>()?;
+    m.add_class::<py_gym::PyObservationPlan>()?;
     m.add_class::<py_callback::PyBatchInfo>()?;
     m.add_class::<PyTimestepsIter>()?;
     m.add_class::<PySimulationConfig>()?;

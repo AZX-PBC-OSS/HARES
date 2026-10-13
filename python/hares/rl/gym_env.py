@@ -491,6 +491,10 @@ class DwellingGymEnv(_GYM_BASE):
         # The episode's finished run result, `None` until a truncating step
         # finalises the run through ``finish()``.
         self._run_result: Any = None
+        # The frozen observation plan, built at reset() against the built
+        # dwelling (lazily here for a step before any reset): every step
+        # and reset observation is read through it.
+        self._plan: Any = None
 
         bounds = [
             observation_field_bounds(f) for f in self._observation_fields
@@ -560,9 +564,19 @@ class DwellingGymEnv(_GYM_BASE):
         truncation (``None`` before that, cleared on ``reset()``)."""
         return self._run_result
 
+    def _plan_or_build(self) -> Any:
+        """The frozen observation plan, built once against the built
+        dwelling; an unknown field fails at the build, naming it."""
+        if self._plan is None:
+            self._plan = self._dwelling.observation_plan(self._observation_fields)
+        return self._plan
+
     def _observation(self) -> np.ndarray:
-        obs = telemetry_to_observation(self._dwelling.telemetry(), self._observation_fields)
-        return np.ascontiguousarray(obs, dtype=np.float64)
+        """The observation row, read through the frozen plan into a fresh
+        array: the same values the batch path reads, on bits."""
+        row = np.empty(len(self._observation_fields), dtype=np.float64)
+        self._dwelling.observe_into(self._plan_or_build(), row)
+        return row
 
     def _apply_action(self, action: np.ndarray) -> None:
         # The extension clamps each value to the declared bounds and counts
@@ -601,6 +615,9 @@ class DwellingGymEnv(_GYM_BASE):
         self._active_seed = applied_seed
         self._run_result = None
 
+        # The plans are frozen at reset: rebuilt against the restored
+        # dwelling, so an unknown field fails here, naming it.
+        self._plan = self._dwelling.observation_plan(self._observation_fields)
         obs = self._observation()
         obs_mask = ~np.isfinite(obs)
         obs_valid = np.all(np.isfinite(obs))
@@ -644,7 +661,7 @@ class DwellingGymEnv(_GYM_BASE):
         self._apply_action(arr)
         step_data: StepResult = self._dwelling.step()
         telemetry = self._dwelling.telemetry()
-        obs = telemetry_to_observation(telemetry, self._observation_fields)
+        obs = self._observation()
         self._steps_elapsed += 1
         truncated = self._steps_elapsed >= self._max_steps
 

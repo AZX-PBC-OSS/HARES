@@ -82,7 +82,7 @@ class VecDwellingGymEnv:
         episode_length: timedelta,
         time_res_s: float | None = None,
         field_bounds_overrides: Mapping[str, tuple[float, float]] | None = None,
-        verify_observation_equivalence: bool = False,
+        copy: bool = True,
     ) -> None:
         self._observation_fields = validated_observation_fields(observation_fields)
         if not callable(reward_fn):
@@ -108,6 +108,26 @@ class VecDwellingGymEnv:
 
         self._initial_snapshots = [bytes(dwelling.save_state()) for dwelling in self._dwellings]
         self.num_envs = len(self._dwellings)
+
+        # The frozen observation plans, one per dwelling, built at reset()
+        # against the built dwelling (lazily here for a step before any
+        # reset). Every step reads its observation through the plan into
+        # the buffer below, in place: no per-row lists and no Python
+        # object per field.
+        self._plans: list[Any] | None = None
+        # The batch's observation buffer, owned by this environment: the
+        # extension fills each environment's row in place through its
+        # buffer protocol.
+        self._obs_buffer = np.empty(
+            (self.num_envs, len(self._observation_fields)), dtype=np.float64
+        )
+        # step() returns a copy of the buffer by default, so an observation
+        # a caller keeps across steps is never overwritten; copy=False
+        # returns the buffer itself, overwritten by the next step() or
+        # reset(), for callers that consume each observation before
+        # stepping again (Gymnasium's SyncVectorEnv(copy=...) has the same
+        # contract).
+        self._copy = copy
 
         self._action_layout, self._signal_type_by_equipment = sorted_action_layout(
             action_space_config
@@ -175,7 +195,6 @@ class VecDwellingGymEnv:
             for field, (low, high) in zip(self._observation_fields, bounds)
         }
         self._reward_fn = reward_fn
-        self._verify_observation_equivalence = verify_observation_equivalence
         self._steps_elapsed = np.zeros(self.num_envs, dtype=np.int64)
 
         _time_res: float
@@ -220,6 +239,21 @@ class VecDwellingGymEnv:
             self.num_envs,
         )
 
+    def _build_plans(self) -> None:
+        """Freezes one observation plan per dwelling, built at reset against
+        the built dwelling. An unknown field fails here, naming it."""
+        self._plans = [
+            dwelling.observation_plan(self._observation_fields)
+            for dwelling in self._dwellings
+        ]
+
+    def _env_plans(self) -> list[Any]:
+        """The plans, built at the first use if no reset has run yet."""
+        if self._plans is None:
+            self._build_plans()
+        assert self._plans is not None
+        return self._plans
+
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         del options
         seeds: list[int] = []
@@ -231,9 +265,13 @@ class VecDwellingGymEnv:
         self._steps_elapsed[:] = 0
         self._run_results = [None] * self.num_envs
 
-        obs = np.vstack(
-            [telemetry_to_observation(d.telemetry(), self._observation_fields) for d in self._dwellings]
-        )
+        # The plans are frozen at reset; the initial observation is read
+        # through them into the buffer, then returned as a fresh copy.
+        self._build_plans()
+        plans = self._env_plans()
+        for idx, dwelling in enumerate(self._dwellings):
+            dwelling.observe_into(plans[idx], self._obs_buffer[idx])
+        obs = self._obs_buffer.copy()
 
         row_has_nan = ~np.all(np.isfinite(obs), axis=1)
         global _warned_initial_nan
@@ -286,20 +324,21 @@ class VecDwellingGymEnv:
         if arr.shape != expected:
             raise ValueError(f"expected actions shape {expected}, got {arr.shape}")
 
-        obs_rows: list[Any] = []
         rewards: list[float] = []
         dones: list[bool] = []
         truncs: list[bool] = []
         infos: list[dict[str, Any]] = []
+        plans = self._env_plans()
         if rust_batch_step is not None:
             actions_list = arr.tolist()
             raw = rust_batch_step(
                 self._dwellings,
                 actions_list,
-                self._observation_fields,
+                plans,
                 self._action_layout,
                 self._signal_type_by_equipment,
                 self._action_bounds,
+                self._obs_buffer,
             )
             for dwelling, row in zip(self._dwellings, raw, strict=True):
                 step_data = row["step"]
@@ -312,20 +351,21 @@ class VecDwellingGymEnv:
                     rewards.append(
                         float(self._reward_fn(_reward_context(step_data, dwelling)))
                     )
-                obs_rows.append(row["obs"])
                 dones.append(bool(row["terminated"]))
                 truncs.append(bool(row["truncated"]))
                 info = dict(row.get("info", {}))
                 info["step"] = step_data
                 infos.append(info)
         else:
-            for dwelling, action_row in zip(self._dwellings, arr, strict=True):
+            for idx, (dwelling, action_row) in enumerate(
+                zip(self._dwellings, arr, strict=True)
+            ):
                 self._apply_actions(dwelling, action_row)
                 step_data = dwelling.step()
-                telemetry = dwelling.telemetry()
-                obs_rows.append(
-                    telemetry_to_observation(telemetry, self._observation_fields)
-                )
+                # The same plan the batch path reads through, into the
+                # same buffer: the two paths read the same values by
+                # construction.
+                dwelling.observe_into(plans[idx], self._obs_buffer[idx])
                 rewards.append(float(self._reward_fn(_reward_context(step_data, dwelling))))
                 dones.append(False)
                 truncs.append(False)
@@ -335,31 +375,14 @@ class VecDwellingGymEnv:
                     info["warnings"] = warning_messages
                 infos.append(info)
 
-        obs = np.asarray(obs_rows, dtype=np.float64)
+        # One contiguous n_envs x n_fields allocation per step by default:
+        # an observation a caller keeps across steps is never overwritten.
+        # copy=False returns the buffer itself, overwritten by the next
+        # step() or reset().
+        obs = self._obs_buffer.copy() if self._copy else self._obs_buffer
         reward_arr = np.asarray(rewards, dtype=np.float64)
         done_arr = np.asarray(dones, dtype=np.bool_)
         trunc_arr = np.asarray(truncs, dtype=np.bool_)
-
-        if self._verify_observation_equivalence:
-            for i, dwelling in enumerate(self._dwellings):
-                py_obs = telemetry_to_observation(dwelling.telemetry(), self._observation_fields)
-                py_obs = np.asarray(py_obs, dtype=np.float64)
-                if not np.allclose(obs[i], py_obs, atol=1e-9, rtol=1e-5, equal_nan=True):
-                    raw_diff = np.abs(obs[i] - py_obs)
-                    nan_mismatch = np.isnan(obs[i]) != np.isnan(py_obs)
-                    diff = np.where(nan_mismatch, np.inf, raw_diff)
-                    max_idx = int(np.argmax(diff))
-                    max_diff = float(diff[max_idx])
-                    max_diff_str = (
-                        "NaN mismatch" if np.isinf(max_diff) else f"{max_diff:.9g}"
-                    )
-                    warnings.warn(
-                        f"Rust-Python observation mismatch for dwelling {i} at field "
-                        f"{self._observation_fields[max_idx]!r}: "
-                        f"Rust={obs[i][max_idx]:.9g}, Python={py_obs[max_idx]:.9g}, "
-                        f"max absolute diff={max_diff_str}",
-                        stacklevel=2,
-                    )
 
         for info in infos:
             for field, (low, high) in self._observation_bounds.items():

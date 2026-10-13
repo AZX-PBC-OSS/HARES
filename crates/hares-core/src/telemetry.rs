@@ -1,10 +1,11 @@
 //! Dwelling telemetry payloads used by control and RL integrations.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
-use chrono::{DateTime, FixedOffset, Timelike};
-use hares_types::HaresError;
-use hares_types::normalize_ascii;
+use chrono::{DateTime, FixedOffset};
+use hares_types::{HaresError, ZoneId};
+
+use crate::observation::{ObservationPlan, ObservationSurface, telemetry_observe_into};
 
 /// Dense telemetry snapshot for one dwelling timestep.
 #[derive(Debug, Clone, PartialEq)]
@@ -102,143 +103,9 @@ impl DwellingTelemetry {
         if !self.initialized {
             return Ok(vec![f64::NAN; fields.len()]);
         }
-        let mut out = Vec::with_capacity(fields.len());
-        let zone_index = index_map(&self.zone_names);
-        let equip_index = index_map(&self.equipment_names);
-
-        for &field in fields {
-            if field == "outdoor_temp" {
-                out.push(self.outdoor_temp_c);
-                continue;
-            }
-            if field == "outdoor_humidity_ratio" {
-                out.push(self.outdoor_humidity_ratio);
-                continue;
-            }
-            if field == "total_electric_kw" || field == "total_power_kw" {
-                out.push(self.total_power_kw);
-                continue;
-            }
-            if field == "reactive_power_kvar" {
-                out.push(self.reactive_power_kvar);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "zone_temp") {
-                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown zone in field `{field}`"))
-                })?;
-                out.push(self.zone_temperatures_c[idx]);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "setpoint_heat") {
-                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown zone in field `{field}`"))
-                })?;
-                out.push(self.setpoint_heat_c[idx]);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "setpoint_cool") {
-                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown zone in field `{field}`"))
-                })?;
-                out.push(self.setpoint_cool_c[idx]);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "zone_energy_balance") {
-                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown zone in field `{field}`"))
-                })?;
-                out.push(self.energy_balance_residuals[idx]);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "equipment_soc") {
-                let idx = *equip_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown equipment in field `{field}`"))
-                })?;
-                out.push(self.equipment_soc[idx]);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "equipment_power") {
-                let idx = *equip_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown equipment in field `{field}`"))
-                })?;
-                out.push(self.equipment_power_kw[idx]);
-                continue;
-            }
-
-            // Flat aliases used in architecture docs for single-instance cases.
-            if field == "battery_soc" {
-                let idx = single_instance_alias(&equip_index, "Battery", field)?;
-                out.push(self.equipment_soc[idx]);
-                continue;
-            }
-            if field == "ev_soc" {
-                let idx = single_instance_alias(&equip_index, "Electric Vehicle", field)?;
-                out.push(self.equipment_soc[idx]);
-                continue;
-            }
-
-            // Temporal encoding: sin/cos of fractional hour for diurnal RL patterns.
-            if field == "time_sin" {
-                let fhour = self.current_time.hour() as f64
-                    + self.current_time.minute() as f64 / 60.0
-                    + self.current_time.second() as f64 / 3600.0;
-                out.push((2.0 * std::f64::consts::PI * fhour / 24.0).sin());
-                continue;
-            }
-            if field == "time_cos" {
-                let fhour = self.current_time.hour() as f64
-                    + self.current_time.minute() as f64 / 60.0
-                    + self.current_time.second() as f64 / 3600.0;
-                out.push((2.0 * std::f64::consts::PI * fhour / 24.0).cos());
-                continue;
-            }
-
-            // Actor telemetry fallback: dot-separated <actor>.<channel>.
-            let mut found_in_actors = false;
-            if let Some((actor_name, channel_name)) = field.split_once('.')
-                // allowed: actor_telemetry keys are user-defined strings, not static tk:: constants
-                && let Some(channels) = self.actor_telemetry.get(actor_name)
-                && let Some(&value) = channels.get(channel_name)
-            {
-                if !warned.dot {
-                    warned.dot = true;
-                    tracing::warn!(
-                        field = field,
-                        actor_telemetry_key = channel_name,
-                        "resolving observation field via actor_telemetry (throttled to once per run)"
-                    );
-                }
-                out.push(value);
-                found_in_actors = true;
-            }
-            // Bare field name: search all actors in sorted-name order
-            // (BTreeMap), so duplicate channel names always resolve to the
-            // lexicographically-first actor's value.
-            if !found_in_actors {
-                for channels in self.actor_telemetry.values() {
-                    if let Some(&value) = channels.get(field) {
-                        if !warned.bare {
-                            warned.bare = true;
-                            tracing::warn!(
-                                field = field,
-                                "resolving observation field via actor_telemetry (bare name, throttled to once per run)"
-                            );
-                        }
-                        out.push(value);
-                        found_in_actors = true;
-                        break;
-                    }
-                }
-            }
-            if found_in_actors {
-                continue;
-            }
-
-            return Err(HaresError::Control(format!(
-                "unknown telemetry field key `{field}`"
-            )));
-        }
+        let plan = ObservationPlan::from_telemetry(self, fields, warned)?;
+        let mut out = vec![0.0; fields.len()];
+        telemetry_observe_into(self, &plan, &mut out)?;
 
         #[cfg(feature = "observe")]
         tracing::debug!(
@@ -249,37 +116,38 @@ impl DwellingTelemetry {
 
         Ok(out)
     }
-}
 
-fn index_map(names: &[String]) -> HashMap<String, usize> {
-    // normalize_ascii(s) = s.trim().to_ascii_lowercase() (hares-types/src/text.rs:11).
-    // Equivalent to Python's name.strip().lower() for ASCII input — HARES zone and
-    // equipment names are always ASCII, so the two index maps resolve identically.
-    names
-        .iter()
-        .enumerate()
-        .map(|(idx, name)| (normalize_ascii(name), idx))
-        .collect()
-}
-
-fn bracket_name<'a>(field: &'a str, key: &str) -> Option<&'a str> {
-    let prefix = format!("{key}[");
-    field
-        .strip_prefix(&prefix)
-        .and_then(|tail| tail.strip_suffix(']'))
-}
-
-fn single_instance_alias(
-    equip_index: &HashMap<String, usize>,
-    canonical_name: &str,
-    field: &str,
-) -> Result<usize, HaresError> {
-    if let Some(&idx) = equip_index.get(&normalize_ascii(canonical_name)) {
-        return Ok(idx);
+    /// A thin wrapper over the frozen observation plan: the fields resolve
+    /// once into an [`ObservationPlan`] and the same executor
+    /// `Dwelling::observe_into` runs on the live dwelling fills the vector
+    /// from this snapshot, so the two readers produce the same values on
+    /// bits by construction. A one-shot read: the fallback warnings consume
+    /// a throwaway run's warn gates.
+    pub fn to_observation_vec(&self, fields: &[&str]) -> Result<Vec<f64>, HaresError> {
+        self.observation_vec(fields, &mut ObservationWarnOnce::default())
     }
-    Err(HaresError::Control(format!(
-        "field `{field}` alias requires `{canonical_name}` equipment"
-    )))
+
+    /// The names the plan resolves against this snapshot: the zone names
+    /// in their (sorted) vector order with no zone ids of their own, the
+    /// equipment names and the actors' published channels in sorted-name
+    /// order.
+    pub(crate) fn observation_surface(&self) -> ObservationSurface {
+        ObservationSurface {
+            zone_names: self
+                .zone_names
+                .iter()
+                .map(|name| (name.clone(), ZoneId(0)))
+                .collect(),
+            equipment_names: self.equipment_names.clone(),
+            actors: self
+                .actor_telemetry
+                .iter()
+                .map(|(name, channels)| {
+                    (name.clone(), channels.keys().cloned().collect::<Vec<_>>())
+                })
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -289,20 +157,6 @@ mod tests {
     use super::ObservationWarnOnce;
     use chrono::{FixedOffset, TimeZone};
     use std::collections::BTreeMap;
-
-    /// The one-argument dispatch the dispatch tests read through, over a
-    /// throwaway run's warn gates; the gates' own behavior is the
-    /// `actor_telemetry_fallbacks_consume_their_own_run_state_only`
-    /// test's.
-    trait SingleRunObservation {
-        fn to_observation_vec(&self, fields: &[&str]) -> Result<Vec<f64>, HaresError>;
-    }
-
-    impl SingleRunObservation for DwellingTelemetry {
-        fn to_observation_vec(&self, fields: &[&str]) -> Result<Vec<f64>, HaresError> {
-            self.observation_vec(fields, &mut ObservationWarnOnce::default())
-        }
-    }
 
     fn sample() -> DwellingTelemetry {
         DwellingTelemetry {
