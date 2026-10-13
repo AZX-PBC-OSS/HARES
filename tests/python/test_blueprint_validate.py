@@ -66,6 +66,18 @@ def test_validate_returns_the_resolved_model_dict():
             assert set(layer) == {"r_m2k_w", "c_j_m2k"}
 
 
+def test_validate_readback_carries_the_active_setpoint_sources():
+    """The resolved model's dict carries each side's active setpoint source
+    (`SetpointSource`, the setpoint-source rule): the fixture home's schedule
+    carries no setpoint column, so both sides resolve from the HPXML thermostat
+    elements."""
+    model = _blueprint().validate()
+    heating = model["setpoints"]["heating"]
+    cooling = model["setpoints"]["cooling"]
+    assert heating["source"] == "hpxml" and cooling["source"] == "hpxml"
+    assert len(heating["weekday_c"]) == 24 and len(heating["weekend_c"]) == 24
+
+
 def test_validate_rejects_an_infeasible_override():
     """An infeasible override fails `validate()` naming the cause, the
     same message the build fails with."""

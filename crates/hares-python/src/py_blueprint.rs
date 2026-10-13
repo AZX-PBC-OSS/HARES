@@ -474,9 +474,36 @@ pub(crate) fn resolved_model_to_py(
         boundaries.append(entry)?;
     }
 
+    // The active setpoint source per side, copied from the equipment specs
+    // the schedule resolution stamped (`SetpointSource`, the inputs ledger's
+    // setpoint-source rule): every HVAC spec on a side agrees, so the first
+    // non-None is the side's source, `None` when no side source resolved.
+    let side_source = |side: fn(
+        &hares_core::resolved::ResolvedEquipment,
+    ) -> &Option<hares_io::SetpointSource>|
+     -> Option<hares_io::SetpointSource> {
+        model.equipment.iter().find_map(|e| side(e).clone())
+    };
+
+    let setpoints = PyDict::new(py);
+    for (side, source) in [
+        ("heating", side_source(|e| &e.heating_setpoint)),
+        ("cooling", side_source(|e| &e.cooling_setpoint)),
+    ] {
+        match source {
+            Some(s) => {
+                let json = serde_json::to_value(&s)
+                    .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+                setpoints.set_item(side, crate::py_tariff::json_value_to_py(py, &json)?)?;
+            }
+            None => setpoints.set_item(side, py.None())?,
+        }
+    }
+
     let out = PyDict::new(py);
     out.set_item("site", site)?;
     out.set_item("clock", clock)?;
     out.set_item("boundaries", boundaries)?;
+    out.set_item("setpoints", setpoints)?;
     Ok(out.into_any().unbind())
 }

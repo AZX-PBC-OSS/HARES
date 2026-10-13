@@ -41,6 +41,31 @@ impl PySelection {
             Selection::Diagnostics => "Selection.diagnostics()".to_string(),
         }
     }
+
+    /// Value equality: two selections built apart select alike. The presets
+    /// a consumer holds are compared against the engine's named tiers.
+    pub fn __eq__(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
+    /// The pickling state: the selection's own serde JSON, the form the
+    /// engine's TOML config carries it in, so a selection crosses a process
+    /// boundary as data and rebuilds as the same selection.
+    pub fn state_json(&self) -> String {
+        serde_json::to_string(&self.0).expect("a selection serialises")
+    }
+
+    /// `__reduce__` over that state: the rebuild callable is the extension
+    /// module's `_selection_from_state`, pickled by reference.
+    pub fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObject;
+
+        let state = slf.borrow().state_json();
+        let module = py.import("hares._hares")?;
+        let rebuild = module.getattr("_selection_from_state")?.unbind();
+        let args = (state,).into_pyobject(py)?.unbind().into_any();
+        Ok((rebuild, args).into_pyobject(py)?.unbind().into_any())
+    }
 }
 
 /// The reporting frequency. Only the timestep frequency runs in this
@@ -99,6 +124,10 @@ impl PyFrequency {
     #[staticmethod]
     pub fn run_period() -> Self {
         Self(Frequency::RunPeriod)
+    }
+
+    pub fn __eq__(&self, other: &Self) -> bool {
+        self.0 == other.0
     }
 
     pub fn __repr__(&self) -> String {
@@ -172,6 +201,19 @@ impl PyDestination {
             Destination::Callback => "Destination.callback()".to_string(),
         }
     }
+
+    pub fn __eq__(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+/// The pickling rebuild for a selection: its own serde JSON back into the
+/// same selection. The `__reduce__` above pickles this by reference.
+#[pyfunction]
+pub fn _selection_from_state(state: String) -> PyResult<PySelection> {
+    let selection: Selection = serde_json::from_str(&state)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(PySelection(selection))
 }
 
 /// One report request: what a run records and where it goes.
