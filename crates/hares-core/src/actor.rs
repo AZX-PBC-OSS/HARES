@@ -243,6 +243,27 @@ pub trait Actor: Send + Sync + 'static {
         None
     }
 
+    /// Re-derives this actor's random stream from the dwelling's generator
+    /// key `seed`: the stream nonce construction assigned is kept, the
+    /// generator starts at its start (word position zero). The dwelling
+    /// calls it only on the actors it recorded as holding a
+    /// dwelling-derived stream; the default refuses, so a seeded actor
+    /// that does not implement it fails the reseed naming the component
+    /// instead of silently keeping its old stream.
+    fn reseed(&mut self, seed: [u8; 32]) -> Result<(), HaresError> {
+        let _ = seed;
+        Err(HaresError::Control(
+            "this actor holds no reseedable random stream (the default Actor::reseed)".to_string(),
+        ))
+    }
+
+    /// The actor's current random-stream state (the generator key, the
+    /// stream nonce, the word position), read back for the reproducibility
+    /// checks. `None` for an actor the dwelling seeded no stream into.
+    fn rng_stream_state(&self) -> Option<hares_types::rng::RngStreamState> {
+        None
+    }
+
     /// Serializes the actor's mutable decision-state into an opaque blob for
     /// checkpointing. Actors with no mutable state return an empty `Vec`.
     fn save_state(&self) -> Result<Vec<u8>, HaresError> {

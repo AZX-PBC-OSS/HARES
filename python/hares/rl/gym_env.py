@@ -610,7 +610,12 @@ class DwellingGymEnv(_GYM_BASE):
 
         self._dwelling.load_state(self._initial_snapshot)
         applied_seed = int(seed) if seed is not None else secrets.randbits(63)
-        self._dwelling.reset_with_seed(applied_seed)
+        # The reset restores the warmed-up state and reseeds the streams,
+        # without rebuilding: the snapshot's converged initial condition is
+        # kept, the episode's random streams are the seed's, and no
+        # warm-up runs again. The explicit full rebuild is
+        # `reset_with_seed`, which this path does not call.
+        self._dwelling.reseed(applied_seed)
         self._steps_elapsed = 0
         self._active_seed = applied_seed
         self._run_result = None

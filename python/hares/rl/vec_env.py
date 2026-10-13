@@ -260,7 +260,12 @@ class VecDwellingGymEnv:
         for idx, dwelling in enumerate(self._dwellings):
             dwelling.load_state(self._initial_snapshots[idx])
             applied_seed = (int(seed) + idx) if seed is not None else secrets.randbits(63)
-            dwelling.reset_with_seed(int(applied_seed))
+            # The reset restores the warmed-up state and reseeds the
+            # streams, without rebuilding: the snapshot's converged
+            # initial condition is kept, the episode's random streams are
+            # the seed's, and no warm-up runs again. The explicit full
+            # rebuild is `reset_with_seed`, which this path does not call.
+            dwelling.reseed(int(applied_seed))
             seeds.append(int(applied_seed))
         self._steps_elapsed[:] = 0
         self._run_results = [None] * self.num_envs

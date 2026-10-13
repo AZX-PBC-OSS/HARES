@@ -608,6 +608,34 @@ impl Equipment for EventBasedLoad {
         true
     }
 
+    fn reseed(&mut self, seed: [u8; 32]) -> crate::Result<()> {
+        match self.start_draws.as_mut() {
+            Some(draws) => {
+                // The identity nonce construction assigned is kept; the
+                // dwelling's generator key is replaced and the stream
+                // starts over at word position zero.
+                draws.stream = RngStream {
+                    seed,
+                    stream: draws.stream.stream,
+                };
+                draws.rng = draws.stream.rng_at(0);
+                draws.draws = 0;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn rng_stream_state(&self) -> Option<hares_types::rng::RngStreamState> {
+        self.start_draws
+            .as_ref()
+            .map(|draws| hares_types::rng::RngStreamState {
+                seed: draws.stream.seed,
+                stream: draws.stream.stream,
+                word_pos: draws.rng.get_word_pos(),
+            })
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -1138,6 +1166,31 @@ impl Equipment for WetAppliance {
 
     fn uses_rng_stream(&self) -> bool {
         true
+    }
+
+    fn reseed(&mut self, seed: [u8; 32]) -> crate::Result<()> {
+        match self.start_draws.as_mut() {
+            Some(draws) => {
+                draws.stream = RngStream {
+                    seed,
+                    stream: draws.stream.stream,
+                };
+                draws.rng = draws.stream.rng_at(0);
+                draws.draws = 0;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn rng_stream_state(&self) -> Option<hares_types::rng::RngStreamState> {
+        self.start_draws
+            .as_ref()
+            .map(|draws| hares_types::rng::RngStreamState {
+                seed: draws.stream.seed,
+                stream: draws.stream.stream,
+                word_pos: draws.rng.get_word_pos(),
+            })
     }
 
     fn descriptor(&self) -> &EquipmentDescriptor {

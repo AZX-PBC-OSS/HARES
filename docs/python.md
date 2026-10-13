@@ -236,13 +236,21 @@ through `finish()`; the finished `RunResult` is the wrapper's `run_result`
 (one dwelling) or `run_results` (the vector), and the underlying dwellings
 are reachable (`env.dwelling`, `envs`), so `health()` reads at any step.
 
-The observations are read through a frozen observation plan
-(`Dwelling.observation_plan(fields)`, built once per episode at reset):
-every step fills the environment's own buffer in place through its buffer
-protocol, and `step()` returns a copy of that buffer by default; a
-`VecDwellingGymEnv` constructed with `copy=False` returns the buffer
-itself, overwritten by the next `step()` or `reset()`, for callers that
-consume each observation before stepping again.
+The reset contract: `reset(seed=...)` restores the warmed-up state and
+reseeds the random streams, without rebuilding. The warmed-up state is the
+one the environment's construction built (the converged initial condition
+its construction seed produced, snapshotted at construction); `load_state`
+restores it and `Dwelling.reseed(seed)` re-derives every random stream the
+dwelling holds for the seed given, with each stream at its start, so
+`reset(seed=...)` fixes the random streams of the episode that follows. No
+dwelling is re-constructed and no warm-up runs again; the explicit full
+rebuild remains `Dwelling.reset_with_seed(seed)`. The observations are read
+through a frozen observation plan (`Dwelling.observation_plan(fields)`,
+built once per episode at reset): every step fills the environment's own
+buffer in place through its buffer protocol, and `step()` returns a copy of
+that buffer by default; a `VecDwellingGymEnv` constructed with
+`copy=False` returns the buffer itself, overwritten by the next `step()` or
+`reset()`, for callers that consume each observation before stepping again.
 
 ## Results
 

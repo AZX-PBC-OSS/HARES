@@ -21,6 +21,16 @@ pub struct RngStream {
     pub stream: u64,
 }
 
+/// A component's current random-stream state, read back for the
+/// reproducibility checks: the generator key, the stream nonce and the
+/// word position, the triple that pins the component's draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RngStreamState {
+    pub seed: [u8; 32],
+    pub stream: u64,
+    pub word_pos: u128,
+}
+
 impl RngStream {
     /// The stream an event load with the stable `identity` draws from under
     /// the dwelling key `seed`.

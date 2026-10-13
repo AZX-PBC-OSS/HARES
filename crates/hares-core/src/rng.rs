@@ -76,6 +76,15 @@ pub fn advance_dwelling_rng(rng: &mut ChaCha8Rng) -> u64 {
     rng.random()
 }
 
+/// One seeded component's random stream, read back for the
+/// reproducibility checks: the component's name in the dwelling and the
+/// (key, stream nonce, word position) triple that pins its draws.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeededStream {
+    pub component: String,
+    pub state: hares_types::rng::RngStreamState,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

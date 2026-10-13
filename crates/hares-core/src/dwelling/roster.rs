@@ -489,6 +489,21 @@ impl Dwelling {
         self.auto_registered_actor_names
             .retain(|name| actors.iter().any(|a| a.name() == name));
         self.auto_registered_actor_names.extend(built_in_names);
+        // The seeded-stream record refreshes with the roster: the
+        // auto-registered actors that hold a dwelling-derived stream (an
+        // EV driver's own, fresh or taken over from the driver it
+        // replaced). reseed re-derives exactly these; a user actor's own
+        // seeded generator (a registry-built driver's config seed) is
+        // never the dwelling's to reseed.
+        self.seeded_stream_actors = self
+            .actors
+            .iter()
+            .filter(|actor| {
+                actor.rng_stream_state().is_some()
+                    && self.auto_registered_actor_names.contains(actor.name())
+            })
+            .map(|actor| actor.name().to_string())
+            .collect();
         self.rebuild_schedule();
     }
 

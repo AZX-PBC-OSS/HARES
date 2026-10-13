@@ -51,6 +51,17 @@ pyo3::create_exception!(
     pyo3::exceptions::PyRuntimeError
 );
 
+/// Test-only: the number of full dwelling re-constructions
+/// `reset_with_seed` ran (its one `DwellingBlueprint::build_with_seed`
+/// call each). Lives in `hares-python` because `cfg(test)` is not set for
+/// `hares-core` when `hares-python`'s tests compile it: the reset the
+/// environments use (`load_state` then `reseed`) must leave the counter
+/// alone, and the counter is shown to count by a `reset_with_seed` call
+/// moving it.
+#[cfg(test)]
+pub(crate) static TEST_BUILD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 use crate::conversions::naive_chrono_to_py_datetime;
 use crate::py_actor::PyActor;
 use crate::py_actor::PyPriority;
@@ -1862,6 +1873,8 @@ impl PyDwelling {
         // The reset reuses the blueprint: the shared parses are the same
         // `Arc`s, the rng derives from the seed, and the settings carry
         // the seed the config reports.
+        #[cfg(test)]
+        TEST_BUILD_COUNT.fetch_add(1, Ordering::SeqCst);
         let mut config = self.config.clone();
         config.settings.sim_config.master_seed = seed;
 
@@ -1879,6 +1892,16 @@ impl PyDwelling {
         *self.callback_cause.lock().expect("cause slot mutex") = None;
 
         self.initialize()
+    }
+
+    /// Reseeds the dwelling's random streams in place, the streams
+    /// construction assigns for `seed` with each at its start: the reset
+    /// that restores a warmed-up state is `load_state(snapshot)` and then
+    /// this — no re-construction, no second warm-up. The explicit full
+    /// rebuild stays `reset_with_seed`.
+    pub fn reseed(&mut self, seed: u64) -> PyResult<()> {
+        let mut dwelling = self.acquire()?;
+        dwelling.reseed(seed).map_err(to_py_err)
     }
 
     pub fn save_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
@@ -4392,6 +4415,105 @@ mod construction_gil_tests {
                 recorded(),
                 0,
                 "DwellingBlueprint.build must build with the GIL released"
+            );
+        });
+    }
+
+    /// The reset the gym environments use restores the warmed-up state
+    /// and reseeds without rebuilding: `load_state(snapshot)` then
+    /// `reseed(7)` constructs nothing (the test-only build counter is
+    /// unchanged; `reset_with_seed` moves it by one, so the counter is
+    /// shown to count), the blueprint is the same object throughout, and
+    /// the restored dwelling's warm-up health is the snapshot's.
+    #[test]
+    fn gym_reset_builds_nothing_and_runs_no_warmup() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = root.join("tests/fixtures/parity/cz5a_ev_charging");
+        Python::attach(|py| {
+            let sim_config = crate::py_config::PySimulationConfig::new(
+                "2023-01-01T00:00:00-07:00",
+                WholeSeconds(86_400),
+                WholeSeconds(900),
+                None,
+                false,
+                false,
+                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                None,
+                0,
+                None,
+                None,
+                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                None,
+                None,
+            )
+            .expect("the sim config builds");
+            let cls = py.get_type::<PyDwelling>();
+            let mut dwelling = PyDwelling::from_hpxml(
+                &cls,
+                PyString::new(py, fixture.join("building.xml").to_str().expect("utf8")).as_any(),
+                Some(
+                    PyString::new(py, fixture.join("schedule.csv").to_str().expect("utf8"))
+                        .as_any(),
+                ),
+                PyString::new(py, fixture.join("weather.epw").to_str().expect("utf8")).as_any(),
+                sim_config,
+                1,
+                Some(7 * 24 * 3600),
+                Some(PyString::new(py, root.join("defaults").to_str().expect("utf8")).as_any()),
+                None,
+                None,
+            )
+            .expect("the cz5a fixture must construct");
+            dwelling.initialize().expect("initialize");
+
+            let warmup_at_snapshot = {
+                let guard = dwelling.acquire().expect("not poisoned");
+                guard.health().warmup.clone()
+            };
+            let snapshot = dwelling
+                .save_state(py)
+                .expect("the warmed-up snapshot saves")
+                .unbind();
+
+            let builds_before = crate::py_dwelling::TEST_BUILD_COUNT.load(Ordering::SeqCst);
+            let blueprint_before = Arc::clone(&dwelling.blueprint);
+
+            // The reset sequence the environments use.
+            use pyo3::prelude::PyBytesMethods;
+            let snapshot_bytes: Vec<u8> = snapshot.bind(py).as_bytes().to_vec();
+            dwelling
+                .load_state(&snapshot_bytes)
+                .expect("the snapshot restores");
+            dwelling.reseed(7).expect("the reseed succeeds");
+
+            let blueprint_after = Arc::clone(&dwelling.blueprint);
+            assert!(
+                Arc::ptr_eq(&blueprint_before, &blueprint_after),
+                "the reset path must not rebuild: the blueprint is the same object"
+            );
+            assert_eq!(
+                crate::py_dwelling::TEST_BUILD_COUNT.load(Ordering::SeqCst),
+                builds_before,
+                "the reset path must construct nothing"
+            );
+            let warmup_after = {
+                let guard = dwelling.acquire().expect("not poisoned");
+                guard.health().warmup.clone()
+            };
+            assert_eq!(
+                warmup_after, warmup_at_snapshot,
+                "the reset keeps the warmed-up state: the warm-up health is the snapshot's"
+            );
+
+            // The counter is shown to count: the explicit full rebuild
+            // constructs once.
+            dwelling
+                .reset_with_seed(py, 7)
+                .expect("the explicit rebuild succeeds");
+            assert_eq!(
+                crate::py_dwelling::TEST_BUILD_COUNT.load(Ordering::SeqCst),
+                builds_before + 1,
+                "reset_with_seed is the one full re-construction"
             );
         });
     }

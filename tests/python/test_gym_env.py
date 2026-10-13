@@ -74,6 +74,68 @@ def _make_dwelling(seed: int = 0, duration_s: int = 600) -> PyDwelling:
     return PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults_path=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=duration_s, time_res=60, master_seed=seed))
 
 
+def test_gym_reset_restores_snapshot_and_reseeds():
+    """The gym's reset restores the warmed-up state and reseeds the streams
+    without rebuilding: two reset(seed=7) calls, each followed by the same
+    96 actions, give bitwise-equal observations and rewards, and the
+    restored first observation is the same whatever the episode's seed."""
+    fixture = ROOT / "tests/fixtures/parity/cz5a_ev_charging"
+    dwelling = PyDwelling.from_hpxml(
+        hpxml=str(fixture / "building.xml"),
+        schedule=str(fixture / "schedule.csv"),
+        weather=str(fixture / "weather.epw"),
+        defaults_path=str(HARES_DEFAULTS),
+        initialization_duration=7 * 24 * 3600,
+        config=SimulationConfig(
+            start_time="2023-01-01T00:00:00-07:00",
+            duration=2 * 86_400,
+            time_res=900,
+            master_seed=42,
+        ),
+    )
+    env = VecDwellingGymEnv(
+        dwellings=[dwelling],
+        observation_fields=[
+            "total_power_kw",
+            "outdoor_temp",
+            "zone_temp[Indoor]",
+            "time_sin",
+            "time_cos",
+        ],
+        action_space_config={"ASHP Heater": ["heat_c"]},
+        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        episode_length=timedelta(days=2),
+    )
+
+    def run_episode(seed: int):
+        obs0, _info = env.reset(seed=seed)
+        observations = [obs0.copy()]
+        rewards = []
+        action = np.full((1, env._action_dim), 21.0, dtype=np.float64)
+        for _ in range(96):
+            obs, reward, _terminated, _truncated, _info = env.step(action)
+            observations.append(obs.copy())
+            rewards.append(reward.copy())
+        return observations, rewards
+
+    first_obs, first_rewards = run_episode(7)
+    second_obs, second_rewards = run_episode(7)
+    assert len(first_obs) == 97
+    for left, right in zip(first_obs, second_obs, strict=True):
+        assert left.tobytes() == right.tobytes(), "bitwise-equal observations"
+    for left, right in zip(first_rewards, second_rewards, strict=True):
+        assert left.tobytes() == right.tobytes(), "bitwise-equal rewards"
+
+    # The restored state is the observation's source: the first
+    # observation is the same whatever the episode's seed.
+    obs7, _info7 = env.reset(seed=7)
+    obs8, _info8 = env.reset(seed=8)
+    assert obs7.tobytes() == obs8.tobytes(), (
+        "the reset restores the warmed-up state, the same first "
+        "observation under any seed"
+    )
+
+
 def test_dwelling_gym_reset_seed_reproducible():
     env = _make_env()
 

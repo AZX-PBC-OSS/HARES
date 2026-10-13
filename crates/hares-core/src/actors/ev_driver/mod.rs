@@ -1260,6 +1260,27 @@ impl Actor for EvDriverActor {
         Some(&self.telemetry)
     }
 
+    /// The dwelling-derived stream this driver holds: its nonce was
+    /// assigned at construction (or taken over from the driver it
+    /// replaced), so reseeding keeps it and replaces the dwelling's
+    /// generator key, the draws starting over at word position zero. The
+    /// driver draws nothing ahead of its stream at construction, so there
+    /// is nothing to redraw.
+    fn reseed(&mut self, seed: [u8; 32]) -> Result<(), HaresError> {
+        let stream = self.rng.get_stream();
+        self.rng = ChaCha8Rng::from_seed(seed);
+        self.rng.set_stream(stream);
+        Ok(())
+    }
+
+    fn rng_stream_state(&self) -> Option<hares_types::rng::RngStreamState> {
+        Some(hares_types::rng::RngStreamState {
+            seed: self.rng.get_seed(),
+            stream: self.rng.get_stream(),
+            word_pos: self.rng.get_word_pos(),
+        })
+    }
+
     fn dispatch_targets(&self) -> &[ActorTarget] {
         std::slice::from_ref(&self.vehicle)
     }

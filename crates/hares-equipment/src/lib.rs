@@ -376,6 +376,30 @@ pub trait Equipment: Send + Sync {
         false
     }
 
+    /// Re-derives this equipment's random stream from the dwelling's
+    /// generator key `seed`: the stream nonce construction assigned is
+    /// kept, the generator starts at its start (word position zero). The
+    /// dwelling calls it on every equipment that answers
+    /// [`Self::uses_rng_stream`]; the default refuses, so a seeded
+    /// equipment that does not implement it fails the reseed naming the
+    /// component instead of silently keeping its old stream.
+    fn reseed(&mut self, seed: [u8; 32]) -> Result<()> {
+        let _ = seed;
+        Err(HaresError::Control(
+            "this equipment holds no reseedable random stream (the default \
+             Equipment::reseed)"
+                .to_string(),
+        ))
+    }
+
+    /// The equipment's current random-stream state (the generator key,
+    /// the stream nonce, the word position), read back for the
+    /// reproducibility checks. `None` for equipment the dwelling seeded
+    /// no stream into.
+    fn rng_stream_state(&self) -> Option<hares_types::rng::RngStreamState> {
+        None
+    }
+
     /// Returns the per-timestep effective ventilation recovery efficiencies
     /// `(sensible, latent)` if this equipment is a ventilation device (HRV/ERV).
     ///

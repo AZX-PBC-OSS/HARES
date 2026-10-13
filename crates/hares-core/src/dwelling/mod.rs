@@ -107,6 +107,7 @@ use crate::result::{
     BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
     TariffRecord,
 };
+use crate::rng::SeededStream;
 use crate::rng::{advance_dwelling_rng, derive_sub_rng, ev_driver_stream};
 use crate::scheduler::{ExecutionPhase, StepScheduler};
 use crate::telemetry::{DwellingTelemetry, ObservationWarnOnce};
@@ -2545,6 +2546,13 @@ pub struct Dwelling {
     /// change before the first recorded row keeps the attachment.
     attached_callback: Option<CallbackAttachment>,
     pub rng: ChaCha8Rng,
+    /// The built-in actors holding a dwelling-derived random stream,
+    /// recorded when a roster change installs them (an EV driver's stream
+    /// index is the actor's own to report through `rng_stream_state`):
+    /// [`Self::reseed`] re-derives exactly these, beside the dwelling's
+    /// own stream and every event-load equipment's
+    /// ([`Equipment::uses_rng_stream`]), each at its start.
+    seeded_stream_actors: Vec<String>,
     /// Bounded warning buffer (first [`WarningLog::CAPACITY`] messages kept,
     /// overflow counted) — see [`Dwelling::take_warnings`].
     pub warnings: WarningLog,
@@ -3931,6 +3939,7 @@ fn assemble_from_blueprint_with_seed(
         attached_callback: None,
         roster: RosterCaches::default(),
         rng,
+        seeded_stream_actors: Vec::new(),
         warnings: std::mem::take(warnings),
         warning_scratch: Vec::new(),
         setpoints_reconciled_by_equipment,
@@ -5234,6 +5243,99 @@ impl Dwelling {
         Err(HaresError::Control(format!(
             "unknown telemetry field key `{field}`"
         )))
+    }
+
+    /// Re-derives every random stream the dwelling holds from
+    /// `master_seed`, with the stream indices construction uses, each at
+    /// its start (word position zero): the dwelling's own stream 0, every
+    /// event-load equipment's stream (its identity nonce kept, the
+    /// dwelling's generator key replaced) and every built-in EV driver
+    /// actor's stream recorded at the roster's last commit. Nothing else
+    /// changes: the reset that restores a warmed-up snapshot is
+    /// `load_state` and then this, no re-construction, no second warm-up.
+    ///
+    /// A component the dwelling seeded whose class does not implement the
+    /// trait's `reseed` fails here naming it, instead of silently keeping
+    /// its old stream.
+    ///
+    /// # Errors
+    ///
+    /// `HaresError::Dwelling` when a recorded actor is gone, or a seeded
+    /// component's `reseed` refuses.
+    pub fn reseed(&mut self, master_seed: u64) -> Result<()> {
+        let stream_seed = hares_types::rng::dwelling_seed(master_seed, self.bldg_id);
+        // The dwelling's own stream, at its start.
+        self.rng = derive_dwelling_rng(master_seed, self.bldg_id);
+        // Every event-load equipment's stream: the identity nonce
+        // construction assigned is kept, the generator starts over.
+        for eq in &mut self.equipment {
+            if eq.uses_rng_stream() {
+                eq.reseed(stream_seed).map_err(|err| {
+                    HaresError::Dwelling(format!(
+                        "reseeding equipment '{}': {err}",
+                        eq.descriptor().name
+                    ))
+                })?;
+            }
+        }
+        // The recorded built-in actors: the last actor registered under a
+        // recorded name holds the stream (the roster's own
+        // last-insert-wins rule), and it keeps that stream's nonce.
+        for name in self.seeded_stream_actors.clone() {
+            let actor = self
+                .actors
+                .iter_mut()
+                .rev()
+                .find(|candidate| candidate.name() == name)
+                .ok_or_else(|| {
+                    HaresError::Dwelling(format!(
+                        "the recorded random-stream actor '{name}' is no longer in the dwelling"
+                    ))
+                })?;
+            actor
+                .reseed(stream_seed)
+                .map_err(|err| HaresError::Dwelling(format!("reseeding actor '{name}': {err}")))?;
+        }
+        Ok(())
+    }
+
+    /// Every seeded component's random-stream state, in construction
+    /// order: the dwelling's own stream first, then each event-load
+    /// equipment's, then each recorded actor's. The reproducibility
+    /// checks read this; a reseeded dwelling's vector equals a fresh
+    /// build's construction assignment, component for component.
+    pub fn seeded_streams(&self) -> Vec<SeededStream> {
+        let mut out = Vec::new();
+        out.push(SeededStream {
+            component: "dwelling".to_string(),
+            state: hares_types::rng::RngStreamState {
+                seed: self.rng.get_seed(),
+                stream: self.rng.get_stream(),
+                word_pos: self.rng.get_word_pos(),
+            },
+        });
+        for eq in &self.equipment {
+            if let Some(state) = eq.rng_stream_state() {
+                out.push(SeededStream {
+                    component: format!("equipment '{}'", eq.descriptor().name),
+                    state,
+                });
+            }
+        }
+        for actor in &self.actors {
+            if self
+                .seeded_stream_actors
+                .iter()
+                .any(|name| name == actor.name())
+                && let Some(state) = actor.rng_stream_state()
+            {
+                out.push(SeededStream {
+                    component: format!("actor '{}'", actor.name()),
+                    state,
+                });
+            }
+        }
+        out
     }
 
     /// Per-zone thermal consistency check: compares HVAC heating and cooling

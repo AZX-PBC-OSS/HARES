@@ -74,6 +74,7 @@ pub use result::{
     BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
     TariffRecord,
 };
+pub use rng::SeededStream;
 pub use rng::derive_dwelling_rng;
 pub use telemetry::DwellingTelemetry;
 pub use telemetry::ObservationWarnOnce;
