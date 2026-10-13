@@ -278,7 +278,7 @@ with tempfile.TemporaryDirectory() as output_dir:
                 ),
             ],
         ),
-        defaults_path='vendor/HARES/defaults',
+        defaults='vendor/HARES/defaults',
     )
     dw.initialize()
     dw.add_pv(PV("PV", capacity_kw=10.0, tilt=20.0, azimuth=180.0))
