@@ -153,7 +153,6 @@ impl DwellingTelemetry {
 #[cfg(test)]
 mod tests {
     use super::DwellingTelemetry;
-    use super::HaresError;
     use super::ObservationWarnOnce;
     use chrono::{FixedOffset, TimeZone};
     use std::collections::BTreeMap;
