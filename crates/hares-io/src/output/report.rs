@@ -24,7 +24,7 @@ use crate::config::ConfigError;
 /// selects the per-step diagnostics variables, declared in the catalogue
 /// as one block and appended to the run's schema only when a run requests
 /// them; the period frequencies arrive with the reporting-frequency entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Selection {
     /// The verbosity preset: every variable the selected verbosity tier
@@ -51,7 +51,7 @@ pub enum Selection {
 /// aggregation. Every non-timestep variant is externally tagged in TOML
 /// with its snake_case name, so a config carries `"hourly"`,
 /// `{ minutes = 15 }` and so on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Frequency {
     /// One row per step: no reduction.
@@ -148,7 +148,7 @@ impl Frequency {
 
 /// Where a report's batches go (`plan.md` 2.2). `Callback` arrives with the
 /// Python-attach entry; every variant this entry adds can run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Destination {
     /// Every flushed batch is retained in memory: the report's frame.

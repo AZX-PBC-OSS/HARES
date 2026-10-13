@@ -8,6 +8,8 @@
 
 use hares_io::output::report::{Destination, Frequency, ReportSpec, Selection};
 use pyo3::prelude::*;
+use std::hash::{Hash, Hasher};
+
 /// What a report selects.
 #[pyclass(name = "Selection", from_py_object)]
 #[derive(Debug, Clone)]
@@ -46,6 +48,14 @@ impl PySelection {
     /// a consumer holds are compared against the engine's named tiers.
     pub fn __eq__(&self, other: &Self) -> bool {
         self.0 == other.0
+    }
+
+    /// Hash of the selection's own fields, the companion `__eq__` needs:
+    /// equal selections hash equal, so a selection is a dict key again.
+    pub fn __hash__(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// The pickling state: the selection's own serde JSON, the form the
@@ -130,6 +140,33 @@ impl PyFrequency {
         self.0 == other.0
     }
 
+    /// Hash of the frequency's own fields, the companion `__eq__` needs:
+    /// equal frequencies hash equal, so a frequency is a dict key again.
+    pub fn __hash__(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// The pickling state: the frequency's own serde JSON, the form the
+    /// engine's TOML config carries it in, so a frequency crosses a process
+    /// boundary as data and rebuilds as the same frequency.
+    pub fn state_json(&self) -> String {
+        serde_json::to_string(&self.0).expect("a frequency serialises")
+    }
+
+    /// `__reduce__` over that state: the rebuild callable is the extension
+    /// module's `_frequency_from_state`, pickled by reference.
+    pub fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObject;
+
+        let state = slf.borrow().state_json();
+        let module = py.import("hares._hares")?;
+        let rebuild = module.getattr("_frequency_from_state")?.unbind();
+        let args = (state,).into_pyobject(py)?.unbind().into_any();
+        Ok((rebuild, args).into_pyobject(py)?.unbind().into_any())
+    }
+
     pub fn __repr__(&self) -> String {
         match &self.0 {
             Frequency::Timestep => "Frequency.timestep()".to_string(),
@@ -205,15 +242,65 @@ impl PyDestination {
     pub fn __eq__(&self, other: &Self) -> bool {
         self.0 == other.0
     }
+
+    /// Hash of the destination's own fields, the companion `__eq__` needs:
+    /// equal destinations hash equal, so a destination is a dict key again.
+    pub fn __hash__(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// The pickling state: the destination's own serde JSON, the form the
+    /// engine's TOML config carries it in, so a destination crosses a
+    /// process boundary as data and rebuilds as the same destination.
+    pub fn state_json(&self) -> String {
+        serde_json::to_string(&self.0).expect("a destination serialises")
+    }
+
+    /// `__reduce__` over that state: the rebuild callable is the extension
+    /// module's `_destination_from_state`, pickled by reference.
+    pub fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObject;
+
+        let state = slf.borrow().state_json();
+        let module = py.import("hares._hares")?;
+        let rebuild = module.getattr("_destination_from_state")?.unbind();
+        let args = (state,).into_pyobject(py)?.unbind().into_any();
+        Ok((rebuild, args).into_pyobject(py)?.unbind().into_any())
+    }
 }
 
-/// The pickling rebuild for a selection: its own serde JSON back into the
-/// same selection. The `__reduce__` above pickles this by reference.
+/// The pickling rebuilds: each report-surface value's own serde JSON back
+/// into the same value. The `__reduce__` methods above pickle these by
+/// reference, so a value crosses a spawn boundary as data and the child
+/// rebuilds it through the installed extension module.
 #[pyfunction]
 pub fn _selection_from_state(state: String) -> PyResult<PySelection> {
     let selection: Selection = serde_json::from_str(&state)
         .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
     Ok(PySelection(selection))
+}
+
+#[pyfunction]
+pub fn _frequency_from_state(state: String) -> PyResult<PyFrequency> {
+    let frequency: Frequency = serde_json::from_str(&state)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(PyFrequency(frequency))
+}
+
+#[pyfunction]
+pub fn _destination_from_state(state: String) -> PyResult<PyDestination> {
+    let destination: Destination = serde_json::from_str(&state)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(PyDestination(destination))
+}
+
+#[pyfunction]
+pub fn _reportspec_from_state(state: String) -> PyResult<PyReportSpec> {
+    let spec: ReportSpec = serde_json::from_str(&state)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(PyReportSpec(spec))
 }
 
 /// One report request: what a run records and where it goes.
@@ -260,6 +347,26 @@ impl PyReportSpec {
     #[getter]
     pub fn frequency(&self) -> PyFrequency {
         PyFrequency(self.0.frequency)
+    }
+
+    /// The pickling state: the request's own serde JSON, the form the
+    /// engine's TOML config carries a report list in, so a whole report
+    /// request (its selection, destination and frequency included) crosses
+    /// a process boundary as data and rebuilds as the same request.
+    pub fn state_json(&self) -> String {
+        serde_json::to_string(&self.0).expect("a report request serialises")
+    }
+
+    /// `__reduce__` over that state: the rebuild callable is the extension
+    /// module's `_reportspec_from_state`, pickled by reference.
+    pub fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObject;
+
+        let state = slf.borrow().state_json();
+        let module = py.import("hares._hares")?;
+        let rebuild = module.getattr("_reportspec_from_state")?.unbind();
+        let args = (state,).into_pyobject(py)?.unbind().into_any();
+        Ok((rebuild, args).into_pyobject(py)?.unbind().into_any())
     }
 
     pub fn __repr__(&self) -> String {

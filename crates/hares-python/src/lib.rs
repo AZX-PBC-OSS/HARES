@@ -237,6 +237,9 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_result::build_info, m)?)?;
     m.add_function(wrap_pyfunction!(py_schema::input_schema, m)?)?;
     m.add_function(wrap_pyfunction!(py_report::_selection_from_state, m)?)?;
+    m.add_function(wrap_pyfunction!(py_report::_frequency_from_state, m)?)?;
+    m.add_function(wrap_pyfunction!(py_report::_destination_from_state, m)?)?;
+    m.add_function(wrap_pyfunction!(py_report::_reportspec_from_state, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather_resample::resample_weather, m)?)?;
     m.add_function(wrap_pyfunction!(py_result::replay, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_weather, m)?)?;
