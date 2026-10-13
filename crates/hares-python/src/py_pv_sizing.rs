@@ -199,7 +199,7 @@ impl PyPvCandidate {
 #[pyclass(frozen, name = "PvSizingResult", skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyPvSizingResult {
-    inner: PvSizingResult,
+    pub(crate) inner: PvSizingResult,
 }
 
 #[pymethods]

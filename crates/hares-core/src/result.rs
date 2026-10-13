@@ -21,7 +21,7 @@ use crate::health::RunHealth;
 /// The metrics of a finished run: the full metric set, gas included
 /// (`FullSimulationMetrics` flattened; the calculator's own type stays in
 /// `hares-io`; every result surface carries this one).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct RunMetrics {
     pub total_energy_kwh: TotalEnergyKwh,
     pub peak_power_kw: PeakPowerKw,

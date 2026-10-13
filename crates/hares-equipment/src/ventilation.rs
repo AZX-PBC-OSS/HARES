@@ -2448,7 +2448,7 @@ mod tests {
             q.to_bits(),
             "telemetry Q must match port Q"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -2641,7 +2641,7 @@ mod tests {
             Some(OperatingMode::Standby),
             "active On mode with zero flow (grid outage) must reconcile to Standby"
         );
-        hares_types::validate_core_contract(v.descriptor(), v.core_output())
+        hares_types::validate_core_contract(v.descriptor(), v.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -2693,7 +2693,7 @@ mod tests {
             Some(OperatingMode::Standby),
             "active On mode with zero schedule fraction must reconcile to Standby"
         );
-        hares_types::validate_core_contract(v.descriptor(), v.core_output())
+        hares_types::validate_core_contract(v.descriptor(), v.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -3143,6 +3143,7 @@ mod tests {
         hares_types::equipment::validate_core_contract(
             restored.descriptor(),
             restored.core_output(),
+            &mut Vec::new(),
         )
         .expect(
             "a running fan's checkpoint must restore to a state the mode/flow guard \

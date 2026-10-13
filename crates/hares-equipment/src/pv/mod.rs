@@ -2112,8 +2112,12 @@ mod tests {
         let mut restored = PV::new(config_single());
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a PV checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a PV checkpoint must restore a contract-valid output");
     }
 
     #[test]

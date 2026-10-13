@@ -74,3 +74,4 @@ pub use result::{
 };
 pub use rng::derive_dwelling_rng;
 pub use telemetry::DwellingTelemetry;
+pub use telemetry::ObservationWarnOnce;

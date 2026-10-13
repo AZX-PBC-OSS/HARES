@@ -3,9 +3,6 @@
 use nalgebra::{Complex, DMatrix, DVector};
 use thiserror::Error;
 
-#[cfg(feature = "observe_detailed")]
-use std::sync::atomic::{AtomicU64, Ordering};
-
 const RCOND_THRESHOLD: f64 = 1.0e-12;
 pub const ZERO_GAIN_EPSILON: f64 = 1.0e-12;
 
@@ -94,6 +91,11 @@ pub struct StateSpaceModel {
     /// instability signal. `tracing::warn!` is emitted at construction when
     /// `bound >= 1.0 + 1e-10`.
     max_discrete_eigenvalue_magnitude: f64,
+    /// Whether this model's construction was accepted by the eigenvalue
+    /// fallback after the Gershgorin bound flagged it unstable: the model
+    /// records the event on itself, so the diagnostic reads per model
+    /// instead of a process-global counter.
+    gershgorin_false_positive: bool,
 }
 
 impl std::fmt::Debug for StateSpaceModel {
@@ -186,19 +188,6 @@ pub enum StabilityVerdict {
     MarginallyUnstable { max_eigenvalue_magnitude: f64 },
 }
 
-/// Count of Gershgorin false-positive rejections averted by full eigenvalue fallback.
-///
-/// Incremented each time `from_continuous` initially flags a model as unstable via
-/// Gershgorin but the full `eigenvalue_check` confirms stability.
-#[cfg(feature = "observe_detailed")]
-static GERSHGORIN_FALSE_POSITIVE_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Returns the number of Gershgorin false-positive rejections averted since startup.
-#[cfg(feature = "observe_detailed")]
-pub fn gershgorin_false_positive_count() -> u64 {
-    GERSHGORIN_FALSE_POSITIVE_COUNT.load(Ordering::Relaxed)
-}
-
 impl StateSpaceModel {
     /// Constructs a fully-discrete model from pre-discretized matrices.
     ///
@@ -226,6 +215,7 @@ impl StateSpaceModel {
             c,
             d,
             max_discrete_eigenvalue_magnitude: gershgorin_bound,
+            gershgorin_false_positive: false,
         })
     }
 
@@ -335,6 +325,7 @@ impl StateSpaceModel {
         let continuous_stable = gershgorin_continuous_stable(a_c);
         let gershgorin_bound = gershgorin_spectral_radius(&a_d);
         let discrete_stable = gershgorin_bound < 1.0 + 1e-10;
+        let mut gershgorin_false_positive = false;
 
         if !continuous_stable || !discrete_stable {
             let a_c_singular = is_singular(a_c);
@@ -362,8 +353,7 @@ impl StateSpaceModel {
                             discrete_stable = stable_result.discrete_stable,
                             "Gershgorin spectral bound exceeded unity but full eigenvalue check confirms stability; proceeding"
                         );
-                        #[cfg(feature = "observe_detailed")]
-                        GERSHGORIN_FALSE_POSITIVE_COUNT.fetch_add(1, Ordering::Relaxed);
+                        gershgorin_false_positive = true;
                     }
                     Ok(Err(unstable)) => {
                         return Err(StateSpaceError::UnstableSystem(unstable));
@@ -401,7 +391,16 @@ impl StateSpaceModel {
             c,
             d,
             max_discrete_eigenvalue_magnitude: gershgorin_bound,
+            gershgorin_false_positive,
         })
+    }
+
+    /// Whether this model's construction was accepted by the eigenvalue
+    /// fallback after the Gershgorin bound flagged it unstable (the
+    /// construction diagnostic the per-model record replaces the
+    /// process-global counter with).
+    pub fn gershgorin_false_positive(&self) -> bool {
+        self.gershgorin_false_positive
     }
 
     /// Zero-allocation step: x[k+1] = N·`x[k]` + B_eff·`u[k]`.
@@ -1964,6 +1963,14 @@ mod tests {
 
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 1.0, &mapping)
             .expect("from_continuous should accept the model via eigenvalue fallback");
+
+        // The event is the model's own record, read per model: no
+        // process-global counter stands between construction and the
+        // diagnostic.
+        assert!(
+            model.gershgorin_false_positive(),
+            "the eigenvalue fallback's acceptance must be recorded on the model"
+        );
 
         // The constructed model must work: one step should produce finite output.
         let x = DVector::from_row_slice(&[20.0, 15.0]);

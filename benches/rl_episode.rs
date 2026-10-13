@@ -158,12 +158,27 @@ fn bench_observation_vec(c: &mut Criterion, dir: &Path) {
     let telemetry = dwelling.telemetry().unwrap();
 
     group.bench_function("narrow_5_fields", |b| {
-        b.iter(|| black_box(telemetry.to_observation_vec(NARROW_FIELDS).expect("obs")));
+        b.iter(|| {
+            black_box(
+                telemetry
+                    .observation_vec(
+                        NARROW_FIELDS,
+                        &mut hares_core::ObservationWarnOnce::default(),
+                    )
+                    .expect("obs"),
+            )
+        });
     });
 
     let wide = wide_fields();
     group.bench_function("wide_55_fields", |b| {
-        b.iter(|| black_box(telemetry.to_observation_vec(&wide).expect("obs")));
+        b.iter(|| {
+            black_box(
+                telemetry
+                    .observation_vec(&wide, &mut hares_core::ObservationWarnOnce::default())
+                    .expect("obs"),
+            )
+        });
     });
 
     group.finish();
@@ -209,7 +224,13 @@ fn bench_episode_single(c: &mut Criterion, dir: &Path) {
                     for _ in 0..num_steps {
                         dwelling.step().expect("step");
                         let t = dwelling.telemetry().unwrap();
-                        black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
+                        black_box(
+                            t.observation_vec(
+                                NARROW_FIELDS,
+                                &mut hares_core::ObservationWarnOnce::default(),
+                            )
+                            .expect("obs"),
+                        );
                     }
                 }
                 let elapsed = start.elapsed();
@@ -277,7 +298,13 @@ fn bench_episode_vec(c: &mut Criterion, dir: &Path) {
             }
             for dwelling in &dwellings {
                 let t = dwelling.telemetry().unwrap();
-                black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
+                black_box(
+                    t.observation_vec(
+                        NARROW_FIELDS,
+                        &mut hares_core::ObservationWarnOnce::default(),
+                    )
+                    .expect("obs"),
+                );
             }
             alloc_snapshot().saturating_sub(before_alloc)
         };
@@ -302,7 +329,13 @@ fn bench_episode_vec(c: &mut Criterion, dir: &Path) {
                         }
                         for dwelling in &dwellings {
                             let t = dwelling.telemetry().unwrap();
-                            black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
+                            black_box(
+                                t.observation_vec(
+                                    NARROW_FIELDS,
+                                    &mut hares_core::ObservationWarnOnce::default(),
+                                )
+                                .expect("obs"),
+                            );
                         }
                     }
                     start.elapsed()
@@ -345,7 +378,13 @@ fn bench_batch_step(c: &mut Criterion, dir: &Path) {
                         dwellings.par_iter_mut().for_each(|dwelling| {
                             black_box(dwelling.step().expect("step"));
                             let t = dwelling.telemetry().unwrap();
-                            black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
+                            black_box(
+                                t.observation_vec(
+                                    NARROW_FIELDS,
+                                    &mut hares_core::ObservationWarnOnce::default(),
+                                )
+                                .expect("obs"),
+                            );
                         });
                     },
                     criterion::BatchSize::LargeInput,

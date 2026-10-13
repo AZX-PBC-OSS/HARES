@@ -36,11 +36,8 @@ struct StepResult {
 
 fn observation_for_fields(dwelling: &PyDwelling, fields: &[String]) -> Result<Vec<f64>, String> {
     let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
-    let guard = dwelling.acquire_string()?;
-    let telemetry = guard.telemetry().map_err(|e| e.to_string())?;
-    telemetry
-        .to_observation_vec(&refs)
-        .map_err(|err| err.to_string())
+    let mut guard = dwelling.acquire_string()?;
+    guard.observation_vec(&refs).map_err(|e| e.to_string())
 }
 
 /// Thin wrapper around a raw pointer to [`PyDwelling`] that is `Send + Sync`.

@@ -1349,8 +1349,12 @@ fn preconditioning_pack_reports_heating_mode() {
     // The production guard (the same validation the dwelling runs on every
     // CoreOutput) accepts the state: an active mode with nonzero electric
     // flow, no thermal sign to check (the EV emits no thermal_output_w).
-    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output())
-        .expect("the preconditioning state must satisfy the core contract");
+    hares_types::equipment::validate_core_contract(
+        ev.descriptor(),
+        ev.core_output(),
+        &mut Vec::new(),
+    )
+    .expect("the preconditioning state must satisfy the core contract");
 }
 
 /// An EV commanded to vars at zero real power (plugged in, at target,
@@ -1387,7 +1391,12 @@ fn commanded_vars_at_zero_real_power_report_on_mode() {
     );
     assert_eq!(ev.telemetry().get("active_power_kw").unwrap(), 0.0);
     assert_eq!(ev.telemetry().get("reactive_power_kvar").unwrap(), 2.0);
-    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+    hares_types::equipment::validate_core_contract(
+        ev.descriptor(),
+        ev.core_output(),
+        &mut Vec::new(),
+    )
+    .expect(
         "standby var support must satisfy the core contract (Rule 1 \
                  counts reactive flow)",
     );
@@ -1439,7 +1448,12 @@ fn away_activity_reports_off_mode_consistent_with_zero_dwelling_flows() {
         0.0,
         "no residential port contribution while away"
     );
-    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+    hares_types::equipment::validate_core_contract(
+        ev.descriptor(),
+        ev.core_output(),
+        &mut Vec::new(),
+    )
+    .expect(
         "away activity with zero dwelling flows must satisfy the \
                  core contract",
     );
@@ -1473,11 +1487,15 @@ fn away_activity_reports_off_mode_consistent_with_zero_dwelling_flows() {
         Some(OperatingMode::Off)
     );
     assert!(ev_warm.telemetry().get("away_charge_power_kw").unwrap() > 0.0);
-    hares_types::equipment::validate_core_contract(ev_warm.descriptor(), ev_warm.core_output())
-        .expect(
-            "away charging with zero dwelling flows must satisfy the core \
+    hares_types::equipment::validate_core_contract(
+        ev_warm.descriptor(),
+        ev_warm.core_output(),
+        &mut Vec::new(),
+    )
+    .expect(
+        "away charging with zero dwelling flows must satisfy the core \
              contract",
-        );
+    );
 }
 
 /// Preconditioning needs a supply: the heater gate keys on pack
@@ -1695,8 +1713,12 @@ fn heater_preconditions_an_idle_pack_with_no_charge_demand() {
         "the idle heater-only state (charge leg zero, heater drawing) \
          reports Heating, not Charging/Off"
     );
-    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output())
-        .expect("idle preconditioning must satisfy the core contract");
+    hares_types::equipment::validate_core_contract(
+        ev.descriptor(),
+        ev.core_output(),
+        &mut Vec::new(),
+    )
+    .expect("idle preconditioning must satisfy the core contract");
 }
 
 /// The DR fraction is a multiplier on the *allocated AC total* — the
@@ -1849,7 +1871,12 @@ fn grid_emergency_discharge_with_running_heater_publishes_a_guard_valid_output()
         "the discharge-side heater is bounded by the floor invariant, not \
          the DR fraction — it keeps preconditioning through the event"
     );
-    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+    hares_types::equipment::validate_core_contract(
+        ev.descriptor(),
+        ev.core_output(),
+        &mut Vec::new(),
+    )
+    .expect(
         "a GridEmergency V2L step with the pack heater running must publish \
              a (mode, flows) pair the core contract accepts",
     );
@@ -1902,7 +1929,12 @@ fn grid_emergency_v2g_discharge_with_running_heater_publishes_a_guard_valid_outp
         "the V2G leg's pack-side heater is bounded by the floor invariant, \
          not the DR fraction"
     );
-    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+    hares_types::equipment::validate_core_contract(
+        ev.descriptor(),
+        ev.core_output(),
+        &mut Vec::new(),
+    )
+    .expect(
         "a GridEmergency V2G step with the pack heater running must publish \
              a (mode, flows) pair the core contract accepts",
     );
@@ -1996,8 +2028,12 @@ fn pack_fed_preconditioning_reports_and_restores_standby_mode() {
          restore the `Standby` label — a restore that re-derives the mode \
          from the zero port loses the saved state's discharge dispatch"
     );
-    hares_types::equipment::validate_core_contract(restored.descriptor(), restored.core_output())
-        .expect("the restored (mode, flows) pair must satisfy the core contract");
+    hares_types::equipment::validate_core_contract(
+        restored.descriptor(),
+        restored.core_output(),
+        &mut Vec::new(),
+    )
+    .expect("the restored (mode, flows) pair must satisfy the core contract");
 }
 
 /// A charge leg below the mode classifier's `1e-9` kW charging threshold
@@ -2044,7 +2080,12 @@ fn sub_threshold_charge_leg_off_mode_still_publishes_a_nonzero_flow() {
         "precondition: the charge leg must be nonzero and within the \
          classifier's sub-threshold window (0, 1e-9] kW, got {port_kw}"
     );
-    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+    hares_types::equipment::validate_core_contract(
+        ev.descriptor(),
+        ev.core_output(),
+        &mut Vec::new(),
+    )
+    .expect(
         "a sub-threshold charge leg must publish a (mode, flows) pair the \
              core contract accepts — Off with a nonzero flow fails Rule 2",
     );
@@ -2106,8 +2147,12 @@ fn taper_landings_across_a_soc_sweep_publish_contract_valid_outputs() {
         for _ in 0..24 {
             let mut ports = PortSlots::default();
             ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
-            if hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output())
-                .is_err()
+            if hares_types::equipment::validate_core_contract(
+                ev.descriptor(),
+                ev.core_output(),
+                &mut Vec::new(),
+            )
+            .is_err()
             {
                 violating.push(residue);
                 break;
@@ -2190,7 +2235,12 @@ fn sub_threshold_export_leg_discharge_mode_still_publishes_a_nonzero_flow() {
         "a sub-threshold export leg must report `Discharging` — not `Off`, \
          which pairs with the nonzero published flow into a Rule 2 violation"
     );
-    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output()).expect(
+    hares_types::equipment::validate_core_contract(
+        ev.descriptor(),
+        ev.core_output(),
+        &mut Vec::new(),
+    )
+    .expect(
         "a sub-threshold export leg must publish a (mode, flows) pair the \
              core contract accepts — Off with a nonzero flow fails Rule 2",
     );
@@ -2233,8 +2283,12 @@ fn dead_bus_suppresses_a_latched_var_setpoint_flows_all_zero() {
         "with the reactive flow zeroed by the dead bus, the mode must be \
          Off — not the vars-only `On` label a served setpoint would earn"
     );
-    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output())
-        .expect("the dead-bus step must publish a guard-valid pair");
+    hares_types::equipment::validate_core_contract(
+        ev.descriptor(),
+        ev.core_output(),
+        &mut Vec::new(),
+    )
+    .expect("the dead-bus step must publish a guard-valid pair");
 }
 
 /// The away arm zeroes the reactive flow: a latched var setpoint must not
@@ -2275,8 +2329,12 @@ fn away_arm_zeroes_a_latched_var_setpoint_off_mode_flows_all_zero() {
         "the away mode is `Off`, the dwelling-side truth — and it must \
          pair with the zeroed flows or Rule 2 fails every dwelling step"
     );
-    hares_types::equipment::validate_core_contract(ev.descriptor(), ev.core_output())
-        .expect("the away step must publish a guard-valid pair");
+    hares_types::equipment::validate_core_contract(
+        ev.descriptor(),
+        ev.core_output(),
+        &mut Vec::new(),
+    )
+    .expect("the away step must publish a guard-valid pair");
 }
 
 /// The out-of-domain whipsaw pathology stays gone: through ten days of
@@ -7134,7 +7192,7 @@ fn ev_validate_core_contract_passes_with_reactive() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
-    hares_types::validate_core_contract(ev.descriptor(), ev.core_output())
+    hares_types::validate_core_contract(ev.descriptor(), ev.core_output(), &mut Vec::new())
         .expect("core contract should pass with REACTIVE cap + Some(Q)");
 }
 
@@ -8581,7 +8639,12 @@ fn var_support_checkpoint_restores_an_output_the_mode_flow_guard_accepts() {
     restored.init(&config, &env).unwrap();
     restored.load_state(&state).unwrap();
 
-    hares_types::validate_core_contract(restored.descriptor(), restored.core_output()).expect(
+    hares_types::validate_core_contract(
+        restored.descriptor(),
+        restored.core_output(),
+        &mut Vec::new(),
+    )
+    .expect(
         "a restored core output must satisfy the mode/flow guard: the v5 \
               restore re-pairs the step-outcome `On` mode with zeroed flows, \
               which Rule 1 rejects as an active mode with no flow",

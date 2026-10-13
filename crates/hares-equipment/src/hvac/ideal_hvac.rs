@@ -1551,8 +1551,12 @@ mod tests {
         restored.init(&config("IH"), &env).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("an ideal HVAC checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("an ideal HVAC checkpoint must restore a contract-valid output");
     }
 
     #[test]
@@ -3835,7 +3839,7 @@ mod tests {
             Some(0.0),
             "unity pf ⇒ telemetry Q == 0.0"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
     }
 

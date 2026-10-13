@@ -4108,7 +4108,12 @@ mod tests {
         restored.init(&config, &env).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output()).expect(
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect(
             "a restored core output must satisfy the mode/flow guard: the \
                  restore pairs the checkpointed active mode with zeroed flows, \
                  which Rule 1 rejects",
@@ -7090,7 +7095,7 @@ mod tests {
         bat.step(&env, Duration::from_secs(300), &mut ports)
             .unwrap();
 
-        hares_types::validate_core_contract(bat.descriptor(), bat.core_output())
+        hares_types::validate_core_contract(bat.descriptor(), bat.core_output(), &mut Vec::new())
             .expect("core contract should pass with REACTIVE cap + Some(Q)");
     }
 

@@ -2038,7 +2038,7 @@ impl PyDwelling {
         main_breaker_ampacity: Option<u32>,
         roof_shape: Option<crate::py_pv_sizing::PyRoofShape>,
     ) -> PyResult<crate::py_pv_sizing::PyPvSizingResult> {
-        let dwelling = self.acquire()?;
+        let mut dwelling = self.acquire()?;
         let (roof_shape, user_override) = match roof_shape {
             Some(py_shape) => {
                 tracing::debug!(
@@ -2057,7 +2057,7 @@ impl PyDwelling {
                 false,
             ),
         };
-        crate::py_pv_sizing::size_pv_from_dwelling(
+        let result = crate::py_pv_sizing::size_pv_from_dwelling(
             &dwelling.roof_info,
             roof_shape,
             crate::py_pv_sizing::PvSizingTargets {
@@ -2082,7 +2082,18 @@ impl PyDwelling {
             },
             dwelling.pv_panel_defaults(),
         )
-        .map_err(pyo3::exceptions::PyValueError::new_err)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        if result.inner.main_panel_ampacity_missing {
+            // The sizing's missing-ampacity condition is this dwelling's
+            // own warning record (per run, every build): the sizing
+            // proceeded without the NEC backfeed check.
+            dwelling.warnings.push_warning(hares_types::Warning::new(
+                "pv_sizing",
+                "PV sizing proceeded without the electrical code check: no \
+                 main_panel_ampacity provided",
+            ));
+        }
+        Ok(result)
     }
 
     /// Attach an electric tariff to this dwelling for billing.
@@ -2394,10 +2405,9 @@ impl PyDwelling {
     }
 
     pub(crate) fn observation(&self) -> Result<Vec<f64>, String> {
-        let dwelling = self.acquire_string()?;
-        let telemetry = dwelling.telemetry().map_err(|e| e.to_string())?;
-        telemetry
-            .to_observation_vec(&["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio"])
+        let mut dwelling = self.acquire_string()?;
+        dwelling
+            .observation_vec(&["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio"])
             .map_err(|err| err.to_string())
     }
 

@@ -869,75 +869,7 @@ impl PySignal {
                 ControlSignal::MaxCapacityFraction { fraction }
             }
         };
-        #[cfg(feature = "observe")]
-        {
-            dispatch_observer::record_dispatch(&result);
-            if let ControlSignal::DutyCycle {
-                component: Some(comp),
-                on_fraction,
-                ..
-            } = &result
-            {
-                dispatch_observer::record_duty_cycle_component(*comp, *on_fraction);
-            }
-        }
         Ok(result)
-    }
-}
-
-#[cfg(feature = "observe")]
-mod dispatch_observer {
-    use std::sync::{LazyLock, Mutex};
-
-    use hares_types::{ControlSignal, DutyCycleComponent};
-
-    static COUNTERS: LazyLock<Mutex<[u64; 27]>> = LazyLock::new(|| Mutex::new([0; 27]));
-    static DUTY_CYCLE_COMPONENT_EVENTS: LazyLock<Mutex<Vec<(DutyCycleComponent, f64)>>> =
-        LazyLock::new(|| Mutex::new(Vec::new()));
-
-    fn variant_index(signal: &ControlSignal) -> usize {
-        match signal {
-            ControlSignal::ThermalSetpoint { .. } => 0,
-            ControlSignal::HumiditySetpoint { .. } => 1,
-            ControlSignal::PowerSetpoint { .. } => 2,
-            ControlSignal::PowerLimit { .. } => 3,
-            ControlSignal::SOCTarget { .. } => 4,
-            ControlSignal::ModeOverride { .. } => 5,
-            ControlSignal::DutyCycle { .. } => 6,
-            ControlSignal::LoadFraction { .. } => 7,
-            ControlSignal::GridConnect { .. } => 8,
-            ControlSignal::SelfConsumption { .. } => 9,
-            ControlSignal::DemandResponse { .. } => 10,
-            ControlSignal::ProtocolNative { .. } => 11,
-            ControlSignal::CurtailmentPercent { .. } => 12,
-            ControlSignal::ReactiveSetpoint { .. } => 13,
-            ControlSignal::PowerFactorSetpoint { .. } => 14,
-            ControlSignal::InverterPriorityMode { .. } => 15,
-            ControlSignal::IdealCapacity { .. } => 16,
-            ControlSignal::ThermalSetpointDelta { .. } => 17,
-            ControlSignal::IdealCapacityModeOverride { .. } => 18,
-            ControlSignal::EvPlugIn { .. } => 19,
-            ControlSignal::EvDrive { .. } => 20,
-            ControlSignal::EvAwayCharge { .. } => 21,
-            ControlSignal::EvSetReadyBy { .. } => 22,
-            ControlSignal::EventDelay { .. } => 23,
-            ControlSignal::MaxCapacityFraction { .. } => 24,
-            ControlSignal::NonHvacZoneInput { .. } => 25,
-            ControlSignal::ModeOverrideRelease => 26,
-        }
-    }
-
-    pub fn record_dispatch(signal: &ControlSignal) {
-        let idx = variant_index(signal);
-        if let Ok(mut counters) = COUNTERS.lock() {
-            counters[idx] += 1;
-        }
-    }
-
-    pub fn record_duty_cycle_component(component: DutyCycleComponent, on_fraction: f64) {
-        if let Ok(mut events) = DUTY_CYCLE_COMPONENT_EVENTS.lock() {
-            events.push((component, on_fraction));
-        }
     }
 }
 

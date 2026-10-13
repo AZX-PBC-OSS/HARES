@@ -1,7 +1,6 @@
 //! Dwelling telemetry payloads used by control and RL integrations.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, FixedOffset, Timelike};
 use hares_types::HaresError;
@@ -52,11 +51,19 @@ pub struct DwellingTelemetry {
     pub initialized: bool,
 }
 
-/// Throttle gate: warn once per process when actor_telemetry dot-notation resolution is used.
-static WARNED_ACTOR_TELEMETRY_DOT: AtomicBool = AtomicBool::new(false);
-
-/// Throttle gate: warn once per process when actor_telemetry bare-name resolution is used.
-static WARNED_ACTOR_TELEMETRY_BARE: AtomicBool = AtomicBool::new(false);
+/// Per-run warn-once gates for the observation dispatch's actor-telemetry
+/// fallbacks. The run's dwelling owns the state and the caller that owns
+/// the run's observation field list threads it through the dispatch, so
+/// the first dot-notation and bare-name fallback resolution in a run each
+/// warn once, and a fresh run (a dwelling rebuilt from its blueprint)
+/// starts with fresh gates instead of inheriting the previous run's.
+#[derive(Debug, Default, Clone)]
+pub struct ObservationWarnOnce {
+    /// The dot-notation fallback (`<actor>.<channel>`) warned this run.
+    pub(crate) dot: bool,
+    /// The bare-name fallback warned this run.
+    pub(crate) bare: bool,
+}
 
 impl DwellingTelemetry {
     /// Verifies that the per-equipment electric power sum matches the
@@ -83,7 +90,15 @@ impl DwellingTelemetry {
     }
 
     /// Selects named observation channels into a flat contiguous vector.
-    pub fn to_observation_vec(&self, fields: &[&str]) -> Result<Vec<f64>, HaresError> {
+    ///
+    /// `warned` is the run's own [`ObservationWarnOnce`] state, supplied by
+    /// the caller that owns the field list across the run; the fallback
+    /// resolutions consume it so each warns once per run.
+    pub fn observation_vec(
+        &self,
+        fields: &[&str],
+        warned: &mut ObservationWarnOnce,
+    ) -> Result<Vec<f64>, HaresError> {
         if !self.initialized {
             return Ok(vec![f64::NAN; fields.len()]);
         }
@@ -186,14 +201,12 @@ impl DwellingTelemetry {
                 && let Some(channels) = self.actor_telemetry.get(actor_name)
                 && let Some(&value) = channels.get(channel_name)
             {
-                if WARNED_ACTOR_TELEMETRY_DOT
-                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-                {
+                if !warned.dot {
+                    warned.dot = true;
                     tracing::warn!(
                         field = field,
                         actor_telemetry_key = channel_name,
-                        "resolving observation field via actor_telemetry (throttled to once per process)"
+                        "resolving observation field via actor_telemetry (throttled to once per run)"
                     );
                 }
                 out.push(value);
@@ -205,13 +218,11 @@ impl DwellingTelemetry {
             if !found_in_actors {
                 for channels in self.actor_telemetry.values() {
                     if let Some(&value) = channels.get(field) {
-                        if WARNED_ACTOR_TELEMETRY_BARE
-                            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                            .is_ok()
-                        {
+                        if !warned.bare {
+                            warned.bare = true;
                             tracing::warn!(
                                 field = field,
-                                "resolving observation field via actor_telemetry (bare name, throttled to once per process)"
+                                "resolving observation field via actor_telemetry (bare name, throttled to once per run)"
                             );
                         }
                         out.push(value);
@@ -274,8 +285,24 @@ fn single_instance_alias(
 #[cfg(test)]
 mod tests {
     use super::DwellingTelemetry;
+    use super::HaresError;
+    use super::ObservationWarnOnce;
     use chrono::{FixedOffset, TimeZone};
     use std::collections::BTreeMap;
+
+    /// The one-argument dispatch the dispatch tests read through, over a
+    /// throwaway run's warn gates; the gates' own behavior is the
+    /// `actor_telemetry_fallbacks_consume_their_own_run_state_only`
+    /// test's.
+    trait SingleRunObservation {
+        fn to_observation_vec(&self, fields: &[&str]) -> Result<Vec<f64>, HaresError>;
+    }
+
+    impl SingleRunObservation for DwellingTelemetry {
+        fn to_observation_vec(&self, fields: &[&str]) -> Result<Vec<f64>, HaresError> {
+            self.observation_vec(fields, &mut ObservationWarnOnce::default())
+        }
+    }
 
     fn sample() -> DwellingTelemetry {
         DwellingTelemetry {
@@ -400,6 +427,35 @@ mod tests {
         let t = sample();
         let err = t.to_observation_vec(&["outdoor_rh"]).unwrap_err();
         assert!(err.to_string().contains("unknown telemetry field"));
+    }
+
+    #[test]
+    fn actor_telemetry_fallbacks_consume_their_own_run_state_only() {
+        let mut t = sample();
+        t.actor_telemetry.insert(
+            "hp".to_string(),
+            BTreeMap::from([("power".to_string(), 2.0)]),
+        );
+
+        let mut warned = ObservationWarnOnce::default();
+        t.observation_vec(&["hp.power"], &mut warned).unwrap();
+        assert!(
+            warned.dot,
+            "the dot fallback's first use in a run consumes the run's warn gate"
+        );
+        t.observation_vec(&["power"], &mut warned).unwrap();
+        assert!(
+            warned.bare,
+            "the bare fallback's first use in a run consumes its gate"
+        );
+
+        // A fresh state is a fresh run's: nothing is inherited.
+        let mut fresh = ObservationWarnOnce::default();
+        t.observation_vec(&["hp.power"], &mut fresh).unwrap();
+        assert!(
+            fresh.dot && !fresh.bare,
+            "a fresh run's state starts unconsumed"
+        );
     }
 
     #[test]

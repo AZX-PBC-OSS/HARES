@@ -6873,6 +6873,7 @@ mod tests {
         hares_types::equipment::validate_core_contract(
             restored.descriptor(),
             restored.core_output(),
+            &mut Vec::new(),
         )
         .expect(
             "a restored generating checkpoint must satisfy the core contract \
@@ -6945,6 +6946,7 @@ mod tests {
         hares_types::equipment::validate_core_contract(
             restored.descriptor(),
             restored.core_output(),
+            &mut Vec::new(),
         )
         .expect(
             "a checkpoint saved in the zeroing-setpoint window must restore to a state \

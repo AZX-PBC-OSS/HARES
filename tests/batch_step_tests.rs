@@ -80,7 +80,10 @@ occupancy = 1.0
                     dwelling
                         .telemetry()
                         .unwrap()
-                        .to_observation_vec(NARROW_FIELDS)
+                        .observation_vec(
+                            NARROW_FIELDS,
+                            &mut hares_core::ObservationWarnOnce::default(),
+                        )
                         .expect("observation")
                 })
                 .collect();
@@ -109,7 +112,12 @@ occupancy = 1.0
         dwellings.par_iter_mut().for_each(|dwelling| {
             let _ = dwelling.step().expect("step");
             let t = dwelling.telemetry().unwrap();
-            let obs = t.to_observation_vec(NARROW_FIELDS).expect("obs");
+            let obs = t
+                .observation_vec(
+                    NARROW_FIELDS,
+                    &mut hares_core::ObservationWarnOnce::default(),
+                )
+                .expect("obs");
             assert_eq!(
                 obs.len(),
                 NARROW_FIELDS.len(),

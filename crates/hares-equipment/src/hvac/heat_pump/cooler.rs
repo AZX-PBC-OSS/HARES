@@ -1738,8 +1738,12 @@ mod tests {
             .unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a GSHP cooler checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a GSHP cooler checkpoint must restore a contract-valid output");
     }
 
     /// The WSHP cooler shares the GSHP's delegation mechanism (inner
@@ -1778,8 +1782,12 @@ mod tests {
         restored.init(&make_source(), &env).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a WSHP cooler checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a WSHP cooler checkpoint must restore a contract-valid output");
     }
 
     #[test]
@@ -2248,7 +2256,7 @@ mod tests {
             q.to_bits(),
             "telemetry Q must equal port Q"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
 
         // Off case: zone in deadband (21 °C) ⇒ no cooling call ⇒ Q == 0.
@@ -2373,7 +2381,7 @@ mod tests {
             (co_kw - p_kw).abs() < 1e-9,
             "CoreOutput active must equal port active (pump folded in): co={co_kw} port={p_kw}"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
     }
 

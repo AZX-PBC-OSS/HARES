@@ -1397,7 +1397,7 @@ mod tests {
             ports.electrical.reactive_power_kvar.to_bits()
         );
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(co_q));
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
     }
 
@@ -1638,8 +1638,12 @@ mod tests {
         restored.init(&config(), &env(21.0)).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a gas WH checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a gas WH checkpoint must restore a contract-valid output");
     }
 
     #[test]

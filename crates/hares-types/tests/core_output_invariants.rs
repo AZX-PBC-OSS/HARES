@@ -6,9 +6,20 @@ use rand_chacha::ChaCha8Rng;
 use hares_types::{
     ControlCapabilities, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState,
     ElectricPower, EndUse, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType,
-    OperatingMode, Soc, validate_core_contract,
+    OperatingMode, Soc,
 };
 use strum::IntoEnumIterator;
+
+/// The two-argument form the invariants read through, over a throwaway
+/// warning record: every call here pins accept/reject behavior, not the
+/// warnings' record behavior (the
+/// `implausible_cop_warns_into_the_caller_supplied_record` test's).
+fn validate_core_contract(
+    desc: &EquipmentDescriptor,
+    co: &CoreOutput,
+) -> Result<(), hares_types::HaresError> {
+    hares_types::validate_core_contract(desc, co, &mut Vec::new())
+}
 
 fn sample_unit(rng: &mut ChaCha8Rng) -> f64 {
     // Map to [0, 1) using the high 53 bits so the result is a stable finite f64.

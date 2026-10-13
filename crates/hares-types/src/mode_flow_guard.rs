@@ -7,28 +7,6 @@
 
 use crate::equipment::{CoreOutput, EquipmentDescriptor, OperatingMode};
 
-#[cfg(feature = "observe")]
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Counter of mode/flow inconsistency rejections.
-/// Incremented on every physical-implausibility rejection.
-#[cfg(feature = "observe")]
-static MODE_FLOW_INCONSISTENCY_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Returns the total number of mode/flow inconsistency rejections in this process.
-#[cfg(feature = "observe")]
-pub fn mode_flow_inconsistency_counter() -> u64 {
-    MODE_FLOW_INCONSISTENCY_COUNT.load(Ordering::Relaxed)
-}
-
-#[cfg(feature = "observe")]
-fn record_rejection() {
-    MODE_FLOW_INCONSISTENCY_COUNT.fetch_add(1, Ordering::Relaxed);
-}
-
-#[cfg(not(feature = "observe"))]
-fn record_rejection() {}
-
 /// Reasons a mode/flow combination is physically inconsistent.
 ///
 /// Returned by [`check_mode_flow_consistency`] as the first-found violation.
@@ -73,7 +51,6 @@ pub(crate) fn check_mode_flow_consistency(
                     .is_some_and(|f| f.consumption_w > 0.0)
                 || co.flows.reactive_power_kvar.is_some_and(|v| v != 0.0);
             if !has_flow {
-                record_rejection();
                 return Err(ModeFlowViolation {
                     message: format!(
                         "core_output contract violation for '{}' ({:?}): \
@@ -100,7 +77,6 @@ pub(crate) fn check_mode_flow_consistency(
                     .is_some_and(|f| f.consumption_w > 0.0)
                 || co.flows.reactive_power_kvar.is_some_and(|v| v != 0.0);
             if non_zero {
-                record_rejection();
                 return Err(ModeFlowViolation {
                     message: format!(
                         "core_output contract violation for '{}' ({:?}): \
@@ -124,7 +100,6 @@ pub(crate) fn check_mode_flow_consistency(
             && !mode.is_heating_variant()
             && !matches!(mode, OperatingMode::On | OperatingMode::Defrost)
         {
-            record_rejection();
             return Err(ModeFlowViolation {
                 message: format!(
                     "core_output contract violation for '{}' ({:?}): \
@@ -138,7 +113,6 @@ pub(crate) fn check_mode_flow_consistency(
             && !mode.is_cooling_variant()
             && !matches!(mode, OperatingMode::On | OperatingMode::Defrost)
         {
-            record_rejection();
             return Err(ModeFlowViolation {
                 message: format!(
                     "core_output contract violation for '{}' ({:?}): \
@@ -165,7 +139,6 @@ pub(crate) fn check_mode_flow_consistency(
             _ => None,
         };
         if let Some(reason) = violation {
-            record_rejection();
             return Err(ModeFlowViolation {
                 message: format!(
                     "core_output contract violation for '{}' ({:?}): \

@@ -24,6 +24,27 @@ use hares_equipment::scheduled_load::ScheduledLoad;
 use hares_equipment::{BatteryConfig, Equipment, EquipmentConfig};
 use hares_types::EndUse;
 
+/// One dwelling run's island-unserved warnings: built once, stepped once,
+/// islanded with `set_grid_voltage(0.0)` and stepped three more times, the
+/// finished run's `RunResult.warnings`.
+fn islanded_run_warnings(tag: &str) -> usize {
+    let mut dwelling = build_dwelling_with_base_load(tag);
+    add_battery_with_discharge_limit(&mut dwelling, 0.6, 0.5);
+
+    dwelling.step().expect("nominal step");
+    dwelling.set_grid_voltage(0.0);
+    dwelling.step().expect("islanded step");
+    dwelling.step().expect("second islanded step");
+    dwelling.step().expect("third islanded step");
+
+    let result = dwelling.finish().expect("the run finishes");
+    result
+        .warnings
+        .iter()
+        .filter(|w| w.source.as_ref() == "island")
+        .count()
+}
+
 fn write_minimal_toml(path: &Path) {
     let content = r#"building_id = 9401
 
@@ -307,5 +328,25 @@ fn outage_with_depleted_battery_does_not_island() {
     assert_eq!(
         summary.base_load_kw, 0.0,
         "dead bus: loads must drop with a depleted battery"
+    );
+}
+
+/// The island-unserved warning is per run: two runs of the same inputs in
+/// one process (the first simulated to its finish, the second a reset, a
+/// fresh build from the same inputs as `reset_with_seed` builds from the
+/// kept blueprint) each carry exactly one island-unserved `Warning` in
+/// their `RunResult.warnings`. A warn-once state inherited across runs
+/// would leave the second run's record without the warning its own
+/// unserved steps raised.
+#[test]
+fn warn_once_is_per_run() {
+    let first = islanded_run_warnings("warn-once-first");
+    assert_eq!(first, 1, "the first run records its own unserved warning");
+
+    let second = islanded_run_warnings("warn-once-reset");
+    assert_eq!(
+        second, 1,
+        "the reset run's record is fresh: its own unserved steps warn again, \
+         not the first run's consumed warn-once state"
     );
 }

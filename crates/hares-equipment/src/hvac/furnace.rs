@@ -1724,8 +1724,12 @@ mod tests {
             let mut restored = ElectricFurnace::new(cfg);
             restored.init(&ef_config(8_000.0, 1.05), &env).unwrap();
             restored.load_state(&state).unwrap();
-            hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-                .expect("an electric furnace checkpoint must restore a contract-valid output");
+            hares_types::validate_core_contract(
+                restored.descriptor(),
+                restored.core_output(),
+                &mut Vec::new(),
+            )
+            .expect("an electric furnace checkpoint must restore a contract-valid output");
         }
         // Gas furnace face (the fuel and speed arms).
         {
@@ -1767,8 +1771,12 @@ mod tests {
             let mut restored = GasFurnace::new(gas_cfg);
             restored.init(&cfg, &env).unwrap();
             restored.load_state(&state).unwrap();
-            hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-                .expect("a gas furnace checkpoint must restore a contract-valid output");
+            hares_types::validate_core_contract(
+                restored.descriptor(),
+                restored.core_output(),
+                &mut Vec::new(),
+            )
+            .expect("a gas furnace checkpoint must restore a contract-valid output");
         }
     }
 
@@ -2490,7 +2498,7 @@ mod tests {
         );
         assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(q));
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(q));
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -2595,7 +2603,7 @@ mod tests {
             q.to_bits(),
             "telemetry Q must match port Q"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 

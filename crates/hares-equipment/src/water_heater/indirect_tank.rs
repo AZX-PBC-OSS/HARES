@@ -1052,8 +1052,12 @@ mod control_domain_tests {
             restored.core_output().flows.thermal_output_w.is_some(),
             "the restored output must publish its thermal flow"
         );
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("an indirect-tank checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("an indirect-tank checkpoint must restore a contract-valid output");
     }
 
     /// Port accumulators for the config's declared ports: the indirect

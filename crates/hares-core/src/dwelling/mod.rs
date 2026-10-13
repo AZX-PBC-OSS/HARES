@@ -106,7 +106,7 @@ use crate::result::{
 };
 use crate::rng::{advance_dwelling_rng, derive_sub_rng, ev_driver_stream};
 use crate::scheduler::{ExecutionPhase, StepScheduler};
-use crate::telemetry::DwellingTelemetry;
+use crate::telemetry::{DwellingTelemetry, ObservationWarnOnce};
 use crate::{Actor, ActorInterest, EnvironmentManager, SimClock};
 
 #[cfg(feature = "observe")]
@@ -149,13 +149,6 @@ const ISLAND_BUS_NOMINAL_VOLTAGE_PU: f64 = 1.0;
 /// scenario-signal warning. 50 W sits above numerical residue and standby
 /// noise but below any real appliance draw.
 const ISLAND_UNSERVED_WARN_THRESHOLD_KW: f64 = 0.05;
-
-/// Rate-limit gate for the islanded unserved-load warning: `tracing::warn!`
-/// once per process, `tracing::debug!` for every subsequent occurrence
-/// (unserved load recurs on every islanded step, so unthrottled warns would
-/// flood the log).
-static ISLAND_UNSERVED_WARNED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 /// Minimum timestep resolution at which PV re-evaluation and BMS staleness
 /// diagnostics have meaningful impact.  5 min matches the EnergyPlus minimum
@@ -2737,6 +2730,17 @@ pub struct Dwelling {
     /// Surplus generation the island could not absorb (would-be phantom
     /// export, `(-net_active_kw()).max(0.0)`); 0.0 when not islanded.
     island_excess_kw: f64,
+    /// Whether this run has already raised the islanded unserved-load
+    /// warning. Per dwelling, so per run: the warning is a scenario signal
+    /// whose first occurrence in a run is recorded in the run's warning
+    /// log, and a fresh run (a dwelling rebuilt from its blueprint, as
+    /// `reset_with_seed` builds) warns again instead of inheriting the
+    /// previous run's consumed gate.
+    island_unserved_warned: bool,
+    /// The observation dispatch's per-run warn-once gates (the
+    /// actor-telemetry fallbacks): the run's own state, fresh with the
+    /// dwelling, never a process global shared across runs or threads.
+    observation_warn_once: ObservationWarnOnce,
     /// Output config retained for schema rebuilds when equipment changes.
     reports: Vec<hares_io::ReportSpec>,
     /// Whether the run requested the diagnostics report: the diagnostics
@@ -3994,6 +3998,8 @@ fn assemble_from_blueprint_with_seed(
         },
         island_unserved_kw: 0.0,
         island_excess_kw: 0.0,
+        island_unserved_warned: false,
+        observation_warn_once: ObservationWarnOnce::default(),
         reports: config.sim_config.reports.clone(),
         diagnostics: config.sim_config.diagnostics,
         output_chunk_size: config.sim_config.output_chunk_size,
@@ -4697,6 +4703,41 @@ impl Dwelling {
             island_bus_voltage_pu: None,
         });
         self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
+    }
+
+    /// Selects the named observation channels into a flat contiguous
+    /// vector over the current telemetry snapshot. The observation
+    /// dispatch's per-run warn-once gates are this dwelling's own, so a
+    /// run's first actor-telemetry fallback resolution warns and a fresh
+    /// run's starts fresh.
+    ///
+    /// # Errors
+    ///
+    /// The telemetry snapshot's error (see
+    /// [`Self::telemetry`](Self::telemetry)), or the dispatch's unknown
+    /// field error.
+    pub fn observation_vec(&mut self, fields: &[&str]) -> Result<Vec<f64>> {
+        let telemetry = self.telemetry()?;
+        telemetry.observation_vec(fields, &mut self.observation_warn_once)
+    }
+
+    /// Validates the stepped equipment's core-output contract, landing any
+    /// plausibility warnings in the run's warning log: the
+    /// caller-supplied record is the dwelling's reused scratch, the
+    /// warnings drain into the log stamped with the step in force, in
+    /// every build.
+    fn validate_equipment_contract(&mut self, idx: usize) -> Result<()> {
+        self.warning_scratch.clear();
+        validate_core_contract(
+            self.equipment[idx].descriptor(),
+            self.equipment[idx].core_output(),
+            &mut self.warning_scratch,
+        )?;
+        for mut warning in self.warning_scratch.drain(..) {
+            warning.step_index = Some(self.clock.current_step);
+            self.warnings.push_warning(warning);
+        }
+        Ok(())
     }
 
     /// Returns current observable state.
@@ -6432,10 +6473,7 @@ impl Dwelling {
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.record_equipment_step_failure(idx, err)?;
             } else {
-                validate_core_contract(
-                    self.equipment[idx].descriptor(),
-                    self.equipment[idx].core_output(),
-                )?;
+                self.validate_equipment_contract(idx)?;
                 validate_port_core_electrical_consistency(
                     self.equipment[idx].descriptor(),
                     self.equipment[idx].core_output(),
@@ -6509,10 +6547,7 @@ impl Dwelling {
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.record_equipment_step_failure(idx, err)?;
             } else {
-                validate_core_contract(
-                    self.equipment[idx].descriptor(),
-                    self.equipment[idx].core_output(),
-                )?;
+                self.validate_equipment_contract(idx)?;
                 validate_port_core_electrical_consistency(
                     self.equipment[idx].descriptor(),
                     self.equipment[idx].core_output(),
@@ -6562,10 +6597,7 @@ impl Dwelling {
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.record_equipment_step_failure(idx, err)?;
             } else {
-                validate_core_contract(
-                    self.equipment[idx].descriptor(),
-                    self.equipment[idx].core_output(),
-                )?;
+                self.validate_equipment_contract(idx)?;
                 validate_port_core_electrical_consistency(
                     self.equipment[idx].descriptor(),
                     self.equipment[idx].core_output(),
@@ -6998,23 +7030,29 @@ impl Dwelling {
                 self.island_unserved_kw = net_kw.max(0.0);
                 self.island_excess_kw = (-net_kw).max(0.0);
                 if self.island_unserved_kw > ISLAND_UNSERVED_WARN_THRESHOLD_KW {
-                    // Rate-limited: warn! once per process, debug! thereafter
-                    // — unserved load recurs every islanded step, and one
-                    // warning is enough to flag the scenario.
-                    if ISLAND_UNSERVED_WARNED
-                        .compare_exchange(
-                            false,
-                            true,
-                            std::sync::atomic::Ordering::Relaxed,
-                            std::sync::atomic::Ordering::Relaxed,
-                        )
-                        .is_ok()
-                    {
+                    // Per-run warn-once: the first occurrence records the
+                    // scenario warning in the run's warning log (every
+                    // build) and logs at warn level; unserved load recurs
+                    // every islanded step, so later occurrences log at
+                    // debug level. The gate is the dwelling's own, so the
+                    // next run (a dwelling rebuilt from its blueprint)
+                    // warns again.
+                    if !self.island_unserved_warned {
+                        self.island_unserved_warned = true;
                         tracing::warn!(
                             step = self.clock.current_step(),
                             island_unserved_kw = self.island_unserved_kw,
                             "islanded operation: on-site sources are not covering the load \
                              (unserved load; subsequent occurrences logged at debug level)"
+                        );
+                        self.warnings.push_from(
+                            "island",
+                            format!(
+                                "islanded operation: on-site sources are not covering the load \
+                                 (unserved load {} kW; subsequent occurrences logged at debug \
+                                 level)",
+                                self.island_unserved_kw
+                            ),
                         );
                     } else {
                         tracing::debug!(

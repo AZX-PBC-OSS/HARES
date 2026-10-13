@@ -693,8 +693,12 @@ mod tests {
         restored.init(&config(3_000.0), &env).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a baseboard checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a baseboard checkpoint must restore a contract-valid output");
     }
 
     #[test]
@@ -985,7 +989,7 @@ mod tests {
         assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
         assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -1020,7 +1024,7 @@ mod tests {
             Some(OperatingMode::Standby),
             "zero-capacity ideal dispatch must reconcile Heating→Standby"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 

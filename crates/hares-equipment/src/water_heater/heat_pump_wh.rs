@@ -2274,7 +2274,7 @@ mod tests {
             q.to_bits(),
             "telemetry Q must equal port Q"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
     }
 
@@ -2295,8 +2295,12 @@ mod tests {
         restored.init(&config(), &env(21.0)).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a heat pump WH checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a heat pump WH checkpoint must restore a contract-valid output");
     }
 
     #[test]

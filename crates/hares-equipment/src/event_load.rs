@@ -3269,8 +3269,12 @@ mod tests {
             .unwrap();
         restored.load_state(&checkpoint).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("an event load checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("an event load checkpoint must restore a contract-valid output");
     }
 
     /// save_state captures delay_remaining_s; load_state restores it so the event

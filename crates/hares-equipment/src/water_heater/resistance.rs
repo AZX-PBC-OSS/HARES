@@ -1375,7 +1375,7 @@ mod tests {
         assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
         assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
     }
 
@@ -2876,7 +2876,12 @@ mod element_priority_tests {
             .load_state(&checkpoint)
             .expect("restore checkpoint");
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output()).expect(
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect(
             "a restored checkpoint must satisfy the core contract (presence rules \
                  and mode/flow guard)",
         );

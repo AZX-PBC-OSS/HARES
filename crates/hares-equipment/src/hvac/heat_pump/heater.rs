@@ -3631,7 +3631,7 @@ mod tests {
             q.to_bits(),
             "telemetry Q must equal port Q"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
 
         // Off case: zone in the deadband (23 °C, between heating 21+1 and
@@ -3693,7 +3693,7 @@ mod tests {
             ),
             None => panic!("burning step must publish flows.fuel_w"),
         }
-        hares_types::validate_core_contract(eq.descriptor(), co)
+        hares_types::validate_core_contract(eq.descriptor(), co, &mut Vec::new())
             .expect("burning step's core output must satisfy the contract with FUEL declared");
 
         // Idle step: zone in the deadband ⇒ no call ⇒ no burn, and the
@@ -3712,7 +3712,7 @@ mod tests {
             Some(0.0),
             "idle step of a dual-fuel unit carries a zero fuel flow, not None"
         );
-        hares_types::validate_core_contract(eq.descriptor(), idle_co)
+        hares_types::validate_core_contract(eq.descriptor(), idle_co, &mut Vec::new())
             .expect("idle step's core output must satisfy the contract with FUEL declared");
     }
 
@@ -3779,7 +3779,7 @@ mod tests {
             eq.core_output().flows.fuel_w.is_none(),
             "electric backup must not publish a fuel flow"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("electric-backup core output must satisfy the contract");
     }
 
@@ -4124,8 +4124,12 @@ mod tests {
         let mut restored = ASHPHeater::new(cfg);
         restored.init(&heater_config(), &env).unwrap();
         restored.load_state(&state).unwrap();
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("an ASHP heater checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("an ASHP heater checkpoint must restore a contract-valid output");
     }
 
     /// The same restore contract for a dual-fuel heater: the FUEL capability
@@ -4158,8 +4162,12 @@ mod tests {
             )
             .unwrap();
         restored.load_state(&state).unwrap();
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a dual-fuel heater checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a dual-fuel heater checkpoint must restore a contract-valid output");
     }
 
     #[test]

@@ -89,9 +89,12 @@ pub struct PvSizingResult {
     pub electrical_constraint_binding: bool,
     pub max_ac_kw: Option<f64>,
     pub max_backfeed_amps: Option<f64>,
+    /// The missing-ampacity condition: no `main_panel_ampacity` was
+    /// provided, so the NEC 705.12(B)(2)(3)(b) backfeed check was skipped.
+    /// The dwelling-facing sizing path records a `Warning` for the
+    /// dwelling when this is set.
+    pub main_panel_ampacity_missing: bool,
 }
-
-use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -223,13 +226,6 @@ const NEC_BUSBAR_REVERSE_MULTIPLIER: f64 = 5.0;
 /// HARES uses the nominal 240 V per NEC standard assumptions for busbar
 /// backfeed calculations.
 const RESIDENTIAL_SPLIT_PHASE_VOLTAGE: f64 = 240.0;
-
-/// Throttle the "no main_panel_ampacity" warning to once per process.
-/// At fleet scale (thousands of dwellings), `size_pv_system` may be called
-/// once per dwelling. Without throttling, every dwelling without ampacity
-/// data emits an identical warning. This AtomicBool gate follows the
-/// same pattern as `hares-equipment::pv::lut` NN fallback warning.
-static NO_AMPACITY_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Per-shape usable fraction of gross roof area.
 fn usable_fraction(shape: RoofShape) -> f64 {
@@ -932,11 +928,12 @@ pub fn size_pv_system(
     // residential installations). The AC-side limit is converted to DC kW
     // via the DC:AC ratio and system loss factor to produce an equivalent
     // DC-side capacity cap.
-    let (electrical_constraint_binding, result_max_ac_kw, result_max_backfeed_amps) = if let Some(
-        ampacity,
-    ) =
-        main_panel_ampacity
-    {
+    let (
+        electrical_constraint_binding,
+        result_max_ac_kw,
+        result_max_backfeed_amps,
+        ampacity_missing,
+    ) = if let Some(ampacity) = main_panel_ampacity {
         if ampacity == 0 {
             return Err(PvSizingError::InvalidMainPanelAmpacity { ampacity });
         }
@@ -988,20 +985,18 @@ pub fn size_pv_system(
         }
 
         clamped_kw = dc_limited_kw;
-        (is_binding, Some(max_ac_kw), Some(max_backfeed_amps))
+        (is_binding, Some(max_ac_kw), Some(max_backfeed_amps), false)
     } else {
         // No main panel ampacity provided — skip the electrical-code check.
-        // Emit a throttled warning (once per process) to avoid log spam at
-        // fleet scale where thousands of dwellings may lack ampacity data.
-        if NO_AMPACITY_WARNED
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            tracing::warn!(
-                "PV sizing proceeding without electrical code check — no main_panel_ampacity provided"
-            );
-        }
-        (false, None, None)
+        // The condition is the caller's to record: the dwelling-facing
+        // sizing path lands a `Warning` on the run's own warning log, so
+        // every sizing call without ampacity data warns for its own
+        // dwelling instead of a process-global once gate deciding which
+        // caller sees it.
+        tracing::warn!(
+            "PV sizing proceeding without electrical code check: no main_panel_ampacity provided"
+        );
+        (false, None, None, true)
     };
 
     let num_panels =
@@ -1049,6 +1044,7 @@ pub fn size_pv_system(
         electrical_constraint_binding,
         max_ac_kw: result_max_ac_kw,
         max_backfeed_amps: result_max_backfeed_amps,
+        main_panel_ampacity_missing: ampacity_missing,
     })
 }
 

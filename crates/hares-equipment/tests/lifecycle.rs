@@ -224,7 +224,7 @@ fn assert_equipment_lifecycle(
 }
 
 fn assert_core_output_contract(desc: &EquipmentDescriptor, co: &CoreOutput) {
-    validate_core_contract(desc, co)
+    validate_core_contract(desc, co, &mut Vec::new())
         .unwrap_or_else(|e| panic!("core contract failed for '{}': {e}", desc.name));
 
     let caps = desc.core_capabilities;

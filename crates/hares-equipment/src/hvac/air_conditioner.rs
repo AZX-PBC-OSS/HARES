@@ -2707,7 +2707,7 @@ mod tests {
             Some(OperatingMode::Cooling),
             "an active cooling delivery must report Cooling, not Standby"
         );
-        hares_types::validate_core_contract(eq.descriptor(), co)
+        hares_types::validate_core_contract(eq.descriptor(), co, &mut Vec::new())
             .expect("zero-fraction cooling step must satisfy the core-output contract");
     }
 
@@ -3038,8 +3038,12 @@ mod tests {
         let mut restored = AirConditioner::new(cfg);
         restored.init(&ac_config(), &environment).unwrap();
         restored.load_state(&state).unwrap();
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("an air conditioner checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("an air conditioner checkpoint must restore a contract-valid output");
     }
 
     #[test]
@@ -3815,7 +3819,7 @@ mod tests {
             q.to_bits(),
             "telemetry Q must equal port Q"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
 
         // Off case: zone in the deadband (21 °C, between heating 18+1 and
