@@ -3024,3 +3024,24 @@ oversubscription it removes was smoothing the premises' serial phases
 across each other. The engine-under-test for every run was the pin
 `a169354e` (the row's worktree build; the before runs used the main
 checkout's Oct 9 `.so` of the same source and compared identical).
+
+### The consumer's rows 72-73 landed on main, 2026-10-13 (main `d8d4f56f`)
+
+The consumer repository's fold branch `fold-cn1-cn5` (`8d9c96f8`: row 72's
+three commits folded as `e4a3137d`/`e5e2b62e`/`8d9c96f8` and row 73's
+`60ccfbc`) merged `--no-ff` onto `main` as `7dc661fc` (`merge: the report
+API and the pool sizing rows`; no conflict, the fold's side taken, a
+superset of the pre-rename main `78568b5`), then the pin `d8d4f56f` (the
+gitlink to the folded engine head `21506ea2`); main pushed
+`78568b5..d8d4f56f` (origin's PR rule bypassed, the ref update accepted).
+Before the merge, the shared checkout's staged uncommitted debris — a
+revert of row 72's `05427c6b` (the parse-once `build_kwargs` handoff) and
+`6a628523` (the `ordered=False` completion-order return), 5 files +9/−98 —
+was backed up as a patch and discarded (the fold carries both). Gates at
+`d8d4f56f`: `uv sync --extra engine` clean (the stale `a169354e` extension
+rebuilt by `--reinstall-package hares-py`), run_all 367 passed / 0 failed /
+7 skipped (the base seven), ruff clean, the B0 production set captured
+twice and `identical` (the two runs mutual-bitwise), the compare against
+the shipped baseline `B0-de-trace.json` printing exactly the recorded 260
+differing paths (the divergent audit line's delta, attributed in the
+engine ledger; the baseline not re-captured).
