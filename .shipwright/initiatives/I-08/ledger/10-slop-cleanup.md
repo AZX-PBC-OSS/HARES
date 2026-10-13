@@ -272,6 +272,15 @@ confirms the comment matches the fixed control flow.
 
 **Fixed by:** `08-consumer.md` CN-5.
 
+**State:** closed as `60ccfbc` (consumer branch `row/cn5-pool-sizing`): the
+shrink runs before the default inside `scale._pool_sizes`, and the
+docstring's promise, the inner pools at `cores // fleet_workers` when the
+caller passed no `workers`, is the code's behaviour on every path. The
+shrink's test (`fleet_pool_shrinks_inner_workers_when_workers_unset`,
+`_pool_sizes(4, None, 4, 28) == (4, 7)`) is the check that the comment now
+describes code that runs; the fixed control flow and the comment were read
+against each other in the row's review, which is this entry's check.
+
 ## SL-6: `check_losses.py`'s docstring claims a check the tool does not perform
 
 **Evidence:** `tools/check_losses.py`'s docstring calls the tool "the

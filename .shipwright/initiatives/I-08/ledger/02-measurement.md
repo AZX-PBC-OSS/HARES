@@ -2998,3 +2998,29 @@ About 120x lower. The reset that was 14% of a construction now costs a
 twentieth of a millisecond: the checkpoint deserialize plus the stream
 re-derivation. Requirement RL-3's well-under-10% holds with orders of
 magnitude to spare.
+### The pool-sizing row's production-capture wall time, 2026-10-12
+
+Before and after the sizing commit (`60ccfbc`, consumer branch
+`row/cn5-pool-sizing`): the wall time of one production-set capture (four
+premises, 365 days, 16 generations, `fleet_workers` 4) through
+`tools/capture_de_trace.py capture`, the entry's measurement.
+
+Before, the consumer at `cf7f2c3`, the sizing bug live: each premise's fit
+pools at `default_workers()`, 26 on this 28-core host, four premises
+concurrently, up to 104 worker processes on 28 cores. After, the sizing
+commit: the inner pools take the fleet-aware share (`_pool_sizes` gives 7)
+and each fit waves its population into pools of 6, four premises
+concurrently, 24 worker processes.
+
+Result: before 185.8 s and 203.3 s (load average 11.4 and 23.5 at start);
+after 225.6 s, 255.3 s and 241.3 s (load 82.9, 6.3 and 47.3 at start; the
+first after-run began 12 s after the before-run ended, its load still
+draining, the cleanest start is the 255.3 s one). Total CPU: about 69.4
+minutes before, about 66 minutes after (fewer worker imports to pay). The
+five captures are bitwise identical across two engine builds of the same
+pin source. The fixed sizing is about 1.2 to 1.4x slower in wall on this
+busy 28-core host while consuming about 3 minutes less CPU: the
+oversubscription it removes was smoothing the premises' serial phases
+across each other. The engine-under-test for every run was the pin
+`a169354e` (the row's worktree build; the before runs used the main
+checkout's Oct 9 `.so` of the same source and compared identical).

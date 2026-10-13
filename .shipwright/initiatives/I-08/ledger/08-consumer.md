@@ -1525,6 +1525,58 @@ generation's `run_specs(..., workers=self.workers)`);
 **Measurement:** wall time of one production-set capture before and after,
 recorded in `02-measurement.md`.
 
+**State:** landed as `60ccfbc` (consumer branch `row/cn5-pool-sizing`, cut
+from the CN-13 head `cf7f2c3` at engine pin `a169354e`). The change as
+specified: `_pool_sizes(n_homes, workers, fleet_workers, cores)` shrinks
+before it defaults, so the shrink is no longer dead and the docstring's
+`cores // fleet_workers` promise describes code that runs (SL-5's check);
+`wave_balanced_workers` is `ceil(n_jobs / ceil(n_jobs / max_workers))` with
+`n_jobs` itself at or under the budget; the `Fitter` computes its pool size
+once per `run` from the population and submits every `run_specs` call of
+the fit at it, the one-spec warm-start and optimum runs included; a direct
+`evaluate` call outside a run sizes itself from its own batch;
+`_workers_used()` reads the sizing from `_pool_sizes` so the header records
+the inner pool the capture ran with. The engine side of the row is a
+verification, not a change: the fleet's caller-declared threading
+(`Fleet::simulate(report, n_threads, chunk_size)`, `n_threads == 0` the
+global pool, `> 0` a local pool of exactly `n_threads` threads) is sane for
+the consumer's use precisely because the consumer's fit path never calls
+it, it drives one single-dwelling `Dwelling.simulate()` per worker process,
+and the sizing defect was entirely the consumer's own pool arithmetic.
+
+Adaptations and findings, in the row's order. The acceptance fixture is not
+the one named for the later parent-probe row (that row has not landed): the
+`a_fit_uses_one_pool_size` case runs a stubbed `run_specs` over the cached
+study home bldg0046363 on a 30-day synthetic meter, engine-free, and
+asserts every recorded `run_specs` call of a one-generation population-12
+fit with `workers=26` carried 12. The over-threaded probe the row was
+committed with is its own case, `a_two_member_generation_is_not_pooled_at_the_core_count`:
+at the base, on the 28-core machine, a two-member
+generation requested a 26-worker pool (the cores-minus-two default) and the
+one-spec runs requested 1; after, every call of the fit carries 2. RED was
+witnessed at the parent on all six new cases (four ImportError on the
+missing API, the two fit cases behaviourally). The consumer gate ran in the
+row's own worktree env (own venv, the engine built from the pin) because
+the shared checkout's venv was re-pointed mid-row by the row-72 work: 353
+passed, 1 failed, 7 skipped, the one failure
+`a_battery_with_no_dispatch_policy_is_inert` the TRAP-2 refusal the true
+pin engine makes, failing identically at the base (proved by running the
+case at `cf7f2c3` against the same build) and owned by row 72 per the
+battery-control entry's consumer-effect note; the main checkout's gates had
+been running a stale `.so` (built hours before the pin's strictness
+landed), which is why the case had been passing there. build_bundle's
+filesystem walk now ignores a worktree's `.git` pointer file (the bundle
+gate's first worktree run; no MISSING, no UNTRACKED after). The DE-trace
+capture is bitwise identical before and after, five captures across two
+engine builds of the same pin source; the compare against the shipped B0
+still prints its recorded 260 differing paths (the divergent audit line the
+baseline was captured on). The measurement is honest about direction: the
+capture's wall went from 186/203 s before to 226/241/255 s after on the
+busy 28-core host, total CPU about 3 minutes lower, because the
+oversubscription the fix removes (104 processes on 28 cores) was smoothing
+the premises' serial phases across each other; the load averages and the
+CPU totals are in `02-measurement.md`.
+
 ## CN-6: no duplicate parent-side evaluations
 
 **Kind:** initiative work (`context.md` item 18).
