@@ -259,6 +259,13 @@ impl PyPvSizingResult {
         self.inner.max_backfeed_amps
     }
 
+    /// Whether no main panel ampacity was provided, so the electrical-code
+    /// check was skipped entirely.
+    #[getter]
+    fn main_panel_ampacity_missing(&self) -> bool {
+        self.inner.main_panel_ampacity_missing
+    }
+
     fn __repr__(&self) -> String {
         let mut s = format!(
             "PvSizingResult(capacity={:.2} kW, panels={}, azimuth={:.0}°, tilt={:.1}°, max_roof={:.1} kW",
@@ -1329,6 +1336,56 @@ mod tests {
         .expect("size_pv_system should succeed");
         assert!(result.capacity_kw() > 0.0);
         assert!(result.num_panels() > 0);
+    }
+
+    #[test]
+    fn size_pv_system_reports_missing_ampacity_condition() {
+        let planes = vec![PyRoofPlane {
+            inner: RoofPlane {
+                area_m2: 100.0,
+                tilt_deg: 26.0,
+                azimuth_deg: Some(180.0),
+                material: None,
+                boundary_index: None,
+            },
+            idx: 0,
+        }];
+        let usable = compute_usable_area(
+            planes,
+            PyRoofShape::Gable,
+            None,
+            Some(40.0),
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("compute should succeed");
+
+        // No ampacity provided: the electrical-code check is skipped and
+        // the result says so.
+        let without = size_pv_system(
+            &usable, 6.0, 2.0, 14.0, None, None, None, None, None, None, None,
+        )
+        .expect("size_pv_system should succeed");
+        assert!(without.main_panel_ampacity_missing());
+
+        // Ampacity provided: the check runs and the flag clears.
+        let with = size_pv_system(
+            &usable,
+            6.0,
+            2.0,
+            14.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(200),
+            None,
+        )
+        .expect("size_pv_system should succeed");
+        assert!(!with.main_panel_ampacity_missing());
     }
 
     #[test]

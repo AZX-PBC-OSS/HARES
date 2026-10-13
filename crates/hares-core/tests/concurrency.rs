@@ -270,7 +270,7 @@ fn concurrent_runs_report_independent_counts() {
         })
     };
 
-    let (sent, actor_count) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let sent = Arc::new(AtomicU64::new(0));
     let actor_runs = {
         let bp = Arc::clone(&blueprint);
         let sent = Arc::clone(&sent);
@@ -299,7 +299,6 @@ fn concurrent_runs_report_independent_counts() {
         plain_rejections, 0,
         "the concurrent plain run's count stays 0: no leak across runs"
     );
-    let _ = actor_count;
 }
 
 // --- spawned-process reproducibility ----------------------------------------
