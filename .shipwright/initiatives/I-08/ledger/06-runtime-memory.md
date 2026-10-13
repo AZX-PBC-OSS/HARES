@@ -1187,6 +1187,144 @@ recorded as measured, not against the `context.md` estimate of about 1 GB
 for fully shared inputs. Cross-platform agreement is `02-measurement.md`
 M-4a and M-4b.
 
+**State:** committed `9212f342` (2026-10-12, branch `row/r70-rt5`,
+based on `e3bc4870`, one code commit, tree clean after). The row landed
+as the user's work order distilled it: the health counts and the
+warn-once state per run, the dwellings proven thread-safe, RED first on
+the leak. The Measurement section's bench group (`concurrent_dwellings`
+in `benches/single_building.rs`) did not run: the work order scoped the
+row to the state model and the proofs, and the thread/dwellings-per-
+second figure waits for the consumer rows that will size the pools
+(CN-5, CN-10).
+
+The per-run state model. A run is one dwelling's life: the dwelling is
+built from the blueprint, stepped to its finish, and a reset
+(`reset_with_seed`) rebuilds the dwelling from the kept blueprint, so
+every per-run field on `Dwelling` is fresh for the next run by
+construction. What changed is that the warn-once and health state that
+lived in process statics moved onto that per-run surface:
+
+- `ISLAND_UNSERVED_WARNED` (`dwelling/mod.rs`): the process-global
+  `AtomicBool` is gone; the dwelling carries `island_unserved_warned`,
+  and the first unserved islanded step in a run both logs at warn level
+  and records a `Warning` (source `island`, the unserved kW in the
+  message) through `WarningLog::push_from`; later occurrences log at
+  debug level. Before the fix the warning was a log throttle only: it
+  never reached `RunResult.warnings` at all, and a second run in the
+  same process inherited the consumed gate.
+- `WARNED_ACTOR_TELEMETRY_DOT` / `WARNED_ACTOR_TELEMETRY_BARE`
+  (`telemetry.rs`): both statics are gone; the dispatch takes the run's
+  own `ObservationWarnOnce` gates (two flags) as a `&mut` parameter. The
+  gates live on the dwelling (the entry's "object that owns the run":
+  the dwelling owns the run in Rust; the gym environment owns the field
+  list in Python, and it threads the call through the dwelling's guard),
+  read through the new `Dwelling::observation_vec(&mut self, fields)`,
+  so a run's first dot-notation and bare-name fallback each warn once
+  and a reset starts fresh. The dispatch method renamed
+  (`to_observation_vec` to `observation_vec`, the gates parameter
+  explicit); the one-argument form survives as the tests' trait.
+- `RANGE_REJECTION_COUNT`, `RANGE_WARNING_COUNT`, `RANGE_EVENTS` and
+  the `RangeEventRing`, `RangeViolationEvent`, `RangeViolationSeverity`,
+  the four `range_*_counter`/`range_violation_events`/`clear_range_…`
+  getters (`hares-types/src/equipment.rs`): all deleted.
+  `validate_core_contract(desc, co, warnings)` now pushes every
+  plausibility-bound crossing (cop past 20, setpoint outside
+  [-50, 80] °C, thermal output outside ±100 kW) into the `&mut Vec<
+  Warning>` the caller supplies, in every build, and the dwelling's
+  `validate_equipment_contract(idx)` drains the reused
+  `warning_scratch` into the run's warning log, step-stamped. The
+  rejection sites keep their typed errors, counters gone.
+- The cop == 0 warning died whole: the state is the documented-valid
+  off-or-transition case (zero useful output, zero work input), and it
+  reports `Some(0.0)` from every idling step, so recording it would put
+  a warning in every idling home and, through FL-2, out of every fleet
+  aggregate. This is the entry's contingency's wrong bound, fixed in the
+  row before the goldens could catch it.
+- `MODE_FLOW_INCONSISTENCY_COUNT` (`mode_flow_guard.rs`) and its getter:
+  deleted; the rejections already fail the run.
+- `GERSHGORIN_FALSE_POSITIVE_COUNT` (`state_space.rs`) and its getter
+  and re-export: deleted; the model records the event on itself
+  (`StateSpaceModel::gershgorin_false_positive()`), set when
+  `from_continuous`'s eigenvalue fallback accepts what the Gershgorin
+  bound flagged, and the acceptance test reads the model's own record.
+- `COUNTERS`, `DUTY_CYCLE_COMPONENT_EVENTS` and the whole
+  `dispatch_observer` module (`py_actor.rs`), written and never read:
+  deleted with the two record calls.
+- `NO_AMPACITY_WARNED` (`pv_sizing.rs`): deleted;
+  `size_pv_system` returns the missing-ampacity condition
+  (`PvSizingResult::main_panel_ampacity_missing`), and the
+  dwelling-facing sizing path (`PyDwelling::estimate_pv_capacity`)
+  records a `Warning` (source `pv_sizing`) on the dwelling's own log
+  when the NEC backfeed check was skipped. The entry's "blueprint's
+  resolver warning collector" does not exist for PV sizing (the sizing
+  is caller-invoked, not part of blueprint resolution), so the record
+  lands on the dwelling at the one dwelling-facing call.
+
+`RunHealth` itself needed no change: the counters were already fields on
+the dwelling, per run by construction. What the row adds is the proof
+(`concurrent_runs_report_independent_counts`, below) that they do not
+cross runs, and the leak proof for the warn-once state that did live in
+statics.
+
+The thread-safety surface. Compile-time: `dwelling_and_blueprint_thread_
+bounds` (new `crates/hares-core/tests/thread_bounds.rs`) asserts
+`Dwelling: Send`, `DwellingBlueprint: Send + Sync`, `Send + Sync` for
+the four parsed input handles and `ForcingTable`, with const functions
+so the bounds hold in every build. Run under the default, `dst`,
+`observe` and `observe_detailed` feature sets and inside the
+`--all-features` workspace pass. Behavioral: `concurrent_dwellings_
+match_sequential` (new `crates/hares-core/tests/concurrency.rs`) builds
+four dwellings from one shared blueprint of `base.xml`
+(`BEopt_example_schedule.csv`, `USA_CO_Denver.Intl.AP.725650_TMY3.epw`,
+24 h at 900 s), runs the first four one at a time, then steps four on
+four threads (one dwelling per thread, the blueprint `Arc` the only
+shared object), and compares every pair bitwise: frames per column
+(f64 by `to_bits()`, utf8 by bytes), and metrics, health and warnings by
+their postcard bytes (`RunMetrics` gained the `serde::Serialize` derive
+for this; postcard writes every f64 as its IEEE-754 bytes, BTreeMaps
+inside, so the encoding is deterministic). No shared-mutable-state
+defect surfaced: the concurrent runs match the serial runs on the first
+pass. `concurrent_runs_report_independent_counts` runs the same inputs
+twice concurrently, one run carrying a test actor that sends an
+out-of-bounds control signal (a sub-band thermostat deadband, rejected
+at dispatch) every step: the actor run reports
+`rejected_control_signals` of exactly the number it sent, the concurrent
+plain run reports 0. `whole_frame_identical_across_spawned_processes`
+(the same file) spawns the test binary twenty times (ten per fixture:
+`base-foundation-basement-garage.xml`, `base-hvac-multiple.xml`, 48 h at
+900 s) through an ignored child test, and every child's frame digest
+(every buffer's raw bytes and validity masks through an unkeyed
+`DefaultHasher`) is equal, so the solver_builder's hashed `HashMap`
+iteration reaches no number. `tests/regression/determinism.rs` is
+rewritten as the entry specifies: each building (the two BEopt and the
+ResStock vendor buildings) runs once alone and twice concurrently on two
+threads from one blueprint, the file report stripped (one shared
+destination path would race the concurrent runs), and the three frames
+and metrics compare bitwise; the `RAYON_NUM_THREADS` sweep and the
+epsilon-compare are gone.
+
+RED first: `warn_once_is_per_run` (in
+`crates/hares-core/tests/grid_outage_islanding.rs`, the entry's shape)
+failed at the parent with `left: 0, right: 1` (the first run's record
+carried no island-unserved warning at all, the warn-once state a process
+static gating a log line only), and passed after the fix with each of
+the two runs' records carrying exactly one. The telemetry gates' unit
+test and the range-warning record test were witnessed red by compile
+errors at the missing API before their implementations.
+
+Gates at `9212f342` (canonical env: `uv sync --locked --all-extras
+--all-groups`, `uv run maturin develop`): fmt clean; clippy `--workspace
+--all-targets --all-features -D warnings` clean; nextest `--workspace
+--all-features -j 4` 8102/8102 (5 skipped: the ignored kind-pin
+generator, the two hand-run measurement tests, the spawned-process
+child, the delta fixture); nextest `-p hares-core --test regression`
+20/20; `pytest -m ''` 1744 passed, 6 xfailed, 0 failed, 0 errors;
+pyright 0; the goldens bitwise (compare-all 8 identical and
+`full_year_900s_dst` identical, and the dst build's compare-all
+identical: the nine manifests the base carries). The submodule note: the
+worktree needed `git submodule update --init` for the vendor fixtures
+the census-adjacent tests read; no tracked path moved.
+
 ## RT-6: resolved-parameter read-back
 
 **Kind:** initiative work (`dl-i08-architecture.inputs`, `new_capability`).
