@@ -345,7 +345,11 @@ fn warn_actor_resolution(
     field: &str,
     key: Option<&str>,
 ) {
-    let already = if dot { &mut warned.dot } else { &mut warned.bare };
+    let already = if dot {
+        &mut warned.dot
+    } else {
+        &mut warned.bare
+    };
     if !*already {
         *already = true;
         match key {
