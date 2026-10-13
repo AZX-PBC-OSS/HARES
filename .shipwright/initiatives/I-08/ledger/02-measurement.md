@@ -2945,3 +2945,56 @@ breakdown was recorded; the dominant cost either way is the assembly's
 own (the environment init and the equipment construction), the warm-up's
 simulated days absent by construction. The re-run on the final head
 (after the row's commits): 3.0 ms and 5.5 ms, the same reading.
+
+### The RL observation read and the batch loop, 2026-10-12, commit `37237b24` (the frozen observation plan)
+
+Raw record: `.shipwright/runs/r71-rt7-rt8-measurement.md` (the harnesses'
+shapes, the counts' coverage per figure and the host condition: WSL2,
+the branch's own gate builds sharing the host, load average 4 to 17).
+
+The per-environment observation read's allocations (the counting
+allocator, 96 reads after one step, divided by 96): the base's
+telemetry-snapshot-plus-string-walk read 42 per call (4 032 over 96);
+the plan's `observe_into` reads 0, in the committed zero-allocation
+test, in every run since. Per `batch_step` call of 8 environments that
+is 336 read allocations the engine stops paying, beside the
+Python-side per-row lists and the per-step `np.asarray` the old row
+conversion built.
+
+The whole call's calling-thread allocation count (20 calls after 10
+warm ones): n=1 median 78 at the base against 34 at the commit (the
+read rode the calling thread at one environment); n=8 median 120
+against 121 (the reads ride the rayon workers there, so the
+calling-thread figure is the GIL-held conversion section: unchanged,
+as expected).
+
+The batch loop's per-step wall (M-3 item 5's stepped-episode shape, 8
+base.xml dwellings, 1 000 steps of 60 s, ten observation fields of
+every kind the home answers, the median of the per-step walls): the
+base's behavior 0.942 ms; the commit's copy=True 0.898 and 0.934 ms in
+two sets, copy=False 0.881 ms. The sets overlap the base's under this
+host's noise (the loop's wall is the simulation step's, the observation
+a small share of it), so the wall is recorded as no measurable change
+and the verdict rests on the structural claim, the removed read, which
+the zero-allocation test proves exactly.
+
+### The RL reset's wall against a full construction, 2026-10-12, commit `fe79a83d` (the reseed reset)
+
+Raw record: `.shipwright/runs/r71-rt7-rt8-measurement.md`. The harness:
+`.shipwright/runs/r71a-reset-wall.py`, the consumer_shape_900s inputs
+(the bldg0176227 ResStock home, its envelope-materials override,
+warm-up off per the fixture) at 1 d, 900 s steps, 20 constructions and
+20 resets, each timed, the medians recorded; the reset is the sequence
+the gym environments run, `load_state(snapshot)` then the seed. Load
+average 4 to 8 at write time.
+
+- the base's path (`reset_with_seed`): construction median 39.6 ms,
+  reset median 5.620 ms, 14.4% of construction (a first set at 14.2%);
+- the row's path (`reseed`): construction median 39.0 ms, reset median
+  0.047 ms, 0.1% of construction (a second set at 0.046 ms against
+  38.3 ms).
+
+About 120x lower. The reset that was 14% of a construction now costs a
+twentieth of a millisecond: the checkpoint deserialize plus the stream
+re-derivation. Requirement RL-3's well-under-10% holds with orders of
+magnitude to spare.

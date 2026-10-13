@@ -1536,6 +1536,74 @@ fails in CI.
 **Kind:** initiative work (`dl-i08-architecture.rl_observation_allocation`:
 per-step RL observation allocation is part of the runtime work).
 
+**State:** committed `37237b24` (2026-10-12, branch `row/r71-rt7-rt8`,
+based on `e3bc4870`): `ObservationPlan` (`crates/hares-core/src/observation.rs`,
+new) resolves every field of the environment's field list once, at plan
+build, to a typed source — the outdoor scalars, the total and reactive
+powers, the zone brackets (the zone's id and its position in the
+sorted-zone-id order both frozen), the equipment brackets, the flat
+aliases (resolved to the equipment index at build), the time features
+and the actor channels (dot and bare, the bare search's sorted-name
+order frozen; the actors' published channels are their sealed
+declarations, so plan time sees the key set any step would) — failing
+at the build on an unknown field and naming it, the resolution order
+and error messages the string walk's, so a field the plan rejects the
+old walk rejects too. `Dwelling::observe_into(plan, out)` and the
+telemetry executor behind `to_observation_vec` (now a thin wrapper over
+the same plan) fill a caller-owned slice with no allocation, the values
+and NaN handling `to_observation_vec` always reported (the
+uninitialized row all NaN; the dwelling-direct read keys the zone
+fields by id, the snapshot read by position). RED first: the new
+hares-core tests compile-error at the parent on the missing surface,
+and the allocation proof's before side measured — the read allocated 42
+per call. GREEN: `observe_into_allocates_nothing_after_the_first_step`
+(the counting allocator, 96 reads on base.xml of every field kind,
+delta 0) and `observation_plan_matches_to_observation_vec` (the
+dwelling-direct executor against the snapshot read on bits, NaN before
+the first step and after one); every existing telemetry observation
+test passes through the wrapper unchanged. Python: `ObservationPlan`,
+`Dwelling.observation_plan(fields)`, `Dwelling.observe_into(plan, out)`
+(any writable C-contiguous float64 buffer view); the gym environments
+build one plan per dwelling at reset (lazily before one, so a step
+before a reset builds it too) and `batch_step` now takes the plans and
+the vector environment's own `(n_envs, n_fields)` buffer, filled in
+place through its buffer protocol — no per-row lists, no Python object
+per field; the row dicts no longer carry `obs`. The per-step `info`
+keys are `&'static str` and the dict is built only for the keys set in
+that step. A step whose observation read fails ends that environment
+with its error (`terminated=True`, `info["error_msg"]`, its row NaN,
+the flag kept): no substitute vector; the
+`dwelling.observation().unwrap_or_default()` fallback deleted with the
+method. `VecDwellingGymEnv(..., copy=True)` (the default) returns a
+fresh copy of the buffer per step; `copy=False` returns the buffer
+itself, documented as overwritten by the next step or reset. The
+`_verify_observation_equivalence` check compared plan output with plan
+output and is deleted with its flag and its three pinning tests; the
+pure-Python path reads through the same plans, so the two paths agree
+by construction (`rust_and_python_paths_give_identical_rewards` still
+passes). New Python pins: `unknown_observation_field_fails_at_reset`
+(both environments, naming the field),
+`batch_step_returns_a_fresh_observation_by_default` (different objects,
+the first unchanged, each bitwise the pure-Python path's),
+`batch_step_copy_false_returns_the_shared_buffer` (`is` the buffer).
+The hares-python unit test `observation_failure_terminates_the_environment`
+faults the batch's one observation wrapper (`#[cfg(test)]` switch
+naming the environment index) for environment 0 of two base.xml
+dwellings: terminated, the error naming the environment, the row NaN,
+environment 1 steps normally. Numbers in `02-measurement.md`: the
+read's 42 allocations per environment per call at the base against 0;
+the whole call's calling-thread count n=1 78 to 34, n=8 120 to 121
+(the reads ride the workers); the batch loop's per-step wall (8 envs,
+1 000 steps of 60 s) 0.942 ms at the base against 0.898 to 0.934 ms
+copy=True and 0.881 ms copy=False — inside the host's noise, recorded
+as no measurable change, the verdict the removed read. Gates: fmt
+clean, clippy `--workspace --all-targets --all-features -D warnings`
+clean, nextest `--workspace --all-features -j 4` 8102/8102 (5 skipped:
+the ignored kind-pin generator and the hand-run measurement tests),
+`pytest -m ''` 1745 passed + 6 xfailed, 0 failed, 0 errors, pyright 0,
+the nine goldens bitwise (compare-all 8 identical, `full_year_900s_dst`
+identical).
+
 **Problem:** every RL step rebuilds the observation from strings. For each
 environment and step:
 - `Dwelling::telemetry()` builds a new `DwellingTelemetry`: it collects and
@@ -1648,6 +1716,66 @@ stepped-episode loop is the harness).
 **Kind:** initiative work (requirement RL-3: reset restores a captured
 initialised state and re-seeds without rebuilding;
 `dl-i08-architecture.results`, `engine_performance`).
+
+**State:** committed `fe79a83d` (2026-10-12, branch `row/r71-rt7-rt8`,
+based on RT-7's `37237b24`): `Dwelling::reseed(master_seed)` re-derives
+every random stream the dwelling holds — the dwelling's own stream 0,
+every event-load equipment's (`Equipment::uses_rng_stream`) and every
+built-in EV driver actor's — with the stream indices construction uses,
+each at its start (word position zero). The components keep their own
+nonces and take the dwelling's new generator key through `reseed(seed:
+[u8; 32])` on the `Equipment` and `Actor` traits, whose defaults refuse
+with a typed error the dwelling wraps naming the component, so a seeded
+component that does not implement it fails instead of keeping its old
+stream. An event load's start draws start over (its generator rebuilt
+at word 0, the draw count zeroed; it draws nothing ahead of its stream
+at construction, so there is nothing to redraw — stated at the impl);
+an EV driver replaces its generator, keeps the nonce construction (or
+the take-over) assigned. The dwelling records the seeded actors when a
+roster change installs them (the auto-registered actors reporting a
+stream through the new `rng_stream_state` read-back; a user actor's own
+config-seeded generator is never the dwelling's to reseed), and
+`Dwelling::seeded_streams()` reads every seeded component's (key,
+nonce, word position) back, the dwelling's own stream first. Python:
+`Dwelling.reseed(seed)`; the gym environments' reset is
+`load_state(snapshot)` then `reseed(seed)` and no longer calls
+`reset_with_seed`, which stays the explicit full rebuild; `docs/python.md`'s
+RL section states the contract (the warmed-up state is the one the
+environment's construction built; `reset(seed=...)` fixes the random
+streams of the episode that follows; no re-construction, no second
+warm-up). RED first: the tests are written against the missing surface
+(the reseed methods compile-error at the parent, the Python
+`Dwelling.reseed` an AttributeError) and the build counter's before
+side is the reset path itself. GREEN:
+`reseed_resets_every_stream` (hares-core, the cz5a EV fixture: a
+dwelling stepped 96 times and reseeded with 7 holds, for every seeded
+component, the (seed, stream, word position) the seed-7 fresh build
+holds at construction — the comparison build warm-up-off so no stream
+has advanced past its start — and a post-reseed step advances the
+dwelling's stream, so the read-back is the components' own state, not
+bookkeeping); `gym_reset_restores_snapshot_and_reseeds` (Python, the
+cz5a fixture, warm-up on, 900 s, 1 d, an ASHP action: two `reset(seed=7)`
+calls each followed by the same 96 actions give bitwise-equal
+observations and rewards, and the restored first observation is the
+same under seed 8);
+`gym_reset_builds_nothing_and_runs_no_warmup` (hares-python unit test:
+the reset sequence leaves the `#[cfg(test)]` build counter on
+`PyDwelling` unchanged, incremented at `reset_with_seed`'s one
+`build_with_seed` call (the counter lives in `hares-python`, which
+`cfg(test)` does not set for `hares-core`); the blueprint `Arc` is the
+same object before and after (`Arc::ptr_eq`); `health().warmup` equals
+the snapshot's; `reset_with_seed(7)` increments the counter by one, so
+the counter is shown to count). Numbers in `02-measurement.md`: the
+reset's median wall against the construction's (20 each,
+consumer_shape_900s's inputs at 1 d): the base's rebuild path 5.620 ms
+against 39.6 ms (14.4%), the row's reseed path 0.047 ms against 39.0 ms
+(0.1%), about 120x lower; requirement RL-3's well-under-10% holds with
+orders of magnitude to spare. Gates: fmt clean, clippy
+`--workspace --all-targets --all-features -D warnings` clean, nextest
+`--workspace --all-features -j 4` 8102/8102 (5 skipped),
+`pytest -m ''` 1745 passed + 6 xfailed, 0 failed, 0 errors, pyright 0,
+the nine goldens bitwise (compare-all 8 identical,
+`full_year_900s_dst` identical).
 
 **Problem:** `DwellingGymEnv.reset` loads the post-warm-up snapshot and
 then calls `reset_with_seed` (`python/ochre_next/rl/gym_env.py:546-548`;
