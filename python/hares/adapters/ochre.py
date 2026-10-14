@@ -63,10 +63,18 @@ def hold_weather(weather: str | Path, time_res_s: int) -> str:
     once per sub-interval with its minute field at the sub-interval's end.
     Every other field of every record is unchanged.
 
-    The held file reads at OCHRE's phase: the engine's EPW reader keeps the
-    hourly convention's fixed 30-minute lag over the held records, so each
-    hour's value is in effect from coverage start plus 30 minutes, the same
-    switch OCHRE's midpoint-stamped ``resample().ffill()`` step makes.
+    The held file reads at OCHRE's phase: OCHRE shifts every hourly
+    record's stamp by a fixed ``timedelta(minutes=30)`` (pvlib indexes the
+    record at its interval's start; ochre/utils/schedule.py:169, applied
+    at :110) and its ``resample().ffill()`` (:555) then carries each
+    hour's value from coverage start plus 30 minutes to the next hour's
+    coverage start plus 30 minutes. The engine reads the record covering
+    each step, so the held file places each hour's value in the records
+    stamped from coverage start plus 30 minutes plus one step to the next
+    hour's coverage start plus 30 minutes: the hour's second-half records
+    carry its own value and its next hour's first-half records carry it
+    back (the file's first half hour carries the first record's value,
+    OCHRE's own backfill of the first row).
 
     The step must divide the hour in whole minutes (for instance 3600, 900,
     300, 60), because the engine's EPW reader accepts a held file's record
@@ -84,6 +92,7 @@ def hold_weather(weather: str | Path, time_res_s: int) -> str:
         )
         raise ValueError(msg)
     step_minutes = time_res_s // 60
+    half_hour_minute = MINUTES_PER_HOUR // 2 // step_minutes * step_minutes
 
     lines = Path(weather).read_text(encoding="utf-8").splitlines()
     if len(lines) <= _FIRST_DATA_LINE:
@@ -101,13 +110,25 @@ def hold_weather(weather: str | Path, time_res_s: int) -> str:
         else:
             held.append(line)
 
-    for line in lines[_FIRST_DATA_LINE:]:
-        if not line.strip():
-            continue
-        fields = line.split(",")
+    records = [line.split(",") for line in lines[_FIRST_DATA_LINE:] if line.strip()]
+    for block, own in enumerate(records):
+        # The block's records carry the block's own stamp fields (the hour
+        # field h stamps its records (h-1):01 through h:00); the value
+        # fields come from this record for the block's second half (the
+        # minute past the half hour) and the previous record for the
+        # first half (the file's first half hour carries the first
+        # record's value, OCHRE's own backfill of the first row.
+        previous = records[max(block - 1, 0)]
         for sub in range(records_per_hour):
-            fields[_MINUTE_FIELD] = str((sub + 1) * step_minutes)
-            held.append(",".join(fields))
+            minute = (sub + 1) * step_minutes
+            source = own if minute > half_hour_minute else previous
+            out = own.copy()
+            out[_MINUTE_FIELD] = str(minute)
+            # Field 6 onward carries the values and their per-record
+            # source-and-uncertainty flags: the flag travels with the
+            # values it describes.
+            out[5:] = source[5:]
+            held.append(",".join(out))
 
     return "\n".join(held) + "\n"
 

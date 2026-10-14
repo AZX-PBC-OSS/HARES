@@ -463,10 +463,13 @@ class TestZipPfOverride:
             "schedule": SCHEDULE,
             "weather": WEATHER,
             "start_time": "2019-07-01T14:00:00",
-            # Three hours: the merged ground-coupled basement damps the
-            # zone's climb to the cooling call (it crosses at ~2 h into the
-            # July afternoon), and the loop breaks when the compressor runs.
-            "duration_s": 10800,
+            # Six hours: the merged ground-coupled basement damps the
+            # zone's climb to the cooling call. The run's first hour's
+            # weather interpolates from the first day's hour-24 record
+            # (the EnergyPlus first-hour rule), which delays the climb to
+            # ~3 h into the afternoon, and the loop breaks when the
+            # compressor runs.
+            "duration_s": 21600,
             "time_res_s": 60,
             "defaults_path": str(HARES_DEFAULTS),
             "bldg_id": 42,
@@ -504,10 +507,10 @@ class TestZipPfOverride:
         dw_ov.initialize()
 
         # Step until the compressor draws power (the merged ground-coupled
-        # basement damps the zone's climb to the cooling call; it crosses at
-        # ~2 h into the July afternoon).
+        # basement damps the zone's climb to the cooling call; it crosses
+        # at ~3 h into the July afternoon).
         compressor_kw = 0.0
-        for _ in range(180):
+        for _ in range(360):
             dw_base.step()
             dw_ov.step()
             tel = _equipment_telemetry(dw_base, "Air Conditioner")
@@ -562,10 +565,13 @@ class TestZipPfOverride:
             "schedule": SCHEDULE,
             "weather": WEATHER,
             "start_time": "2019-07-01T14:00:00",
-            # Three hours: the merged ground-coupled basement damps the
-            # zone's climb to the cooling call (it crosses at ~2 h into the
-            # July afternoon), and the loop breaks when the compressor runs.
-            "duration_s": 10800,
+            # Six hours: the merged ground-coupled basement damps the
+            # zone's climb to the cooling call. The run's first hour's
+            # weather interpolates from the first day's hour-24 record
+            # (the EnergyPlus first-hour rule), which delays the climb to
+            # ~3 h into the afternoon, and the loop breaks when the
+            # compressor runs.
+            "duration_s": 21600,
             "time_res_s": 60,
             "defaults_path": str(HARES_DEFAULTS),
             "bldg_id": 42,
@@ -591,7 +597,7 @@ class TestZipPfOverride:
         dw.initialize()
 
         tel = None
-        for _ in range(180):
+        for _ in range(360):
             dw.step()
             tel = _equipment_telemetry(dw, "Air Conditioner")
             if tel.get("compressor_kw", 0.0) > 0.0:

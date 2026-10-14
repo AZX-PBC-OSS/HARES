@@ -1590,18 +1590,40 @@ mod tests {
             for (hour, &source_value) in source_field.iter().enumerate() {
                 for sub in 0..4 {
                     let held_value = held_field[hour * 4 + sub];
+                    // The OCHRE phase: the hour's value occupies the
+                    // records stamped from coverage start plus 30 minutes
+                    // (subs 2 and 3, the minute fields 45 and 60) to the
+                    // next hour's coverage start plus 30 minutes (the
+                    // next hour's subs 0 and 1). The block's first half
+                    // carries the previous hour's value; the file's first
+                    // half hour carries the first record's value (OCHRE's
+                    // own backfill of the first row over the run's start).
+                    let previous = if hour == 0 {
+                        source_field[0]
+                    } else {
+                        source_field[hour - 1]
+                    };
+                    let expected = if sub < 2 { previous } else { source_value };
                     assert!(
-                        held_value == source_value,
-                        "{field_name} hour {hour} sub {sub}: held {held_value} != source {source_value}"
+                        held_value == expected,
+                        "{field_name} hour {hour} sub {sub}: held {held_value} != expected {expected}"
                     );
                 }
             }
         }
-        // The ground temperature comes from the same header months, so the
-        // held file's per-record interpolation repeats the source's values.
+        // The ground temperature comes from the same header months, so
+        // the held file's per-record interpolation tracks the source's
+        // values. The DOE2 monthly means derive from the file's own dry
+        // bulb records, and the OCHRE phase's first-half placement moves
+        // those monthly means by a few thousandths of a degree, so the
+        // equality is a tolerance, not a bit identity.
         for (hour, &source_value) in source.ground_temp_c.iter().enumerate() {
             for sub in 0..4 {
-                assert_eq!(held.ground_temp_c[hour * 4 + sub], source_value);
+                let held_value = held.ground_temp_c[hour * 4 + sub];
+                assert!(
+                    (held_value - source_value).abs() < 0.05,
+                    "ground_temp_c hour {hour} sub {sub}: held {held_value} vs source {source_value}"
+                );
             }
         }
     }

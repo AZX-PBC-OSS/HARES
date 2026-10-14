@@ -383,9 +383,11 @@ pub(crate) enum InterpMethod {
     /// The hour's record held across its steps: ground temperature (a
     /// monthly site series, not a weather-file hourly field in EnergyPlus)
     /// and surface albedo (EnergyPlus drops the file's albedo; holding the
-    /// hour's record is a HARES choice), and the solar fields until the
-    /// midpoint rule applies.
+    /// hour's record is a HARES choice).
     HourHold,
+    /// EnergyPlus's solar midpoint interpolation: GHI, DNI and DHI
+    /// (`WeatherManager.cc:8343-8375`, `:3107-3117`).
+    SolarMidpoint,
     /// Recomputed from the step's interpolated inputs, never interpolated
     /// itself: sky temperature (`calcSky`, `WeatherManager.cc:3106-3113`).
     Recompute,
@@ -406,13 +408,47 @@ pub(crate) fn field_method(field: WeatherField) -> InterpMethod {
         WeatherField::WindDirDeg => InterpMethod::LastHourCircular,
         WeatherField::LiquidPrecipM => InterpMethod::LastHourDivided,
         WeatherField::GhiWM2 | WeatherField::DniWM2 | WeatherField::DhiWM2 => {
-            InterpMethod::HourHold
+            InterpMethod::SolarMidpoint
         }
         WeatherField::SkyTempC => InterpMethod::Recompute,
         WeatherField::GroundTempC | WeatherField::SurfaceAlbedo => InterpMethod::HourHold,
     }
 }
 
+/// EnergyPlus's `SolarInterpolation` weight for step `ts` of `n` steps
+/// per hour (1 to n), one function of `(n, ts)` reproducing the table
+/// build at `WeatherManager.cc:8343-8375` for every n: for an even n the
+/// step ending at the half hour takes 1.0 on its own hour and the weight
+/// falls by 1/n per step each side; n = 3 takes 5/6, 5/6, 0.5; for an
+/// odd n >= 5 the two middle steps take `1 - 1/(2n)`.
+pub(crate) fn solar_interpolation_weight(n: usize, ts: usize) -> f64 {
+    if n == 1 {
+        return 0.5;
+    }
+    if n.is_multiple_of(2) {
+        let halfpoint = n / 2;
+        if ts == halfpoint {
+            return 1.0;
+        }
+        let hpoint = halfpoint.abs_diff(ts);
+        return 1.0 - hpoint as f64 * (1.0 / n as f64);
+    }
+    if n == 3 {
+        return [5.0 / 6.0, 5.0 / 6.0, 0.5][ts - 1];
+    }
+    let tweight = 1.0 / n as f64;
+    let halfpoint = n / 2;
+    let tweight1 = 1.0 - tweight / 2.0;
+    if ts == halfpoint || ts == halfpoint + 1 {
+        return tweight1;
+    }
+    let hpoint = if ts < halfpoint {
+        halfpoint - ts
+    } else {
+        ts - halfpoint - 1
+    };
+    tweight1 - hpoint as f64 * tweight
+}
 /// Metadata extracted from an EPW header.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WeatherMeta {
@@ -579,12 +615,11 @@ impl WeatherTimeSeries {
     ///   (`WeatherManager.cc:3043-3128`): every point field is linear
     ///   last-hour interpolation evaluated for the step's end, the wind
     ///   direction interpolates on the circle, the precipitation is the
-    ///   weighted depth divided by the steps per hour, the sky temperature
-    ///   is recomputed from the interpolated inputs, and the ground
-    ///   temperature and surface albedo hold the hour's record. The solar
-    ///   fields hold the hour's record under the point-value rule; the
-    ///   solar midpoint interpolation is a separate rule (see
-    ///   `interpolate_hourly_records`).
+    ///   weighted depth divided by the steps per hour, the solar fields
+    ///   take the midpoint interpolation (the hourly average is the
+    ///   hour's midpoint value), the sky temperature is recomputed from
+    ///   the interpolated inputs, and the ground temperature and surface
+    ///   albedo hold the hour's record.
     ///
     /// `first_hour` and `start` drive the first-hour rule: the first hour
     /// of the run interpolates from hour 24 of the run's first day
@@ -852,15 +887,59 @@ impl WeatherTimeSeries {
             }
         }
 
-        // The held fields: the hour's record across its steps. The solar
-        // fields hold the hour's record under this rule; the solar
-        // midpoint interpolation replaces the hold below.
+        // The solar fields: EnergyPlus's midpoint interpolation. The
+        // hourly average is the value at the hour's midpoint (Engineering
+        // Reference, "Weather File Solar Interpolation",
+        // climate-calculations.tex:304-306), so the step's value is
+        // linear interpolation between hour midpoints evaluated at the
+        // step's end: before the half hour the remainder goes to the
+        // previous hour's record, after it to the next hour's
+        // (`WeatherManager.cc:3074-3091, 3113-3116`), at it the hour's
+        // own record. The next hour of hour 24 is hour 1 of the same day
+        // (`:3061-3065`); the previous hour of the run's first hour is
+        // the record the first-hour rule names. The three-term sum and
+        // the zero weights stay in E+'s form (`last * prev_w + this *
+        // wgt + next * next_w`).
+        let solar_weights: Vec<f64> = (1..=n)
+            .map(|ts| solar_interpolation_weight(n, ts))
+            .collect();
+        tracing::debug!(steps_per_hour = n, weights = ?solar_weights, "the solar interpolation weights");
         for (field, column) in [
             (WeatherField::GhiWM2, &mut out.ghi_w_m2),
             (WeatherField::DniWM2, &mut out.dni_w_m2),
             (WeatherField::DhiWM2, &mut out.dhi_w_m2),
-            (WeatherField::GroundTempC, &mut out.ground_temp_c),
         ] {
+            debug_assert_eq!(field_method(field), InterpMethod::SolarMidpoint);
+            for k in 0..len {
+                let prev = prev_record_index(k, first_hour_k, first_hour_prev, len);
+                let hour_in_day = k % 24;
+                // The next hour of hour 24 is hour 1 of the same day's
+                // records, not the next day's hour 1.
+                let next = if hour_in_day == 23 {
+                    (k / 24) * 24
+                } else {
+                    k + 1
+                };
+                for ts in 1..=n {
+                    let wgt = solar_weights[ts - 1];
+                    let (prev_w, next_w) = if wgt == 1.0 {
+                        (0.0, 0.0)
+                    } else if 2 * ts < n {
+                        (1.0 - wgt, 0.0)
+                    } else {
+                        (0.0, 1.0 - wgt)
+                    };
+                    column[k * n + ts - 1] = self.get(field, prev) * prev_w
+                        + self.get(field, k) * wgt
+                        + self.get(field, next) * next_w;
+                }
+            }
+        }
+
+        // The held fields: the hour's record across its steps.
+        {
+            let field = WeatherField::GroundTempC;
+            let column = &mut out.ground_temp_c;
             debug_assert_eq!(field_method(field), InterpMethod::HourHold);
             for k in 0..len {
                 for ts in 1..=n {
@@ -981,6 +1060,7 @@ fn sum_downsample(values: &[f64], ratio: usize) -> Vec<f64> {
 mod tests {
     use super::{
         FirstHour, RecordLabel, WeatherError, WeatherField, WeatherMeta, WeatherTimeSeries,
+        solar_interpolation_weight,
     };
     use chrono::NaiveDate;
 
@@ -1242,25 +1322,157 @@ mod tests {
         }
     }
 
-    /// The solar fields hold the hour's record: each hourly average
-    /// spans its hour's steps unchanged (the point-value rule; the solar
-    /// midpoint rule is a separate change).
+    /// The solar weights reproduce EnergyPlus's table for four and six
+    /// steps: records 400 (previous hour), 800 (this hour), 0 (next
+    /// hour); the four 900 s steps of the this-hour read 700, 800, 600,
+    /// 400; the six 600 s steps read the N = 6 weights' values.
     #[test]
-    fn solar_fields_hold_the_hours_record() {
+    fn solar_weights_match_energyplus_four_steps() {
         let mut series = hourly_series(&[0.0; 24]);
-        series.ghi_w_m2 = (0..24).map(|h| h as f64 * 100.0).collect();
+        series.ghi_w_m2 = vec![0.0; 24];
+        series.ghi_w_m2[0] = 400.0;
+        series.ghi_w_m2[1] = 800.0;
+        // The run starts at hour 2: hour 2's rows read prev = hour 1
+        // (400), this = hour 2 (800), next = hour 3 (0).
         let out = series
             .resample(900, FirstHour::default(), start_midnight(1))
             .expect("resample should succeed");
-        for h in 0..24 {
-            for ts in 1..=4 {
-                assert_eq!(
-                    out.ghi_w_m2[h * 4 + ts - 1],
-                    h as f64 * 100.0,
-                    "hour {h} step {ts} holds the hour's record"
-                );
-            }
+        let expected = [700.0, 800.0, 600.0, 400.0];
+        for (ts, expected_value) in expected.iter().enumerate() {
+            assert_eq!(
+                out.ghi_w_m2[4 + ts],
+                *expected_value,
+                "the hour-2 step {} reads the published solar weight",
+                ts + 1
+            );
         }
+    }
+
+    /// Six steps per hour: the N = 6 weights (4/6, 5/6, 1.0, 5/6, 4/6,
+    /// 3/6) on records 400 previous, 800 this, 0 next.
+    #[test]
+    fn solar_weights_match_energyplus_six_steps() {
+        let mut series = hourly_series(&[0.0; 24]);
+        series.ghi_w_m2 = vec![0.0; 24];
+        series.ghi_w_m2[0] = 400.0;
+        series.ghi_w_m2[1] = 800.0;
+        let out = series
+            .resample(600, FirstHour::default(), start_midnight(1))
+            .expect("resample should succeed");
+        let weights: Vec<f64> = (1..=6)
+            .map(|ts| solar_interpolation_weight(6, ts))
+            .collect();
+        for ts in 1..=6_usize {
+            let wgt = weights[ts - 1];
+            let (prev_w, next_w) = if wgt == 1.0 {
+                (0.0, 0.0)
+            } else if 2 * ts < 6 {
+                (1.0 - wgt, 0.0)
+            } else {
+                (0.0, 1.0 - wgt)
+            };
+            let expected = 400.0 * prev_w + 800.0 * wgt + 0.0 * next_w;
+            assert_eq!(
+                out.ghi_w_m2[6 + ts - 1],
+                expected,
+                "the hour-2 step {ts} reads the published solar weight"
+            );
+        }
+    }
+
+    /// The weight function reproduces EnergyPlus's odd-N tables: 5/6,
+    /// 5/6, 0.5 for N = 3, and `1 - 1/10` for the two middle steps of
+    /// N = 5.
+    #[test]
+    fn solar_weights_match_energyplus_odd_steps() {
+        let n3: Vec<f64> = (1..=3)
+            .map(|ts| solar_interpolation_weight(3, ts))
+            .collect();
+        assert_eq!(n3, vec![5.0 / 6.0, 5.0 / 6.0, 0.5]);
+        let n5: Vec<f64> = (1..=5)
+            .map(|ts| solar_interpolation_weight(5, ts))
+            .collect();
+        assert_eq!(n5[1], 1.0 - 1.0 / 10.0);
+        assert_eq!(n5[2], 1.0 - 1.0 / 10.0);
+        // The even and odd tables' boundary steps: N = 1 takes 0.5.
+        assert_eq!(solar_interpolation_weight(1, 1), 0.5);
+    }
+
+    /// After the half hour of hour 24, the next-hour value is hour 1 of
+    /// the same day's records, never the next day's hour 1.
+    #[test]
+    fn solar_hour24_takes_hour1_of_the_same_day_after_the_half_hour() {
+        let mut day1 = vec![0.0; 24];
+        let mut day2 = vec![0.0; 24];
+        day1[0] = 100.0;
+        day1[22] = 300.0;
+        day1[23] = 500.0;
+        day2[0] = 900.0;
+        let mut series = two_day_series(&day1, &day2);
+        // The GHI records: day 1's hours 1, 23 and 24, and the next
+        // day's hour 1, carry the test's values.
+        series.ghi_w_m2 = vec![0.0; 48];
+        series.ghi_w_m2[0] = 100.0;
+        series.ghi_w_m2[22] = 300.0;
+        series.ghi_w_m2[23] = 500.0;
+        series.ghi_w_m2[24] = 900.0;
+        let out = series
+            .resample(900, FirstHour::default(), start_midnight(1))
+            .expect("resample should succeed");
+        let expected = [
+            500.0 * 0.75 + 300.0 * 0.25,
+            500.0,
+            500.0 * 0.75 + 100.0 * 0.25,
+            500.0 * 0.5 + 100.0 * 0.5,
+        ];
+        for (ts, expected_value) in expected.iter().enumerate() {
+            assert_eq!(
+                out.ghi_w_m2[23 * 4 + ts],
+                *expected_value,
+                "the hour-24 step {} blends with the same day's hour 1, never the next day's",
+                ts + 1
+            );
+        }
+    }
+
+    /// The run's first hour's solar previous-hour record is the record
+    /// the first-hour rule names: hour 24 of the first day by default,
+    /// hour 1 under `Hour1`.
+    #[test]
+    fn solar_first_hour_uses_hour24_of_the_first_day() {
+        let mut series = hourly_series(&[0.0; 24]);
+        series.ghi_w_m2[0] = 100.0;
+        series.ghi_w_m2[1] = 200.0;
+        series.ghi_w_m2[23] = 500.0;
+        let out = series
+            .resample(900, FirstHour::default(), start_midnight(1))
+            .expect("resample should succeed");
+        // Under Hour24: the first hour's previous-hour record is hour 24
+        // (500). The four steps read (100 * 0.75 + 500 * 0.25), 100,
+        // (100 * 0.75 + 200 * 0.25) and (100 * 0.5 + 200 * 0.5).
+        let expected = [
+            100.0 * 0.75 + 500.0 * 0.25,
+            100.0,
+            100.0 * 0.75 + 200.0 * 0.25,
+            100.0 * 0.5 + 200.0 * 0.5,
+        ];
+        for (ts, expected_value) in expected.iter().enumerate() {
+            assert_eq!(
+                out.ghi_w_m2[ts],
+                *expected_value,
+                "the run's first hour's step {} reads the first-day rule's record",
+                ts + 1
+            );
+        }
+        // Under Hour1: the previous-hour record is hour 1 itself, so the
+        // first step reads 100 throughout and the rest are unchanged.
+        let out_hour1 = series
+            .resample(900, FirstHour::Hour1, start_midnight(1))
+            .expect("resample should succeed");
+        assert_eq!(out_hour1.ghi_w_m2[0], 100.0);
+        assert_eq!(out_hour1.ghi_w_m2[1], 100.0);
+        assert_eq!(out_hour1.ghi_w_m2[2], 100.0 * 0.75 + 200.0 * 0.25);
+        assert_eq!(out_hour1.ghi_w_m2[3], 100.0 * 0.5 + 200.0 * 0.5);
     }
 
     #[test]
@@ -1435,9 +1647,9 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
             (WeatherField::HorizontalInfrared, InterpMethod::LastHour),
             (WeatherField::WindDirDeg, InterpMethod::LastHourCircular),
             (WeatherField::LiquidPrecipM, InterpMethod::LastHourDivided),
-            (WeatherField::GhiWM2, InterpMethod::HourHold),
-            (WeatherField::DniWM2, InterpMethod::HourHold),
-            (WeatherField::DhiWM2, InterpMethod::HourHold),
+            (WeatherField::GhiWM2, InterpMethod::SolarMidpoint),
+            (WeatherField::DniWM2, InterpMethod::SolarMidpoint),
+            (WeatherField::DhiWM2, InterpMethod::SolarMidpoint),
             (WeatherField::SkyTempC, InterpMethod::Recompute),
             (WeatherField::GroundTempC, InterpMethod::HourHold),
             (WeatherField::SurfaceAlbedo, InterpMethod::HourHold),

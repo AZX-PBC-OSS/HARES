@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "e30f70c1269ddb9755d850b8313d4d05036658af",
+  "git_head": "2d09e0f6483e8e7981f06ed4b1afdb0dd1e8453f",
   "git_dirty": true,
   "metrics": [
     {
@@ -33,12 +33,12 @@
         "value": null
       },
       "grid_interaction_metrics.peak_export_kw": {
-        "bits": "0x3ff91b5a3dcca640",
-        "value": 1.5691778577842257
+        "bits": "0x3ff90940cb873ee3",
+        "value": 1.5647590589832638
       },
       "grid_interaction_metrics.peak_import_kw": {
-        "bits": "0x4005449c271d0c02",
-        "value": 2.6585009628047382
+        "bits": "0x4005422ba7fe9275",
+        "value": 2.657309830147194
       },
       "metrics_reliability": "Reliable",
       "nan_step_count": 0,
@@ -77,20 +77,20 @@
         }
       },
       "peak_power_kw.rolling.peak_15min_kw": {
-        "bits": "0x400540abf2165ac2",
-        "value": 2.6565779603073176
+        "bits": "0x40053f11a55901af",
+        "value": 2.6557953756129886
       },
       "peak_power_kw.rolling.peak_30min_kw": {
-        "bits": "0x4005400d369b6f49",
-        "value": 2.656275202387324
+        "bits": "0x40053ee816c6045e",
+        "value": 2.6557161120586406
       },
       "peak_power_kw.rolling.peak_60min_kw": {
-        "bits": "0x4004685af611e2b1",
-        "value": 2.550954744740317
+        "bits": "0x400468c8bbc70fd7",
+        "value": 2.551164118778597
       },
       "renewable_energy_fraction": {
-        "bits": "0x3fdab7c07c6fba32",
-        "value": 0.4174653258513984
+        "bits": "0x3fdaaede4e581b10",
+        "value": 0.4169231190757481
       },
       "rows_with_partial_setpoint_data_fraction": {
         "bits": null,
@@ -105,16 +105,16 @@
         "value": 48.0
       },
       "total_energy_kwh.gross_consumption_kwh": {
-        "bits": "0x40492f424893c99b",
-        "value": 50.369210312044025
+        "bits": "0x40492f3cced96b19",
+        "value": 50.369043213044456
       },
       "total_energy_kwh.gross_pv_generation_kwh": {
-        "bits": "0x403507039b83e3bf",
-        "value": 21.027398795795076
+        "bits": "0x403500013813bbab",
+        "value": 21.000018601243635
       },
       "total_energy_kwh.net_energy_kwh": {
-        "bits": "0x403d5780f5a3af9a",
-        "value": 29.341811516249074
+        "bits": "0x403d5e78659f1a85",
+        "value": 29.369024611800814
       },
       "total_energy_kwh.per_end_use": {
         "cooking": {
@@ -126,8 +126,8 @@
           "value": 1.7458333333333285
         },
         "hvac_heating": {
-          "bits": "0x4003c86f4b09751a",
-          "value": 2.4728685247670343
+          "bits": "0x4003c817af638c32",
+          "value": 2.4727014257673767
         },
         "lighting": {
           "bits": "0x4016b5d7f2d45496",
@@ -142,8 +142,8 @@
           "value": 18.747817406578143
         },
         "pv": {
-          "bits": "0xc03507039b83e3bf",
-          "value": -21.027398795795076
+          "bits": "0xc03500013813bbab",
+          "value": -21.000018601243635
         },
         "water_heating": {
           "bits": "0x0000000000000000",
@@ -182,8 +182,8 @@
         "value": null
       },
       "grid_interaction_metrics.peak_export_kw": {
-        "bits": "0x4000f1d0c424d958",
-        "value": 2.118073971151869
+        "bits": "0x4000fa1e41cfdd78",
+        "value": 2.122128023296394
       },
       "grid_interaction_metrics.peak_import_kw": {
         "bits": "0x4004c7ad07599823",
@@ -238,8 +238,8 @@
         "value": 2.5012746017217884
       },
       "renewable_energy_fraction": {
-        "bits": "0x3fe3a5eb2f30310e",
-        "value": 0.6140037461896399
+        "bits": "0x3fe39dc0156009e1",
+        "value": 0.6130066316111958
       },
       "rows_with_partial_setpoint_data_fraction": {
         "bits": null,
@@ -254,16 +254,16 @@
         "value": 48.0
       },
       "total_energy_kwh.gross_consumption_kwh": {
-        "bits": "0x404878e6bb0fcc89",
-        "value": 48.94454134246286
+        "bits": "0x40487861e242bbe9",
+        "value": 48.940487177453015
       },
       "total_energy_kwh.gross_pv_generation_kwh": {
-        "bits": "0x403e0d5881758cc9",
-        "value": 30.052131739805905
+        "bits": "0x403e00374272eafa",
+        "value": 30.000843194061396
       },
       "total_energy_kwh.net_energy_kwh": {
-        "bits": "0x4032e474f4aa0c4a",
-        "value": 18.89240960265696
+        "bits": "0x4032f08c82128ce3",
+        "value": 18.939643983391658
       },
       "total_energy_kwh.per_end_use": {
         "cooking": {
@@ -275,8 +275,8 @@
           "value": 1.2458333333333302
         },
         "hvac_heating": {
-          "bits": "0x3ff8c56ce593462b",
-          "value": 1.5481995551857703
+          "bits": "0x3ff8b4d1cbf132a7",
+          "value": 1.5441453901759503
         },
         "lighting": {
           "bits": "0x4016b5d7f2d45496",
@@ -291,8 +291,8 @@
           "value": 18.747817406578143
         },
         "pv": {
-          "bits": "0xc03e0d5881758cc9",
-          "value": -30.052131739805905
+          "bits": "0xc03e00374272eafa",
+          "value": -30.000843194061396
         },
         "water_heating": {
           "bits": "0x0000000000000000",
@@ -331,8 +331,8 @@
         "value": null
       },
       "grid_interaction_metrics.peak_export_kw": {
-        "bits": "0x3ffd907d8324c2ea",
-        "value": 1.8477759478375284
+        "bits": "0x3ffd74ec6b0724e6",
+        "value": 1.8410457783486947
       },
       "grid_interaction_metrics.peak_import_kw": {
         "bits": "0x4004c7ad07599823",
@@ -375,20 +375,20 @@
         }
       },
       "peak_power_kw.rolling.peak_15min_kw": {
-        "bits": "0x4004c7ad07599823",
-        "value": 2.5974979948250776
+        "bits": "0x4004c61fe419c309",
+        "value": 2.596740514789762
       },
       "peak_power_kw.rolling.peak_30min_kw": {
-        "bits": "0x4004c7ad07599823",
-        "value": 2.5974979948250776
+        "bits": "0x4004c3cdd9baeaf9",
+        "value": 2.595607472435742
       },
       "peak_power_kw.rolling.peak_60min_kw": {
-        "bits": "0x4003f95b3f0a9455",
-        "value": 2.4967560696700652
+        "bits": "0x4003fa1f08247eaf",
+        "value": 2.497129500974402
       },
       "renewable_energy_fraction": {
-        "bits": "0x3fde7fb38e040c98",
-        "value": 0.47654427403194566
+        "bits": "0x3fde75cf3b06d320",
+        "value": 0.47594052089998407
       },
       "rows_with_partial_setpoint_data_fraction": {
         "bits": null,
@@ -403,16 +403,16 @@
         "value": 48.0
       },
       "total_energy_kwh.gross_consumption_kwh": {
-        "bits": "0x4048b5bc56ca5c17",
-        "value": 49.41981015091749
+        "bits": "0x4048b57d9a78fd55",
+        "value": 49.41789561183638
       },
       "total_energy_kwh.gross_pv_generation_kwh": {
-        "bits": "0x40378cfc7b154321",
-        "value": 23.550727551165554
+        "bits": "0x4037851d57a69bbe",
+        "value": 23.51997897927844
       },
       "total_energy_kwh.net_energy_kwh": {
-        "bits": "0x4039de7c327f7511",
-        "value": 25.869082599751952
+        "bits": "0x4039e5dddd4b5efc",
+        "value": 25.897916632557994
       },
       "total_energy_kwh.per_end_use": {
         "cooking": {
@@ -424,8 +424,8 @@
           "value": 1.5041666666666627
         },
         "hvac_heating": {
-          "bits": "0x3ffc3dfe3ac31612",
-          "value": 1.7651350303070825
+          "bits": "0x3ffc3626b0973e2a",
+          "value": 1.7632204912259888
         },
         "lighting": {
           "bits": "0x4016b5d7f2d45496",
@@ -440,8 +440,8 @@
           "value": 18.747817406578143
         },
         "pv": {
-          "bits": "0xc0378cfc7b154321",
-          "value": -23.550727551165554
+          "bits": "0xc037851d57a69bbe",
+          "value": -23.51997897927844
         },
         "water_heating": {
           "bits": "0x0000000000000000",
@@ -650,26 +650,26 @@
         },
         {
           "name": "Total Electric Power (kW)",
-          "digest": "7449cb594715cf43f283cbf8c32a13d65fe5f1a953d4be6200b6fc78f665333a",
+          "digest": "3e9ee9db5bf1c6c1e5ec7938b65f724ee1bfff537949d484a4c9c02e2f233d7e",
           "blocks": [
-            "f824f881bb90e1f489e0300a3b1cb7fb826209745b990f1849dc07fe87d90f36",
-            "346244333cd973ee41219c6e790348f76643d986dede9f6ec70c73e5e1bb091a"
+            "0a270f73aa95da2085aad80e969951c6f6f094080ca291e56ddf0c121835406d",
+            "5398cf6f63da2f5a9de611752f0a0510489559d65dec9ea30146dfbcb0fbd65c"
           ]
         },
         {
           "name": "Total Gas Power (therms/hour)",
-          "digest": "3e521a6041d682e80c867c75f598fae1d5ed20cb2573f658d85c56876f1babc2",
+          "digest": "af7d5fa2610ab11e7f409a47187138e961eb68c5a923394f9332a3ccc536617a",
           "blocks": [
-            "32ceb32f76606fcef0028edcd8d3b06de0460c81c1bf4ae75bab4d7ffc8dd33e",
-            "4d3ad35ae20ad763643b996ff135d70c1845263f1f9ffd38d2e8f218b3318f4e"
+            "cd33ca91dc1068bbb6632267e7d1c5f5d60bab56d5c12fa2ca20979e8e096f84",
+            "c0b06546209d01dd8bb1b3ab9f731a691b6c2749c67066667aca18b65292d260"
           ]
         },
         {
           "name": "Total Reactive Power (kVAR)",
-          "digest": "7ed34f9e99a3e4e16368ec414d72d177b400a44eefe40ae48c020ad2fa13363f",
+          "digest": "0aeb214a415cff7fc517388ccd20f08c259e43379ad9df04602c2587f90529a2",
           "blocks": [
-            "7d310e210d9978913869336fbbef067934caef7103f53c1851fe0da8960de726",
-            "d8f46134d76613dce63aad85d5331add2d669c80267f9d2d13f2bd218a14e1f1"
+            "41f4d57988c5398cd025ba3fd2fffe2c970056744e10cd7087f144ba05064544",
+            "fff33aa7a3aefe8cf55f8e53bf5ee4860ba897cd6eeddf5e18ea35e2994977e4"
           ]
         },
         {
@@ -682,26 +682,26 @@
         },
         {
           "name": "Temperature - Indoor (C)",
-          "digest": "6570e2f93534a2a30008444c2923a65d247b18c397e8b267c3463ad12d0c76d2",
+          "digest": "719b3cf38c766f0ac47c5ecfa00136fc19ea480ea45d2dd5bccb9509c68c0f4c",
           "blocks": [
-            "593e08148c86a39aace38ee2cddeb85d3006ca104cd254fdad7b267142570acd",
-            "c2601342a85ebfde2627038692475aba9f509a7b621d2a2e0b2aa64f29b7c1ca"
+            "0bf2645c5ef32b4131d70d86caf5f3d1c3a7274fc0f63cff57d02d35dd740796",
+            "00cfe68aee76be25c5504aef04d7ab31eef8d1911c13146782396bffa2249a41"
           ]
         },
         {
           "name": "Gas Furnace Electric Power (kW)",
-          "digest": "150af445044f529e2009798b5715357653a06ef6638c952945efe7b6ade5f38d",
+          "digest": "5349c9dfa1397adc1a4216925ebd70333760719f9e9ef4fb3f00901ccea19bd9",
           "blocks": [
-            "0a2f7cd5194d3d7140c65a4beabee07a3366420a0843b0d2da7714e45b5dd609",
-            "7a9e7dc5f8d926172133727d3f292889a356ec3261f5dfbc81ed939d95d94caf"
+            "ad0e73e275661e63897d32e958491ccfc452d3e44a4e4cb843a650776b55d4e8",
+            "ac38096b145b84fba404d113be02d6acb955cbdf779576a9686d03588fa8b502"
           ]
         },
         {
           "name": "Gas Furnace Gas Power (therms/hour)",
-          "digest": "d32267ec300f6bb92b1d27f0ff501779507c73bd36bea8fbbcd90b93ba5ada05",
+          "digest": "0867232b48a8506e6dadf640a5260290db1102601728460143e0cf23c35930d1",
           "blocks": [
-            "3cd983f504e8028a27a7bb0e8bbf673e6a2434730bf9777c8b0d945689697d34",
-            "831e1869490f79a3f32dc1696a696f1d48bc2df75498ec3730a93bc46efb9a67"
+            "6bca3100151ab3f366dfe069fa3629fcc83e9e8fa37c1a7a347721947155802a",
+            "c7d511a972d325b74538dd4dd6288fc20325a510fa9e9353d2b69e5774bfe48e"
           ]
         },
         {
@@ -722,18 +722,18 @@
         },
         {
           "name": "Gas Water Heater Gas Power (therms/hour)",
-          "digest": "aa06af83647fdef9f1ada77c6de3447d14b84160e6bfc296cbbec11b3757a500",
+          "digest": "2528af5d4e1d3cc9678ad3c55e5bbc00ce13cd6e03f3d2b3ca79b913c4eba8ca",
           "blocks": [
-            "f37e28c72d0dfa295395561c8d089c251e77d6577463a135360f1558a92bfa46",
-            "9680e6172ddbcad766f9dfeb5dce8a1cc5d21a7244f3bc5ee53990645789c2fd"
+            "e2ededa97bfa67d88ce63fa04b3aee1ce1e0de4f2ce417d0f0c9089f0acb6fa5",
+            "5882bb2394ac0e240af3a539e81c251f82dcbef2ed36c45298e3e941aa182913"
           ]
         },
         {
           "name": "PV Electric Power (kW)",
-          "digest": "85692f1b66821b585f3865f68d3ea09533e999c35f292682e9f502ce50b7846a",
+          "digest": "0e14f55bc24696ab5c10d97ba635f4a1d8b8302967d0c3077adbf43295583373",
           "blocks": [
-            "0dee9313ca196d862fc0e4914c55176354dc6d4c1a8ba741fae50b0100e90bd8",
-            "cfecb07ef9ea5f261339ca6d31e8f45f7489de8895f3f895821ffc550c4a207a"
+            "561ec0b2c8e5fe2dfadf073ba919bfea959a3f045c553c0af86401d448a91cea",
+            "bb051d92232dd44bf8afb49ffed22810c53fdcbb432d51f05e0390dc4ba3b6f4"
           ]
         },
         {
@@ -834,10 +834,10 @@
         },
         {
           "name": "HVAC Heating End Use Electric Power (kW)",
-          "digest": "150af445044f529e2009798b5715357653a06ef6638c952945efe7b6ade5f38d",
+          "digest": "5349c9dfa1397adc1a4216925ebd70333760719f9e9ef4fb3f00901ccea19bd9",
           "blocks": [
-            "0a2f7cd5194d3d7140c65a4beabee07a3366420a0843b0d2da7714e45b5dd609",
-            "7a9e7dc5f8d926172133727d3f292889a356ec3261f5dfbc81ed939d95d94caf"
+            "ad0e73e275661e63897d32e958491ccfc452d3e44a4e4cb843a650776b55d4e8",
+            "ac38096b145b84fba404d113be02d6acb955cbdf779576a9686d03588fa8b502"
           ]
         },
         {
@@ -858,10 +858,10 @@
         },
         {
           "name": "PV End Use Electric Power (kW)",
-          "digest": "85692f1b66821b585f3865f68d3ea09533e999c35f292682e9f502ce50b7846a",
+          "digest": "0e14f55bc24696ab5c10d97ba635f4a1d8b8302967d0c3077adbf43295583373",
           "blocks": [
-            "0dee9313ca196d862fc0e4914c55176354dc6d4c1a8ba741fae50b0100e90bd8",
-            "cfecb07ef9ea5f261339ca6d31e8f45f7489de8895f3f895821ffc550c4a207a"
+            "561ec0b2c8e5fe2dfadf073ba919bfea959a3f045c553c0af86401d448a91cea",
+            "bb051d92232dd44bf8afb49ffed22810c53fdcbb432d51f05e0390dc4ba3b6f4"
           ]
         },
         {
@@ -898,18 +898,18 @@
         },
         {
           "name": "Temperature - Zone_2 (C)",
-          "digest": "ecbf709972371d2b8863895e23ad4e1b9488d36fe05e29f13f340ef2c79bf55f",
+          "digest": "e4765f06203762ff4aff3acf781cc888da562d720510744d1db4ea5c68570da6",
           "blocks": [
-            "e25559b4d663b5964fcf5f1322d46f2f9e1e09bf16799f5ffaf051f7d790eef4",
-            "e4e4f143895eea8576193a7c81fee795583c9c36574bb3e34f7ca0c11ce4e902"
+            "a1273b8e2a4989a0b07f212e8409b74bea340e9e44514982f5a7fbd15033a1a0",
+            "e9b5d10804167a3ee9d417e5bb46b67e4bc676a388c83d82261aba026f5a49cc"
           ]
         },
         {
           "name": "Temperature - Zone_3 (C)",
-          "digest": "143574cb96ea20d72e356477b8b7e04bf4f7a83c955befd5b0dfe17c7683a582",
+          "digest": "6d0ffa7261e2e5a52f9f3df16e0df67fc6d8e01677837a5c72e79e12169cfa02",
           "blocks": [
-            "3e512f047aa1d8713811fe7a6402ef84aab0a1184ea61efcb7ced3c391929e63",
-            "4459d8d1ea768eef45aaba9fc15d77fe2f27afafed86aa10fb3e3c474204b687"
+            "3797a9a081ed0aa0665ba5a5dcd12f2c9060eee3bf804d62378e3b2a3d49193c",
+            "9abf57b5e9614af1c1997d56ca065edbc69b143e992c4ea478b273bec4d26429"
           ]
         },
         {
@@ -1494,16 +1494,16 @@
         },
         {
           "name": "total_energy_kwh",
-          "digest": "78ab8dd9007c5d34c5ee0d4727d277c828bcb489d5daba3c102ff3602290322a",
+          "digest": "1c784aab3286a480ddc25de6348f2db87e28afd685886e6cea22d27deb6bf294",
           "blocks": [
-            "78ab8dd9007c5d34c5ee0d4727d277c828bcb489d5daba3c102ff3602290322a"
+            "1c784aab3286a480ddc25de6348f2db87e28afd685886e6cea22d27deb6bf294"
           ]
         },
         {
           "name": "peak_power_kw",
-          "digest": "565dd1c1722256a2a1292799baa172cbcef8be88a0d4ac3b7d0816f23a17a5ed",
+          "digest": "d2c4f7ade1178a0ce6cebe0ee790c5ccadedce900a448df6f752a48dbac8d66b",
           "blocks": [
-            "565dd1c1722256a2a1292799baa172cbcef8be88a0d4ac3b7d0816f23a17a5ed"
+            "d2c4f7ade1178a0ce6cebe0ee790c5ccadedce900a448df6f752a48dbac8d66b"
           ]
         }
       ]

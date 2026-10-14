@@ -248,15 +248,33 @@ interpolated itself (`calcSky`, `:3106-3113`). Day boundaries read the
 previous day's hour-24 record as last hour; the run's first hour reads
 the record the first-hour rule names (below).
 
-### Solar values
+### Solar values: the midpoint interpolation
 
-The solar fields (global horizontal, direct normal and diffuse
-horizontal) hold the hour's record across the hour's steps: each
-hourly average spans its hour unchanged. EnergyPlus treats each hourly
-average as the value at the hour's midpoint and interpolates linearly
-between midpoints when the timestep is shorter than an hour (the
-midpoint rule); that rule is recorded with the solar interpolation's
-own change.
+The solar values on the weather file are average values over the hour,
+and "For interpolation of hourly weather data (i.e., when the specified
+timestep is greater than 1), the average value is assumed to be the
+value at the midpoint of the hour" (EnergyPlus Engineering Reference,
+"Weather File Solar Interpolation",
+`doc/engineering-reference/src/climate-sky-and-solar-shading-calculations/climate-calculations.tex:304-306`).
+The weights are EnergyPlus's `SolarInterpolation` table
+(`WeatherManager.cc:8343-8375`): for an even number of steps per hour N,
+the step ending at the half hour has weight 1.0 on its own hour's
+record and the weight falls by 1/N per step each side (N = 4: 0.75,
+1.0, 0.75, 0.5); for N = 3 the weights are 5/6, 5/6, 0.5; for odd
+N >= 5 the two middle steps take `1 - 1/(2N)`. A step is before the
+half hour when `2*ts < N`, at it when `2*ts == N` and after it when
+`2*ts > N` (`WeatherManager.cc:3081-3091`). Before the half hour the
+remainder goes to the previous hour's record, after it to the next
+hour's (`:3074-3091`, `:3113-3116`): linear interpolation between hour
+midpoints, evaluated at the end of each timestep. Beam and diffuse are
+interpolated this way. After the half hour of hour 24, the next-hour
+value is hour 1 of the same day's records, not the next day's hour 1
+(`NextHr = (hour == 24) ? 1 : hour + 1`, `:3061-3065`); before the half
+hour of hour 1, the previous-hour value is the previous day's hour 24
+(`wvarsLastHr`, carried across days, `:3124`), except in the run's
+first hour, where the first-hour rule names the record
+(`:3050-3056`). The same interpolation is used for repeated warm-up
+days (`idd/Energy+.idd.in:1488`).
 
 ### First hour, record labels, sub-hourly files
 
@@ -309,5 +327,5 @@ Three places, deliberate:
   field has no counterpart to interpolate.
 - **Global horizontal irradiance.** EnergyPlus keeps no global
   horizontal in its per-timestep weather (the `WeatherVars` set,
-  `WeatherManager.hh:713-732`); HARES carries GHI and holds the hour's
-  record under the point-value rule above.
+  `WeatherManager.hh:713-732`); HARES applies the same midpoint weights
+  to GHI as to beam and diffuse, a HARES extension recorded as such.

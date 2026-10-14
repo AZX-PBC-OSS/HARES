@@ -623,3 +623,13 @@ golden fixtures re-captured.
   `ParsedWeather.record_label` replaces `midpoint_offset_secs`. Every
   golden re-captured (each fixture's weather reads move under the new
   rules); the per-golden deltas are in the measurement log.
+
+- 2026-10-14: the solar irradiance values (GHI, DNI, DHI) follow
+  EnergyPlus's midpoint interpolation for an hourly file at a step
+  shorter than an hour: the hourly average is the value at the hour's
+  midpoint, and the step's value is the linear interpolation between
+  hour midpoints evaluated at the step's end, replacing the per-hour
+  hold. GHI takes the same weights as beam and diffuse (EnergyPlus keeps
+  no GHI; a recorded extension). Every golden re-captured again (the
+  solar reads move); the per-golden deltas are in the measurement log,
+  recorded separately from the point-value rule's.

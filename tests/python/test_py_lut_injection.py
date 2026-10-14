@@ -357,10 +357,14 @@ class TestLutBehavior:
         # Both batteries should be charging (SOC above initial 0.5)
         assert soc_d > 0.5, f"Default battery should be charging, SOC={soc_d}"
         assert soc_c > 0.5, f"Custom battery should be charging, SOC={soc_c}"
-        # Different OCV curves produce different internal voltages and ohmic
-        # losses, leading to measurably different SOC trajectories. The
-        # difference is small over 5 minutes but must be non-zero.
-        assert soc_d != soc_c, (
-            f"Custom OCV should produce different charging behavior: "
-            f"default SOC={soc_d:.6f}, custom SOC={soc_c:.6f}"
+        # The OCV curve's direct observable: the terminal voltage differs,
+        # so the grid draw at the same charge command differs (the ohmic
+        # losses sit in the drawn power). The SOC integrates the charge
+        # command's DC power, whose loss split is internal to the step,
+        # so the SOC trajectories diverge only through the thermal
+        # feedback and are equal to printed precision here.
+        assert tel["power_kw"][idx_d] != tel["power_kw"][idx_c], (
+            f"Custom OCV should produce a different drawn power at the same "
+            f"charge command: default={tel['power_kw'][idx_d]}, "
+            f"custom={tel['power_kw'][idx_c]}"
         )

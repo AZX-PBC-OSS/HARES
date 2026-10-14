@@ -296,6 +296,7 @@ const SIMULATION_KEYS: &[&str] = &[
     "site_location",
     "max_consecutive_step_failures",
     "health_policy",
+    "first_hour_interpolation",
 ];
 
 /// The feature set the running binary was built with. The tool's features

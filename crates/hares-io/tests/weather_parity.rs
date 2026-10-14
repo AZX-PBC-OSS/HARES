@@ -428,35 +428,34 @@ fn real_epw_interpolated_to_60s_stays_within_record_bounds() {
         &resampled.horizontal_infrared_w_m2,
         &weather.horizontal_infrared_w_m2,
     );
+    check_within("ghi", &resampled.ghi_w_m2, &weather.ghi_w_m2);
+    check_within("dni", &resampled.dni_w_m2, &weather.dni_w_m2);
+    check_within("dhi", &resampled.dhi_w_m2, &weather.dhi_w_m2);
 
-    // Solar holds the hour's record: each hour's 60 rows repeat the
-    // hour's value.
+    // Solar takes the midpoint interpolation: each step's value is a
+    // convex blend of three adjacent hourly records (the bounds check
+    // above covers them), and the step ending at the half hour (ts = 30
+    // of 60) reads its hour's record exactly.
     for (hour, &source_ghi) in weather.ghi_w_m2.iter().enumerate() {
-        for ts in 0..60 {
-            assert_eq!(
-                resampled.ghi_w_m2[hour * 60 + ts],
-                source_ghi,
-                "GHI hour {hour} step {ts} holds the hour's record"
-            );
-        }
+        assert_eq!(
+            resampled.ghi_w_m2[hour * 60 + 29],
+            source_ghi,
+            "GHI hour {hour} at the half hour reads the hour's record"
+        );
     }
     for (hour, &source_dni) in weather.dni_w_m2.iter().enumerate() {
-        for ts in 0..60 {
-            assert_eq!(
-                resampled.dni_w_m2[hour * 60 + ts],
-                source_dni,
-                "DNI hour {hour} step {ts} holds the hour's record"
-            );
-        }
+        assert_eq!(
+            resampled.dni_w_m2[hour * 60 + 29],
+            source_dni,
+            "DNI hour {hour} at the half hour reads the hour's record"
+        );
     }
     for (hour, &source_dhi) in weather.dhi_w_m2.iter().enumerate() {
-        for ts in 0..60 {
-            assert_eq!(
-                resampled.dhi_w_m2[hour * 60 + ts],
-                source_dhi,
-                "DHI hour {hour} step {ts} holds the hour's record"
-            );
-        }
+        assert_eq!(
+            resampled.dhi_w_m2[hour * 60 + 29],
+            source_dhi,
+            "DHI hour {hour} at the half hour reads the hour's record"
+        );
     }
 
     // The precipitation's weighted depth divided by 60 sums over each
