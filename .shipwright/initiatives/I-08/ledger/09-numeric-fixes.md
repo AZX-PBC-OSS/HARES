@@ -367,6 +367,53 @@ construction), IN-6.
 electric power and mean indoor temperature deltas, recorded separately from
 B-1b's solar deltas.
 
+**State:** committed `2d3e6721` (branch `row/r79-b1a-b1b`, based on
+`e30f70c1`, one commit). The implementation: `WeatherMeta` carries
+`record_label: RecordLabel { IntervalEnd, IntervalStart }` (EPW, TMY3 and
+ResStock CSV interval-end; PSM3 interval-start) and `midpoint_offset_secs`
+is gone with the shift in the annual offset; `WeatherTimeSeries::resample`
+takes the step, the first-hour rule and the run's start and resolves by the
+EnergyPlus rules: the records used directly at the file's own step, the
+interval mismatch a construction error naming both intervals for sub-hourly
+files, the interval mean for an hourly file at a step longer than an hour,
+and the interpolation expansion (`interpolate_hourly_records`) for an
+hourly file at a sub-hourly step: one row per step, the point fields linear
+last-hour interpolation evaluated at the step's end, the wind direction on
+the circle, the precipitation weighted then divided by N, the sky
+temperature recomputed from the row's interpolated inputs, the ground
+temperature and surface albedo at the hour's record. The first-hour rule is
+`SimulationConfig.first_hour_interpolation` (`hour24` the default), joins
+`ForcingKey`, and the resample cache keys on the step, the rule and the
+run's start (the rule changes which records the first hour's steps read);
+`validate()` rejects a step under an hour that does not divide 3600 s. The
+parsed-weather handles share one resolved series per key, the blueprint and
+the exposed `resample_weather` ride it, and `docs/PHYSICS_DECISIONS.md`
+gains the weather section (the quotes, the field table, the record-label
+table, OCHRE's held behaviour, the three field-coverage differences). RED
+first: the differential tests in `crates/hares-core/tests/
+weather_interpolation.rs` compiled at the parent and failed there (the
+1-minute EPW hold read lagged 30 minutes and wrapped to the file's end, and
+the 15-minute PSM3 fixture's interval mismatch raised nothing, and pass at
+the commit. The acceptance list landed whole (the four- and six-step
+published weights bitwise, the circle 350→10 reading 355/0/5/10, the
+divided precipitation, the first hour both ways over the cz4a fixture and
+over the stated series, the PSM3 covering record, the mismatch refusals,
+the divide-the-hour validation, the forcing key differing by the rule, the
+exhaustive method match). The census: the goldens all read hourly weather,
+so every golden exercises the new rules: all nine moved (declared),
+re-captured twice byte-identical, the per-golden deltas in
+`02-measurement.md`; the sub-hourly fixtures are the OCHRE comparison's
+hold files, read directly at their interval. The PCHIP-era tests are
+rewritten to the new methods (the pchip machinery deleted); the drift locks
+re-measured with the cause (the BESTEST 640/600FF/900FF locks, the
+diagnostics CSV pin re-captured, the held-weather phase test rewritten to
+the covering-record phase). Gates at the row: fmt clean, clippy
+`--workspace --all-targets --all-features -D warnings` clean, the
+`hares-io` and `hares-core` suites green; the final block's gates green at
+the tip: nextest `--workspace --all-features -j 2` 8073/8073 (6 skipped),
+`pytest -m ''` 1753 passed + 6 xfailed, 0 failed, 0 errors, pyright 0, the
+nine goldens bitwise (compare-all 8 + dst 1).
+
 ## B-1b: weather solar values follow EnergyPlus midpoint interpolation
 
 **Kind:** numeric fix (`dl-i08-architecture.weather`, interval averages).
@@ -433,6 +480,46 @@ interpolation and the re-captured goldens.
 
 **Measurement:** per golden, annual incident solar on the horizontal, PV
 output and solar heat gains deltas.
+
+**State:** committed `487df2e9` (branch `row/r79-b1a-b1b`, on the
+point-value commit). The solar fields' interpolation method is
+`SolarMidpoint`: the weights one function of (N, ts)
+(`solar_interpolation_weight`) reproducing the vendored
+`SolarInterpolation` table for every N, the value the three-term sum in
+the loop's own form (`last * prev_w + this * wgt + next * next_w`) with
+the day-aware next hour (hour 24's next is hour 1 of the same day) and
+the first-hour rule's previous record at the run's first hour; GHI, DNI
+and DHI all take it, the GHI extension recorded in the physics decisions'
+weather section. The acceptance tests landed whole: the four-step and
+six-step published weights, the odd-N tables (5/6, 5/6, 0.5 for N = 3;
+`1 - 1/10` for the two middle steps of N = 5), the hour-24 same-day wrap
+(never the next day's hour 1), and the first hour under both first-hour
+rules. One consequence folded into the commit: the OCHRE comparison's
+hold file is read by the covering-record rule now, so the adapter's
+`hold_weather` places each hour's value in the records stamped from
+coverage start plus 30 minutes to the next hour's (the block's second
+half carries its own record's values and source flags, the first half the
+previous record's, the file's first half hour the first record's value:
+OCHRE's own backfill of the first row), the committed hold files
+regenerated byte-identical to the adapter's output, and the strict OCHRE
+parity is bitwise again (the hold under the new read had carried a
+1-minute phase lead). The 48 h thermal trace's records re-measured (the
+interpolated values phase against OCHRE's held step values at the solar
+ramps: the worst window-solar step error 9.2% inside the widened 10% band,
+the mean ratio 0.9885, the 48 h heating 40.136 kWh and the overnight worst
+1.2267 °C re-recorded). The census: every golden exercises the solar rule
+(hourly weather at sub-hourly or the hour step): all nine moved again
+(declared), re-captured twice byte-identical; the annual incident solar on
+the horizontal unchanged (the rule preserves the totals: the measured
+annual mean delta 0.000000 over the cz4a file at 900 s), the PV deltas and
+the HVAC deltas in `02-measurement.md`, the goldens' verbosity-2 frames
+carrying no insolation or solar-gain columns so the solar heat gains' own
+delta is not derivable from the committed products. Gates at the row and
+the final block's gates at the tip: fmt clean, clippy
+`--workspace --all-targets --all-features -D warnings` clean, nextest
+`--workspace --all-features -j 2` 8073/8073 (6 skipped), `pytest -m ''`
+1753 passed + 6 xfailed, 0 failed, 0 errors, pyright 0, the nine goldens
+bitwise (compare-all 8 + dst 1).
 
 ## B-1c: typical and actual weather years, wrap and leap days
 

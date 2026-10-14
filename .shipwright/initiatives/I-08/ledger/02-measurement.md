@@ -3045,3 +3045,61 @@ twice and `identical` (the two runs mutual-bitwise), the compare against
 the shipped baseline `B0-de-trace.json` printing exactly the recorded 260
 differing paths (the divergent audit line's delta, attributed in the
 engine ledger; the baseline not re-captured).
+
+### The weather interpolation rows, 2026-10-14 (the tip `487df2e9` on `row/r79-b1a-b1b`)
+
+The two weather rows' golden movement, per golden, measured from the run
+metrics (the end-use totals, the rolling peak and the frame's indoor
+column mean). The point-value row's deltas run from the base `e30f70c1`
+to the point-value commit `2d3e6721`; the solar row's from `2d3e6721` to
+the solar commit `487df2e9`. Load average at the captures: 1 to 2 (1
+min).
+
+Point values (`2d3e6721` against `e30f70c1`), HVAC heating kWh / HVAC
+cooling kWh / peak 60 min kW / mean indoor temperature C:
+
+- `consumer_shape_900s`: 92.960 → 91.842 / 1137.40 → 1147.04 /
+  3.4944 → 3.4932 / +0.0120
+- `fleet_mixed_offset`: 17.769 → 17.769 / 0.000 → 0.000 / 4.7833 →
+  4.7833 / (fleet frame)
+- `fleet_same_offset_300s`: 2.6265 → 2.4729 / 1.7500 → 1.7458 / 2.5592 →
+  2.5510 / (fleet frame)
+- `full_year_hourly`: 369.30 → 367.58 / 493.42 → 489.08 / 5.8569 →
+  5.8462 / −0.0145
+- `leap_year_february_900s`: 156.98 → 156.88 / 4.950 → 4.963 / 7.3882 →
+  7.4180 / −0.0019
+- `month_boundary_billing_3600s`: 30.600 → 30.589 / 14.400 → 14.400 /
+  5.1850 → 5.1840 / −0.0010
+- `weather_wrap_900s`: 244.21 → 243.66 / 4.800 → 4.800 / 11.1439 →
+  9.3194 / −0.0183
+- `full_year_900s_dst`: 7092.16 → 7085.47 / 485.63 → 486.50 / 11.5703 →
+  10.3276 / +0.0011
+
+Solar (`487df2e9` against `2d3e6721`), gross PV generation kWh / HVAC
+heating kWh / HVAC cooling kWh / peak 60 min kW:
+
+- `consumer_shape_900s`: 10495.57 → 10492.86 / 91.842 → 91.666 /
+  1147.04 → 1148.47 / 3.4932 → 3.4905
+- `fleet_same_offset_300s`: 21.027 → 21.000 / 2.4729 → 2.4727 / 1.7458 →
+  1.7458 / 2.5510 → 2.5512
+- `full_year_900s_dst`: (no PV) / 7085.47 → 7078.02 / 486.50 → 488.75 /
+  10.3276 → 10.3258
+- `leap_year_february_900s`: (no PV) / 156.88 → 156.87 / 4.963 → 4.963 /
+  7.4180 → 7.4182
+- `weather_wrap_900s`: (no PV) / 243.66 → 243.64 / 4.800 → 4.800 /
+  9.3194 → 9.3187
+- `full_year_hourly`, `month_boundary_billing_3600s`,
+  `fleet_mixed_offset`, `resstock_2025_fleet`: the frame digests moved
+  only by the provenance fields; every metric value identical (the gas
+  furnace's heating and the fleet's 3600 s reads take the hour's record
+  whole, which the phase correction had already aligned).
+
+The annual incident solar on the horizontal: unchanged. The midpoint
+rule preserves the hourly and annual totals exactly (the weights sum to
+one over each hour's steps; EnergyPlus's own note, "the total solar for
+a day should agree"): the annual mean of the step values over the cz4a
+file at 900 s measured identical (225.750685 W/m2 both rules, delta
+0.000000). The movement is within-day phase, and the goldens' verbosity-2
+frames carry no insolation or solar-gain columns, so the solar heat
+gains' per-golden delta is not derivable from the committed products;
+the PV and HVAC deltas above carry the record.
