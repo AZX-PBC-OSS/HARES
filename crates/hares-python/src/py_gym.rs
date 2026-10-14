@@ -958,6 +958,7 @@ mod tests {
             None,
             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
+            "hour24",
             None,
         )
         .expect("the sim config builds");

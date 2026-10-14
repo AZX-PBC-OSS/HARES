@@ -127,6 +127,7 @@ mod tests {
             },
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: hares_io::HealthPolicy::default(),
+            first_hour_interpolation: hares_io::FirstHour::default(),
         };
         let toml = toml::to_string(&config).expect("the config serialises to TOML");
         let table: toml::Table = toml.parse().expect("the TOML parses");

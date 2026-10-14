@@ -154,6 +154,7 @@ fn simulation_config_with_frame(csv_path: PathBuf, with_frame: bool) -> Simulati
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
     }
 }
 

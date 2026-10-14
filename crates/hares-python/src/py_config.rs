@@ -282,6 +282,7 @@ impl PySimulationConfig {
         site_location = None,
         max_consecutive_step_failures = hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy = None,
+        first_hour_interpolation = "hour24",
         **unexpected
     ))]
     // PyO3 #[new] with kwargs maps 1:1 to Python kwargs; builder adds no value here.
@@ -300,6 +301,7 @@ impl PySimulationConfig {
         site_location: Option<PySiteLocationOverride>,
         max_consecutive_step_failures: u32,
         health_policy: Option<PyHealthPolicy>,
+        first_hour_interpolation: &str,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         if let Some(unexpected) = unexpected {
@@ -321,6 +323,16 @@ impl PySimulationConfig {
         }
 
         let start = parse_datetime_str(start_time)?;
+
+        let first_hour = match first_hour_interpolation {
+            "hour24" => hares_io::FirstHour::Hour24,
+            "hour1" => hares_io::FirstHour::Hour1,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "first_hour_interpolation must be 'hour24' or 'hour1', got '{other}'"
+                )));
+            }
+        };
 
         let inner = SimulationConfig {
             start_time: start,
@@ -350,6 +362,7 @@ impl PySimulationConfig {
             site_location: site_location.map(|s| s.0).unwrap_or_default(),
             max_consecutive_step_failures,
             health_policy: health_policy.map(|p| p.0).unwrap_or_default(),
+            first_hour_interpolation: first_hour,
         };
         inner
             .validate()
@@ -890,6 +903,7 @@ mod tests {
             None,
             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
+            "hour24",
             None,
         )?;
         Ok(cfg.0)
@@ -952,6 +966,7 @@ mod tests {
                     None,
                     hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     None,
+                    "hour24",
                     Some(&dict),
                 )
                 .expect_err("a removed keyword is an error");
@@ -981,6 +996,7 @@ mod tests {
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
+                "hour24",
                 Some(&dict),
             )
             .expect_err("an unknown keyword is an error");
@@ -1012,6 +1028,7 @@ mod tests {
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
+                "hour24",
                 Some(&dict),
             )
             .expect_err("duration_s is a removed keyword");

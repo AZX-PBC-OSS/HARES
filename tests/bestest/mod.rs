@@ -117,24 +117,27 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
         // against silent drift.
         ("600", AnnualHeatingLoadKwh) => 3122.278349,
         ("600", AnnualCoolingLoadKwh) => 5542.031522,
-        // 640: heating energy 2086.2 vs band 2751–3803 (the dispatch
-        // landing dominates the diffuse loss here).
-        ("640", AnnualHeatingEnergyKwh) => 2086.165423,
+        // 640: heating energy 2018.3 vs band 2751–3803 (the dispatch
+        // landing dominates the diffuse loss here). Re-measured
+        // 2026-10-14: the weather reads follow the EnergyPlus rules (the
+        // record of the hour the step ends in; the previous read lagged
+        // one hour), moving the morning pick-up's phase.
+        ("640", AnnualHeatingEnergyKwh) => 2018.333372,
         // 900: heating 1105.8 vs band 1170–2041 (the heavy-mass case
         // gains heating from the dispatch's setpoint landing: the old
         // state-dependent offset under-delivered).
         ("900", AnnualHeatingLoadKwh) => 1105.795088,
-        // 600FF: peak 73.21 vs band 64.9–69.5 (min in band: strict).
-        // Re-measured: the through-glass diffuse flux (the window
-        // transmitted solar column reports what leaves back out through
-        // the glazing) moved the freefloat peak −0.52 K from 73.73; the
-        // movement predates this branch and re-captures here.
-        ("600FF", PeakZoneTempC) => 73.210144,
-        // 900FF: peak 45.96 vs 41.6–44.8; min 3.18 vs −6.4…−1.6.
-        // Re-measured after the diffuse window loss: the peak
-        // −0.65 K, the min −0.26 K (less diffuse solar through the day).
-        ("900FF", PeakZoneTempC) => 45.962828,
-        ("900FF", MinZoneTempC) => 3.178863,
+        // 600FF: peak 74.01 vs band 64.9–69.5 (min in band: strict).
+        // Re-measured 2026-10-14: the weather reads follow the EnergyPlus
+        // rules (the record of the hour the step ends in; the previous
+        // read lagged one hour), one hour earlier solar on the peak.
+        ("600FF", PeakZoneTempC) => 74.009888,
+        // 900FF: peak 46.15 vs 41.6–44.8; min 3.26 vs −6.4…−1.6.
+        // Re-measured 2026-10-14 for the same weather-phase correction
+        // (the peak +0.19 K, the min +0.09 K against the 2026-10-07
+        // locks).
+        ("900FF", PeakZoneTempC) => 46.151089,
+        ("900FF", MinZoneTempC) => 3.264846,
         _ => return None,
     })
 }

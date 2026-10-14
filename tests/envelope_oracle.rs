@@ -76,6 +76,7 @@ mod tests {
                     site_location: hares_io::SiteLocationOverride::default(),
                     max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: Default::default(),
                 },
                 None,
                 1,
@@ -495,8 +496,10 @@ mod tests {
             "Window heat gain (indoor)",
             &OCHRE_WINDOW_HEAT_GAIN,
             col_mean(&hares, "Window Heat Gain - Indoor (W)"),
-            600.0,
-            "window U-factor, frame effects (OCHRE ballpark; observed +504 %)",
+            650.0,
+            "window U-factor, frame effects (OCHRE ballpark; observed +604 % after \
+             the EnergyPlus weather phase correction: the fixture's only hour is \
+             the run's first hour, which blends from the first day's hour-24 record)",
         ));
 
         // ASHRAE HoF Ch. 15 glazing transmission: window transmitted solar is
@@ -796,17 +799,23 @@ mod tests {
         // temperatures across validated simulation tools. Taking 2 °C as a
         // loose short-window MAE bound is conservative relative to that
         // published residual and catches a fundamental RC construction bug
-        // without demanding OCHRE parity.
+        // without demanding OCHRE parity. The fixture's only hour is the
+        // run's first hour, whose weather now blends from the first day's
+        // hour-24 record under the EnergyPlus rules while OCHRE holds the
+        // noon record: the driver difference adds to the model residual
+        // (measured 2.131 °C after the phase correction), so the bound
+        // carries it at 2.5 °C.
         if let Some(timeseries_mae) = checks
             .iter()
             .find(|c| c.name == "Indoor temp timeseries MAE")
             .map(|c| c.hares)
         {
             assert!(
-                timeseries_mae.is_finite() && timeseries_mae < 2.0,
-                "Indoor timeseries MAE {timeseries_mae:.3} °C exceeds 2 °C bound \
-                 (ASHRAE 140-2017 Table B8-3 annual-mean ±1 °C residual, doubled for \
-                 short-window cycling). HARES envelope construction likely regressed."
+                timeseries_mae.is_finite() && timeseries_mae < 2.5,
+                "Indoor timeseries MAE {timeseries_mae:.3} °C exceeds 2.5 °C bound \
+                 (the ASHRAE 140-2017 ±1 °C residual, doubled for short-window cycling, \
+                 plus this first-hour fixture's measured weather-driver difference). \
+                 HARES envelope construction likely regressed."
             );
         }
 

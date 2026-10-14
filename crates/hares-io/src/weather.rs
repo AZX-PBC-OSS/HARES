@@ -3,6 +3,7 @@
 use std::io::BufRead;
 use std::path::Path;
 
+use chrono::{Datelike, Timelike};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -169,7 +170,7 @@ pub fn read_weather_meta(path: impl AsRef<Path>) -> Result<WeatherMeta, WeatherE
             elevation_m: 0.0,
             wf_allows_leap_years: true,
             source_step_secs: 3600,
-            midpoint_offset_secs: 1800,
+            record_label: RecordLabel::IntervalEnd,
             has_embedded_location: false,
             station_wmo: None,
         }),
@@ -311,6 +312,107 @@ pub fn parse_weather_override_location(
     Ok(weather)
 }
 
+/// The timestamp convention of a weather file's records: which end of the
+/// interval a record's stamp labels.
+///
+/// EPW, TMY3 and ResStock CSV stamp a record at its interval's end: a
+/// record stamped `h` covers `(h - 1 h, h]`. PSM3 stamps a record at its
+/// interval's start: a record stamped `t` covers `[t, t + interval)`, so
+/// an hourly PSM3 record stamped `t` is the record of the hour ending
+/// `t + 1 h`.
+///
+/// EnergyPlus reads every format's records as the hours they cover: the
+/// hourly file's 24 records are hours 1 to 24 of the day, and a record's
+/// value is reached at the end of its hour (Input Output Reference,
+/// "Weather Data Hourly Interpolation",
+/// `doc/input-output-reference/src/weather-data/weather-data-hourly-interpolation.tex`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordLabel {
+    /// A record's stamp labels its interval's end: the record covers
+    /// `(stamp - interval, stamp]`.
+    IntervalEnd,
+    /// A record's stamp labels its interval's start: the record covers
+    /// `[stamp, stamp + interval)`.
+    IntervalStart,
+}
+
+/// Which hour's record the run's first hour interpolates from, when the
+/// weather file is hourly and the run's step is shorter than an hour.
+///
+/// EnergyPlus Input Output Reference, RunPeriod, "First Hour Interpolation
+/// Starting Values"
+/// (`doc/input-output-reference/src/overview/group-location-climate-weather-file-access.tex:717-721`):
+/// `Hour24` (the default) interpolates the first hour from hour 24 of the
+/// first day; `Hour1` from hour 1. The option only affects the first hour
+/// of the first day in the entire run period; the code sets the previous
+/// hour's record from it once per environment
+/// (`WeatherManager.cc:3050-3056`), for every field, solar included. The
+/// same interpolation is used for repeated warm-up days
+/// (`idd/Energy+.idd.in:1488`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirstHour {
+    /// Interpolate the run's first hour from hour 24 of the run's first
+    /// day (EnergyPlus's default).
+    #[default]
+    Hour24,
+    /// Interpolate the run's first hour from hour 1 of the run's first day.
+    Hour1,
+}
+
+/// One weather field's interpolation method over an hourly file at a step
+/// shorter than an hour, as EnergyPlus's interpolation loop computes it
+/// (`WeatherManager.cc:3093-3121`). One exhaustive match over
+/// [`WeatherField`] chooses the method; see
+/// `docs/PHYSICS_DECISIONS.md`'s weather section for the field table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InterpMethod {
+    /// Linear last-hour interpolation between the previous hour's record
+    /// and this hour's, evaluated for the step's end: dry bulb, dew point,
+    /// relative humidity, pressure, wind speed, opaque sky cover,
+    /// horizontal infrared (`WeatherManager.cc:3093-3105`).
+    LastHour,
+    /// The last-hour interpolation on the circle, shortest arc
+    /// (`interpolateWindDirection`, `WeatherManager.cc:3174-3188`): wind
+    /// direction.
+    LastHourCircular,
+    /// The last-hour interpolated depth divided by the steps per hour:
+    /// liquid precipitation (`WeatherManager.cc:3119-3120`).
+    LastHourDivided,
+    /// The hour's record held across its steps: ground temperature (a
+    /// monthly site series, not a weather-file hourly field in EnergyPlus)
+    /// and surface albedo (EnergyPlus drops the file's albedo; holding the
+    /// hour's record is a HARES choice), and the solar fields until the
+    /// midpoint rule applies.
+    HourHold,
+    /// Recomputed from the step's interpolated inputs, never interpolated
+    /// itself: sky temperature (`calcSky`, `WeatherManager.cc:3106-3113`).
+    Recompute,
+}
+
+/// Every field's one method, chosen by one exhaustive match: the test
+/// `every_weather_field_has_one_declared_method` checks the match against
+/// the field table in `docs/PHYSICS_DECISIONS.md`'s weather section.
+pub(crate) fn field_method(field: WeatherField) -> InterpMethod {
+    match field {
+        WeatherField::DryBulbC
+        | WeatherField::DewPointC
+        | WeatherField::RelHumidityPct
+        | WeatherField::PressureKpa
+        | WeatherField::WindSpeedMS
+        | WeatherField::OpaqueSkyCover
+        | WeatherField::HorizontalInfrared => InterpMethod::LastHour,
+        WeatherField::WindDirDeg => InterpMethod::LastHourCircular,
+        WeatherField::LiquidPrecipM => InterpMethod::LastHourDivided,
+        WeatherField::GhiWM2 | WeatherField::DniWM2 | WeatherField::DhiWM2 => {
+            InterpMethod::HourHold
+        }
+        WeatherField::SkyTempC => InterpMethod::Recompute,
+        WeatherField::GroundTempC | WeatherField::SurfaceAlbedo => InterpMethod::HourHold,
+    }
+}
+
 /// Metadata extracted from an EPW header.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WeatherMeta {
@@ -330,15 +432,10 @@ pub struct WeatherMeta {
     pub wf_allows_leap_years: bool,
     /// Native timestep of the source file in seconds (e.g. 3600 for EPW, 300 for 5-min PSM3).
     pub source_step_secs: u32,
-    /// Seconds to subtract from simulation time when indexing into the
-    /// resampled weather array. For EPW (hour-ending convention) this is
-    /// the fixed 30-minute lag, 1800 s at every records-per-hour: OCHRE
-    /// shifts each record's stamp by a fixed `timedelta(minutes=30)`
-    /// whatever the file's interval (ochre/utils/schedule.py:169, applied
-    /// at :110) and its `resample().ffill()` (:555) then carries the last
-    /// stamp at or before each step, so the lag does not scale with the
-    /// source's resolution. For hour-beginning formats (PSM3), this is 0.
-    pub midpoint_offset_secs: u32,
+    /// Which end of the interval a record's stamp labels, per format: EPW,
+    /// TMY3 and ResStock CSV are hour-ending (`IntervalEnd`); PSM3 is
+    /// hour-beginning (`IntervalStart`). See [`RecordLabel`].
+    pub record_label: RecordLabel,
     /// Whether this weather format embeds its own site location (latitude,
     /// longitude, timezone) in its header. EPW, PSM3, and TMY3 do (`true`);
     /// ResStock CSV does not (`false`) and is parsed with `0.0` placeholders
@@ -464,18 +561,46 @@ impl WeatherTimeSeries {
         }
     }
 
-    /// Resample weather data to a different timestep.
+    /// Resolve the series to the run's step, by the EnergyPlus weather
+    /// rules:
     ///
-    /// Supports three cases based on `self.meta.source_step_secs` vs `target_step_secs`:
-    /// - Same resolution: return clone (no-op).
-    /// - Upsampling (source coarser than target): each field is resampled by
-    ///   its one method, chosen in this one place (today's defaults until the
-    ///   EnergyPlus methods replace them).
-    /// - Downsampling (source finer than target): mean for instantaneous and solar
-    ///   fields, sum for accumulated fields.
+    /// - A file at the run's own step: the records are the steps, used
+    ///   directly (clone).
+    /// - A sub-hourly file (more than one record per hour) at any other
+    ///   step: an error naming both intervals. EnergyPlus refuses the run
+    ///   the same way: "Number of intervals per hour on Weather file does
+    ///   not match specified number of Time Steps Per Hour"
+    ///   (`WeatherManager.cc:715-722`).
+    /// - An hourly file at a step longer than an hour: the interval mean
+    ///   of the records the step covers (EnergyPlus has no timestep
+    ///   longer than an hour, so this is a HARES convention).
+    /// - An hourly file at a step shorter than an hour: EnergyPlus's
+    ///   interpolation
+    ///   (`WeatherManager.cc:3043-3128`): every point field is linear
+    ///   last-hour interpolation evaluated for the step's end, the wind
+    ///   direction interpolates on the circle, the precipitation is the
+    ///   weighted depth divided by the steps per hour, the sky temperature
+    ///   is recomputed from the interpolated inputs, and the ground
+    ///   temperature and surface albedo hold the hour's record. The solar
+    ///   fields hold the hour's record under the point-value rule; the
+    ///   solar midpoint interpolation is a separate rule (see
+    ///   `interpolate_hourly_records`).
     ///
-    /// Requires that one step divides evenly into the other.
-    pub fn resample(&self, target_step_secs: u32) -> Result<Self, WeatherError> {
+    /// `first_hour` and `start` drive the first-hour rule: the first hour
+    /// of the run interpolates from hour 24 of the run's first day
+    /// (`FirstHour::Hour24`, the default) or hour 1 (`FirstHour::Hour1`),
+    /// never from a record before the run's first day.
+    ///
+    /// # Errors
+    ///
+    /// [`WeatherError::Resample`] when the intervals are incompatible or
+    /// the file does not cover whole days.
+    pub fn resample(
+        &self,
+        target_step_secs: u32,
+        first_hour: FirstHour,
+        start: chrono::NaiveDateTime,
+    ) -> Result<Self, WeatherError> {
         if target_step_secs == 0 {
             return Err(WeatherError::Resample(
                 "target_step_secs must be > 0".to_string(),
@@ -488,90 +613,24 @@ impl WeatherTimeSeries {
             return Ok(self.clone());
         }
 
-        if source > target_step_secs {
-            // Upsampling: source is coarser → interpolate to finer resolution.
-            if !source.is_multiple_of(target_step_secs) {
-                return Err(WeatherError::Resample(format!(
-                    "incompatible timestep: {source} % {target_step_secs} != 0"
-                )));
-            }
-            let factor = (source / target_step_secs) as usize;
+        // A sub-hourly file's records are its timesteps: the run's step
+        // must equal the file's interval, or the run is an error, as
+        // EnergyPlus refuses the mismatch
+        // (`WeatherManager.cc:715-722`). Today's resampling of such
+        // files (the mean when finer, PCHIP or hold when coarser) is
+        // gone.
+        if source != 3600 {
+            return Err(WeatherError::Resample(format!(
+                "the weather file's interval per record ({source} s) does not match the run's \
+                 step ({target_step_secs} s): a sub-hourly weather file's interval must equal \
+                 the run's step, as in EnergyPlus (number of intervals per hour on Weather \
+                 file does not match specified number of Time Steps Per Hour)"
+            )));
+        }
 
-            let mut rel_humidity_pct = pchip_resample(&self.rel_humidity_pct, factor);
-            for v in &mut rel_humidity_pct {
-                *v = v.clamp(0.0, 100.0);
-            }
-            let mut opaque_sky_cover = pchip_resample(&self.opaque_sky_cover, factor);
-            for v in &mut opaque_sky_cover {
-                *v = v.clamp(0.0, 10.0);
-            }
-
-            let dry_bulb_c = pchip_cyclic_resample(&self.dry_bulb_c, factor);
-            let dew_point_c = pchip_cyclic_resample(&self.dew_point_c, factor);
-            let pressure_kpa = pchip_resample(&self.pressure_kpa, factor);
-            let horizontal_infrared_w_m2 =
-                pchip_cyclic_resample(&self.horizontal_infrared_w_m2, factor);
-            let ground_temp_c = pchip_cyclic_resample(&self.ground_temp_c, factor);
-
-            // Sky temperature is recomputed from interpolated inputs rather than
-            // interpolated directly.  T_sky is a non-linear function of IR, dry-bulb,
-            // dew-point, and sky cover; directly interpolating it violates the chain
-            // rule and produces values inconsistent with the other interpolated fields.
-            // EnergyPlus does the same at WeatherManager.cc:3113.
-            let sky_temp_c: Vec<f64> = dry_bulb_c
-                .iter()
-                .zip(&dew_point_c)
-                .zip(&rel_humidity_pct)
-                .zip(&horizontal_infrared_w_m2)
-                .zip(&opaque_sky_cover)
-                .map(|((((&db, &dp), &rh), &ir), &osc)| {
-                    compute_sky_temp_c(ir, db, dp, rh, osc, SkyTempModel::default())
-                })
-                .collect();
-
-            Ok(Self {
-                meta: WeatherMeta {
-                    source_step_secs: target_step_secs,
-                    ..self.meta.clone()
-                },
-                design_conditions: self.design_conditions,
-                // Continuous instantaneous fields: smooth diurnal/seasonal curves
-                // default to PchipCyclic (smooth year-boundary wrap); pressure uses
-                // Pchip (flat extrapolation at boundary).
-                dry_bulb_c,
-                dew_point_c,
-                rel_humidity_pct,
-                pressure_kpa,
-                horizontal_infrared_w_m2,
-                sky_temp_c,
-                ground_temp_c,
-                opaque_sky_cover,
-                // Solar irradiance defaults to ZOH (zero-order hold): holds each
-                // hourly period-average value constant across all sub-steps,
-                // preserving the hourly energy integral exactly.
-                // Hourly EPW solar values are period averages (not instantaneous
-                // midpoints), so ZOH is the conservative default that does not
-                // leak energy across hour boundaries at sunrise/sunset.
-                // EnergyPlus Engineering Reference: Weather File Solar Interpolation
-                // (Climate Calculations chapter) — confirms EPW solar values are
-                // hourly averages; OCHRE schedule.py:553 uses resample().ffill()
-                // (equivalent to ZOH) for all weather columns.
-                ghi_w_m2: replicate_zoh(&self.ghi_w_m2, factor),
-                dni_w_m2: replicate_zoh(&self.dni_w_m2, factor),
-                dhi_w_m2: replicate_zoh(&self.dhi_w_m2, factor),
-                // Turbulent/stochastic → ZOH.
-                wind_speed_m_s: replicate_zoh(&self.wind_speed_m_s, factor),
-                wind_dir_deg: circular_linear_resample(&self.wind_dir_deg, factor),
-                // Accumulated depth → distribute evenly so downstream sums are preserved.
-                liquid_precip_m: distribute_accumulated(&self.liquid_precip_m, factor),
-                // Surface property → ZOH (not interpolatable).
-                surface_albedo: self
-                    .surface_albedo
-                    .as_ref()
-                    .map(|v| replicate_zoh(v, factor)),
-            })
-        } else {
-            // Downsampling: source is finer → aggregate to coarser resolution.
+        if target_step_secs > 3600 {
+            // Downsampling: an hourly file at a step longer than an hour
+            // keeps the interval mean of the records the step covers.
             if !target_step_secs.is_multiple_of(source) {
                 return Err(WeatherError::Resample(format!(
                     "incompatible timestep: {target_step_secs} % {source} != 0"
@@ -596,8 +655,8 @@ impl WeatherTimeSeries {
             let opaque_sky_cover = mean_downsample(&self.opaque_sky_cover, ratio);
 
             // Recompute sky temperature from downsampled inputs (same rationale as
-            // upsampling: T_sky is non-linear in its inputs, so averaging T_sky is
-            // inconsistent with averaging the input fields).
+            // the interpolation: T_sky is non-linear in its inputs, so averaging
+            // T_sky is inconsistent with averaging the input fields).
             let sky_temp_c: Vec<f64> = dry_bulb_c
                 .iter()
                 .zip(&dew_point_c)
@@ -609,9 +668,10 @@ impl WeatherTimeSeries {
                 })
                 .collect();
 
-            Ok(Self {
+            return Ok(Self {
                 meta: WeatherMeta {
                     source_step_secs: target_step_secs,
+                    record_label: RecordLabel::IntervalEnd,
                     ..self.meta.clone()
                 },
                 design_conditions: self.design_conditions,
@@ -638,371 +698,258 @@ impl WeatherTimeSeries {
                     .surface_albedo
                     .as_ref()
                     .map(|v| mean_downsample(v, ratio)),
-            })
+            });
         }
-    }
-}
 
-/// Fritsch-Carlson monotone cubic interpolation slopes.
-///
-/// Algorithm: Fritsch, F.N. and Carlson, R.E. (1980)
-/// "Monotone Piecewise Cubic Interpolation",
-/// SIAM Journal on Numerical Analysis, 17(2), pp. 238-246.
-/// doi:10.1137/0717021
-///
-/// Given uniformly-spaced values `y` (unit spacing h=1), returns the slope
-/// (first derivative) at each knot such that the resulting piecewise cubic
-/// Hermite interpolant preserves monotonicity within every interval.
-pub(crate) fn fritsch_carlson_slopes(y: &[f64]) -> Vec<f64> {
-    let n = y.len();
-    if n == 0 {
-        return vec![];
-    }
-    if n == 1 {
-        return vec![0.0];
-    }
-
-    // Secant slopes between consecutive knots (h=1, so delta_k = y[k+1] - y[k]).
-    let mut delta: Vec<f64> = Vec::with_capacity(n - 1);
-    for k in 0..n - 1 {
-        delta.push(y[k + 1] - y[k]);
-    }
-
-    // Initialize tangent slopes.
-    let mut d = vec![0.0_f64; n];
-
-    // Boundary slopes: non-centered three-point formula with shape-preserving caps.
-    // Matches SLATEC pchim.f, SciPy PchipInterpolator, and MATLAB pchip.
-    d[0] = if n > 2 {
-        let s = 1.5 * delta[0] - 0.5 * delta[1];
-        if s.signum() != delta[0].signum() {
-            0.0
-        } else if delta[0].signum() != delta[1].signum() && s.abs() > (3.0 * delta[0]).abs() {
-            3.0 * delta[0]
-        } else {
-            s
+        // An hourly file at a step shorter than an hour: the EnergyPlus
+        // interpolation. The step must divide the hour (EnergyPlus allows
+        // only timesteps per hour that divide 60,
+        // `idd/Energy+.idd.in:925-936`).
+        if !3600u32.is_multiple_of(target_step_secs) {
+            return Err(WeatherError::Resample(format!(
+                "the step ({target_step_secs} s) must divide the hour: EnergyPlus allows only \
+                 timesteps per hour evenly divisible into 60"
+            )));
         }
-    } else {
-        delta[0]
-    };
-    d[n - 1] = if n > 2 {
-        let s = 1.5 * delta[n - 2] - 0.5 * delta[n - 3];
-        if s.signum() != delta[n - 2].signum() {
-            0.0
-        } else if delta[n - 2].signum() != delta[n - 3].signum()
-            && s.abs() > (3.0 * delta[n - 2]).abs()
-        {
-            3.0 * delta[n - 2]
-        } else {
-            s
-        }
-    } else {
-        delta[n - 2]
-    };
-
-    // Interior slopes: average of adjacent secants, zeroed when signs differ.
-    for k in 1..n - 1 {
-        if delta[k - 1].signum() != delta[k].signum() {
-            d[k] = 0.0;
-        } else {
-            d[k] = (delta[k - 1] + delta[k]) / 2.0;
-        }
+        self.interpolate_hourly_records((3600 / target_step_secs) as usize, first_hour, start)
     }
 
-    // Fritsch-Carlson monotonicity correction (§3 of the paper).
-    // Uses SLATEC pchim.f form: tau * d[k] instead of tau * alpha * delta[k]
-    // to avoid 0 × ∞ = NaN when delta[k] is subnormal.
-    for k in 0..n - 1 {
-        if delta[k] == 0.0 {
-            // Flat segment: both endpoint slopes must be zero.
-            d[k] = 0.0;
-            d[k + 1] = 0.0;
-        } else {
-            let alpha = d[k] / delta[k];
-            let beta = d[k + 1] / delta[k];
-            let r2 = alpha * alpha + beta * beta;
-            if r2 > 9.0 {
-                let tau = 3.0 / r2.sqrt();
-                d[k] *= tau;
-                d[k + 1] *= tau;
+    /// The EnergyPlus interpolation of an hourly file at a step shorter
+    /// than an hour: one output row per step, the point fields linear
+    /// last-hour interpolation evaluated for the step's end
+    /// (`Value_TimeStep = LastHourValue * Weight_LastHour +
+    /// ThisHourValue * Weight_ThisHour`, `Weight_ThisHour =
+    /// CurrentTimeStep / NumberOfTimeStepsInHour`; Input Output Reference,
+    /// "Weather Data Hourly Interpolation"), the wind direction on the
+    /// circle, the precipitation divided by the steps per hour, the sky
+    /// temperature recomputed from the row's interpolated inputs
+    /// (`calcSky`, `WeatherManager.cc:3106-3113`), and the held fields at
+    /// the hour's record.
+    ///
+    /// The previous hour's record of the run's first hour is the record
+    /// `first_hour` names (hour 24 or hour 1 of the run's first day,
+    /// `WeatherManager.cc:3050-3056`); every later hour interpolates from
+    /// the previous hour's own record, day boundaries included (the
+    /// previous day's hour 24), and the file's first hour carries the
+    /// file's last record for runs that read past the year's end. No step
+    /// reads a record before the run's first day.
+    ///
+    /// # Errors
+    ///
+    /// [`WeatherError::Resample`] when the file does not cover whole days.
+    fn interpolate_hourly_records(
+        &self,
+        steps_per_hour: usize,
+        first_hour: FirstHour,
+        start: chrono::NaiveDateTime,
+    ) -> Result<Self, WeatherError> {
+        let n = steps_per_hour;
+        let len = self.len();
+        if len == 0 {
+            return Err(WeatherError::Resample(
+                "the weather series is empty".to_string(),
+            ));
+        }
+        if !len.is_multiple_of(24) {
+            return Err(WeatherError::Resample(format!(
+                "hourly weather must cover whole days: {len} records is not a multiple of 24"
+            )));
+        }
+
+        // The run's start in seconds into the file's year, the same
+        // mapping the per-step read uses: the naive local wall clock,
+        // records addressed from the file's first record.
+        let seconds_into_year = u64::from(start.ordinal0()) * 86_400
+            + u64::from(start.hour()) * 3_600
+            + u64::from(start.minute()) * 60
+            + u64::from(start.second());
+        let year_secs = len as u64 * 3_600;
+        let target_secs = 3_600 / n as u64;
+        let offset_row = ((seconds_into_year % year_secs) / target_secs) as usize % (len * n);
+        // The hour containing the run's start: its steps interpolate from
+        // the record the first-hour rule names.
+        let first_hour_k = offset_row / n;
+        let first_day = first_hour_k / 24;
+        let first_hour_prev = match first_hour {
+            FirstHour::Hour24 => first_day * 24 + 23,
+            FirstHour::Hour1 => first_day * 24,
+        };
+
+        let rows = len * n;
+        let mut out = Self {
+            meta: WeatherMeta {
+                source_step_secs: u32::try_from(3600 / n).expect("the steps per hour divide 3600"),
+                record_label: RecordLabel::IntervalEnd,
+                ..self.meta.clone()
+            },
+            design_conditions: self.design_conditions,
+            dry_bulb_c: vec![0.0; rows],
+            dew_point_c: vec![0.0; rows],
+            rel_humidity_pct: vec![0.0; rows],
+            pressure_kpa: vec![0.0; rows],
+            ghi_w_m2: vec![0.0; rows],
+            dni_w_m2: vec![0.0; rows],
+            dhi_w_m2: vec![0.0; rows],
+            wind_speed_m_s: vec![0.0; rows],
+            wind_dir_deg: vec![0.0; rows],
+            opaque_sky_cover: vec![0.0; rows],
+            horizontal_infrared_w_m2: vec![0.0; rows],
+            sky_temp_c: vec![0.0; rows],
+            ground_temp_c: vec![0.0; rows],
+            liquid_precip_m: vec![0.0; rows],
+            surface_albedo: self.surface_albedo.as_ref().map(|_| vec![0.0; rows]),
+        };
+
+        // The last-hour fields: `prev * wp + this * w` per row, the
+        // weights EnergyPlus's (`wgt_curr = ts / N`, `wgt_prev =
+        // 1 - wgt_curr`, `WeatherManager.cc:8343-8347`; the weighted sum
+        // prev-first, `:3094-3105`).
+        let last_hour_field = |field: WeatherField, out_column: &mut Vec<f64>| {
+            for k in 0..len {
+                let prev = prev_record_index(k, first_hour_k, first_hour_prev, len);
+                for ts in 1..=n {
+                    let w = (ts as f64 / n as f64).min(1.0);
+                    let wp = 1.0 - w;
+                    out_column[k * n + ts - 1] =
+                        self.get(field, prev) * wp + self.get(field, k) * w;
+                }
+            }
+        };
+        for (field, column) in [
+            (WeatherField::DryBulbC, &mut out.dry_bulb_c),
+            (WeatherField::DewPointC, &mut out.dew_point_c),
+            (WeatherField::RelHumidityPct, &mut out.rel_humidity_pct),
+            (WeatherField::PressureKpa, &mut out.pressure_kpa),
+            (WeatherField::WindSpeedMS, &mut out.wind_speed_m_s),
+            (WeatherField::OpaqueSkyCover, &mut out.opaque_sky_cover),
+            (
+                WeatherField::HorizontalInfrared,
+                &mut out.horizontal_infrared_w_m2,
+            ),
+        ] {
+            debug_assert_eq!(field_method(field), InterpMethod::LastHour);
+            last_hour_field(field, column);
+        }
+
+        // The wind direction: the same weight, on the circle.
+        for k in 0..len {
+            let prev = prev_record_index(k, first_hour_k, first_hour_prev, len);
+            for ts in 1..=n {
+                let w = (ts as f64 / n as f64).min(1.0);
+                out.wind_dir_deg[k * n + ts - 1] =
+                    circular_interp(self.wind_dir_deg[prev], self.wind_dir_deg[k], w);
             }
         }
-    }
 
-    d
-}
-
-/// Fritsch-Carlson monotone cubic interpolation slopes with cyclic boundary.
-///
-/// Same algorithm as [`fritsch_carlson_slopes`] but treats the data as
-/// periodic: `y[0]` and `y[n-1]` are neighbours, so there are n segments
-/// (not n-1). Endpoint slopes use centered differences that wrap around
-/// the boundary rather than one-sided formulas.
-///
-/// # Panics
-/// Panics if `y` has fewer than 3 elements (cyclic PCHIP is meaningless
-/// for 0–2 points).
-pub(crate) fn fritsch_carlson_slopes_cyclic(y: &[f64]) -> Vec<f64> {
-    let n = y.len();
-    assert!(n >= 3, "cyclic PCHIP requires at least 3 points, got {n}");
-
-    // Secant slopes for all n segments (including the wrap segment n-1 → 0).
-    let mut delta: Vec<f64> = Vec::with_capacity(n);
-    for k in 0..n {
-        delta.push(y[(k + 1) % n] - y[k]);
-    }
-
-    // All slopes use centered differences (no boundary special case).
-    let mut d = vec![0.0_f64; n];
-    for k in 0..n {
-        let left = delta[(k + n - 1) % n];
-        let right = delta[k];
-        if left.signum() != right.signum() {
-            d[k] = 0.0;
-        } else {
-            d[k] = (left + right) / 2.0;
-        }
-    }
-
-    // Fritsch-Carlson monotonicity correction for all n segments.
-    for k in 0..n {
-        let k_next = (k + 1) % n;
-        if delta[k] == 0.0 {
-            d[k] = 0.0;
-            d[k_next] = 0.0;
-        } else {
-            let alpha = d[k] / delta[k];
-            let beta = d[k_next] / delta[k];
-            let r2 = alpha * alpha + beta * beta;
-            if r2 > 9.0 {
-                let tau = 3.0 / r2.sqrt();
-                d[k] *= tau;
-                d[k_next] *= tau;
+        // The precipitation: the weighted hourly depth divided by N.
+        for k in 0..len {
+            let prev = prev_record_index(k, first_hour_k, first_hour_prev, len);
+            for ts in 1..=n {
+                let w = (ts as f64 / n as f64).min(1.0);
+                let wp = 1.0 - w;
+                let weighted = self.liquid_precip_m[prev] * wp + self.liquid_precip_m[k] * w;
+                out.liquid_precip_m[k * n + ts - 1] = weighted / n as f64;
             }
         }
-    }
 
-    d
-}
-
-/// Resample data to a finer resolution using PCHIP interpolation.
-///
-/// Uses Piecewise Cubic Hermite Interpolating Polynomials (PCHIP)
-/// with Fritsch-Carlson monotonicity-preserving slopes.
-/// Guarantees: C1 continuity, monotonicity preservation,
-/// interpolating (passes through original data points).
-/// Hermite basis functions per Press et al., Numerical Recipes, 3rd ed., §3.3.
-///
-/// Reference: Fritsch & Carlson (1980), SIAM J. Numer. Anal. 17(2).
-///
-/// Edge cases:
-/// - Single element: replicate (no neighbor to interpolate toward).
-/// - Two elements: linear interpolation.
-/// - Year boundary: flat extrapolation (no cyclic wrap).
-///   For smooth year-boundary transitions, use [`pchip_cyclic_resample`].
-/// - NaN in source data: propagated through interpolation.
-///
-/// Exposed as `pub` for integration tests. Not a stable public API;
-/// callers outside `hares-io` should use [`WeatherTimeSeries::resample`].
-#[doc(hidden)]
-pub fn pchip_resample(values: &[f64], factor: usize) -> Vec<f64> {
-    let n = values.len();
-    if n == 0 {
-        return vec![];
-    }
-    if factor <= 1 {
-        return values.to_vec();
-    }
-    if n == 1 {
-        return vec![values[0]; factor];
-    }
-
-    let total = n * factor;
-    let mut out = Vec::with_capacity(total);
-
-    if n == 2 {
-        // Linear interpolation fallback for two-element input.
-        // Clamp frac to [0, 1]: beyond the last knot, frac saturates at 1.0
-        // producing flat-hold at values[n-1].
-        for i in 0..total {
-            let t = i as f64 / factor as f64;
-            let k = (t as usize).min(n - 2);
-            let frac = (t - k as f64).clamp(0.0, 1.0);
-            out.push(values[k] + frac * (values[k + 1] - values[k]));
+        // The held fields: the hour's record across its steps. The solar
+        // fields hold the hour's record under this rule; the solar
+        // midpoint interpolation replaces the hold below.
+        for (field, column) in [
+            (WeatherField::GhiWM2, &mut out.ghi_w_m2),
+            (WeatherField::DniWM2, &mut out.dni_w_m2),
+            (WeatherField::DhiWM2, &mut out.dhi_w_m2),
+            (WeatherField::GroundTempC, &mut out.ground_temp_c),
+        ] {
+            debug_assert_eq!(field_method(field), InterpMethod::HourHold);
+            for k in 0..len {
+                for ts in 1..=n {
+                    column[k * n + ts - 1] = self.get(field, k);
+                }
+            }
         }
-        return out;
-    }
-
-    let d = fritsch_carlson_slopes(values);
-
-    for i in 0..total {
-        let t_global = i as f64 / factor as f64;
-        let k = (t_global as usize).min(n - 2);
-        // Clamp to [0, 1] for flat extrapolation at year boundary (no cyclic wrap).
-        // h = 1.0 for uniform spacing, so t = t_global - k.
-        let t = (t_global - k as f64).clamp(0.0, 1.0);
-
-        // Hermite basis functions (h = 1.0, so slope terms are just d[k]).
-        let t2 = t * t;
-        let t3 = t2 * t;
-        let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
-        let h10 = t3 - 2.0 * t2 + t;
-        let h01 = -2.0 * t3 + 3.0 * t2;
-        let h11 = t3 - t2;
-
-        out.push(h00 * values[k] + h10 * d[k] + h01 * values[k + 1] + h11 * d[k + 1]);
-    }
-
-    out
-}
-
-/// Resample data to a finer resolution using cyclic PCHIP interpolation.
-///
-/// Same as [`pchip_resample`] but treats the data as periodic: the last
-/// value connects smoothly back to the first via a wrap-around segment,
-/// and endpoint slopes use centered differences across the year boundary.
-/// This eliminates the discontinuity at each year boundary in multi-year
-/// simulations.
-///
-/// Use for smooth diurnal/seasonal fields (temperature, IR, ground temp).
-/// Do NOT use for accumulated fields (precipitation) or stochastic ones
-/// (wind speed).
-///
-/// Edge cases:
-/// - Single element: replicate.
-/// - Two elements: linear interpolation in both forward and wrap segments.
-/// - NaN in source data: propagated through interpolation.
-pub fn pchip_cyclic_resample(values: &[f64], factor: usize) -> Vec<f64> {
-    let n = values.len();
-    if n == 0 {
-        return vec![];
-    }
-    if factor <= 1 {
-        return values.to_vec();
-    }
-    if n == 1 {
-        return vec![values[0]; factor];
-    }
-
-    let total = n * factor;
-    let mut out = Vec::with_capacity(total);
-
-    if n == 2 {
-        // Two-element cyclic: forward segment 0→1 and wrap segment 1→0.
-        // Both use linear interpolation (matching the non-cyclic 2-element path).
-        for i in 0..total {
-            let t_global = i as f64 / factor as f64;
-            let k = (t_global as usize) % 2;
-            let frac = t_global - k as f64;
-            let k_next = 1 - k; // alternates 0↔1
-            out.push(values[k] + frac * (values[k_next] - values[k]));
+        if let Some(albedo) = self.surface_albedo.as_ref() {
+            let out_albedo = out
+                .surface_albedo
+                .as_mut()
+                .expect("the albedo column exists when the source's does");
+            for k in 0..len {
+                for ts in 1..=n {
+                    out_albedo[k * n + ts - 1] = albedo[k];
+                }
+            }
         }
-        return out;
+
+        // The sky temperature: recomputed from each row's interpolated
+        // inputs (`calcSky`, `WeatherManager.cc:3106-3113`), never
+        // interpolated itself.
+        for row in 0..rows {
+            out.sky_temp_c[row] = compute_sky_temp_c(
+                out.horizontal_infrared_w_m2[row],
+                out.dry_bulb_c[row],
+                out.dew_point_c[row],
+                out.rel_humidity_pct[row],
+                out.opaque_sky_cover[row],
+                SkyTempModel::default(),
+            );
+        }
+
+        // The record indices and weights of the first step of each day,
+        // at debug: the interpolation's audit trail.
+        for day in 0..len / 24 {
+            let k = day * 24;
+            let prev = prev_record_index(k, first_hour_k, first_hour_prev, len);
+            tracing::debug!(
+                day,
+                first_step_record = k,
+                previous_record = prev,
+                weight_this_hour = 1.0 / n as f64,
+                "weather interpolation, the day's first step"
+            );
+        }
+
+        Ok(out)
     }
-
-    let d = fritsch_carlson_slopes_cyclic(values);
-
-    for i in 0..total {
-        let t_global = i as f64 / factor as f64;
-        let k = (t_global as usize) % n;
-        let t = t_global - k as f64;
-        let k_next = (k + 1) % n;
-
-        // Hermite basis functions (h = 1.0 for uniform spacing).
-        let t2 = t * t;
-        let t3 = t2 * t;
-        let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
-        let h10 = t3 - 2.0 * t2 + t;
-        let h01 = -2.0 * t3 + 3.0 * t2;
-        let h11 = t3 - t2;
-
-        out.push(h00 * values[k] + h10 * d[k] + h01 * values[k_next] + h11 * d[k_next]);
-    }
-
-    out
 }
 
-fn replicate_zoh(values: &[f64], factor: usize) -> Vec<f64> {
-    let mut out = Vec::with_capacity(values.len().saturating_mul(factor));
-    for &value in values {
-        out.extend(std::iter::repeat_n(value, factor));
+/// The previous hour's record index for the interpolation of hour `k`:
+/// the run's first hour reads the record the first-hour rule names, every
+/// other hour the previous hour's own record, day boundaries included;
+/// the file's first hour carries the file's last record for runs that
+/// read past the year's end.
+fn prev_record_index(k: usize, first_hour_k: usize, first_hour_prev: usize, len: usize) -> usize {
+    if k == first_hour_k {
+        first_hour_prev
+    } else if k == 0 {
+        len - 1
+    } else {
+        k - 1
     }
-    out
 }
 
-/// Circular linear interpolation for angular quantities (e.g. wind direction).
-///
-/// Interpolates along the shortest arc between consecutive angles so that
-/// transitions like 350° → 10° go through 0°/360° instead of the long way
-/// around (180°). This matches EnergyPlus WeatherManager.cc:3183-3197
-/// (`interpolateWindDirection`).
-///
-/// Algorithm for each sub-sample between values[k] and values[k+1]:
-/// 1. If either endpoint is NaN or outside [0, 360) (sentinel/missing),
-///    fall back to ZOH from values[k].
-/// 2. Compute shortest-arc delta:
-///    `delta = ((values[k+1] - values[k] + 180) % 360) - 180`
-/// 3. Interpolate: `result = (values[k] + t * delta + 360) % 360`
-///    where t ∈ [0, 1] is the interpolation fraction.
-///
-/// Edge cases: single element replicates, two-element
-/// input uses simple linear path, last segment flat-holds beyond the final knot.
-fn circular_linear_resample(values: &[f64], factor: usize) -> Vec<f64> {
-    let n = values.len();
-    if n == 0 {
-        return vec![];
-    }
-    if factor <= 1 {
-        return values.to_vec();
-    }
-    if n == 1 {
-        return vec![values[0]; factor];
-    }
-
-    /// Returns true for a valid wind direction in [0, 360).
+/// The circular interpolation of one direction pair at one weight: the
+/// shortest arc, as the engine's circular interpolation has always
+/// computed it (EnergyPlus's `interpolateWindDirection`,
+/// `WeatherManager.cc:3174-3188`). An endpoint outside `[0, 360)` (a
+/// sentinel or NaN) falls back to holding the previous hour's value.
+fn circular_interp(prev: f64, cur: f64, weight: f64) -> f64 {
     fn is_valid_angle(v: f64) -> bool {
         v.is_finite() && (0.0..360.0).contains(&v)
     }
-
-    let total = n * factor;
-    let mut out = Vec::with_capacity(total);
-    for i in 0..total {
-        let t = i as f64 / factor as f64;
-        let k = (t as usize).min(n - 2);
-        let frac = (t - k as f64).clamp(0.0, 1.0);
-        let a = values[k];
-        let b = values[k + 1];
-
-        if !is_valid_angle(a) || !is_valid_angle(b) {
-            // Sentinel or NaN: fall back to ZOH from left value.
-            out.push(a);
-        } else if frac == 0.0 {
-            out.push(a);
-        } else {
-            // Shortest-arc delta in [-180, +180).
-            // Uses Euclidean remainder to handle negative numerators correctly
-            // (Rust's `%` truncates toward zero, giving negative remainders).
-            let delta = ((b - a + 180.0).rem_euclid(360.0)) - 180.0;
-            let result = (a + frac * delta).rem_euclid(360.0);
-            out.push(result);
-        }
+    if !is_valid_angle(prev) || !is_valid_angle(cur) {
+        return prev;
     }
-    out
+    let delta = ((cur - prev + 180.0).rem_euclid(360.0)) - 180.0;
+    (prev + weight * delta).rem_euclid(360.0)
 }
 
-/// Distribute an accumulated quantity evenly across sub-timestep slots.
-///
-/// Unlike ZOH (which replicates an instantaneous value), accumulated fields
-/// like precipitation depth represent a total over the source interval. Dividing
-/// by `factor` preserves the integral when downstream code sums across slots.
-fn distribute_accumulated(values: &[f64], factor: usize) -> Vec<f64> {
-    let scale = 1.0 / factor as f64;
-    let mut out = Vec::with_capacity(values.len().saturating_mul(factor));
-    for &value in values {
-        let distributed = value * scale;
-        out.extend(std::iter::repeat_n(distributed, factor));
+impl std::fmt::Display for RecordLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::IntervalEnd => "interval_end",
+            Self::IntervalStart => "interval_start",
+        })
     }
-    out
 }
 
 /// Downsample by computing the mean of consecutive `ratio`-sized blocks.
@@ -1033,365 +980,287 @@ fn sum_downsample(values: &[f64], ratio: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        WeatherError, WeatherField, WeatherMeta, WeatherTimeSeries, fritsch_carlson_slopes,
-        fritsch_carlson_slopes_cyclic, pchip_cyclic_resample, pchip_resample,
+        FirstHour, RecordLabel, WeatherError, WeatherField, WeatherMeta, WeatherTimeSeries,
     };
+    use chrono::NaiveDate;
 
-    fn sample_series() -> WeatherTimeSeries {
+    /// The start every test's resample reads from: the file's own first
+    /// midnight, unless a test's first-hour rule needs another day.
+    fn start_midnight(day: u32) -> chrono::NaiveDateTime {
+        NaiveDate::from_ymd_opt(2019, 1, day)
+            .expect("a valid date")
+            .and_hms_opt(0, 0, 0)
+            .expect("a valid midnight")
+    }
+
+    fn meta() -> WeatherMeta {
+        WeatherMeta {
+            location: "Test Site".to_string(),
+            latitude: 39.74,
+            longitude: -104.99,
+            timezone_offset_h: -7.0,
+            elevation_m: 1600.0,
+            wf_allows_leap_years: true,
+            source_step_secs: 3600,
+            record_label: RecordLabel::IntervalEnd,
+            has_embedded_location: true,
+            station_wmo: None,
+        }
+    }
+
+    /// A one-day hourly series (24 records) with the hour values the
+    /// field-wise `hour_values` closures set, every other field 0.0.
+    fn hourly_series(hour_values: &[f64]) -> WeatherTimeSeries {
+        assert_eq!(hour_values.len(), 24, "the test series covers one day");
         WeatherTimeSeries {
-            meta: WeatherMeta {
-                location: "Test Site".to_string(),
-                latitude: 39.74,
-                longitude: -104.99,
-                timezone_offset_h: -7.0,
-                elevation_m: 1600.0,
-                wf_allows_leap_years: true,
-                source_step_secs: 3600,
-                midpoint_offset_secs: 0,
-                has_embedded_location: true,
-                station_wmo: None,
-            },
+            meta: meta(),
             design_conditions: None,
-            dry_bulb_c: vec![10.0, 11.0],
-            dew_point_c: vec![5.0, 6.0],
-            rel_humidity_pct: vec![40.0, 45.0],
-            pressure_kpa: vec![90.0, 91.0],
-            ghi_w_m2: vec![0.0, 500.0],
-            dni_w_m2: vec![0.0, 700.0],
-            dhi_w_m2: vec![0.0, 100.0],
-            wind_speed_m_s: vec![2.0, 3.0],
-            wind_dir_deg: vec![180.0, 190.0],
-            opaque_sky_cover: vec![4.0, 5.0],
-            horizontal_infrared_w_m2: vec![300.0, 310.0],
-            sky_temp_c: vec![2.0, 3.0],
-            ground_temp_c: vec![10.0, 10.1],
-            liquid_precip_m: vec![0.0, 0.0],
+            dry_bulb_c: hour_values.to_vec(),
+            dew_point_c: vec![0.0; 24],
+            rel_humidity_pct: vec![0.0; 24],
+            pressure_kpa: vec![0.0; 24],
+            ghi_w_m2: vec![0.0; 24],
+            dni_w_m2: vec![0.0; 24],
+            dhi_w_m2: vec![0.0; 24],
+            wind_speed_m_s: vec![0.0; 24],
+            wind_dir_deg: vec![0.0; 24],
+            opaque_sky_cover: vec![0.0; 24],
+            horizontal_infrared_w_m2: vec![0.0; 24],
+            sky_temp_c: vec![0.0; 24],
+            ground_temp_c: vec![0.0; 24],
+            liquid_precip_m: vec![0.0; 24],
             surface_albedo: None,
         }
     }
 
-    /// 5-point series for testing PCHIP (not the linear-fallback 2-point path).
-    fn sample_series_5pt() -> WeatherTimeSeries {
-        WeatherTimeSeries {
-            meta: WeatherMeta {
-                location: "Test Site".to_string(),
-                latitude: 39.74,
-                longitude: -104.99,
-                timezone_offset_h: -7.0,
-                elevation_m: 1600.0,
-                wf_allows_leap_years: true,
-                source_step_secs: 3600,
-                midpoint_offset_secs: 0,
-                has_embedded_location: true,
-                station_wmo: None,
-            },
-            design_conditions: None,
-            dry_bulb_c: vec![10.0, 12.0, 15.0, 13.0, 11.0],
-            dew_point_c: vec![5.0, 6.0, 8.0, 7.0, 5.0],
-            rel_humidity_pct: vec![40.0, 45.0, 60.0, 50.0, 42.0],
-            pressure_kpa: vec![90.0, 91.0, 90.5, 91.5, 90.0],
-            ghi_w_m2: vec![0.0, 200.0, 500.0, 300.0, 0.0],
-            dni_w_m2: vec![0.0, 400.0, 700.0, 500.0, 0.0],
-            dhi_w_m2: vec![0.0, 50.0, 100.0, 80.0, 0.0],
-            wind_speed_m_s: vec![2.0, 3.0, 5.0, 4.0, 2.0],
-            wind_dir_deg: vec![180.0, 190.0, 200.0, 210.0, 180.0],
-            opaque_sky_cover: vec![4.0, 5.0, 6.0, 5.0, 4.0],
-            horizontal_infrared_w_m2: vec![300.0, 310.0, 320.0, 310.0, 300.0],
-            sky_temp_c: vec![2.0, 3.0, 4.0, 3.0, 2.0],
-            ground_temp_c: vec![10.0, 10.1, 10.2, 10.1, 10.0],
-            liquid_precip_m: vec![0.0, 0.0, 0.001, 0.0, 0.0],
-            surface_albedo: None,
+    /// A two-day hourly series (48 records): day 1's values then day 2's.
+    fn two_day_series(day1: &[f64], day2: &[f64]) -> WeatherTimeSeries {
+        let mut series = hourly_series(day1);
+        series.dry_bulb_c.extend_from_slice(day2);
+        for column in [
+            &mut series.dew_point_c,
+            &mut series.rel_humidity_pct,
+            &mut series.pressure_kpa,
+            &mut series.ghi_w_m2,
+            &mut series.dni_w_m2,
+            &mut series.dhi_w_m2,
+            &mut series.wind_speed_m_s,
+            &mut series.wind_dir_deg,
+            &mut series.opaque_sky_cover,
+            &mut series.horizontal_infrared_w_m2,
+            &mut series.sky_temp_c,
+            &mut series.ground_temp_c,
+            &mut series.liquid_precip_m,
+        ] {
+            column.extend(std::iter::repeat_n(0.0, 24));
         }
+        series
     }
 
     #[test]
     fn get_returns_column_value() {
-        let series = sample_series();
+        let mut series = hourly_series(&[10.0; 24]);
+        series.wind_dir_deg[1] = 190.0;
         assert_eq!(series.get(WeatherField::WindDirDeg, 1), 190.0);
-        assert_eq!(series.get(WeatherField::PressureKpa, 0), 90.0);
+        assert_eq!(series.get(WeatherField::PressureKpa, 0), 0.0);
     }
 
+    /// The point fields' published weights: four steps per hour read
+    /// `last * (1 - ts/N) + this * ts/N` for ts 1 to 4, bitwise.
     #[test]
-    fn resample_cyclic_pchip_on_dry_bulb_and_circular_linear_on_wind_dir() {
-        // dry_bulb's one method is cyclic PCHIP: the two-element series
-        // interpolates linearly up through hour 0 and back down through
-        // hour 1 (the two-element cyclic path's sawtooth).
-        let series = sample_series();
-        let resampled = series.resample(60).expect("resample should succeed");
-        assert_eq!(resampled.len(), 120);
-
-        // First sample hits the first knot exactly.
-        assert!((resampled.dry_bulb_c[0] - 10.0).abs() < 1e-12);
-        // Midpoint should be ~10.5 (linear for 2-element input).
-        assert!((resampled.dry_bulb_c[30] - 10.5).abs() < 1e-12);
-        // Second hour starts at the second knot and returns toward the
-        // first: the last sub-step's interval-end label sits one minute
-        // short of the wrap knot.
-        assert!((resampled.dry_bulb_c[60] - 11.0).abs() < 1e-12);
-        assert!((resampled.dry_bulb_c[119] - (10.0 + 1.0 / 60.0)).abs() < 1e-12);
-        for w in resampled.dry_bulb_c[..60].windows(2) {
-            assert!(w[1] >= w[0] - 1e-12, "hour-0 monotonicity violated");
-        }
-        for w in resampled.dry_bulb_c[60..].windows(2) {
-            assert!(w[1] <= w[0] + 1e-12, "hour-1 sawtooth violated");
-        }
-
-        // Wind direction uses CircularLinear interpolation (B9 fix).
-        // First sample hits the first knot exactly.
-        assert!((resampled.wind_dir_deg[0] - 180.0).abs() < 1e-12);
-        // Midpoint between 180 and 190 via circular linear: 185.
-        assert!((resampled.wind_dir_deg[30] - 185.0).abs() < 1e-12);
-        // Second hour starts at the second knot.
-        assert!((resampled.wind_dir_deg[60] - 190.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn resample_distributes_precipitation_across_sub_slots() {
-        let mut series = sample_series();
-        series.liquid_precip_m = vec![0.0, 0.006];
-        let resampled = series.resample(60).expect("resample should succeed");
-        let expected_per_slot = 0.006 / 60.0;
-        for (i, &val) in resampled.liquid_precip_m.iter().enumerate().skip(60) {
-            assert!(
-                (val - expected_per_slot).abs() < 1e-15,
-                "slot {i}: expected {expected_per_slot}, got {val}"
+    fn point_weights_match_io_reference_four_steps() {
+        // Day 1 hour 24 at 0.0, day 2 hour 1 at 4.0; the run starts on
+        // day 1, so the day-2 hour-1 steps are no first hour: they read
+        // the previous day's hour-24 record as last hour.
+        let mut day1 = vec![0.0; 24];
+        let mut day2 = vec![0.0; 24];
+        day1[23] = 0.0;
+        day2[0] = 4.0;
+        let series = two_day_series(&day1, &day2);
+        let out = series
+            .resample(900, FirstHour::default(), start_midnight(1))
+            .expect("resample should succeed");
+        assert_eq!(out.len(), 48 * 4);
+        let n = 4.0_f64;
+        for ts in 1..=4_usize {
+            let w = (ts as f64 / n).min(1.0);
+            let expected = 0.0 * (1.0 - w) + 4.0 * w;
+            assert_eq!(
+                out.dry_bulb_c[24 * 4 + ts - 1],
+                expected,
+                "the day-2 hour-1 step {ts} reads the published weight"
             );
         }
-        let total: f64 = resampled.liquid_precip_m.iter().sum();
-        assert!(
-            (total - 0.006).abs() < 1e-12,
-            "total rainfall must be preserved: got {total}"
-        );
     }
 
+    /// Six steps per hour read the published 1/6-to-6/6 weights.
+    #[test]
+    fn point_weights_match_io_reference_six_steps() {
+        let day1 = vec![0.0; 24];
+        let mut day2 = vec![0.0; 24];
+        day2[0] = 6.0;
+        let series = two_day_series(&day1, &day2);
+        let out = series
+            .resample(600, FirstHour::default(), start_midnight(1))
+            .expect("resample should succeed");
+        let n = 6.0_f64;
+        for ts in 1..=6_usize {
+            let w = (ts as f64 / n).min(1.0);
+            let expected = 0.0 * (1.0 - w) + 6.0 * w;
+            assert_eq!(
+                out.dry_bulb_c[24 * 6 + ts - 1],
+                expected,
+                "the day-2 hour-1 step {ts} reads the published weight"
+            );
+        }
+    }
+
+    /// The wind direction interpolates on the circle with the same
+    /// weights: 350 degrees to 10 degrees over four steps reads 355, 0,
+    /// 5 and 10.
+    #[test]
+    fn wind_direction_interpolates_on_the_circle() {
+        let mut series = hourly_series(&[0.0; 24]);
+        series.wind_dir_deg = vec![0.0; 24];
+        series.wind_dir_deg[0] = 350.0;
+        series.wind_dir_deg[1] = 10.0;
+        // The run's first hour is hour 1; read hour 2's rows, whose
+        // previous hour is hour 1: 350 to 10 over four steps.
+        let out = series
+            .resample(900, FirstHour::default(), start_midnight(1))
+            .expect("resample should succeed");
+        let expected = [355.0, 0.0, 5.0, 10.0];
+        for (ts, expected_value) in expected.iter().enumerate() {
+            assert_eq!(
+                out.wind_dir_deg[4 + ts],
+                *expected_value,
+                "the hour-2 step {} interpolates on the circle",
+                ts + 1
+            );
+        }
+    }
+
+    /// The precipitation is the weighted hourly depth divided by the
+    /// steps per hour: hourly depths 2.0 mm then 6.0 mm at 900 s read
+    /// (2.0*0.75 + 6.0*0.25)/4 and so on to 6.0/4.
+    #[test]
+    fn precipitation_is_interpolated_then_divided_by_steps_per_hour() {
+        let mut series = hourly_series(&[0.0; 24]);
+        series.liquid_precip_m = vec![0.0; 24];
+        series.liquid_precip_m[0] = 2.0;
+        series.liquid_precip_m[1] = 6.0;
+        let out = series
+            .resample(900, FirstHour::default(), start_midnight(1))
+            .expect("resample should succeed");
+        let n = 4.0_f64;
+        for (ts, (w_prev, w_this)) in [(0.75, 0.25), (0.5, 0.5), (0.25, 0.75), (0.0, 1.0)]
+            .iter()
+            .enumerate()
+        {
+            let expected_value = (2.0 * w_prev + 6.0 * w_this) / n;
+            assert_eq!(
+                out.liquid_precip_m[4 + ts],
+                expected_value,
+                "the hour-2 step {} divides the weighted depth by the steps per hour",
+                ts + 1
+            );
+        }
+    }
+
+    /// A sub-hourly file whose interval differs from the step is a
+    /// construction error naming both intervals.
+    #[test]
+    fn subhourly_file_interval_must_equal_the_step() {
+        let mut series = hourly_series(&[0.0; 24]);
+        series.meta.source_step_secs = 900;
+        for step in [300, 1800] {
+            let err = series
+                .resample(step, FirstHour::default(), start_midnight(1))
+                .expect_err("the interval mismatch is an error");
+            assert!(err.to_string().contains("900"), "{err}");
+            assert!(err.to_string().contains(&step.to_string()), "{err}");
+        }
+    }
+
+    /// A step that does not divide the hour is an error.
     #[test]
     fn resample_rejects_non_divisor_step() {
-        let series = sample_series();
+        let series = hourly_series(&[0.0; 24]);
         let err = series
-            .resample(7)
+            .resample(7, FirstHour::default(), start_midnight(1))
             .expect_err("non-divisor timestep should fail");
         assert!(matches!(err, WeatherError::Resample(_)));
-        assert!(err.to_string().contains("3600 % 7"));
+        assert!(err.to_string().contains("divide the hour"), "{err}");
     }
 
     #[test]
     fn resample_same_resolution_returns_clone() {
-        let series = sample_series();
-        let resampled = series.resample(3600).expect("same-res should succeed");
+        let series = hourly_series(&[0.0; 24]);
+        let resampled = series
+            .resample(3600, FirstHour::default(), start_midnight(1))
+            .expect("same-res should succeed");
         assert_eq!(resampled, series);
     }
 
+    /// An hourly file at a step longer than an hour keeps the interval
+    /// mean of the records the step covers.
     #[test]
     fn resample_downsample_mean() {
-        // 4-element series at 900s source, downsample to 3600s (ratio=4).
-        let mut series = sample_series();
-        series.meta.source_step_secs = 900;
-        series.dry_bulb_c = vec![10.0, 12.0, 14.0, 16.0];
-        series.dew_point_c = vec![5.0, 6.0, 7.0, 8.0];
-        series.rel_humidity_pct = vec![40.0, 50.0, 60.0, 70.0];
-        series.pressure_kpa = vec![90.0, 91.0, 92.0, 93.0];
-        series.ghi_w_m2 = vec![100.0, 200.0, 300.0, 400.0];
-        series.dni_w_m2 = vec![0.0, 0.0, 0.0, 0.0];
-        series.dhi_w_m2 = vec![0.0, 0.0, 0.0, 0.0];
-        series.wind_speed_m_s = vec![2.0, 3.0, 4.0, 5.0];
-        series.wind_dir_deg = vec![180.0, 190.0, 200.0, 210.0];
-        series.opaque_sky_cover = vec![4.0, 5.0, 6.0, 7.0];
-        series.horizontal_infrared_w_m2 = vec![300.0, 310.0, 320.0, 330.0];
-        series.sky_temp_c = vec![2.0, 3.0, 4.0, 5.0];
-        series.ground_temp_c = vec![10.0, 10.1, 10.2, 10.3];
-        series.liquid_precip_m = vec![0.001, 0.002, 0.003, 0.004];
-
-        let down = series.resample(3600).expect("downsample should succeed");
-        assert_eq!(down.len(), 1);
-        assert!((down.dry_bulb_c[0] - 13.0).abs() < 1e-12);
-        assert!((down.ghi_w_m2[0] - 250.0).abs() < 1e-12);
-        // Precipitation is summed, not averaged.
-        assert!((down.liquid_precip_m[0] - 0.01).abs() < 1e-12);
-        assert_eq!(down.meta.source_step_secs, 3600);
+        let mut day1 = vec![0.0; 24];
+        day1[0] = 10.0;
+        day1[1] = 12.0;
+        day1[2] = 14.0;
+        day1[3] = 16.0;
+        let series = two_day_series(&day1, &[0.0; 24]);
+        let down = series
+            .resample(7200, FirstHour::default(), start_midnight(1))
+            .expect("downsample should succeed");
+        assert_eq!(down.len(), 24);
+        // The two-hour step's mean covers records 0 and 1: 10 and 12.
+        assert!((down.dry_bulb_c[0] - 11.0).abs() < 1e-12);
+        assert_eq!(down.meta.source_step_secs, 7200);
     }
 
+    /// The ground temperature and surface albedo hold the hour's record.
     #[test]
-    fn resample_upsample_with_some_albedo() {
-        let mut series = sample_series_5pt();
-        series.surface_albedo = Some(vec![0.2, 0.7, 0.5, 0.3, 0.2]);
-        let resampled = series.resample(600).expect("resample should succeed");
-        let albedo = resampled
-            .surface_albedo
-            .as_ref()
-            .expect("albedo should be Some");
-        // ZOH: each source value replicated 6 times
-        assert_eq!(albedo.len(), 5 * 6);
-        assert!(albedo[..6].iter().all(|&v| (v - 0.2).abs() < 1e-12));
-        assert!(albedo[6..12].iter().all(|&v| (v - 0.7).abs() < 1e-12));
-    }
-
-    #[test]
-    fn resample_downsample_with_some_albedo() {
-        let mut series = sample_series();
-        series.meta.source_step_secs = 900;
-        series.dry_bulb_c = vec![10.0, 12.0, 14.0, 16.0];
-        series.dew_point_c = vec![5.0, 6.0, 7.0, 8.0];
-        series.rel_humidity_pct = vec![40.0, 50.0, 60.0, 70.0];
-        series.pressure_kpa = vec![90.0, 91.0, 92.0, 93.0];
-        series.ghi_w_m2 = vec![100.0, 200.0, 300.0, 400.0];
-        series.dni_w_m2 = vec![0.0; 4];
-        series.dhi_w_m2 = vec![0.0; 4];
-        series.wind_speed_m_s = vec![2.0; 4];
-        series.wind_dir_deg = vec![180.0; 4];
-        series.opaque_sky_cover = vec![5.0; 4];
-        series.horizontal_infrared_w_m2 = vec![300.0; 4];
-        series.sky_temp_c = vec![2.0; 4];
-        series.ground_temp_c = vec![10.0; 4];
-        series.liquid_precip_m = vec![0.0; 4];
-        series.surface_albedo = Some(vec![0.2, 0.7, 0.7, 0.3]);
-        let down = series.resample(3600).expect("downsample should succeed");
-        let albedo = down.surface_albedo.as_ref().expect("albedo should be Some");
-        assert_eq!(albedo.len(), 1);
-        // Mean of [0.2, 0.7, 0.7, 0.3] = 0.475
-        assert!((albedo[0] - 0.475).abs() < 1e-12);
-    }
-
-    // --- PCHIP unit tests ---
-
-    #[test]
-    fn pchip_single_element_replicates() {
-        let out = pchip_resample(&[42.0], 4);
-        assert_eq!(out.len(), 4);
-        assert!(out.iter().all(|&v| v == 42.0));
-    }
-
-    #[test]
-    fn pchip_two_elements_linear() {
-        let out = pchip_resample(&[0.0, 10.0], 4);
-        assert_eq!(out.len(), 8);
-        // Linear interp with flat extrapolation: last 3 values hold at 10.0.
-        let expected = [0.0, 2.5, 5.0, 7.5, 10.0, 10.0, 10.0, 10.0];
-        for (i, (&got, &exp)) in out.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (got - exp).abs() < 1e-12,
-                "index {i}: expected {exp}, got {got}"
-            );
+    fn ground_and_albedo_hold_the_hours_record() {
+        let mut series = hourly_series(&[0.0; 24]);
+        series.ground_temp_c = (0..24).map(|h| 10.0 + h as f64 * 0.1).collect();
+        series.surface_albedo = Some((0..24).map(|h| 0.2 + h as f64 * 0.01).collect());
+        let out = series
+            .resample(900, FirstHour::default(), start_midnight(1))
+            .expect("resample should succeed");
+        for h in 0..24 {
+            for ts in 1..=4 {
+                let row = h * 4 + ts - 1;
+                assert_eq!(out.ground_temp_c[row], 10.0 + h as f64 * 0.1);
+                assert_eq!(
+                    out.surface_albedo.as_ref().expect("albedo")[row],
+                    0.2 + h as f64 * 0.01
+                );
+            }
         }
     }
 
+    /// The solar fields hold the hour's record: each hourly average
+    /// spans its hour's steps unchanged (the point-value rule; the solar
+    /// midpoint rule is a separate change).
     #[test]
-    fn pchip_interpolates_through_knots() {
-        let values = [1.0, 4.0, 2.0, 5.0, 3.0];
-        let out = pchip_resample(&values, 3);
-        assert_eq!(out.len(), 15);
-        // Every `factor`-th sample must equal the original knot.
-        for (k, &v) in values.iter().enumerate() {
-            assert!(
-                (out[k * 3] - v).abs() < 1e-12,
-                "knot {k}: expected {v}, got {}",
-                out[k * 3]
-            );
+    fn solar_fields_hold_the_hours_record() {
+        let mut series = hourly_series(&[0.0; 24]);
+        series.ghi_w_m2 = (0..24).map(|h| h as f64 * 100.0).collect();
+        let out = series
+            .resample(900, FirstHour::default(), start_midnight(1))
+            .expect("resample should succeed");
+        for h in 0..24 {
+            for ts in 1..=4 {
+                assert_eq!(
+                    out.ghi_w_m2[h * 4 + ts - 1],
+                    h as f64 * 100.0,
+                    "hour {h} step {ts} holds the hour's record"
+                );
+            }
         }
-    }
-
-    #[test]
-    fn pchip_preserves_monotonicity_in_monotone_run() {
-        // Strictly increasing data: output should be non-decreasing.
-        let values = [0.0, 1.0, 3.0, 6.0, 10.0];
-        let out = pchip_resample(&values, 10);
-        for w in out.windows(2) {
-            assert!(
-                w[1] >= w[0] - 1e-12,
-                "monotonicity violated: {} > {}",
-                w[0],
-                w[1]
-            );
-        }
-        // Year boundary: last output sample must equal last knot (flat extrapolation).
-        assert!(
-            (out[out.len() - 1] - 10.0).abs() < 1e-12,
-            "last sample must equal last knot, got {}",
-            out[out.len() - 1]
-        );
-    }
-
-    #[test]
-    fn pchip_nan_propagation() {
-        let values = [1.0, f64::NAN, 3.0];
-        let out = pchip_resample(&values, 2);
-        // NaN at knot 1 contaminates slopes d[0] and d[1], which means:
-        // - out[0] is NaN (d[0] is NaN, h10*NaN contaminates even at t=0)
-        // - out[1..3] are NaN (interval touching NaN knot)
-        assert!(
-            out[0].is_nan(),
-            "expected NaN at index 0 (slope contamination)"
-        );
-        assert!(out[1].is_nan(), "expected NaN at index 1");
-        assert!(out[2].is_nan(), "expected NaN at index 2");
-        assert!(out[3].is_nan(), "expected NaN at index 3");
-    }
-
-    #[test]
-    fn pchip_factor_one_returns_original() {
-        let values = [1.0, 2.0, 3.0];
-        let out = pchip_resample(&values, 1);
-        assert_eq!(out, values);
-    }
-
-    #[test]
-    fn fritsch_carlson_flat_segment_slopes_zero() {
-        let y = [5.0, 5.0, 5.0, 5.0];
-        let d = fritsch_carlson_slopes(&y);
-        for (i, &s) in d.iter().enumerate() {
-            assert!(s.abs() < 1e-15, "slope at knot {i} should be 0, got {s}");
-        }
-    }
-
-    #[test]
-    fn fritsch_carlson_linear_data() {
-        // For perfectly linear data, slopes should equal the constant secant.
-        let y = [2.0, 4.0, 6.0, 8.0, 10.0];
-        let d = fritsch_carlson_slopes(&y);
-        for (i, &s) in d.iter().enumerate() {
-            assert!(
-                (s - 2.0).abs() < 1e-12,
-                "slope at knot {i}: expected 2.0, got {s}"
-            );
-        }
-    }
-
-    #[test]
-    fn resample_clamps_rel_humidity() {
-        let mut series = sample_series_5pt();
-        // Non-monotonic extrema to exercise PCHIP overshoot + clamping.
-        series.rel_humidity_pct = vec![99.0, 1.0, 99.0, 1.0, 99.0];
-        let resampled = series.resample(600).expect("resample should succeed");
-        for &v in &resampled.rel_humidity_pct {
-            assert!((0.0..=100.0).contains(&v), "RH out of bounds: {v}");
-        }
-    }
-
-    #[test]
-    fn resample_clamps_opaque_sky_cover() {
-        let mut series = sample_series_5pt();
-        // Non-monotonic extrema to exercise PCHIP overshoot + clamping.
-        series.opaque_sky_cover = vec![9.5, 0.5, 9.5, 0.5, 9.5];
-        let resampled = series.resample(600).expect("resample should succeed");
-        for &v in &resampled.opaque_sky_cover {
-            assert!((0.0..=10.0).contains(&v), "sky cover out of bounds: {v}");
-        }
-    }
-
-    #[test]
-    fn resample_solar_fields_use_zoh_by_default() {
-        let series = sample_series();
-        let resampled = series.resample(60).expect("resample should succeed");
-        // GHI defaults to ZOH: each sub-step holds the source hourly value.
-        // With values [0.0, 500.0] and factor=60:
-        // All 60 sub-steps of hour 0 must be 0.0.
-        assert!(resampled.ghi_w_m2.iter().take(60).all(|&x| x == 0.0));
-        // All 60 sub-steps of hour 1 must be 500.0.
-        assert!(resampled.ghi_w_m2.iter().skip(60).all(|&x| x == 500.0));
-        // Same for DNI (source: [0.0, 700.0]) and DHI (source: [0.0, 100.0]).
-        assert!(resampled.dni_w_m2.iter().take(60).all(|&x| x == 0.0));
-        assert!(resampled.dni_w_m2.iter().skip(60).all(|&x| x == 700.0));
-        assert!(resampled.dhi_w_m2.iter().take(60).all(|&x| x == 0.0));
-        assert!(resampled.dhi_w_m2.iter().skip(60).all(|&x| x == 100.0));
     }
 
     #[test]
@@ -1440,43 +1309,26 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         );
     }
 
-    /// Verify that sky temperature is recomputed from interpolated inputs after
-    /// upsampling, not interpolated directly.  This is the B5 fix: T_sky is a
-    /// non-linear function of its inputs, so direct interpolation violates the
-    /// chain rule (E+ WeatherManager.cc:3113).
+    /// The sky temperature is recomputed from each row's interpolated
+    /// inputs, never interpolated itself: T_sky is a non-linear function
+    /// of its inputs, so direct interpolation violates the chain rule
+    /// (E+ WeatherManager.cc:3106-3113).
     #[test]
-    fn sky_temp_recomputed_after_upsampling() {
+    fn sky_temp_recomputed_from_interpolated_inputs() {
         use crate::epw::{SkyTempModel, compute_sky_temp_c};
 
-        let mut series = sample_series_5pt();
-        // Set IR, dry-bulb, dew-point, and sky cover to values where
-        // compute_sky_temp_c produces a specific cascade outcome.
-        // Use strong IR (>= 50 W/m²) so the Stefan-Boltzmann path is taken,
-        // since that's the most nonlinear (4th root).
-        series.horizontal_infrared_w_m2 = vec![200.0, 250.0, 300.0, 250.0, 200.0];
-        series.dry_bulb_c = vec![10.0, 12.0, 15.0, 13.0, 11.0];
-        series.dew_point_c = vec![5.0, 6.0, 8.0, 7.0, 5.0];
-        series.opaque_sky_cover = vec![4.0, 5.0, 6.0, 5.0, 4.0];
+        let mut series = hourly_series(&[0.0; 24]);
+        series.horizontal_infrared_w_m2 = (0..24).map(|h| 200.0 + f64::from(h) * 5.0).collect();
+        series.dry_bulb_c = (0..24).map(|h| 10.0 + f64::from(h)).collect();
+        series.dew_point_c = (0..24).map(|h| 5.0 + f64::from(h) * 0.2).collect();
+        series.opaque_sky_cover = vec![4.0; 24];
+        series.rel_humidity_pct = vec![50.0; 24];
 
-        // Compute the "original" sky temps to seed the series.
-        series.sky_temp_c = series
-            .horizontal_infrared_w_m2
-            .iter()
-            .zip(&series.dry_bulb_c)
-            .zip(&series.dew_point_c)
-            .zip(&series.rel_humidity_pct)
-            .zip(&series.opaque_sky_cover)
-            .map(|((((&ir, &db), &dp), &rh), &osc)| {
-                compute_sky_temp_c(ir, db, dp, rh, osc, SkyTempModel::default())
-            })
-            .collect();
+        let resampled = series
+            .resample(900, FirstHour::default(), start_midnight(1))
+            .expect("resample should succeed");
+        assert_eq!(resampled.len(), 96);
 
-        // Upsample by factor 6 (3600s → 600s).
-        let resampled = series.resample(600).expect("resample should succeed");
-        assert_eq!(resampled.len(), 30);
-
-        // Verify every resampled sky_temp_c matches compute_sky_temp_c applied
-        // to the corresponding resampled inputs.
         for i in 0..resampled.len() {
             let expected = compute_sky_temp_c(
                 resampled.horizontal_infrared_w_m2[i],
@@ -1486,556 +1338,128 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
                 resampled.opaque_sky_cover[i],
                 SkyTempModel::default(),
             );
-            assert!(
-                (resampled.sky_temp_c[i] - expected).abs() < 1e-9,
-                "slot {i}: recomputed sky_temp_c must equal compute_sky_temp_c \
-                 from interpolated inputs; got {}, expected {}",
-                resampled.sky_temp_c[i],
+            assert_eq!(
+                resampled.sky_temp_c[i], expected,
+                "row {i}: recomputed sky_temp_c must equal compute_sky_temp_c \
+                 from interpolated inputs"
+            );
+        }
+    }
+
+    /// The first hour of the run interpolates from hour 24 of the run's
+    /// first day, by default: at 900 s the four steps of hour 1 read
+    /// `h24 * 0.75 + h1 * 0.25` and so on, never a record from before the
+    /// run's first day.
+    #[test]
+    fn first_hour_uses_hour24_of_the_first_day_by_default() {
+        let mut series = hourly_series(&[0.0; 24]);
+        series.dry_bulb_c[0] = 4.0;
+        series.dry_bulb_c[23] = 40.0;
+        let out = series
+            .resample(900, FirstHour::default(), start_midnight(1))
+            .expect("resample should succeed");
+        let n = 4.0_f64;
+        for ts in 1..=4_usize {
+            let w = (ts as f64 / n).min(1.0);
+            let expected = 40.0 * (1.0 - w) + 4.0 * w;
+            assert_eq!(
+                out.dry_bulb_c[ts - 1],
                 expected,
+                "the run's first hour's step {ts} interpolates from the first day's hour 24"
             );
         }
     }
 
-    /// Same check for downsampling: sky_temp_c must be recomputed from
-    /// the mean-downsampled inputs, not just averaged.
+    /// With `Hour1` selected, the first hour's previous-hour record is the
+    /// hour-1 record itself: the first hour's steps read the hour-1
+    /// record's value throughout.
     #[test]
-    fn sky_temp_recomputed_after_downsampling() {
-        use crate::epw::{SkyTempModel, compute_sky_temp_c};
-
-        let mut series = sample_series_5pt();
-        series.meta.source_step_secs = 600; // 10-min source
-        series.horizontal_infrared_w_m2 = vec![200.0, 250.0, 300.0, 350.0, 200.0];
-        series.dry_bulb_c = vec![10.0, 12.0, 15.0, 13.0, 11.0];
-        series.dew_point_c = vec![5.0, 6.0, 8.0, 7.0, 5.0];
-        series.opaque_sky_cover = vec![4.0, 5.0, 6.0, 5.0, 4.0];
-
-        // Seed sky_temp_c from inputs.
-        series.sky_temp_c = series
-            .horizontal_infrared_w_m2
-            .iter()
-            .zip(&series.dry_bulb_c)
-            .zip(&series.dew_point_c)
-            .zip(&series.rel_humidity_pct)
-            .zip(&series.opaque_sky_cover)
-            .map(|((((&ir, &db), &dp), &rh), &osc)| {
-                compute_sky_temp_c(ir, db, dp, rh, osc, SkyTempModel::default())
-            })
-            .collect();
-
-        // Downsample to 3600s (factor 6 → 1 output row).
-        // But 5 rows / 6 is not integer, so use 4-element series at 900s → 3600s.
-        series.dry_bulb_c = vec![10.0, 12.0, 15.0, 13.0];
-        series.dew_point_c = vec![5.0, 6.0, 8.0, 7.0];
-        series.horizontal_infrared_w_m2 = vec![200.0, 300.0, 350.0, 250.0];
-        series.opaque_sky_cover = vec![4.0, 5.0, 6.0, 5.0];
-        series.rel_humidity_pct = vec![40.0, 50.0, 60.0, 50.0];
-        series.pressure_kpa = vec![90.0, 91.0, 90.5, 91.5];
-        series.ghi_w_m2 = vec![100.0, 200.0, 300.0, 400.0];
-        series.dni_w_m2 = vec![0.0; 4];
-        series.dhi_w_m2 = vec![0.0; 4];
-        series.wind_speed_m_s = vec![2.0; 4];
-        series.wind_dir_deg = vec![180.0; 4];
-        series.ground_temp_c = vec![10.0, 10.1, 10.2, 10.3];
-        series.liquid_precip_m = vec![0.0; 4];
-        series.meta.source_step_secs = 900;
-
-        // Seed sky_temp from inputs again.
-        series.sky_temp_c = series
-            .horizontal_infrared_w_m2
-            .iter()
-            .zip(&series.dry_bulb_c)
-            .zip(&series.dew_point_c)
-            .zip(&series.rel_humidity_pct)
-            .zip(&series.opaque_sky_cover)
-            .map(|((((&ir, &db), &dp), &rh), &osc)| {
-                compute_sky_temp_c(ir, db, dp, rh, osc, SkyTempModel::default())
-            })
-            .collect();
-
-        let down = series.resample(3600).expect("downsample should succeed");
-        assert_eq!(down.len(), 1);
-
-        let expected = compute_sky_temp_c(
-            down.horizontal_infrared_w_m2[0],
-            down.dry_bulb_c[0],
-            down.dew_point_c[0],
-            down.rel_humidity_pct[0],
-            down.opaque_sky_cover[0],
-            SkyTempModel::default(),
-        );
-        assert!(
-            (down.sky_temp_c[0] - expected).abs() < 1e-9,
-            "downsampled sky_temp_c must equal compute_sky_temp_c from \
-             mean-downsampled inputs; got {}, expected {}",
-            down.sky_temp_c[0],
-            expected,
-        );
-    }
-
-    // --- CircularLinear resampling tests (B9 fix) ---
-
-    #[test]
-    fn circular_linear_normal_interpolation() {
-        // 180° → 190°: no wrap-around, should behave like linear.
-        let out = super::circular_linear_resample(&[180.0, 190.0], 6);
-        assert_eq!(out.len(), 12);
-        // First sample is exactly 180°.
-        assert!((out[0] - 180.0).abs() < 1e-12);
-        // Halfway between 180 and 190 = 185°.
-        assert!((out[3] - 185.0).abs() < 1e-12);
-        // Second knot hit.
-        assert!((out[6] - 190.0).abs() < 1e-12);
-        // Beyond last knot: flat hold at 190°.
-        assert!((out[11] - 190.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn circular_linear_wrap_350_to_10() {
-        // 350° → 10°: the shortest arc goes through 0° (delta = +20°),
-        // NOT through 180° (which would be delta = -340° or +20° the wrong way).
-        let out = super::circular_linear_resample(&[350.0, 10.0], 6);
-        assert_eq!(out.len(), 12);
-        // First sample: 350°.
-        assert!((out[0] - 350.0).abs() < 1e-12);
-        // Midpoint: 350 + 0.5 * 20 = 360 → 360 % 360 = 0°.
-        assert!(
-            (out[3] - 0.0).abs() < 1e-12,
-            "midpoint should be 0°, got {}",
-            out[3]
-        );
-        // Second knot: 10°.
-        assert!((out[6] - 10.0).abs() < 1e-12);
-        // Verify all values stay in [0, 360).
-        for (i, &v) in out.iter().enumerate() {
-            assert!((0.0..360.0).contains(&v), "out[{i}] = {v} out of [0, 360)");
+    fn first_hour_uses_hour1_when_selected() {
+        let mut series = hourly_series(&[0.0; 24]);
+        series.dry_bulb_c[0] = 4.0;
+        series.dry_bulb_c[23] = 40.0;
+        let out = series
+            .resample(900, FirstHour::Hour1, start_midnight(1))
+            .expect("resample should succeed");
+        for ts in 1..=4_usize {
+            assert_eq!(
+                out.dry_bulb_c[ts - 1],
+                4.0,
+                "the run's first hour's step {ts} reads the hour-1 record"
+            );
         }
-        // Verify monotonic increase along the short arc: 350→353→357→0→3→7→10.
-        // The raw angles increase (350, 353.33, 356.67, 0, 3.33, 6.67, 10).
-        // After modulo, there's a wrap at the midpoint. Check using circular distance.
-        for w in out.windows(2) {
-            // Use rem_euclid (not %) to handle negative numerators correctly.
-            let circ_delta = ((w[1] - w[0] + 180.0).rem_euclid(360.0)) - 180.0;
-            assert!(
-                circ_delta >= -1e-9,
-                "non-monotonic along short arc: {} → {}, circular delta = {circ_delta}",
-                w[0],
-                w[1]
+        // The second hour interpolates from hour 1 normally.
+        assert_eq!(out.dry_bulb_c[4], 4.0 * 0.75 + 0.0 * 0.25);
+    }
+
+    /// A run whose first day is not the file's first day applies the
+    /// first-hour rule to the run's own first day.
+    #[test]
+    fn first_hour_rule_uses_the_runs_first_day() {
+        let mut day1 = vec![0.0; 24];
+        let mut day2 = vec![0.0; 24];
+        day1[23] = 111.0;
+        day2[0] = 4.0;
+        day2[23] = 222.0;
+        let series = two_day_series(&day1, &day2);
+        let out = series
+            .resample(900, FirstHour::default(), start_midnight(2))
+            .expect("resample should succeed");
+        let n = 4.0_f64;
+        for ts in 1..=4_usize {
+            let w = (ts as f64 / n).min(1.0);
+            let expected = 222.0 * (1.0 - w) + 4.0 * w;
+            assert_eq!(
+                out.dry_bulb_c[24 * 4 + ts - 1],
+                expected,
+                "the run's first hour (day 2's hour 1) interpolates from day 2's hour 24"
             );
         }
     }
 
+    /// Every weather field has one declared method, and the match reads
+    /// the field table: linear last-hour for the point fields, the circle
+    /// for the wind direction, the divided depth for precipitation, the
+    /// hour's record for ground temperature and albedo, the recomputation
+    /// for the sky temperature.
     #[test]
-    fn circular_linear_reverse_wrap_10_to_350() {
-        // 10° → 350°: shortest arc goes backward through 0° (delta = -20°).
-        let out = super::circular_linear_resample(&[10.0, 350.0], 6);
-        assert_eq!(out.len(), 12);
-        // First sample: 10°.
-        assert!((out[0] - 10.0).abs() < 1e-12);
-        // Midpoint: 10 + 0.5 * (-20) = 0 → 0°.
-        assert!(
-            (out[3] - 0.0).abs() < 1e-12,
-            "midpoint should be 0°, got {}",
-            out[3]
-        );
-        // Second knot: 350°.
-        assert!((out[6] - 350.0).abs() < 1e-12);
-        // Verify monotonic decrease along the short arc.
-        for w in out.windows(2) {
-            let circ_delta = ((w[1] - w[0] + 180.0).rem_euclid(360.0)) - 180.0;
-            assert!(
-                circ_delta <= 1e-9,
-                "non-monotonic along short arc: {} → {}, circular delta = {circ_delta}",
-                w[0],
-                w[1]
-            );
+    fn every_weather_field_has_one_declared_method() {
+        use super::{InterpMethod, field_method};
+        let expected: &[(WeatherField, InterpMethod)] = &[
+            (WeatherField::DryBulbC, InterpMethod::LastHour),
+            (WeatherField::DewPointC, InterpMethod::LastHour),
+            (WeatherField::RelHumidityPct, InterpMethod::LastHour),
+            (WeatherField::PressureKpa, InterpMethod::LastHour),
+            (WeatherField::WindSpeedMS, InterpMethod::LastHour),
+            (WeatherField::OpaqueSkyCover, InterpMethod::LastHour),
+            (WeatherField::HorizontalInfrared, InterpMethod::LastHour),
+            (WeatherField::WindDirDeg, InterpMethod::LastHourCircular),
+            (WeatherField::LiquidPrecipM, InterpMethod::LastHourDivided),
+            (WeatherField::GhiWM2, InterpMethod::HourHold),
+            (WeatherField::DniWM2, InterpMethod::HourHold),
+            (WeatherField::DhiWM2, InterpMethod::HourHold),
+            (WeatherField::SkyTempC, InterpMethod::Recompute),
+            (WeatherField::GroundTempC, InterpMethod::HourHold),
+            (WeatherField::SurfaceAlbedo, InterpMethod::HourHold),
+        ];
+        for (field, method) in expected {
+            assert_eq!(&field_method(*field), method, "{field:?}");
         }
     }
 
+    /// The circular interpolation's shortest arc: 350 to 10 degrees
+    /// crosses 0, and an endpoint outside [0, 360) holds the previous
+    /// hour's value.
     #[test]
-    fn circular_linear_constant_wind() {
-        // All same value: should produce that value everywhere.
-        let out = super::circular_linear_resample(&[270.0, 270.0, 270.0], 4);
-        assert_eq!(out.len(), 12);
-        for (i, &v) in out.iter().enumerate() {
-            assert!((v - 270.0).abs() < 1e-12, "out[{i}] = {v}, expected 270.0");
-        }
-    }
-
-    #[test]
-    fn circular_linear_nan_propagates_as_zoh() {
-        // NaN is a sentinel: interval touching NaN falls back to ZOH.
-        let out = super::circular_linear_resample(&[180.0, f64::NAN, 200.0], 2);
-        assert_eq!(out.len(), 6);
-        // Interval [180, NaN]: ZOH from 180.
-        assert!((out[0] - 180.0).abs() < 1e-12);
-        assert!((out[1] - 180.0).abs() < 1e-12);
-        // Interval [NaN, 200]: ZOH from NaN.
-        assert!(out[2].is_nan(), "expected NaN at index 2");
-        assert!(out[3].is_nan(), "expected NaN at index 3");
-        // Interval [200, ...] (only 3 input values, so last interval is [NaN, 200]
-        // already covered. Actually with 3 values and factor 2:
-        // i=0: k=0, frac=0 → 180
-        // i=1: k=0, frac=0.5 → ZOH because b=NaN → 180
-        // i=2: k=1, frac=0 → NaN
-        // i=3: k=1, frac=0.5 → ZOH because a=NaN → NaN
-        // i=4: k=1, frac=1.0 (clamped) → ZOH because a=NaN → NaN
-        // i=5: k=1, frac=1.5 (clamped to 1.0) → ZOH because a=NaN → NaN
-    }
-
-    #[test]
-    fn circular_linear_sentinel_minus_9999_treated_as_zoh() {
-        // -9999 sentinel (TMY3 missing): interval touching it falls back to ZOH.
-        let out = super::circular_linear_resample(&[180.0, -9999.0, 200.0], 2);
-        assert_eq!(out.len(), 6);
-        // Interval [180, -9999]: ZOH from 180.
-        assert!((out[0] - 180.0).abs() < 1e-12);
-        assert!((out[1] - 180.0).abs() < 1e-12);
-        // Interval [-9999, 200]: ZOH from -9999 (propagates sentinel).
-        assert!(
-            (out[2] - (-9999.0)).abs() < 1e-12,
-            "expected -9999 at index 2"
-        );
-        assert!(
-            (out[3] - (-9999.0)).abs() < 1e-12,
-            "expected -9999 at index 3"
-        );
-    }
-
-    #[test]
-    fn circular_linear_360_treated_as_invalid() {
-        // 360.0 is NOT in [0, 360) so it's treated as sentinel → ZOH.
-        let out = super::circular_linear_resample(&[350.0, 360.0], 2);
-        assert_eq!(out.len(), 4);
-        // Both sub-samples in interval [350, 360]: ZOH from 350 (b is invalid).
-        assert!((out[0] - 350.0).abs() < 1e-12);
-        assert!((out[1] - 350.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn circular_linear_single_element_replicates() {
-        let out = super::circular_linear_resample(&[45.0], 4);
-        assert_eq!(out.len(), 4);
-        assert!(out.iter().all(|&v| (v - 45.0).abs() < 1e-12));
-    }
-
-    #[test]
-    fn circular_linear_empty_returns_empty() {
-        let out = super::circular_linear_resample(&[], 4);
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn circular_linear_factor_one_returns_original() {
-        let values = [10.0, 350.0, 180.0];
-        let out = super::circular_linear_resample(&values, 1);
-        assert_eq!(out, values);
-    }
-
-    #[test]
-    fn circular_linear_multi_segment_with_wrap() {
-        // 350 → 10 (wrap through 0), then 10 → 30 (normal).
-        let out = super::circular_linear_resample(&[350.0, 10.0, 30.0], 6);
-        assert_eq!(out.len(), 18);
-        // First segment: 350 → 10 through 0.
-        assert!((out[0] - 350.0).abs() < 1e-12);
-        assert!(
-            (out[3] - 0.0).abs() < 1e-12,
-            "midpoint of first segment: got {}",
-            out[3]
-        );
-        assert!((out[6] - 10.0).abs() < 1e-12);
-        // Second segment: 10 → 30 (normal, delta = +20).
-        assert!((out[12] - 30.0).abs() < 1e-12);
-        // Midpoint of second segment: 20°.
-        assert!(
-            (out[9] - 20.0).abs() < 1e-12,
-            "midpoint of second segment: got {}",
-            out[9]
-        );
-    }
-
-    // --- Cyclic PCHIP tests (D5 fix) ---
-
-    #[test]
-    fn pchip_cyclic_single_element_replicates() {
-        let out = pchip_cyclic_resample(&[42.0], 4);
-        assert_eq!(out.len(), 4);
-        assert!(out.iter().all(|&v| v == 42.0));
-    }
-
-    #[test]
-    fn pchip_cyclic_two_elements_linear() {
-        let out = pchip_cyclic_resample(&[0.0, 10.0], 4);
-        assert_eq!(out.len(), 8);
-        // Forward segment 0→1: 0, 2.5, 5, 7.5
-        // Wrap segment 1→0: 10, 7.5, 5, 2.5
-        let expected = [0.0, 2.5, 5.0, 7.5, 10.0, 7.5, 5.0, 2.5];
-        for (i, (&got, &exp)) in out.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (got - exp).abs() < 1e-12,
-                "index {i}: expected {exp}, got {got}"
-            );
-        }
-    }
-
-    #[test]
-    fn pchip_cyclic_interpolates_through_knots() {
-        let values = [1.0, 4.0, 2.0, 5.0, 3.0];
-        let out = pchip_cyclic_resample(&values, 3);
-        assert_eq!(out.len(), 15);
-        // Every `factor`-th sample must equal the original knot.
-        for (k, &v) in values.iter().enumerate() {
-            assert!(
-                (out[k * 3] - v).abs() < 1e-12,
-                "knot {k}: expected {v}, got {}",
-                out[k * 3]
-            );
-        }
-    }
-
-    #[test]
-    fn pchip_cyclic_smooth_year_boundary() {
-        // The key D5 fix: the wrap segment (last→first) must be smooth,
-        // not a flat-hold discontinuity.
-        // Use a symmetric sinusoidal-like pattern so the boundary is continuous.
-        let values = [0.0, 1.0, 2.0, 1.0]; // peaks at index 2
-        let out_cyclic = pchip_cyclic_resample(&values, 10);
-        let out_plain = pchip_resample(&values, 10);
-
-        assert_eq!(out_cyclic.len(), 40);
-        assert_eq!(out_plain.len(), 40);
-
-        // Interior segments should be similar (not identical due to different
-        // boundary slopes affecting adjacent segments).
-        // The critical difference: at the year boundary (last segment),
-        // cyclic wraps smoothly while plain flat-holds.
-
-        // Last output of cyclic: close to values[0] = 0 (wrap segment nearly done)
-        let last_cyclic = out_cyclic[out_cyclic.len() - 1];
-        assert!(
-            (last_cyclic - 0.0).abs() < 0.5,
-            "cyclic last sample should be close to values[0]=0, got {last_cyclic}"
-        );
-
-        // Last output of plain: exactly values[n-1] = 1.0 (flat extrapolation)
-        let last_plain = out_plain[out_plain.len() - 1];
-        assert!(
-            (last_plain - 1.0).abs() < 1e-12,
-            "plain last sample must equal values[n-1]=1.0, got {last_plain}"
-        );
-
-        // First output of both: exactly values[0] = 0.0
-        assert!((out_cyclic[0] - 0.0).abs() < 1e-12);
-        assert!((out_plain[0] - 0.0).abs() < 1e-12);
-
-        // Cyclic: the transition from last sample to first sample of the next
-        // cycle is smooth (both near values[0]).
-        // Plain: there's a jump from values[n-1]=1.0 to values[0]=0.0.
-        let cyclic_jump = (out_cyclic[0] - last_cyclic).abs();
-        let plain_jump = (out_plain[0] - last_plain).abs();
-        assert!(
-            cyclic_jump < plain_jump,
-            "cyclic boundary jump ({cyclic_jump}) should be smaller than plain ({plain_jump})"
-        );
-    }
-
-    #[test]
-    fn pchip_cyclic_no_discontinuity_at_boundary() {
-        // Construct data where values[0] ≈ values[n-1] to verify
-        // the cyclic interpolation produces a smooth boundary.
-        let n = 24;
-        let values: Vec<f64> = (0..n)
-            .map(|i| 10.0 + 5.0 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).sin())
-            .collect();
-        // values[0] and values[n-1] are both ≈ 10.0 (sin(0) ≈ sin(2π - 2π/n))
-
-        let factor = 6;
-        let out = pchip_cyclic_resample(&values, factor);
-        assert_eq!(out.len(), n * factor);
-
-        // The last sub-sample should be close to values[0], ensuring
-        // that wrapping from year-end to year-start is continuous.
-        let last = out[out.len() - 1];
-        let first = out[0];
-        assert!(
-            (last - first).abs() < 1.0,
-            "boundary discontinuity too large: last={last}, first={first}"
-        );
-
-        // The derivative-like difference at the boundary should be smooth:
-        // the difference between the last sub-sample and the first sub-sample
-        // of the next cycle (= first of this cycle) should be comparable to
-        // the typical step size within the series.
-        let step = values[1] - values[0]; // typical step size
-        let boundary_step = first - last;
-        // boundary_step should be comparable in magnitude to step (within an order of magnitude)
-        assert!(
-            boundary_step.abs() < 10.0 * step.abs() + 0.1,
-            "boundary step ({boundary_step}) much larger than typical step ({step})"
-        );
-    }
-
-    #[test]
-    fn pchip_cyclic_preserves_monotonicity_in_monotone_run() {
-        // Strictly increasing then wrapping back down: monotonicity should
-        // hold within each segment but the wrap segment naturally decreases.
-        // Test a purely monotone cyclic signal (sawtooth) — segments should
-        // be monotone individually.
-        let values = [0.0, 2.0, 4.0, 6.0, 8.0];
-        let out = pchip_cyclic_resample(&values, 10);
-        assert_eq!(out.len(), 50);
-
-        // Check monotonicity within each segment (not across the wrap).
-        for seg in 0..values.len() {
-            let start = seg * 10;
-            let end = (seg + 1) * 10;
-            for w in out[start..end].windows(2) {
-                if seg < values.len() - 1 {
-                    // Forward segments: should be non-decreasing
-                    assert!(
-                        w[1] >= w[0] - 1e-12,
-                        "monotonicity violated in segment {seg}: {} > {}",
-                        w[0],
-                        w[1]
-                    );
-                }
-                // Wrap segment (seg == n-1): decreasing is expected
-            }
-        }
-
-        // Every knot must be hit exactly
-        for (k, &v) in values.iter().enumerate() {
-            assert!(
-                (out[k * 10] - v).abs() < 1e-12,
-                "knot {k}: expected {v}, got {}",
-                out[k * 10]
-            );
-        }
-    }
-
-    #[test]
-    fn pchip_cyclic_factor_one_returns_original() {
-        let values = [1.0, 2.0, 3.0, 4.0];
-        let out = pchip_cyclic_resample(&values, 1);
-        assert_eq!(out, values);
-    }
-
-    #[test]
-    fn pchip_cyclic_empty_returns_empty() {
-        let out = pchip_cyclic_resample(&[], 4);
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn fritsch_carlson_cyclic_flat_segment_slopes_zero() {
-        let y = [5.0, 5.0, 5.0, 5.0];
-        let d = fritsch_carlson_slopes_cyclic(&y);
-        for (i, &s) in d.iter().enumerate() {
-            assert!(s.abs() < 1e-15, "slope at knot {i} should be 0, got {s}");
-        }
-    }
-
-    #[test]
-    fn fritsch_carlson_cyclic_linear_data() {
-        // For perfectly linear data with uniform spacing, slopes should equal
-        // the constant secant — including at the cyclic boundary.
-        let y = [2.0, 4.0, 6.0, 8.0];
-        let d = fritsch_carlson_slopes_cyclic(&y);
-        // Note: the wrap segment is 8→2 (delta = -6), so the data is NOT
-        // linear cyclically. Slopes at interior points should be 2.0,
-        // but at the boundary points (0 and 3) the slopes will differ
-        // because they see the wrap-around delta.
-        // Interior points (1, 2): centered average of adjacent deltas, all +2.
-        assert!(
-            (d[1] - 2.0).abs() < 1e-12,
-            "slope at 1: expected 2.0, got {}",
-            d[1]
-        );
-        assert!(
-            (d[2] - 2.0).abs() < 1e-12,
-            "slope at 2: expected 2.0, got {}",
-            d[2]
-        );
-        // Boundary points: delta wraps from 8→2 = -6, so signs differ → slope = 0.
-        assert!(
-            d[0].abs() < 1e-12,
-            "slope at 0: expected ~0 (sign change at wrap), got {}",
-            d[0]
-        );
-        assert!(
-            d[3].abs() < 1e-12,
-            "slope at 3: expected ~0 (sign change at wrap), got {}",
-            d[3]
-        );
-    }
-
-    #[test]
-    fn fritsch_carlson_cyclic_truly_cyclic_linear() {
-        // Data that IS linear when wrapped: a + b*i mod something won't work,
-        // but constant data is trivially cyclic-linear.
-        let y = [3.0, 3.0, 3.0, 3.0, 3.0];
-        let d = fritsch_carlson_slopes_cyclic(&y);
-        for (i, &s) in d.iter().enumerate() {
-            assert!(s.abs() < 1e-15, "slope at knot {i} should be 0, got {s}");
-        }
-    }
-
-    #[test]
-    fn pchip_cyclic_matches_noncyclic_in_interior() {
-        // For data where the boundary values are equal (values[0] == values[n-1]),
-        // the wrap segment is flat and boundary slopes match non-cyclic slopes
-        // for interior points far from the boundary.
-        let values = [5.0, 10.0, 15.0, 10.0, 5.0];
-        let out_cyclic = pchip_cyclic_resample(&values, 4);
-        let out_plain = pchip_resample(&values, 4);
-
-        // Interior segment 1→2 (index 4..8): should be very similar
-        // (not identical because boundary slopes still affect adjacent segments
-        // through the Fritsch-Carlson correction, but close).
-        for i in 4..8 {
-            let diff = (out_cyclic[i] - out_plain[i]).abs();
-            assert!(
-                diff < 0.5,
-                "interior segment too different at index {i}: cyclic={}, plain={}, diff={diff}",
-                out_cyclic[i],
-                out_plain[i]
-            );
-        }
-    }
-
-    #[test]
-    fn resample_uses_pchip_cyclic_for_temperature_fields() {
-        // Verify that dry_bulb and dew_point default to PchipCyclic,
-        // producing smooth year boundaries.
-        let mut series = sample_series_5pt();
-        // Make first and last values equal so the wrap is naturally smooth.
-        series.dry_bulb_c = vec![5.0, 10.0, 15.0, 10.0, 5.0];
-        series.dew_point_c = vec![2.0, 5.0, 8.0, 5.0, 2.0];
-        series.horizontal_infrared_w_m2 = vec![200.0, 300.0, 350.0, 300.0, 200.0];
-        series.ground_temp_c = vec![8.0, 10.0, 12.0, 10.0, 8.0];
-
-        let resampled = series.resample(600).expect("resample should succeed");
-        assert_eq!(resampled.len(), 30);
-
-        // The last sub-sample of dry_bulb should be close to values[0] = 5.0,
-        // not stuck at values[n-1] = 5.0 as flat extrapolation would give.
-        // (In this case values[0] == values[n-1], so both are 5.0, but the
-        // path getting there is different — cyclic smoothly wraps while
-        // plain flat-holds.)
-        let last_db = resampled.dry_bulb_c[resampled.len() - 1];
-        let first_db = resampled.dry_bulb_c[0];
-        // With cyclic and matching endpoints, the boundary should be very smooth.
-        assert!(
-            (last_db - first_db).abs() < 0.5,
-            "dry_bulb boundary discontinuity: last={last_db}, first={first_db}"
-        );
-
-        // Pressure should still use non-cyclic Pchip (flat extrapolation).
-        // The last value should be exactly values[n-1].
-        let last_pressure = resampled.pressure_kpa[resampled.len() - 1];
-        assert!(
-            (last_pressure - 90.0).abs() < 1e-9,
-            "pressure should use non-cyclic Pchip, last value should be ~90, got {last_pressure}"
-        );
+    fn circular_interp_shortest_arc_and_sentinels() {
+        use super::circular_interp;
+        assert_eq!(circular_interp(350.0, 10.0, 0.5), 0.0);
+        assert_eq!(circular_interp(350.0, 10.0, 1.0), 10.0);
+        assert_eq!(circular_interp(10.0, 350.0, 0.5), 0.0);
+        assert_eq!(circular_interp(180.0, 190.0, 0.5), 185.0);
+        // A sentinel endpoint holds the previous hour's value.
+        assert_eq!(circular_interp(180.0, f64::NAN, 0.5), 180.0);
+        assert_eq!(circular_interp(180.0, -9999.0, 0.5), 180.0);
+        assert_eq!(circular_interp(180.0, 360.0, 0.5), 180.0);
     }
 }

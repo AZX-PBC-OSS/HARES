@@ -55,6 +55,7 @@ fn config(hpxml: &Path) -> DwellingConfig {
                 site_location: SiteLocationOverride::default(),
                 max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
             },
             None,
             1,
@@ -314,8 +315,9 @@ fn parity_furnace_dwelling() -> Dwelling {
 }
 
 /// The read-back's values are the ones the steps use. At the run's first
-/// full-fire step (pinned at step 4: the furnace comes out of warm-up
-/// partial, then meets a load above its capacity) the furnace's step
+/// full-fire step (pinned at step 6: the furnace comes out of warm-up
+/// partial, then meets a load above its capacity; the EnergyPlus weather
+/// phase correction moved the arrival from 4 to 6) the furnace's step
 /// telemetry fuel_input_w is the read-back's rated capacity over its
 /// AFUE, bit for bit: the burner burns exactly the resolved values'
 /// ratio.
@@ -352,7 +354,7 @@ fn step_telemetry_uses_the_read_back_furnace_values() {
     }
     let (step, fuel) =
         pinned_step.expect("the furnace reaches full fire within the pinned horizon");
-    assert_eq!(step, 4, "the first full-fire step is pinned");
+    assert_eq!(step, 6, "the first full-fire step is pinned");
     assert_eq!(
         fuel.to_bits(),
         full_fire_fuel_w.to_bits(),

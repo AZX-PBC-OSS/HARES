@@ -85,11 +85,11 @@ class TestParseEpw:
         weather = parse_epw(EPW_PATH)
         assert weather.source_step_secs == 3600
 
-    def test_midpoint_offset_secs_equals_1800(self):
+    def test_record_label_is_interval_end(self):
         from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
-        assert weather.midpoint_offset_secs == 1800
+        assert weather.record_label == "interval_end"
 
     def test_surface_albedo_none_for_epw(self):
         from hares import parse_epw

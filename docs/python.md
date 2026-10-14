@@ -609,3 +609,17 @@ golden fixtures re-captured.
   `weather_wrap_900s`, `month_boundary_billing_3600s`, `consumer_shape_900s`,
   `fleet_mixed_offset`, `resstock_2025_fleet` (each home has a washer or
   dishwasher and a water heater).
+
+- 2026-10-14: the weather point values (dry bulb, dew point, relative
+  humidity, pressure, wind speed and direction, sky cover, infrared,
+  precipitation) follow EnergyPlus's Last Hour Interpolation at the
+  step's end, replacing the PCHIP resampling and the half-hour record
+  shift; the sky temperature is recomputed from the interpolated inputs,
+  the ground temperature and surface albedo hold the hour's record, a
+  sub-hourly file's records are read directly at its interval and an
+  interval mismatch is a construction error; a step shorter than an hour
+  must divide the hour. The new `first_hour_interpolation` config field
+  (default `hour24`) picks the run's first hour's starting record;
+  `ParsedWeather.record_label` replaces `midpoint_offset_secs`. Every
+  golden re-captured (each fixture's weather reads move under the new
+  rules); the per-golden deltas are in the measurement log.

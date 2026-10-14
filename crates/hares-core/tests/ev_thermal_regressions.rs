@@ -87,25 +87,30 @@ fn inject_ev(hpxml: &str) -> String {
 /// weather format; rows run 01:00..00:00 with 00:00 belonging to the
 /// following date). A flat sub-freezing profile removes the daytime
 /// ambient rescue a diurnal cycle would provide, isolating the sustained
-/// cold-snap behavior.
+/// cold-snap behavior. A full year is written (8760 rows): the format's
+/// timestep detection divides the year's seconds by the record count, so
+/// a partial year parses as a bogus interval.
 fn write_constant_weather(dir: &std::path::Path, days: usize, temp_c: f64) -> PathBuf {
+    let _ = days;
     let path = dir.join("constant_weather.csv");
     let mut out = String::from(
         "date_time,Dry Bulb Temperature [°C],Relative Humidity [%],Wind Speed [m/s],Wind Direction [Deg],Global Horizontal Radiation [W/m2],Direct Normal Radiation [W/m2],Diffuse Horizontal Radiation [W/m2]\n",
     );
-    for day in 0..days {
-        // 2018-01-01 + `day` days, manual arithmetic (non-leap year; the
-        // scenarios stay within Jan/Feb).
-        let dom = 1 + day as u32;
-        let (month, day_of_month) = if dom <= 31 { (1, dom) } else { (2, dom - 31) };
+    for day in 0..365 {
+        use chrono::Datelike as _;
+        // 2018-01-01 + `day` days, by calendar arithmetic (2018 is not a
+        // leap year, so 365 days ends at 2018-12-31).
+        let date = chrono::NaiveDate::from_ymd_opt(2018, 1, 1)
+            .expect("date")
+            .checked_add_signed(chrono::Duration::days(day as i64))
+            .expect("a valid date");
+        let (month, day_of_month) = (date.month(), date.day());
         for hour in 0..24u32 {
             let (m, d, h) = if hour == 23 {
-                let nd = day_of_month + 1;
-                if month == 1 && nd > 31 {
-                    (2, 1, 0)
-                } else {
-                    (month, nd, 0)
-                }
+                let nd = date
+                    .checked_add_signed(chrono::Duration::days(1))
+                    .expect("a valid next date");
+                (nd.month(), nd.day(), 0)
             } else {
                 (month, day_of_month, hour + 1)
             };
@@ -400,6 +405,7 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path),
@@ -479,6 +485,7 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path),
@@ -611,6 +618,7 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path),
@@ -680,6 +688,7 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
     };
     let base = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path.clone()),

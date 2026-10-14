@@ -34,6 +34,10 @@ pub struct ForcingKey {
     /// solar position converts to UTC), so the key carries both this and
     /// the offset.
     pub local_start: chrono::NaiveDateTime,
+    /// The first-hour interpolation rule. It changes which records the
+    /// run's first hour's steps read (hour 24 or hour 1 of the first
+    /// day), so two grids differing only in the rule never share a table.
+    pub first_hour_interpolation: crate::weather::FirstHour,
     /// The resolved site's UTC offset in seconds.
     pub utc_offset_secs: i32,
     /// The horizon in steps: the number of rows the table holds. The

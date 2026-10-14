@@ -1876,6 +1876,7 @@ fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: hares_io::FirstHour::default(),
     }
 }
 
@@ -2258,6 +2259,7 @@ mod tests {
             site_location: hares_io::SiteLocationOverride::default(),
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: hares_io::HealthPolicy::default(),
+            first_hour_interpolation: hares_io::FirstHour::default(),
         }
     }
 
@@ -3756,6 +3758,7 @@ mod tests {
                     site_location: hares_io::SiteLocationOverride::default(),
                     max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: hares_io::FirstHour::default(),
                 },
                 None,
                 bldg_id,
@@ -4043,6 +4046,7 @@ mod tests {
                     site_location: hares_io::SiteLocationOverride::default(),
                     max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: hares_io::FirstHour::default(),
                 },
                 None,
                 bldg_id,
@@ -4452,6 +4456,7 @@ mod tests {
                         max_consecutive_step_failures:
                             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                         health_policy: hares_io::HealthPolicy::default(),
+                        first_hour_interpolation: hares_io::FirstHour::default(),
                     },
                     None,
                     bldg_id,
@@ -4696,6 +4701,7 @@ mod tests {
                     site_location: hares_io::SiteLocationOverride::default(),
                     max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: hares_io::FirstHour::default(),
                 },
                 None,
                 bldg_id,
@@ -4750,6 +4756,7 @@ mod tests {
                     site_location: hares_io::SiteLocationOverride::default(),
                     max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: hares_io::FirstHour::default(),
                 },
                 None,
                 bldg_id,
@@ -5041,6 +5048,7 @@ mod tests {
                         max_consecutive_step_failures:
                             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                         health_policy: hares_io::HealthPolicy::default(),
+                        first_hour_interpolation: hares_io::FirstHour::default(),
                     },
                     overrides,
                     bldg_id,
@@ -5239,6 +5247,7 @@ mod tests {
                     site_location: hares_io::SiteLocationOverride::default(),
                     max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: hares_io::FirstHour::default(),
                 },
                 None,
                 1,
@@ -5424,6 +5433,7 @@ mod tests {
                     site_location: hares_io::SiteLocationOverride::default(),
                     max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: hares_io::FirstHour::default(),
                 },
                 None,
                 bldg_id,
@@ -5516,6 +5526,7 @@ mod tests {
                     site_location: hares_io::SiteLocationOverride::default(),
                     max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: hares_io::FirstHour::default(),
                 },
                 None,
                 bldg_id,
@@ -5866,6 +5877,7 @@ mod tests {
                     site_location: hares_io::SiteLocationOverride::default(),
                     max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: hares_io::FirstHour::default(),
                 },
                 None,
                 bldg_id,

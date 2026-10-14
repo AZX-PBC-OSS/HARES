@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use crate::output::report::{ReportSpec, Selection};
 use crate::site_location::SiteLocationOverride;
+use crate::weather::FirstHour;
 
 /// Errors produced during config deserialization and validation.
 #[derive(Debug, Error)]
@@ -301,6 +302,16 @@ pub struct SimulationConfig {
     /// event stays counted and nothing escalates.
     #[serde(default)]
     pub health_policy: HealthPolicy,
+    /// Which hour's record the run's first hour interpolates from, when
+    /// the weather file is hourly and the step is shorter than an hour:
+    /// hour 24 of the run's first day (`hour24`, the default, EnergyPlus's
+    /// own) or hour 1 (`hour1`). The option only affects the first hour of
+    /// the first day in the entire run period; every later day boundary
+    /// reads the previous day's hour 24, and the same interpolation is
+    /// used for repeated warm-up days. No effect at an hourly step or over
+    /// a sub-hourly file (the records are read directly).
+    #[serde(default)]
+    pub first_hour_interpolation: FirstHour,
 }
 
 /// Default for [`SimulationConfig::max_consecutive_step_failures`]: one
@@ -336,6 +347,7 @@ impl hares_types::DescribeFields for SimulationConfig {
             site_location: SiteLocationOverride::sample(),
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: HealthPolicy::sample(),
+            first_hour_interpolation: FirstHour::default(),
         };
         let mut fields = describe(
             &sample,
@@ -436,6 +448,15 @@ impl hares_types::DescribeFields for SimulationConfig {
                     "health_policy",
                     FieldMeta {
                         description: Some("which counted health events escalate to a run failure"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "first_hour_interpolation",
+                    FieldMeta {
+                        description: Some(
+                            "which hour's record the run's first hour interpolates from (hour24 or hour1)",
+                        ),
                         ..Default::default()
                     },
                 ),
@@ -689,6 +710,18 @@ impl SimulationConfig {
         if duration_secs % time_res_secs != 0 {
             return Err(ConfigError::Validation(format!(
                 "duration ({duration_secs}s) must be evenly divisible by time_res ({time_res_secs}s)"
+            )));
+        }
+
+        // A step shorter than an hour must divide the hour: EnergyPlus
+        // allows only timesteps per hour evenly divisible into 60
+        // (`idd/Energy+.idd.in:925-936`, 1 to 60 including 1, 2, 3, 4, 5,
+        // 6, 10, 12, 15, 20, 30, 60), so every sub-hourly step length
+        // below divides 3600 s.
+        if time_res_secs < 3600 && 3600 % time_res_secs != 0 {
+            return Err(ConfigError::Validation(format!(
+                "time_res ({time_res_secs}s) must divide the hour (3600 s): EnergyPlus allows \
+                 only timesteps per hour evenly divisible into 60"
             )));
         }
 
@@ -1227,6 +1260,7 @@ max_evictions = 0
             site_location: SiteLocationOverride::default(),
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: crate::HealthPolicy::default(),
+            first_hour_interpolation: FirstHour::default(),
         };
         let err = cfg
             .time_res_secs_u32()
@@ -1287,6 +1321,7 @@ destination = { csv = { path = "/tmp/sim_output.csv" } }
             site_location: SiteLocationOverride::default(),
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: crate::HealthPolicy::default(),
+            first_hour_interpolation: FirstHour::default(),
         };
         let built_err = built
             .validate()
@@ -1330,6 +1365,7 @@ latitude_deg = 95.0
             },
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: crate::HealthPolicy::default(),
+            first_hour_interpolation: FirstHour::default(),
         };
         let built_err = built
             .validate()

@@ -36,7 +36,7 @@ use crate::epw::{
     SkyTempModel, compute_sky_temp_c, doe2_ground_temp_from_monthly_avg, interpolate_ground_temp_c,
     monthly_average_dry_bulb,
 };
-use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
+use crate::weather::{RecordLabel, WeatherError, WeatherMeta, WeatherTimeSeries};
 
 /// ISA standard atmosphere: pressure [kPa] at a given elevation [m].
 ///
@@ -357,12 +357,11 @@ pub fn parse_resstock_csv_str(
         wf_allows_leap_years: true,
         source_step_secs,
         // ResStock AMY simplified CSV uses end-of-interval timestamps (first row =
-        // 01:00:00, representing 00:00–01:00), matching the TMY3/EPW hour-ending
-        // convention. The midpoint of each hourly record lies 1800 s (30 min)
-        // before the timestamp. Parallel to the B4 fix at tmy3.rs:244.
-        // See Wilcox & Marion 2008, NREL/TP-581-43156 §3; confirmed by real NREL
-        // ResStock AMY 2018 CSV files (G0100630_2018.csv, G5107750_2018.csv).
-        midpoint_offset_secs: 1800,
+        // 01:00:00, representing 00:00-01:00), matching the TMY3/EPW hour-ending
+        // convention. See Wilcox & Marion 2008, NREL/TP-581-43156; confirmed by
+        // real NREL ResStock AMY 2018 CSV files (G0100630_2018.csv,
+        // G5107750_2018.csv).
+        record_label: RecordLabel::IntervalEnd,
         has_embedded_location: false,
         station_wmo: None,
     };
@@ -858,44 +857,44 @@ Diffuse Horizontal Radiation [W/m2]
         );
     }
 
-    /// Regression test — ticket 099: ResStock CSV timestamps are end-of-interval
-    /// (first row = 01:00:00, representing the period 00:00–01:00), identical to
-    /// the TMY3 and EPW convention. The midpoint of each hourly record therefore
-    /// lies 1800 s (30 min) before the timestamp, so `midpoint_offset_secs` must
-    /// be 1800, not 0.
+    /// Regression test: ResStock CSV timestamps are end-of-interval
+    /// (first row = 01:00:00, representing the period 00:00-01:00), identical to
+    /// the TMY3 and EPW convention.
     ///
     /// Evidence: real NREL ResStock AMY 2018 CSV files
     /// (e.g. G0100630_2018.csv) start at `2018-01-01 01:00:00`, confirming the
-    /// end-of-interval convention. The TMY3 path was corrected to 1800 (B4 fix at
-    /// `tmy3.rs`); this test guards the equivalent fix for the ResStock CSV path.
+    /// end-of-interval convention.
     #[test]
-    fn resstock_midpoint_offset_is_1800_seconds() {
+    fn resstock_record_label_is_interval_end() {
         let csv = build_test_csv(8760);
         let result = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0)
             .expect("should parse 8760-row CSV");
         assert_eq!(
-            result.meta.midpoint_offset_secs, 1800,
-            "ResStock CSV uses end-of-interval timestamps: midpoint_offset_secs \
-             must be 1800 s (30 min), not {}",
-            result.meta.midpoint_offset_secs
+            result.meta.record_label,
+            crate::weather::RecordLabel::IntervalEnd,
+            "ResStock CSV uses end-of-interval timestamps: the record's stamp \
+             labels its interval's end"
         );
     }
 
     /// Verify that the midpoint of the first ResStock CSV record
     /// (timestamp = 01:00, i.e. 3600 s into the year) lies at 00:30
-    /// (1800 s into the year), consistent with the end-of-interval convention
-    /// and the TMY3/EPW offset.
+    /// (1800 s into the year), consistent with the end-of-interval convention.
     #[test]
     fn resstock_first_record_midpoint_is_half_past_midnight() {
         let csv = build_test_csv(8760);
         let ts = parse_resstock_csv_str(&csv, 0.0, 39.7, -105.0, -7.0)
             .expect("should parse 8760-row CSV");
 
-        // First record timestamp sits at 3600 s (01:00) into the year.
-        // Midpoint = timestamp_secs - midpoint_offset_secs = 3600 - 1800 = 1800 s = 00:30.
-        let offset = ts.meta.midpoint_offset_secs as u64;
+        // First record timestamp sits at 3600 s (01:00) into the year. The
+        // interval-end label puts the record's coverage at (00:00, 01:00],
+        // whose midpoint is 1800 s (00:30) into the year.
+        assert_eq!(
+            ts.meta.record_label,
+            crate::weather::RecordLabel::IntervalEnd
+        );
         let first_timestamp_secs: u64 = ts.meta.source_step_secs as u64; // one step = 3600 s
-        let midpoint_secs = first_timestamp_secs - offset;
+        let midpoint_secs = first_timestamp_secs - 1800;
         assert_eq!(
             midpoint_secs, 1800,
             "midpoint of first ResStock CSV record should be 1800 s (00:30) into year, \

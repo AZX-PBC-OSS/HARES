@@ -17,7 +17,7 @@ use crate::epw::{
     SkyTempModel, compute_sky_temp_c, doe2_ground_temp_from_monthly_avg, doe2_ground_temp_monthly,
     interpolate_ground_temp_c,
 };
-use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
+use crate::weather::{RecordLabel, WeatherError, WeatherMeta, WeatherTimeSeries};
 
 /// Valid PSM3 timestep intervals in seconds.
 const VALID_STEP_SECS: [u32; 4] = [300, 900, 1800, 3600];
@@ -133,7 +133,9 @@ fn parse_header_meta(names_line: &str, values_line: &str) -> Result<WeatherMeta,
         elevation_m,
         wf_allows_leap_years: true,
         source_step_secs: 3600,
-        midpoint_offset_secs: 0,
+        // PSM3 stamps every record at its interval's start: the hour
+        // field runs 0 to 23 and the record stamped h covers [h, h + 1 h).
+        record_label: RecordLabel::IntervalStart,
         has_embedded_location: true,
         station_wmo: None,
     })
@@ -717,20 +719,26 @@ mod tests {
     }
 
     #[test]
-    fn psm3_downsample_to_hourly() {
+    fn psm3_subhourly_file_at_another_interval_is_an_error() {
         let csv = make_psm3_csv(15, false);
         let ts = parse_psm3_str(&csv).expect("should parse 15-min PSM3");
         assert_eq!(ts.len(), 35_040);
         assert_eq!(ts.meta.source_step_secs, 900);
 
-        let hourly = ts.resample(3600).expect("should downsample to hourly");
-        assert_eq!(hourly.len(), 8760);
-        assert_eq!(hourly.meta.source_step_secs, 3600);
-
-        // All temperature values are 20.0, so mean should be 20.0.
-        assert!((hourly.dry_bulb_c[0] - 20.0).abs() < 1e-12);
-        // GHI mean of 4x 100 = 100.
-        assert!((hourly.ghi_w_m2[0] - 100.0).abs() < 1e-12);
+        // A sub-hourly file's records are its timesteps: a step at any
+        // other interval is the construction error.
+        let err = ts
+            .resample(
+                3600,
+                crate::weather::FirstHour::default(),
+                chrono::NaiveDate::from_ymd_opt(2019, 1, 1)
+                    .expect("date")
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight"),
+            )
+            .expect_err("the interval mismatch is an error");
+        assert!(err.to_string().contains("900"), "{err}");
+        assert!(err.to_string().contains("3600"), "{err}");
     }
 
     #[test]

@@ -2065,6 +2065,7 @@ mod tests {
             site_location: hares_io::SiteLocationOverride::default(),
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: hares_io::HealthPolicy::default(),
+            first_hour_interpolation: hares_io::FirstHour::default(),
         };
         let weather_avgs = super::WeatherAverages {
             avg_wind_m_s: 2.0,
@@ -2131,6 +2132,7 @@ mod tests {
             site_location: hares_io::SiteLocationOverride::default(),
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: hares_io::HealthPolicy::default(),
+            first_hour_interpolation: hares_io::FirstHour::default(),
         };
         let weather_avgs = super::WeatherAverages {
             avg_wind_m_s: 2.0,

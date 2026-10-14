@@ -2894,6 +2894,7 @@ impl Dwelling {
             site_location: hares_io::SiteLocationOverride::default(),
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: hares_io::HealthPolicy::default(),
+            first_hour_interpolation: hares_io::FirstHour::default(),
         };
 
         let config = DwellingConfig {
@@ -3261,6 +3262,7 @@ fn assemble_from_blueprint_with_seed(
                 bp.time_res,
                 config.initialization_duration.is_some(),
             )),
+            first_hour_interpolation: config.sim_config.first_hour_interpolation,
         },
     )
     .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
@@ -20285,10 +20287,11 @@ latent_gain_fraction = 0.08
     fn warmup_nonconvergence_recorded_and_warned() {
         let mut dwelling = bestest_dwelling();
 
-        // A 1e-9 °C threshold cannot be met across consecutive warm-up days
-        // of a transient start; the fixture is non-converging under it.
+        // A 0.0 °C threshold demands two bitwise-identical warm-up days'
+        // end states: the criterion is strict less-than, so the run is
+        // non-converging by construction.
         let days = dwelling
-            .run_warmup_converged(1e-9, 2)
+            .run_warmup_converged(0.0, 2)
             .expect("warm-up runs to its iteration cap");
 
         assert_eq!(days, 2);
@@ -20547,10 +20550,11 @@ latent_gain_fraction = 0.08
         let mut dwelling = bestest_dwelling();
         dwelling.sim_config.health_policy = hares_io::HealthPolicy::strict();
 
-        // A 1e-9 °C threshold cannot be met across consecutive warm-up days
-        // of a transient start; the fixture is non-converging under it.
+        // A one-iteration budget cannot converge: the criterion compares
+        // two consecutive warm-up days' end states, so warm-up exits
+        // without meeting it and the strict policy escalates.
         let err = dwelling
-            .run_warmup_converged(1e-9, 2)
+            .run_warmup_converged(1e-9, 1)
             .expect_err("the strict policy escalates the non-convergence");
 
         assert!(

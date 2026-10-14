@@ -2109,6 +2109,7 @@ mod tests {
             site_location: crate::SiteLocationOverride::default(),
             max_consecutive_step_failures: crate::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: crate::HealthPolicy::default(),
+            first_hour_interpolation: crate::FirstHour::default(),
         }
     }
 
@@ -2138,6 +2139,7 @@ mod tests {
             site_location: crate::SiteLocationOverride::default(),
             max_consecutive_step_failures: crate::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: crate::HealthPolicy::default(),
+            first_hour_interpolation: crate::FirstHour::default(),
         }
     }
 

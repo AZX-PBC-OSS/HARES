@@ -112,6 +112,7 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
     }
 }
 
@@ -312,6 +313,7 @@ fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(bldg.join("home.xml")),

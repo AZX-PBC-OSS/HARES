@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Duration as ChronoDuration, FixedOffset};
+use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, NaiveDateTime};
 
 use crate::defaults::DefaultsStore;
 use crate::forcing::{ForcingKey, ForcingTable};
@@ -340,7 +340,12 @@ impl ParsedHpxml {
 #[derive(Debug)]
 pub struct ParsedWeather {
     series: Arc<WeatherTimeSeries>,
-    resampled: Mutex<HashMap<u32, Arc<WeatherTimeSeries>>>,
+    /// The resolved series per time grid and first-hour rule: the key is
+    /// the step, the first-hour interpolation and the run's start (the
+    /// run's first hour's record depends on all three), so blueprints on
+    /// one grid share one copy.
+    resampled:
+        Mutex<HashMap<(u32, crate::weather::FirstHour, NaiveDateTime), Arc<WeatherTimeSeries>>>,
     forcing: Mutex<HashMap<ForcingKey, Arc<ForcingTable>>>,
     source: WeatherInput,
 }
@@ -397,30 +402,33 @@ impl ParsedWeather {
         &self.series.meta
     }
 
-    /// The series resampled to `step_secs`, computed once and cached on
-    /// the handle: blueprints at the same resolution share one copy.
+    /// The series resolved to the run's step, computed once and cached on
+    /// the handle: blueprints on the same time grid and first-hour rule
+    /// share one copy. The rule and the start join the key because they
+    /// choose the records the run's first hour's steps read.
     ///
     /// # Errors
     ///
     /// [`HaresError`] when the resample fails.
-    pub fn resampled(&self, step_secs: u32) -> Result<Arc<WeatherTimeSeries>, HaresError> {
-        if let Some(series) = self
-            .resampled
-            .lock()
-            .expect("resample cache")
-            .get(&step_secs)
-        {
+    pub fn resampled(
+        &self,
+        step_secs: u32,
+        first_hour: crate::weather::FirstHour,
+        start: chrono::NaiveDateTime,
+    ) -> Result<Arc<WeatherTimeSeries>, HaresError> {
+        let key = (step_secs, first_hour, start);
+        if let Some(series) = self.resampled.lock().expect("resample cache").get(&key) {
             return Ok(Arc::clone(series));
         }
         let series = Arc::new(
             self.series
-                .resample(step_secs)
+                .resample(step_secs, first_hour, start)
                 .map_err(|err| HaresError::Io(format!("weather resample failed: {err}")))?,
         );
         self.resampled
             .lock()
             .expect("resample cache")
-            .insert(step_secs, Arc::clone(&series));
+            .insert(key, Arc::clone(&series));
         Ok(series)
     }
 
@@ -539,7 +547,7 @@ fn weather_meta_from_lines(
             elevation_m: 0.0,
             wf_allows_leap_years: true,
             source_step_secs: 3600,
-            midpoint_offset_secs: 1800,
+            record_label: crate::weather::RecordLabel::IntervalEnd,
             has_embedded_location: false,
             station_wmo: None,
         }),

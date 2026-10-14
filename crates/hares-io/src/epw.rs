@@ -19,7 +19,7 @@ use hares_physics::constants::{
 use hares_types::parse_trimmed_f64;
 use tracing::{debug, warn};
 
-use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
+use crate::weather::{RecordLabel, WeatherError, WeatherMeta, WeatherTimeSeries};
 
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
 const EXPECTED_RECORDS_LEAP: usize = 8784;
@@ -197,15 +197,10 @@ pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, Weather
     let mut meta = parse_location_header(location_line)?;
     let records_per_hour = ensure_hourly_data_period(data_period_line)?;
     // A sub-hourly file (N records per hour) is read in order at its own
-    // interval: source step 3600/N. The midpoint lag stays at the hourly
-    // convention's fixed 30 minutes: OCHRE's set_annual_index shifts every
-    // stamp by a fixed timedelta(minutes=30) whatever the file's resolution
-    // (vendors/OCHRE/ochre/utils/schedule.py:169, applied at :110), and its
-    // weather step's resample().ffill() (:555) carries the last stamp at or
-    // before each step, so a record's value enters the step at coverage
-    // start plus 30 minutes. Scaling the lag to 1800/N made the held file's
-    // read switch each hour's value about 29.5 minutes early and put the
-    // weather phase ahead of OCHRE's by the same amount.
+    // interval: source step 3600/N. Every record's stamp labels its
+    // interval's end (the minute field is the interval's closing minute),
+    // at every records-per-hour, so the run at the file's own interval
+    // reads each record at the step it covers.
     meta.source_step_secs = 3600 / records_per_hour;
     let epw_ground_temps = parse_ground_temperatures(ground_temp_line);
 
@@ -470,9 +465,9 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         elevation_m,
         wf_allows_leap_years: true,
         source_step_secs: 3600,
-        // EPW uses hour-ending convention: row "12" covers 11:00–12:00.
-        // Subtract half-period (30 min) from sim time to read the correct period.
-        midpoint_offset_secs: 1800,
+        // EPW uses hour-ending convention: a record stamped "12" covers
+        // 11:00-12:00.
+        record_label: RecordLabel::IntervalEnd,
         has_embedded_location: true,
         station_wmo,
     })
@@ -1516,7 +1511,10 @@ mod tests {
         let held = hold_epw_records(&epw, 4);
         let parsed = parse_epw_str(&held).expect("the held file parses");
         assert_eq!(parsed.meta.source_step_secs, 900);
-        assert_eq!(parsed.meta.midpoint_offset_secs, 1800);
+        assert_eq!(
+            parsed.meta.record_label,
+            crate::weather::RecordLabel::IntervalEnd
+        );
         assert_eq!(parsed.len(), 8760 * 4);
         // Each hour's four records carry the hour's value, in source order.
         for hour in 0..12 {

@@ -4033,6 +4033,7 @@ mod profiling_summary_tests {
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
+                "hour24",
                 None,
             )
             .expect("the sim config builds");
@@ -4157,6 +4158,7 @@ mod profiling_summary_tests {
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
+                "hour24",
                 None,
             )
             .expect("the sim config builds");
@@ -4266,6 +4268,7 @@ mod construction_gil_tests {
             None,
             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
+            "hour24",
             None,
         )
         .expect("the sim config builds")
@@ -4444,6 +4447,7 @@ mod construction_gil_tests {
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
+                "hour24",
                 None,
             )
             .expect("the sim config builds");

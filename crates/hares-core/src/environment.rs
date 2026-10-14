@@ -161,12 +161,14 @@ impl StepWeatherEvaluator {
     ///
     /// `horizon_steps` sizes a privately built table; `None` sizes it to
     /// the weather series' length, the run's own default.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         weather: Arc<WeatherTimeSeries>,
         resolved_site: Option<&SiteLocation>,
         step_secs: u32,
         start_time: DateTime<FixedOffset>,
         civil_timezone: Option<&str>,
+        first_hour: hares_io::FirstHour,
         horizon_steps: Option<u64>,
         weather_handle: Option<&ParsedWeather>,
     ) -> Result<Self, StepWeatherError> {
@@ -208,8 +210,7 @@ impl StepWeatherEvaluator {
 
         // Compute start offsets: weather and schedule time series are annual starting Jan 1.
         // Offset into them based on the simulation start time so step 0 reads the correct row.
-        let weather_start_offset =
-            compute_annual_offset(&weather.meta, start_time, step_secs, weather.len());
+        let weather_start_offset = compute_annual_offset(start_time, step_secs, weather.len());
         let (mains_t_annual_avg_c, mains_dt_annual_range_c) =
             compute_mains_inputs(&weather, step_secs);
 
@@ -246,6 +247,7 @@ impl StepWeatherEvaluator {
         let forcing_key = ForcingKey {
             time_res_secs: step_secs,
             local_start: start_time.naive_local(),
+            first_hour_interpolation: first_hour,
             utc_offset_secs: start_time.offset().local_minus_utc(),
             horizon_steps: horizon_steps.unwrap_or_else(|| weather.len() as u64).max(1),
             latitude_bits: weather_meta.latitude.to_bits(),
@@ -541,6 +543,11 @@ pub struct EnvironmentInitOptions<'a> {
     /// reads; the dwelling path passes the horizon rule's value (the
     /// duration's steps, and at least one day's steps when warm-up runs).
     pub horizon_steps: Option<u64>,
+    /// The first-hour interpolation rule: which hour's record the run's
+    /// first hour's steps interpolate from, when the weather file is
+    /// hourly and the step is shorter than an hour. The default is
+    /// EnergyPlus's own: hour 24 of the run's first day.
+    pub first_hour_interpolation: hares_io::FirstHour,
 }
 
 /// Produces a complete [`EnvironmentState`] at each timestep.
@@ -664,7 +671,11 @@ impl EnvironmentManager {
             return Err(EnvironmentManagerError::ZeroTimeResolution);
         }
 
-        let weather = Arc::new(weather.resample(step_secs)?);
+        let weather = Arc::new(weather.resample(
+            step_secs,
+            options.first_hour_interpolation,
+            start_time.naive_local(),
+        )?);
         if weather.is_empty() {
             return Err(EnvironmentManagerError::EmptyWeather);
         }
@@ -730,7 +741,14 @@ impl EnvironmentManager {
         options: EnvironmentInitOptions<'_>,
     ) -> Result<Self, EnvironmentManagerError> {
         let (weather, weather_handle) = match weather {
-            WeatherSource::Shared(handle) => (handle.resampled(step_secs)?, Some(handle)),
+            WeatherSource::Shared(handle) => (
+                handle.resampled(
+                    step_secs,
+                    options.first_hour_interpolation,
+                    start_time.naive_local(),
+                )?,
+                Some(handle),
+            ),
             WeatherSource::Owned(series) => (series, None),
         };
         if weather.is_empty() {
@@ -765,6 +783,7 @@ impl EnvironmentManager {
             step_secs,
             start_time,
             options.civil_timezone,
+            options.first_hour_interpolation,
             options.horizon_steps,
             weather_handle,
         )
@@ -787,11 +806,10 @@ impl EnvironmentManager {
             .conditioned_zone_index()?
             .map(|idx| ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)));
         let surfaces = build_surface_geometry(building)?;
-        // Use the shifted offset (with midpoint_offset_secs applied) for initial conditions
-        // to match OCHRE's behavior of reading weather at the period midpoint.
-        // EPW hour 12 (covers 11:00-12:00) has its representative value at 11:30.
-        let init_offset =
-            compute_annual_offset(&weather.meta, start_time, step_secs, weather.len());
+        // The initial conditions read the weather at the run's start: the
+        // record of the hour the start lies in, the same mapping every
+        // step's read uses.
+        let init_offset = compute_annual_offset(start_time, step_secs, weather.len());
         let initial_outdoor_temp_c = weather
             .dry_bulb_c
             .get(init_offset)
@@ -1541,19 +1559,19 @@ fn build_forcing_table(
     Ok(ForcingTable::from_rows(rows?))
 }
 
-/// EPW hour-ending midpoint shift (30 minutes = 1800 seconds).
 /// Compute the step offset into an annual weather file for a given start time.
 ///
-/// EPW files are indexed by **local standard time** (LST). The simulation
+/// Weather files are indexed by **local standard time** (LST). The simulation
 /// start time is already in local time (`DateTime<FixedOffset>`), so no
 /// UTC→LST conversion is needed -- we extract wall-clock components directly.
 ///
-/// The `midpoint_offset_secs` from `WeatherMeta` accounts for the source
-/// file's timestamp convention. For EPW (hour-ending), subtracting half a
-/// period aligns the PCHIP knot with the period midpoint, matching OCHRE's
-/// pvlib +30min convention.
+/// The resolved series is addressed by the step's coverage: the row the
+/// read reaches at the step's start is the row of the step ending
+/// `step_secs` later (EnergyPlus reaches a record's value at the end of
+/// its hour, Input Output Reference "Weather Data Hourly Interpolation"),
+/// and the offset carries no shift: the row index into the resolved
+/// series is the step count from the year's start to the step's start.
 fn compute_annual_offset(
-    meta: &WeatherMeta,
     start_time: DateTime<FixedOffset>,
     step_secs: u32,
     weather_len: usize,
@@ -1573,7 +1591,7 @@ fn compute_annual_offset(
     // (365 or 366 days).  EPW, PSM3, and TMY3 all support leap-year files;
     // using the actual row count avoids mis-indexing for 8784-row (leap) files.
     let year_secs = weather_len as u64 * step_secs as u64;
-    let shifted = (seconds_into_year + year_secs - meta.midpoint_offset_secs as u64) % year_secs;
+    let shifted = (seconds_into_year + year_secs) % year_secs;
 
     (shifted / step_secs as u64) as usize
 }
@@ -1997,13 +2015,18 @@ pub fn resample_weather(
         / u64::from(step_secs);
 
     let handle = ParsedWeather::parse(weather)?;
-    let series = handle.resampled(step_secs)?;
+    let series = handle.resampled(
+        step_secs,
+        config.first_hour_interpolation,
+        config.start_time.naive_local(),
+    )?;
     let evaluator = StepWeatherEvaluator::new(
         series,
         Some(site),
         step_secs,
         config.start_time,
         config.civil_timezone.as_deref(),
+        config.first_hour_interpolation,
         // The horizon the run's own table is sized to: the weather
         // series' length covers every step of the horizon.
         None,
@@ -2115,6 +2138,16 @@ mod tests {
     }
 
     fn weather_series() -> WeatherTimeSeries {
+        // One whole day, hourly: the even hours at the first value, the
+        // odd hours at the second, so every hour is distinguishable and
+        // the series covers whole days (the day-structured interpolation
+        // requires it).
+        let n = 24;
+        let mix = |first: f64, second: f64| -> Vec<f64> {
+            (0..n)
+                .map(|h| if h % 2 == 0 { first } else { second })
+                .collect()
+        };
         WeatherTimeSeries {
             meta: WeatherMeta {
                 location: "Test".to_string(),
@@ -2124,25 +2157,25 @@ mod tests {
                 elevation_m: 1000.0,
                 wf_allows_leap_years: true,
                 source_step_secs: 3600,
-                midpoint_offset_secs: 0,
+                record_label: hares_io::RecordLabel::IntervalEnd,
                 has_embedded_location: true,
                 station_wmo: None,
             },
             design_conditions: None,
-            dry_bulb_c: vec![10.0, 20.0],
-            dew_point_c: vec![2.0, 3.0],
-            rel_humidity_pct: vec![50.0, 55.0],
-            pressure_kpa: vec![100.0, 100.5],
-            ghi_w_m2: vec![500.0, 600.0],
-            dni_w_m2: vec![700.0, 800.0],
-            dhi_w_m2: vec![100.0, 110.0],
-            wind_speed_m_s: vec![3.0, 4.0],
-            wind_dir_deg: vec![180.0, 190.0],
-            opaque_sky_cover: vec![2.0, 3.0],
-            horizontal_infrared_w_m2: vec![300.0, 310.0],
-            sky_temp_c: vec![5.0, 6.0],
-            ground_temp_c: vec![8.0, 9.0],
-            liquid_precip_m: vec![0.0, 0.0],
+            dry_bulb_c: mix(10.0, 20.0),
+            dew_point_c: mix(2.0, 3.0),
+            rel_humidity_pct: mix(50.0, 55.0),
+            pressure_kpa: mix(100.0, 100.5),
+            ghi_w_m2: mix(500.0, 600.0),
+            dni_w_m2: mix(700.0, 800.0),
+            dhi_w_m2: mix(100.0, 110.0),
+            wind_speed_m_s: mix(3.0, 4.0),
+            wind_dir_deg: mix(180.0, 190.0),
+            opaque_sky_cover: mix(2.0, 3.0),
+            horizontal_infrared_w_m2: mix(300.0, 310.0),
+            sky_temp_c: mix(5.0, 6.0),
+            ground_temp_c: mix(8.0, 9.0),
+            liquid_precip_m: vec![0.0; n],
             surface_albedo: None,
         }
     }
@@ -2365,8 +2398,11 @@ mod tests {
     }
 
     #[test]
-    fn weather_step_0_matches_first_epw_record() {
-        // Start at 00:00 LST: no midpoint shift, maps directly to row 0.
+    fn weather_step_0_interpolates_from_the_first_days_hour24() {
+        // Start at 00:00 LST. The series is one whole day at the hour:
+        // the run's first step is hour 1's first step at 60 s, which
+        // interpolates from the first day's hour-24 record (20.0) toward
+        // hour 1's own record (10.0) at weight 1/60.
         let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather_series(),
@@ -2379,7 +2415,9 @@ mod tests {
         .expect("manager");
         let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
         let env = manager.update(&sim_clock, &[]).unwrap();
-        assert!((env.weather.outdoor_temp_c - 10.0).abs() < 1.0e-6);
+        let w = 1.0_f64 / 60.0;
+        let expected = 20.0 * (1.0 - w) + 10.0 * w;
+        assert!((env.weather.outdoor_temp_c - expected).abs() < 1.0e-6);
     }
 
     fn ambient_test_manager(b: &Building) -> (EnvironmentManager, SimClock) {
@@ -2654,9 +2692,10 @@ mod tests {
     }
 
     #[test]
-    fn weather_step_59_uses_pchip_interpolation() {
-        // With 2-element [10.0, 20.0] input and PCHIP (linear for 2-pt),
-        // step 59 of 60 sub-hour slots ≈ 10.0 + (59/60)*10.0 ≈ 19.833.
+    fn weather_step_59_reads_the_record_of_the_hour_it_ends() {
+        // The series is one whole day at the hour; step 59 of 60 sub-hour
+        // slots is the step ending at 01:00: hour 1's last step, whose
+        // this-hour weight is 1.0, reads hour 1's record exactly (10.0).
         let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
         let mut manager = EnvironmentManager::new(
             weather_series(),
@@ -2672,13 +2711,8 @@ mod tests {
             let _ = sim_clock.next();
         }
         let env = manager.update(&sim_clock, &[]).unwrap();
-        // PCHIP linearly interpolates between 10.0 and 20.0 for 2-element input.
-        let expected = 10.0 + (59.0 / 60.0) * 10.0;
-        assert!(
-            (env.weather.outdoor_temp_c - expected).abs() < 0.1,
-            "expected ~{expected}, got {}",
-            env.weather.outdoor_temp_c
-        );
+        // A record's value is reached at the end of its hour.
+        assert_eq!(env.weather.outdoor_temp_c, 10.0);
     }
 
     #[test]
@@ -2695,7 +2729,13 @@ mod tests {
         .expect("manager");
         let sim_clock = SimClock::new(start, Duration::seconds(60), Duration::hours(2));
         let env = manager.update(&sim_clock, &[]).unwrap();
-        assert!((env.weather.wind_dir_deg - 185.0).abs() < 1.0e-6);
+        // The run starts at 00:30, inside hour 1: the first step is the
+        // hour's 31st, and the first-hour rule interpolates on the circle
+        // from the first day's hour-24 record (190.0) toward hour 1's own
+        // record (180.0) at weight 31/60.
+        let w = 31.0_f64 / 60.0;
+        let expected = 190.0 + w * (180.0 - 190.0);
+        assert!((env.weather.wind_dir_deg - expected).abs() < 1.0e-6);
     }
 
     #[test]
@@ -2851,9 +2891,14 @@ mod tests {
         )
         .expect("manager");
         let env = manager.update(&clock(), &[]).unwrap();
-        // Free-float zone (no HVAC setpoints) starts at outdoor temperature,
-        // not 21 °C. weather_series() has dry_bulb_c[0] = 10.0.
-        assert!((env.zones[0].temperature_c - 10.0).abs() < 1e-6);
+        // Free-float zone (no HVAC setpoints) starts at the run's first
+        // step's outdoor temperature, not 21 °C. The series is one whole
+        // day at the hour: the first step at 60 s is hour 1's first step,
+        // which interpolates from the first day's hour-24 record (20.0)
+        // toward hour 1's own record (10.0) at weight 1/60.
+        let w = 1.0_f64 / 60.0;
+        let expected_first_step = 20.0 * (1.0 - w) + 10.0 * w;
+        assert!((env.zones[0].temperature_c - expected_first_step).abs() < 1e-6);
     }
 
     /// Clear-sky solar noon on a south-facing tilted surface must produce non-zero
@@ -2979,7 +3024,7 @@ mod tests {
     /// same lag, so the held read switches each hour's value at coverage
     /// start plus 30 minutes, exactly when OCHRE's step switches.
     #[test]
-    fn held_weather_reads_the_reference_phase_at_a_step_boundary() {
+    fn held_weather_reads_the_record_covering_each_step() {
         // A held 900 s file: each hourly record repeated four times, dry
         // bulb 10 + the record's hour, so every hour is distinguishable.
         let mut lines = vec![
@@ -3014,7 +3059,10 @@ mod tests {
         std::fs::write(&path, lines.join("\n") + "\n").expect("write held EPW");
         let weather = hares_io::epw::parse_epw(&path).expect("the held file parses");
         assert_eq!(weather.meta.source_step_secs, 900);
-        assert_eq!(weather.meta.midpoint_offset_secs, 1800);
+        assert_eq!(
+            weather.meta.record_label,
+            hares_io::RecordLabel::IntervalEnd
+        );
 
         let start = utc_offset().with_ymd_and_hms(2021, 1, 1, 0, 0, 0).unwrap();
         let mut manager = EnvironmentManager::new(
@@ -3028,16 +3076,17 @@ mod tests {
         .expect("manager");
 
         let mut clock = SimClock::new(start, Duration::seconds(900), Duration::hours(4));
-        // Step wall times and the record OCHRE's step has in effect: the
-        // hour containing wall time minus 30 minutes. 00:30 and 01:00 sit
-        // inside hour 1's hold on both sides; 01:15, 02:15 and 03:15 are
-        // the first steps where a scaled lag would have moved on.
+        // Step wall times and the record the step reads: the record
+        // covering the step, stamped at the step's end (the file's
+        // interval-end labels). Steps 0 to 3 end inside hour 1 (00:15 to
+        // 01:00) and read hour 1's records; step 4 ends at 01:15 and is
+        // the first step hour 2's record covers.
         let expected_by_step: [(u64, f64); 5] = [
             (2, 10.0),  // 00:30: hour 1 (rows 0..3)
-            (4, 10.0),  // 01:00: hour 1 still
-            (5, 10.0),  // 01:15: hour 1; the scaled lag reads hour 2 here
-            (9, 11.0),  // 02:15: hour 2; the scaled lag reads hour 3 here
-            (13, 12.0), // 03:15: hour 3; the scaled lag reads hour 4 here
+            (3, 10.0),  // 01:00: hour 1's last record
+            (4, 11.0),  // 01:15: the first step hour 2's record covers
+            (8, 12.0),  // 02:15: the first step hour 3's record covers
+            (12, 13.0), // 03:15: the first step hour 4's record covers
         ];
         for step in 0..16u64 {
             let env = manager.update(&clock, &[]).unwrap();
@@ -3063,34 +3112,30 @@ mod tests {
     /// (125*86400 + 12*3600) / 3600 = 3012.
     #[test]
     fn annual_offset_leap_year_may_5_noon() {
-        let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2024, 5, 5, 12, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600, 8784), 3012);
+        assert_eq!(compute_annual_offset(start, 3600, 8784), 3012);
     }
 
     /// compute_annual_offset: non-leap year (2023) -- May 5 noon.
     /// (124*86400 + 12*3600) / 3600 = 2988.
     #[test]
     fn annual_offset_non_leap_year_may_5_noon() {
-        let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 5, 5, 12, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600, 8760), 2988);
+        assert_eq!(compute_annual_offset(start, 3600, 8760), 2988);
     }
 
     /// compute_annual_offset: leap year Jan 1 00:00 → index 0.
     #[test]
     fn annual_offset_leap_year_jan_1() {
-        let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600, 8784), 0);
+        assert_eq!(compute_annual_offset(start, 3600, 8784), 0);
     }
 
     /// compute_annual_offset: non-leap year Jan 1 00:00 → index 0.
     #[test]
     fn annual_offset_non_leap_year_jan_1() {
-        let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600, 8760), 0);
+        assert_eq!(compute_annual_offset(start, 3600, 8760), 0);
     }
 
     /// compute_annual_offset: leap year Dec 31 23:00.
@@ -3099,40 +3144,36 @@ mod tests {
     /// shifted = 31,618,800 % 31,622,400 = 31,618,800.  31,618,800 / 3600 = 8783.
     #[test]
     fn annual_offset_leap_year_dec_31() {
-        let meta = weather_series().meta;
         let start = utc_offset()
             .with_ymd_and_hms(2024, 12, 31, 23, 0, 0)
             .unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600, 8784), 8783);
+        assert_eq!(compute_annual_offset(start, 3600, 8784), 8783);
     }
 
     /// compute_annual_offset: non-leap year Dec 31 23:00.
     /// (364*86400 + 23*3600) / 3600 = 8759.
     #[test]
     fn annual_offset_non_leap_year_dec_31() {
-        let meta = weather_series().meta;
         let start = utc_offset()
             .with_ymd_and_hms(2023, 12, 31, 23, 0, 0)
             .unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600, 8760), 8759);
+        assert_eq!(compute_annual_offset(start, 3600, 8760), 8759);
     }
 
     /// compute_annual_offset: leap year Feb 29 → ordinal0 = 59.
     /// (59*86400 + 6*3600) / 3600 = 1422.
     #[test]
     fn annual_offset_leap_year_feb_29() {
-        let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2024, 2, 29, 6, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600, 8784), 1422);
+        assert_eq!(compute_annual_offset(start, 3600, 8784), 1422);
     }
 
     /// compute_annual_offset: non-leap year Mar 1 → ordinal0 = 59.
     /// (59*86400 + 6*3600) / 3600 = 1422.
     #[test]
     fn annual_offset_non_leap_year_mar_1() {
-        let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 3, 1, 6, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 3600, 8760), 1422);
+        assert_eq!(compute_annual_offset(start, 3600, 8760), 1422);
     }
 
     /// compute_annual_offset: sub-hourly resolution (15-min steps).
@@ -3140,9 +3181,8 @@ mod tests {
     /// year_secs = 35040*900 = 31,536,000 (= 365*86400).  5400/900 = 6.
     #[test]
     fn annual_offset_15min_resolution() {
-        let meta = weather_series().meta;
         let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 1, 30, 0).unwrap();
-        assert_eq!(compute_annual_offset(&meta, start, 900, 35040), 6);
+        assert_eq!(compute_annual_offset(start, 900, 35040), 6);
     }
 
     // ----- compute_schedule_offset leap-year tests (T-0032) -----
@@ -3246,7 +3286,7 @@ mod tests {
                 elevation_m: 10.0,
                 wf_allows_leap_years: true,
                 source_step_secs: 3600,
-                midpoint_offset_secs: 0,
+                record_label: hares_io::RecordLabel::IntervalEnd,
                 has_embedded_location: true,
                 station_wmo: None,
             },
@@ -3725,7 +3765,7 @@ mod tests {
                 elevation_m: 0.0,
                 wf_allows_leap_years: true,
                 source_step_secs: step_secs,
-                midpoint_offset_secs: 0,
+                record_label: hares_io::RecordLabel::IntervalEnd,
                 has_embedded_location: true,
                 station_wmo: None,
             },
@@ -3789,7 +3829,7 @@ mod tests {
                 elevation_m: 0.0,
                 wf_allows_leap_years: true,
                 source_step_secs: step_secs,
-                midpoint_offset_secs: 0,
+                record_label: hares_io::RecordLabel::IntervalEnd,
                 has_embedded_location: true,
                 station_wmo: None,
             },
@@ -3865,7 +3905,7 @@ mod tests {
                 elevation_m: 0.0,
                 wf_allows_leap_years: true,
                 source_step_secs: step_secs,
-                midpoint_offset_secs: 0,
+                record_label: hares_io::RecordLabel::IntervalEnd,
                 has_embedded_location: true,
                 station_wmo: None,
             },
@@ -3943,7 +3983,7 @@ mod tests {
                     elevation_m: 10.0,
                     wf_allows_leap_years: true,
                     source_step_secs: 3600,
-                    midpoint_offset_secs: 0,
+                    record_label: hares_io::RecordLabel::IntervalEnd,
                     has_embedded_location: true,
                     station_wmo: None,
                 },

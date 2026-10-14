@@ -59,6 +59,7 @@ fn sim_config(
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
     }
 }
 
@@ -327,6 +328,35 @@ fn forcing_table_run_equals_uncached_run_consumer_shape() {
     };
     let (with_table, per_step) = table_and_per_step_frames(config);
     assert_frames_bitwise_equal(&per_step, &with_table, "consumer shape");
+}
+
+/// `forcing_key_differs_by_first_hour`: two blueprints over one
+/// parsed-weather handle that differ only in the first-hour rule hold
+/// different tables on that handle: the rule changes which records the
+/// run's first hour's steps read.
+#[test]
+fn forcing_key_differs_by_first_hour() {
+    let shared = SharedCz4a::new();
+    let mut first_settings = cz4a_settings(start_at("2024-02-27T00:00:00-07:00"), 1);
+    let mut second_settings = first_settings.clone();
+    first_settings.sim_config.first_hour_interpolation = hares_io::FirstHour::Hour24;
+    second_settings.sim_config.first_hour_interpolation = hares_io::FirstHour::Hour1;
+
+    let first = shared.blueprint(first_settings).build().expect("build");
+    let second = shared.blueprint(second_settings).build().expect("build");
+
+    let first_key = first.environment.forcing_key().clone();
+    let second_key = second.environment.forcing_key().clone();
+    assert_ne!(
+        first_key, second_key,
+        "two first-hour rules on one weather file must key differently"
+    );
+    let first_table = first.environment.forcing_table().expect("table").clone();
+    let second_table = second.environment.forcing_table().expect("table").clone();
+    assert!(
+        !std::sync::Arc::ptr_eq(&first_table, &second_table),
+        "different keys must not share a table"
+    );
 }
 
 /// `forcing_key_differs_by_start_date`: two blueprints over one

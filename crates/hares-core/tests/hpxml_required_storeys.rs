@@ -52,6 +52,7 @@ fn ach50_infiltration_without_floors_above_grade_is_an_error() {
                 site_location: hares_io::SiteLocationOverride::default(),
                 max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
             },
             None,
             1,

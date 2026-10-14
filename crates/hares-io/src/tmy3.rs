@@ -36,7 +36,7 @@ use hares_types::parse_trimmed_f64;
 use crate::epw::{
     SkyTempModel, compute_sky_temp_c, doe2_ground_temp_monthly, interpolate_ground_temp_c,
 };
-use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
+use crate::weather::{RecordLabel, WeatherError, WeatherMeta, WeatherTimeSeries};
 
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
 const EXPECTED_RECORDS_LEAP: usize = 8784;
@@ -248,11 +248,10 @@ fn parse_station_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         elevation_m,
         wf_allows_leap_years: true,
         source_step_secs: 3600,
-        // TMY3 uses hour-ending convention: timestamp marks the end of each
-        // measurement interval (e.g., hour 1 = 00:01–01:00). The midpoint of
-        // each hour is 30 minutes before the timestamp, so offset = 1800 s.
+        // TMY3 uses hour-ending convention: the timestamp marks the end of
+        // each measurement interval (e.g., hour 1 = 00:01-01:00).
         // See Wilcox & Marion 2008, NREL/TP-581-43156. Consistent with EPW.
-        midpoint_offset_secs: 1800,
+        record_label: RecordLabel::IntervalEnd,
         has_embedded_location: true,
         station_wmo: Some(fields[0].trim())
             .filter(|id| !id.is_empty())
@@ -591,12 +590,13 @@ mod tests {
     ///
     /// Reference: Wilcox & Marion 2008, NREL/TP-581-43156 §3.
     #[test]
-    fn tmy3_midpoint_offset_is_1800_seconds() {
+    fn tmy3_record_label_is_interval_end() {
         let csv = make_tmy3_csv(false);
         let ts = parse_tmy3_str(&csv).expect("should parse standard TMY3 year");
         assert_eq!(
-            ts.meta.midpoint_offset_secs, 1800,
-            "TMY3 uses hour-ending convention: midpoint_offset_secs must be 1800 s (30 min)"
+            ts.meta.record_label,
+            RecordLabel::IntervalEnd,
+            "TMY3 uses hour-ending convention: the record's stamp labels its interval's end"
         );
     }
 
@@ -607,11 +607,12 @@ mod tests {
         let csv = make_tmy3_csv(false);
         let ts = parse_tmy3_str(&csv).expect("should parse standard TMY3 year");
 
-        // First record timestamp sits at 3600 s (01:00) into the year.
-        // Midpoint = timestamp_secs - midpoint_offset_secs = 3600 - 1800 = 1800 s = 00:30.
-        let offset = ts.meta.midpoint_offset_secs as u64;
+        // First record timestamp sits at 3600 s (01:00) into the year. The
+        // interval-end label puts the record's coverage at (00:00, 01:00],
+        // whose midpoint is 1800 s (00:30) into the year.
+        assert_eq!(ts.meta.record_label, RecordLabel::IntervalEnd);
         let first_timestamp_secs: u64 = ts.meta.source_step_secs as u64; // one step = 3600 s
-        let midpoint_secs = first_timestamp_secs - offset;
+        let midpoint_secs = first_timestamp_secs - 1800;
         assert_eq!(
             midpoint_secs, 1800,
             "midpoint of first TMY3 record should be 1800 s (00:30) into year, \

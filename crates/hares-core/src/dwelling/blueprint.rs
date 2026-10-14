@@ -440,7 +440,11 @@ impl DwellingBlueprintBuilder {
         } = self;
 
         let step_secs = super::conversions::duration_to_u32_secs(settings.sim_config.time_res)?;
-        let resampled_weather = inputs.weather.resampled(step_secs)?;
+        let resampled_weather = inputs.weather.resampled(
+            step_secs,
+            settings.sim_config.first_hour_interpolation,
+            settings.sim_config.start_time.naive_local(),
+        )?;
         let resampled_schedule = Arc::new(
             inputs
                 .schedule

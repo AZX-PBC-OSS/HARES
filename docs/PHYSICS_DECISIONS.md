@@ -212,3 +212,102 @@ provenance names where each thermostat's setpoints came from: the schedule
 column, the HPXML control, or the default profile. OCHRE lets the column
 win silently (`vendors/OCHRE/ochre/utils/schedule.py:408-427`); the
 warning follows OS-HPXML, not OCHRE.
+
+## Weather reads follow the EnergyPlus interpolation rules
+
+A weather step's values are the EnergyPlus weather rules' values, read
+from the vendored EnergyPlus (commit `f7c103167a`) and its published
+references. HARES previously resampled weather with PCHIP curves and a
+half-hour record shift; both are gone, replaced by the rules below.
+
+### Point values: Last Hour Interpolation
+
+For an hourly file at a step shorter than an hour, every point field is
+the linear last-hour interpolation, evaluated for the step's end:
+`Value_TimeStep = LastHourValue * Weight_LastHour + ThisHourValue *
+Weight_ThisHour`, `Weight_ThisHour = CurrentTimeStep /
+NumberOfTimeStepsInHour`, `Weight_LastHour = 1 - Weight_ThisHour`
+(EnergyPlus Input Output Reference, "Weather Data Hourly Interpolation",
+`doc/input-output-reference/src/weather-data/weather-data-hourly-interpolation.tex`;
+the loop at `WeatherManager.cc:3093-3121`, the weights at
+`:8343-8347`). Hour 1 is 00:00:01 to 01:00:00, so a record's value is
+reached at the end of its hour. The published weights for four steps per
+hour are 0.25, 0.5, 0.75, 1.0 on the this-hour value; for six, 1/6 to
+6/6. Interpolation runs only when the file has one record per hour and
+the run has more than one timestep per hour (`WeatherManager.cc:3043`).
+
+At a one-hour step each step takes the record of the hour it ends in.
+The fields that interpolate linearly: dry bulb, dew point, relative
+humidity, barometric pressure, wind speed, opaque sky cover and
+horizontal infrared (`WeatherManager.cc:3094-3105`). Wind direction
+interpolates on the circle with the same weight
+(`interpolateWindDirection`, `:3174-3188`). Liquid precipitation is the
+weighted hourly depth divided by the steps per hour (`:3119-3120`). Sky
+temperature is recomputed from the step's interpolated inputs, never
+interpolated itself (`calcSky`, `:3106-3113`). Day boundaries read the
+previous day's hour-24 record as last hour; the run's first hour reads
+the record the first-hour rule names (below).
+
+### Solar values
+
+The solar fields (global horizontal, direct normal and diffuse
+horizontal) hold the hour's record across the hour's steps: each
+hourly average spans its hour unchanged. EnergyPlus treats each hourly
+average as the value at the hour's midpoint and interpolates linearly
+between midpoints when the timestep is shorter than an hour (the
+midpoint rule); that rule is recorded with the solar interpolation's
+own change.
+
+### First hour, record labels, sub-hourly files
+
+The first hour of the run interpolates from hour 24 of the run's first
+day (`Hour24`, the default) or hour 1 (`Hour1`), the config field
+`first_hour_interpolation` (EnergyPlus RunPeriod "First Hour
+Interpolation Starting Values",
+`doc/input-output-reference/src/overview/group-location-climate-weather-file-access.tex:717-721`).
+"Note that this option only affects the first hour of the first day in
+the entire run period" (`:721`); the code sets the whole previous-hour
+record from it once per environment (`WeatherManager.cc:3050-3056`), so
+it governs the solar previous hour of the run's first hour too. No step
+reads a record before the run's first day.
+
+A record's stamp labels its interval's end for EPW, TMY3 and ResStock
+CSV (a record stamped `h` covers `(h - 1 h, h]`), and its interval's
+start for PSM3 (a record stamped `t` covers `[t, t + interval)`, so an
+hourly PSM3 record stamped `t` is the record of the hour ending
+`t + 1 h`). The metadata carries this as the record label; a
+sub-hourly file's records are the run's timesteps when the file's
+interval equals the step, and the run is a construction error naming
+both intervals when it does not, as EnergyPlus refuses the mismatch:
+"Number of intervals per hour on Weather file does not match specified
+number of Time Steps Per Hour" (`WeatherManager.cc:715-722`). A step
+shorter than an hour must divide the hour (EnergyPlus allows only
+timesteps per hour evenly divisible into 60,
+`idd/Energy+.idd.in:925-936`). An hourly file at a step longer than an
+hour keeps the interval mean of the records the step covers (EnergyPlus
+has no timestep longer than an hour).
+
+OCHRE shifts every record's stamp by a fixed `timedelta(minutes=30)`
+whatever the file's interval (`ochre/utils/schedule.py:169`, applied at
+`:110`) and its `resample().ffill()` (`:555`) carries the last stamp at
+or before each step: a half-period lag and a zero-order hold. That is
+the pvlib midpoint convention, which the EnergyPlus rules above
+replace; the OCHRE comparison's own hold file (the adapter's
+OCHRE-convention construction) is read directly at its interval.
+
+### Where HARES's weather fields differ from EnergyPlus's
+
+Three places, deliberate:
+
+- **Surface albedo.** EnergyPlus does not carry the file's albedo into
+  its per-timestep weather: the value is read only into the missing-data
+  defaults (`WeatherManager.cc:2936-2938`, `:3031`) and the
+  interpolation loop assigns no albedo. HARES holds the hour's record.
+- **Total sky cover.** EnergyPlus interpolates total and opaque sky
+  cover (`:3098-3100`); HARES's weather has no total sky cover field
+  (`crates/hares-io/src/weather.rs`, opaque sky cover only), so that
+  field has no counterpart to interpolate.
+- **Global horizontal irradiance.** EnergyPlus keeps no global
+  horizontal in its per-timestep weather (the `WeatherVars` set,
+  `WeatherManager.hh:713-732`); HARES carries GHI and holds the hour's
+  record under the point-value rule above.

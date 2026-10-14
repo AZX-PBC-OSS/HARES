@@ -66,7 +66,7 @@ fn empty_weather_meta() -> WeatherMeta {
         elevation_m: 1600.0,
         wf_allows_leap_years: true,
         source_step_secs: 3600,
-        midpoint_offset_secs: 0,
+        record_label: hares_io::RecordLabel::IntervalEnd,
         has_embedded_location: false,
         station_wmo: None,
     }

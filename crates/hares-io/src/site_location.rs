@@ -284,7 +284,7 @@ impl SiteLocation {
             elevation_m: 0.0,
             wf_allows_leap_years: true,
             source_step_secs: 3600,
-            midpoint_offset_secs: 1800,
+            record_label: crate::weather::RecordLabel::IntervalEnd,
             has_embedded_location: false,
             station_wmo: None,
         };
@@ -532,7 +532,7 @@ mod tests {
             elevation_m: elev,
             wf_allows_leap_years: true,
             source_step_secs: 3600,
-            midpoint_offset_secs: 0,
+            record_label: crate::weather::RecordLabel::IntervalStart,
             has_embedded_location: true,
             station_wmo: None,
         }

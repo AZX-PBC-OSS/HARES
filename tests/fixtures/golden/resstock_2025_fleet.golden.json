@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "5a9c4ac85adb3ac7808090e5e941bce44cef8e6a",
+  "git_head": "e30f70c1269ddb9755d850b8313d4d05036658af",
   "git_dirty": true,
   "metrics": [],
   "products": {
@@ -161,9 +161,9 @@
         },
         {
           "name": "Total Electric Power (kW)",
-          "digest": "253fc511646e2a5e49497886ec74ca4cfe06c41df15e74c640f7812b46a430e7",
+          "digest": "245569f1e3ccf683e599943626d33aa819c204f68ea1f9789ff1c1854409ff77",
           "blocks": [
-            "253fc511646e2a5e49497886ec74ca4cfe06c41df15e74c640f7812b46a430e7"
+            "245569f1e3ccf683e599943626d33aa819c204f68ea1f9789ff1c1854409ff77"
           ]
         },
         {
@@ -175,23 +175,23 @@
         },
         {
           "name": "Total Reactive Power (kVAR)",
-          "digest": "d3944f838704b48c35df894997dc11544b874dd8644c781e25d31f4174fe4319",
+          "digest": "e59333fdef8412b8eb9582ae997d6b8144b2945382f6ed18bdf8922cca3724cb",
           "blocks": [
-            "d3944f838704b48c35df894997dc11544b874dd8644c781e25d31f4174fe4319"
+            "e59333fdef8412b8eb9582ae997d6b8144b2945382f6ed18bdf8922cca3724cb"
           ]
         },
         {
           "name": "Outdoor Dry Bulb (C)",
-          "digest": "46c6d17ed4603daadca135774ea772255a7af176fedcb21d137a7bddceee05d3",
+          "digest": "ce4c4770faa5abe8f7c23e658ba17696727d0ab7c048ac94a88fe7fde80255f6",
           "blocks": [
-            "46c6d17ed4603daadca135774ea772255a7af176fedcb21d137a7bddceee05d3"
+            "ce4c4770faa5abe8f7c23e658ba17696727d0ab7c048ac94a88fe7fde80255f6"
           ]
         },
         {
           "name": "Temperature - Indoor (C)",
-          "digest": "615ee2c2d4cb10f9e247ddebe9ab4672aae254a21dd0059f671883dfd8d1eca9",
+          "digest": "9e223ff4fb1bd64e23de2cbad4aa9d80f802a71649eac086937ba336eaae899d",
           "blocks": [
-            "615ee2c2d4cb10f9e247ddebe9ab4672aae254a21dd0059f671883dfd8d1eca9"
+            "9e223ff4fb1bd64e23de2cbad4aa9d80f802a71649eac086937ba336eaae899d"
           ]
         },
         {
@@ -203,16 +203,16 @@
         },
         {
           "name": "Room AC Electric Power (kW)",
-          "digest": "8dd5557e41e31d9e7e9066a2e82ef40c3434a4525a7b0f5355205fd0f7857239",
+          "digest": "562e038cf80d5a980d9789551269df132000da62ad99501dc4dfb29191765901",
           "blocks": [
-            "8dd5557e41e31d9e7e9066a2e82ef40c3434a4525a7b0f5355205fd0f7857239"
+            "562e038cf80d5a980d9789551269df132000da62ad99501dc4dfb29191765901"
           ]
         },
         {
           "name": "Heat Pump Water Heater Electric Power (kW)",
-          "digest": "8ba269d77010449bc1e0c926d17425aad01cf9b2c429b621bd0a976f21e17c74",
+          "digest": "b10c237becee0016b49d941590e1e303af432efb4f8e824a388e67b1b8e17b3e",
           "blocks": [
-            "8ba269d77010449bc1e0c926d17425aad01cf9b2c429b621bd0a976f21e17c74"
+            "b10c237becee0016b49d941590e1e303af432efb4f8e824a388e67b1b8e17b3e"
           ]
         },
         {
@@ -287,16 +287,16 @@
         },
         {
           "name": "HVAC Cooling End Use Electric Power (kW)",
-          "digest": "8dd5557e41e31d9e7e9066a2e82ef40c3434a4525a7b0f5355205fd0f7857239",
+          "digest": "562e038cf80d5a980d9789551269df132000da62ad99501dc4dfb29191765901",
           "blocks": [
-            "8dd5557e41e31d9e7e9066a2e82ef40c3434a4525a7b0f5355205fd0f7857239"
+            "562e038cf80d5a980d9789551269df132000da62ad99501dc4dfb29191765901"
           ]
         },
         {
           "name": "Water Heating End Use Electric Power (kW)",
-          "digest": "8ba269d77010449bc1e0c926d17425aad01cf9b2c429b621bd0a976f21e17c74",
+          "digest": "b10c237becee0016b49d941590e1e303af432efb4f8e824a388e67b1b8e17b3e",
           "blocks": [
-            "8ba269d77010449bc1e0c926d17425aad01cf9b2c429b621bd0a976f21e17c74"
+            "b10c237becee0016b49d941590e1e303af432efb4f8e824a388e67b1b8e17b3e"
           ]
         },
         {
@@ -343,9 +343,9 @@
         },
         {
           "name": "Temperature - Ground (C)",
-          "digest": "3e84b012d6c448a04f1ac5c3b1cd159fb3403f9aff6a5be1bc59840181e78a0b",
+          "digest": "3bf077b94cc0c1f35218751ab10b7ee7af8b1764cdf8e24eade73d57be69bd99",
           "blocks": [
-            "3e84b012d6c448a04f1ac5c3b1cd159fb3403f9aff6a5be1bc59840181e78a0b"
+            "3bf077b94cc0c1f35218751ab10b7ee7af8b1764cdf8e24eade73d57be69bd99"
           ]
         }
       ]

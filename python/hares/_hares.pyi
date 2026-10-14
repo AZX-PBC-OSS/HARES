@@ -2411,6 +2411,7 @@ class SimulationConfig:
         site_location: SiteLocationOverride | None = ...,
         max_consecutive_step_failures: int = ...,
         health_policy: HealthPolicy | None = ...,
+        first_hour_interpolation: str = ...,
         **unexpected: object,
     ) -> None: ...
     @property
@@ -2857,7 +2858,7 @@ class WeatherTimeSeries:
     @property
     def source_step_secs(self) -> int: ...
     @property
-    def midpoint_offset_secs(self) -> int: ...
+    def record_label(self) -> str: ...
     @property
     def surface_albedo(self) -> list[float] | None: ...
 
