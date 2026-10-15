@@ -318,18 +318,27 @@ def test_output_columns_present(
 #   against OCHRE's held step values, most visibly at the solar ramps (the
 #   worst window-solar step error 9.2% at a morning ramp), and the 48 h
 #   heating and the overnight worst divergence both moved.
+# - The records re-measured (2026-10-15) after the engine's warm-up
+#   converged by the EnergyPlus criteria by default: the HARES side of
+#   this trace warms up (its initial condition is the converged state,
+#   the warm-up's own extra days of first-day replay), where the trace's
+#   OCHRE run starts from its own initial state, so the early-window
+#   divergence's shape changed (the 6 h worst 0.71 to 2.05 C at the
+#   morning ramp) and the 48 h heating moved -14.8% against OCHRE's
+#   (the warmed state draws less first-day heat). The two envelope
+#   models' response remains the divergence's cause class.
 #
 # The three thermal-trace cases below stay strict xfails for the temperature
 # thresholds; their in-test records (ochre_records.check_record, edge
 # inclusive) hold each measured pair so the reasons cannot go stale.
 # ---------------------------------------------------------------------------
 
-TRACE_WORST_6H_C = 0.7066
-TRACE_MEAN_48H_C = 0.3697
+TRACE_WORST_6H_C = 2.0452
+TRACE_MEAN_48H_C = 0.3988
 TRACE_HEATING_OCHRE_KWH = 47.052
-TRACE_HEATING_HARES_KWH = 40.136
-OVERNIGHT_WORST_C = 1.2267
-OVERNIGHT_MEAN_C = 0.3672
+TRACE_HEATING_HARES_KWH = 31.3747
+OVERNIGHT_WORST_C = 1.3706
+OVERNIGHT_MEAN_C = 0.3823
 SOLAR_MEAN_RATIO = 0.9885
 SOLAR_WORST_REL_ERR = 0.0918
 

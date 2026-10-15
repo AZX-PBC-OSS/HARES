@@ -79,8 +79,12 @@ class SimulationPlan:
             **self.base_kwargs,
         )
 
-    def _config(self, start_time: str, duration_s: int) -> SimulationConfig:
-        return SimulationConfig(start_time=start_time, duration=duration_s, **self._sim_kwargs)
+    def _config(self, start_time: str, duration_s: int, **extra: Any) -> SimulationConfig:
+        return SimulationConfig(
+            start_time=start_time,
+            duration=duration_s,
+            **{**self._sim_kwargs, **extra},
+        )
 
     def add_segment(
         self,
@@ -102,12 +106,17 @@ class SimulationPlan:
 
         for i, seg in enumerate(self.segments):
             kwargs = dict(self.base_kwargs)
+            # The warm-up rides the segment's config: disabled for segments
+            # 1+, where after segment 0's warmup restore_building_state
+            # transfers the thermal state forward, so re-initialization is
+            # unnecessary and would be discarded by the transfer.
+            warmup_kw: dict[str, Any] = {"warmup": None} if i > 0 else {}
 
             bp = DwellingBlueprint.from_hpxml(
                 self.hpxml,
                 self.schedule,
                 self.weather,
-                config=self._config(seg.start.isoformat(), seg.duration_s),
+                config=self._config(seg.start.isoformat(), seg.duration_s, **warmup_kw),
                 **kwargs,
             )
             seg.setup(bp)

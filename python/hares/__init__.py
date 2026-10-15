@@ -17,6 +17,7 @@ from ._hares import Coverage
 from ._hares import Alignment
 from ._hares import SimulationConfig
 from ._hares import HealthPolicy
+from ._hares import WarmupConfig
 from ._hares import SiteLocationOverride
 from ._hares import Destination
 from ._hares import Frequency
@@ -190,6 +191,7 @@ __all__ = [
     "Alignment",
     "SimulationConfig",
     "HealthPolicy",
+    "WarmupConfig",
     "SiteLocationOverride",
     "DwellingConfig",
     "ReportSpec",

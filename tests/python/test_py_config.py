@@ -282,12 +282,7 @@ class TestSimulationConfig:
         )
         assert cfg.diagnostics is True
         toml_keys = tomllib.loads(cfg.to_toml()).keys()
-        # The warmup key exists on the Rust config (its TOML form carries
-        # it) before its Python keyword lands with the warm-up surface
-        # row; the equality is otherwise whole.
-        keyword_only = sorted(k for k in keyword_names if k != "warmup")
-        toml_only = sorted(k for k in toml_keys if k != "warmup")
-        assert keyword_only == toml_only, (
+        assert sorted(keyword_names) == sorted(toml_keys), (
             "the keyword surface and the TOML keys must be the same name map"
         )
         parsed = SimulationConfig.from_toml(cfg.to_toml())

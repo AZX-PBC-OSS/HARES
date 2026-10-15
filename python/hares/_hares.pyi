@@ -2394,7 +2394,42 @@ class HealthPolicy:
     def __eq__(self, other: object) -> bool: ...
     def __repr__(self) -> str: ...
 
+class WarmupConfig:
+    """The warm-up convergence criteria, EnergyPlus's tolerances and day
+    counts. Every field left unset keeps its EnergyPlus default:
+    temperature_tolerance_c 0.4 delta C on the daily maximum and minimum
+    zone air temperature, loads_tolerance 0.04 on the daily peak HVAC
+    heating and cooling delivered (the 100 W floor applies), at least
+    min_days 1 and at most max_days 25 warm-up days."""
+
+    def __init__(
+        self,
+        *,
+        temperature_tolerance_c: float = ...,
+        loads_tolerance: float = ...,
+        min_days: int = ...,
+        max_days: int = ...,
+        **unexpected: object,
+    ) -> None: ...
+    @property
+    def temperature_tolerance_c(self) -> float: ...
+    @property
+    def loads_tolerance(self) -> float: ...
+    @property
+    def min_days(self) -> int: ...
+    @property
+    def max_days(self) -> int: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __repr__(self) -> str: ...
+
 class SimulationConfig:
+    """The one simulation config. The `warmup` keyword has three cases:
+    an omitted keyword warms up by the Rust default (the EnergyPlus
+    criteria, `WarmupConfig()`); an explicit `warmup=None` disables the
+    warm-up; a `WarmupConfig(...)` sets the criteria. (The getter reads
+    `WarmupConfig | None` only: it cannot distinguish the omitted
+    keyword's default from an explicit default `WarmupConfig()`.)"""
+
     def __init__(
         self,
         *,
@@ -2411,6 +2446,7 @@ class SimulationConfig:
         site_location: SiteLocationOverride | None = ...,
         max_consecutive_step_failures: int = ...,
         health_policy: HealthPolicy | None = ...,
+        warmup: WarmupConfig | None = ...,
         first_hour_interpolation: str = ...,
         weather_year: str = ...,
         **unexpected: object,
@@ -2471,6 +2507,10 @@ class SimulationConfig:
     def health_policy(self) -> HealthPolicy: ...
     @health_policy.setter
     def health_policy(self, value: HealthPolicy) -> None: ...
+    @property
+    def warmup(self) -> WarmupConfig | None: ...
+    @warmup.setter
+    def warmup(self, value: WarmupConfig | None) -> None: ...
     def validate(self) -> None: ...
     def to_toml(self) -> str: ...
     @classmethod

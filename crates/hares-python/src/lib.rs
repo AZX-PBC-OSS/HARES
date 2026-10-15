@@ -41,7 +41,9 @@ mod utils;
 use py_actor::{
     PyActor, PyDRLevel, PyDispatchRequest, PyMode, PyOutputVariable, PyPriority, PySignal,
 };
-use py_config::{PyDwellingConfig, PyHealthPolicy, PySimulationConfig, PySiteLocationOverride};
+use py_config::{
+    PyDwellingConfig, PyHealthPolicy, PySimulationConfig, PySiteLocationOverride, PyWarmupConfig,
+};
 use py_control::PyControlSignal;
 use py_dwelling::{PyDwelling, PyTimestepsIter};
 use py_enums::{
@@ -76,6 +78,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<py_callback::PyBatchInfo>()?;
     m.add_class::<PyTimestepsIter>()?;
     m.add_class::<PySimulationConfig>()?;
+    m.add_class::<PyWarmupConfig>()?;
     m.add_class::<PySiteLocationOverride>()?;
     m.add_class::<PyDwellingConfig>()?;
     m.add_class::<PyReportSpec>()?;

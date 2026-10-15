@@ -270,6 +270,126 @@ impl PyHealthPolicy {
 #[derive(Debug, Clone)]
 pub struct PySimulationConfig(pub SimulationConfig);
 
+/// The warm-up keyword's three cases: an absent keyword means the Rust
+/// default (the converging warm-up at the EnergyPlus defaults), an
+/// explicit `None` means `Warmup::Disabled`, and a `WarmupConfig` sets
+/// the criteria. The signature default (`PyWarmupArg::Absent`) is what
+/// distinguishes absent from an explicit `None`.
+#[derive(Debug, Clone)]
+pub enum PyWarmupArg {
+    Absent,
+    ExplicitNone,
+    Config(hares_io::WarmupConfig),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for PyWarmupArg {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> Result<Self, PyErr> {
+        if obj.is_none() {
+            return Ok(Self::ExplicitNone);
+        }
+        if let Ok(config) = obj.extract::<PyWarmupConfig>() {
+            return Ok(Self::Config(config.0));
+        }
+        let type_name = obj
+            .get_type()
+            .name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Err(PyTypeError::new_err(format!(
+            "warmup must be a WarmupConfig or None, got {type_name}"
+        )))
+    }
+}
+
+impl PyWarmupArg {
+    /// The `Warmup` the argument stands for; absent is the Rust default.
+    fn into_warmup(self) -> hares_io::Warmup {
+        match self {
+            Self::Absent => hares_io::Warmup::default(),
+            Self::ExplicitNone => hares_io::Warmup::Disabled,
+            Self::Config(config) => hares_io::Warmup::Converge(config),
+        }
+    }
+}
+
+/// The warm-up convergence criteria, a frozen pyclass over the Rust
+/// `WarmupConfig`: the EnergyPlus tolerances and day counts. A partial
+/// construction keeps the Rust defaults for the fields left unset.
+#[pyclass(name = "WarmupConfig", frozen, from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyWarmupConfig(pub hares_io::WarmupConfig);
+
+#[pymethods]
+impl PyWarmupConfig {
+    #[new]
+    #[pyo3(signature = (
+        *,
+        temperature_tolerance_c = hares_io::DEFAULT_TEMPERATURE_TOLERANCE_C,
+        loads_tolerance = hares_io::DEFAULT_LOADS_TOLERANCE,
+        min_days = hares_io::DEFAULT_MIN_WARMUP_DAYS,
+        max_days = hares_io::DEFAULT_MAX_WARMUP_DAYS,
+        **unexpected
+    ))]
+    pub fn new(
+        temperature_tolerance_c: f64,
+        loads_tolerance: f64,
+        min_days: u32,
+        max_days: u32,
+        unexpected: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        if let Some(unexpected) = unexpected {
+            unexpected_keyword_error("WarmupConfig", unexpected, &[])?;
+        }
+        let config = hares_io::WarmupConfig {
+            temperature_tolerance_c,
+            loads_tolerance,
+            min_days,
+            max_days,
+        };
+        config
+            .validate()
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        Ok(Self(config))
+    }
+
+    #[getter]
+    pub fn temperature_tolerance_c(&self) -> f64 {
+        self.0.temperature_tolerance_c
+    }
+
+    #[getter]
+    pub fn loads_tolerance(&self) -> f64 {
+        self.0.loads_tolerance
+    }
+
+    #[getter]
+    pub fn min_days(&self) -> u32 {
+        self.0.min_days
+    }
+
+    #[getter]
+    pub fn max_days(&self) -> u32 {
+        self.0.max_days
+    }
+
+    pub fn __eq__(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "WarmupConfig(temperature_tolerance_c={}, loads_tolerance={}, \
+             min_days={}, max_days={})",
+            self.0.temperature_tolerance_c,
+            self.0.loads_tolerance,
+            self.0.min_days,
+            self.0.max_days,
+        )
+    }
+}
+
 #[pymethods]
 impl PySimulationConfig {
     #[new]
@@ -288,6 +408,7 @@ impl PySimulationConfig {
         site_location = None,
         max_consecutive_step_failures = hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy = None,
+        warmup = PyWarmupArg::Absent,
         first_hour_interpolation = "hour24",
         weather_year = "typical",
         **unexpected
@@ -308,6 +429,7 @@ impl PySimulationConfig {
         site_location: Option<PySiteLocationOverride>,
         max_consecutive_step_failures: u32,
         health_policy: Option<PyHealthPolicy>,
+        warmup: PyWarmupArg,
         first_hour_interpolation: &str,
         weather_year: &str,
         unexpected: Option<&Bound<'_, PyDict>>,
@@ -380,7 +502,7 @@ impl PySimulationConfig {
             site_location: site_location.map(|s| s.0).unwrap_or_default(),
             max_consecutive_step_failures,
             health_policy: health_policy.map(|p| p.0).unwrap_or_default(),
-            warmup: hares_io::Warmup::default(),
+            warmup: warmup.into_warmup(),
             first_hour_interpolation: first_hour,
             weather_year,
         };
@@ -563,6 +685,25 @@ impl PySimulationConfig {
             }
         };
         self.assign(|cfg| cfg.weather_year = year)
+    }
+
+    /// The warm-up: a `WarmupConfig` (the converging warm-up's criteria) or
+    /// `None` (disabled). The constructor's three cases are wider: an
+    /// absent `warmup` keyword is the Rust default (the converging
+    /// warm-up), which no getter can distinguish from an explicit
+    /// `WarmupConfig()` at the Rust defaults.
+    #[getter]
+    pub fn warmup(&self) -> Option<PyWarmupConfig> {
+        self.0.warmup.config().map(|config| PyWarmupConfig(*config))
+    }
+
+    #[setter]
+    pub fn set_warmup(&mut self, value: Option<PyWarmupConfig>) -> PyResult<()> {
+        let warmup = match value {
+            None => hares_io::Warmup::Disabled,
+            Some(config) => hares_io::Warmup::Converge(config.0),
+        };
+        self.assign(move |cfg| cfg.warmup = warmup)
     }
 
     #[getter]
@@ -902,6 +1043,7 @@ mod tests {
 
     use super::PySimulationConfig;
     use super::PySiteLocationOverride;
+    use super::PyWarmupArg;
     use super::WholeSeconds;
     use hares_core::Dwelling;
     use hares_io::SimulationConfig;
@@ -923,6 +1065,7 @@ mod tests {
             None,
             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
+            crate::py_config::PyWarmupArg::Absent,
             "hour24",
             "typical",
             None,
@@ -987,6 +1130,7 @@ mod tests {
                     None,
                     hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     None,
+                    PyWarmupArg::Absent,
                     "hour24",
                     "typical",
                     Some(&dict),
@@ -1018,6 +1162,7 @@ mod tests {
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
+                PyWarmupArg::Absent,
                 "hour24",
                 "typical",
                 Some(&dict),
@@ -1051,6 +1196,7 @@ mod tests {
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
+                PyWarmupArg::Absent,
                 "hour24",
                 "typical",
                 Some(&dict),

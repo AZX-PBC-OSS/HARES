@@ -1005,4 +1005,102 @@ mod tests {
             );
         });
     }
+
+    /// The Python warm-up default is the Rust one: a dwelling built
+    /// through the Python `from_hpxml` with no `warmup` keyword and one
+    /// built through the Rust convenience constructor, both on the
+    /// cz4a_ashp_hpwh inputs from 2023-01-01 for 2 days at 3600 s, report
+    /// equal `WarmupOutcome`s.
+    #[test]
+    fn python_and_rust_warmup_defaults_agree() {
+        use pyo3::types::PyString;
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture = root.join("../../tests/fixtures/parity/cz4a_ashp_hpwh");
+        let hpxml = fixture.join("building.xml");
+        let schedule = fixture.join("schedule.csv");
+        let weather = fixture.join("weather.epw");
+        let defaults = root.join("../../defaults");
+
+        Python::attach(|py| {
+            let cls = py.get_type::<crate::py_dwelling::PyDwelling>();
+            let mut py_dwelling = crate::py_dwelling::PyDwelling::from_hpxml(
+                &cls,
+                PyString::new(py, hpxml.to_str().expect("utf8")).as_any(),
+                Some(PyString::new(py, schedule.to_str().expect("utf8")).as_any()),
+                PyString::new(py, weather.to_str().expect("utf8")).as_any(),
+                crate::py_config::PySimulationConfig::new(
+                    "2023-01-01T00:00:00-07:00",
+                    crate::py_config::WholeSeconds(2 * 86_400),
+                    crate::py_config::WholeSeconds(3600),
+                    None,
+                    false,
+                    false,
+                    hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                    None,
+                    0,
+                    None,
+                    None,
+                    hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    None,
+                    crate::py_config::PyWarmupArg::Absent,
+                    "hour24",
+                    "typical",
+                    None,
+                )
+                .expect("the sim config builds"),
+                0,
+                Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
+                None,
+                None,
+            )
+            .expect("the cz4a fixture must construct");
+            py_dwelling.initialize().expect("initialize");
+            let py_outcome = py_dwelling
+                .health()
+                .expect("the health reads")
+                .inner
+                .warmup
+                .clone();
+
+            // The Rust convenience constructor on the same inputs: its
+            // sim config carries the same default warm-up. The
+            // with-reports variant passes the repo's defaults directory
+            // (the plain constructor's None defaults source cannot load
+            // the fixture's zip lookup).
+            let start = chrono::DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")
+                .expect("the start parses");
+            let rust_dwelling = Dwelling::from_hpxml_with_reports(
+                hares_core::HpxmlInputs {
+                    hpxml_path: &hpxml,
+                    schedule_path: &schedule,
+                    weather_path: &weather,
+                },
+                start,
+                chrono::Duration::hours(1),
+                chrono::Duration::days(2),
+                None,
+                Vec::new(),
+                Some(defaults),
+            )
+            .expect("the Rust convenience constructor builds");
+            let rust_outcome = rust_dwelling.health().warmup.clone();
+
+            assert_eq!(
+                py_outcome, rust_outcome,
+                "the Python default and the Rust default report the same WarmupOutcome"
+            );
+            match &rust_outcome {
+                hares_core::WarmupOutcome::Ran {
+                    days_run,
+                    converged,
+                    ..
+                } => {
+                    assert!(*converged, "the agreeing default converges");
+                    assert!(*days_run >= 1, "the agreeing default ran warm-up days");
+                }
+                other => panic!("expected a ran warm-up, got {other:?}"),
+            }
+        });
+    }
 }

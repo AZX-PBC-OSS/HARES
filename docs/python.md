@@ -271,6 +271,46 @@ the buffer set to NaN. And a Python actor's publication made outside
 `decide()` lands at the next drain (the next `decide()`'s return); one
 made after the last drain is dropped.
 
+## Warm-up
+
+Every dwelling warms up by default: the warm-up repeats the run's
+first day until the EnergyPlus warm-up convergence criteria are met
+(at most 25 days), so the recorded run starts from a periodic initial
+state, and warm-up steps are never reported (the first report row is
+`start_time`). The criteria are the EnergyPlus defaults: the daily
+maximum and minimum zone air temperature against
+`temperature_tolerance_c` (0.4 delta C) and the daily peak HVAC
+heating and cooling delivered against `loads_tolerance` (0.04, with
+the 100 W floor), for every zone, with at least `min_days` (1) and at
+most `max_days` (25) warm-up days.
+
+The `warmup` keyword on `SimulationConfig` has three cases: an omitted
+keyword converges with the Rust defaults; an explicit `warmup=None`
+disables the warm-up (the run starts from the construction's initial
+state, the outcome reads `disabled`); a `WarmupConfig(...)` sets the
+criteria. The outcome is read from `RunResult.health.warmup` (or
+`dwelling.health().warmup` before the run): `days_run`, `converged`
+and the last day's residuals.
+
+```python
+from hares import Dwelling, SimulationConfig, WarmupConfig
+
+dw = Dwelling.from_hpxml(
+    hpxml="path/to/building.xml",
+    schedule="path/to/schedules.csv",
+    weather="path/to/weather.epw",
+    defaults="path/to/HARES/defaults",
+    config=SimulationConfig(
+        start_time="2023-01-01T00:00:00-07:00",
+        duration=2 * 86400,
+        time_res=3600,
+        warmup=WarmupConfig(max_days=2),
+    ),
+)
+outcome = dw.health().warmup
+print(outcome.outcome, outcome.days_run, outcome.converged)
+```
+
 ## Results
 
 One run carries one result: `Dwelling.simulate()` and
@@ -398,6 +438,11 @@ replacement.
   `Provenance`, `EquipmentProvenance`, `SiteLocationOverride`.
 - Added: `HealthPolicy` (with `strict()`), `HaresHealthPolicyError`, and
   the `SimulationConfig.health_policy` keyword.
+- Added: `WarmupConfig` (the EnergyPlus warm-up criteria over the Rust
+  table's defaults) and the `SimulationConfig.warmup` keyword: an omitted
+  `warmup` converges with the Rust defaults, `warmup=None` disables, a
+  `WarmupConfig` sets the criteria; the removed `initialization_duration`
+  keyword names `SimulationConfig.warmup`.
 - Added: `Dwelling.finish()`, `Dwelling.health()`,
   `Dwelling.initialize()`, `Dwelling.attach_callback()`,
   `Dwelling.config()`, `Dwelling.dwelling_fatal`,
@@ -666,3 +711,13 @@ golden fixtures re-captured.
   (`consumer_shape_900s`, `fleet_same_offset_300s`) are unchanged. The
   days-run table and the first-day energy deltas are in the measurement
   log.
+
+- 2026-10-15: Python dwellings warm up by default, as Rust ones do: the
+  Python `SimulationConfig` gains the `warmup` keyword (an omitted
+  keyword is the Rust default, `warmup=None` disables, a `WarmupConfig`
+  sets the criteria) and the removed `initialization_duration` keyword
+  is an error naming `SimulationConfig.warmup`. The calibration consumer
+  never passed the keyword, so its evaluations warm up from this change;
+  the consumer's fit absorbs it. No golden was re-captured: the golden
+  manifests run through the Rust adapter, which this change does not
+  touch.

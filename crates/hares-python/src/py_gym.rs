@@ -958,6 +958,7 @@ mod tests {
             None,
             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
+            crate::py_config::PyWarmupArg::Absent,
             "hour24",
             "typical",
             None,

@@ -154,6 +154,10 @@ def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
         "time_res = 60\n"
         "master_seed = 42\n"
         "warmup = \"disabled\"\n"
+        "[[reports]]\n"
+        "name = \"frame\"\n"
+        "selection = { verbosity = 6 }\n"
+        "destination = \"memory\"\n"
     )
     dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults=str(HARES_DEFAULTS), config=config)
     dwelling.initialize()
@@ -180,6 +184,10 @@ def _run_hares_simulate_24h(output_dir: Path) -> dict[str, float]:
         "time_res = 60\n"
         "master_seed = 42\n"
         "warmup = \"disabled\"\n"
+        "[[reports]]\n"
+        "name = \"frame\"\n"
+        "selection = { verbosity = 6 }\n"
+        "destination = \"memory\"\n"
     )
     dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults=str(HARES_DEFAULTS), config=config)
     dwelling.initialize()
