@@ -44,6 +44,7 @@ fn sim_config() -> SimulationConfig {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -54,7 +55,6 @@ fn settings(ua_w_per_k: f64, master_seed: u64) -> DwellingSettings {
         sim_config(),
         Some(serde_json::json!({ "Gas Water Heater": { "ua_w_per_k": ua_w_per_k } })),
         176_227,
-        None,
         None,
     )
     .pipe(|mut settings| {

@@ -57,10 +57,10 @@ fn cz4a_config(diagnostics: bool, output: &Path) -> DwellingConfig {
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: hares_io::FirstHour::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
             },
             None,
             1,
-            None,
             None,
         ),
     }

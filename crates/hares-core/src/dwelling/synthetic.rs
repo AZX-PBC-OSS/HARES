@@ -23,11 +23,8 @@ pub(crate) struct SyntheticTomlConfig {
     /// The one `SimulationConfig` type: the `[simulation]` table
     /// deserialises as it (its `time_res` and `duration` in seconds), the
     /// same table the plain TOML path and the Python constructor build.
+    /// The warm-up is the table's `warmup` field.
     pub(crate) simulation: SimulationConfig,
-    /// The warmup seconds, a top-level dwelling key: the `[simulation]`
-    /// table is the `SimulationConfig`'s and carries no warmup.
-    #[serde(default)]
-    pub(crate) initialization_duration_s: Option<u64>,
     pub(crate) geometry: SyntheticGeometryConfig,
     pub(crate) materials: SyntheticMaterialsConfig,
     pub(crate) hvac: SyntheticHvacConfig,
@@ -2532,7 +2529,7 @@ occupants_present = false"#;
     }
 
     #[test]
-    fn initialization_duration_s_parsed_from_toml() {
+    fn toplevel_initialization_duration_s_names_the_sim_config() {
         let toml = r#"
 building_id = 1
 
@@ -2552,12 +2549,26 @@ wall_r_value_m2_k_w = 2.0
 [hvac]
 equipment_name = "None"
 "#;
-        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        assert_eq!(config.initialization_duration_s, Some(86400));
+        // The top-level warm-up seconds are a removed key: the warm-up
+        // lives in the [simulation] table's warmup field.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("top_init.toml");
+        std::fs::write(&toml_path, toml).expect("write temp TOML");
+        let err = {
+            use crate::dwelling::Dwelling;
+            Dwelling::from_toml_config(&toml_path)
+                .map(|_| ())
+                .expect_err("a top-level initialization_duration_s is an error")
+        };
+        assert!(
+            err.to_string().contains("initialization_duration_s")
+                && err.to_string().contains("warmup"),
+            "the error names the key and SimulationConfig.warmup: {err}"
+        );
     }
 
     #[test]
-    fn initialization_duration_s_defaults_to_none() {
+    fn synthetic_warmup_defaults_to_the_converging_warmup() {
         let toml = r#"
 building_id = 1
 
@@ -2577,11 +2588,44 @@ wall_r_value_m2_k_w = 2.0
 equipment_name = "None"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        assert_eq!(config.initialization_duration_s, None);
+        assert_eq!(
+            config.simulation.warmup,
+            hares_io::Warmup::Converge(hares_io::WarmupConfig::default()),
+            "an omitted warmup key means the default converging warm-up"
+        );
     }
 
     #[test]
-    fn initialization_duration_s_negative_rejected() {
+    fn synthetic_warmup_disabled_form() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 3600
+warmup = "disabled"
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            config.simulation.warmup,
+            hares_io::Warmup::Disabled,
+            "the disabled form parses to Warmup::Disabled"
+        );
+    }
+
+    #[test]
+    fn toplevel_negative_initialization_duration_s_names_the_removed_key() {
         let toml = r#"
 building_id = 1
 
@@ -2601,24 +2645,40 @@ wall_r_value_m2_k_w = 2.0
 [hvac]
 equipment_name = "None"
 "#;
-        let result = toml::from_str::<SyntheticTomlConfig>(toml);
+        // The removed-key check runs before deserialising, so even a value
+        // that never parsed cleanly is named as the removed key first.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("top_init_negative.toml");
+        std::fs::write(&toml_path, toml).expect("write temp TOML");
+        let err = {
+            use crate::dwelling::Dwelling;
+            Dwelling::from_toml_config(&toml_path)
+                .map(|_| ())
+                .expect_err(
+                    "a top-level initialization_duration_s is a removed key whatever its value",
+                )
+        };
         assert!(
-            result.is_err(),
-            "negative initialization_duration_s must be rejected at parse time"
+            err.to_string().contains("initialization_duration_s"),
+            "the error names the removed key: {err}"
         );
     }
 
-    /// Row 34: the warmup seconds are a top-level dwelling key, so the
-    /// migrated BESTEST fixture states it there and the dwelling builds.
+    /// The BESTEST fixtures state their warm-up in the [simulation] table's
+    /// warmup field and the dwelling builds.
     #[test]
-    fn toplevel_initialization_duration_is_accepted() {
+    fn bestest_fixture_warmup_builds() {
         use crate::dwelling::Dwelling;
         use std::path::PathBuf;
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let fixture = root.join("tests/fixtures/bestest/600.toml");
-        Dwelling::from_toml_config(&fixture)
-            .expect("the migrated fixture's top-level initialization_duration_s is accepted");
+        let dwelling = Dwelling::from_toml_config(&fixture).expect("the fixture builds");
+        assert_eq!(
+            dwelling.sim_config.warmup,
+            hares_io::Warmup::Converge(hares_io::WarmupConfig::default()),
+            "the fixture's positive warm-up seconds became the default converging warm-up"
+        );
     }
 
     // Row 34: the [simulation] table deserialises as the one
@@ -2777,7 +2837,7 @@ output_verbosity = 3
     }
 
     #[test]
-    fn synthetic_simulation_initialization_duration_names_toplevel() {
+    fn synthetic_simulation_initialization_duration_names_warmup() {
         use crate::dwelling::Dwelling;
         use std::fs;
 
@@ -2805,13 +2865,13 @@ equipment_name = "None"
         fs::write(&toml_path, toml).expect("write temp TOML");
         let Err(err) = Dwelling::from_toml_config(&toml_path) else {
             panic!(
-                "initialization_duration_s under [simulation] is a removed key naming the top level"
+                "initialization_duration_s under [simulation] is a removed key naming SimulationConfig.warmup"
             );
         };
         let message = err.to_string();
         assert!(
-            message.contains("initialization_duration_s") && message.contains("top level"),
-            "the error names the top-level key, got: {message}"
+            message.contains("initialization_duration_s") && message.contains("warmup"),
+            "the error names the removed key and SimulationConfig.warmup, got: {message}"
         );
     }
 

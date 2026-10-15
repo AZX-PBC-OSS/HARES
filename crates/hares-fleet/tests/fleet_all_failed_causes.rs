@@ -64,10 +64,10 @@ fn config_with_schedule_source(bldg_id: i64, schedule_path: Option<PathBuf>) -> 
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
             },
             None,
             bldg_id,
-            None,
             None,
         ),
     }

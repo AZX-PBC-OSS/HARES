@@ -282,7 +282,12 @@ class TestSimulationConfig:
         )
         assert cfg.diagnostics is True
         toml_keys = tomllib.loads(cfg.to_toml()).keys()
-        assert sorted(keyword_names) == sorted(toml_keys), (
+        # The warmup key exists on the Rust config (its TOML form carries
+        # it) before its Python keyword lands with the warm-up surface
+        # row; the equality is otherwise whole.
+        keyword_only = sorted(k for k in keyword_names if k != "warmup")
+        toml_only = sorted(k for k in toml_keys if k != "warmup")
+        assert keyword_only == toml_only, (
             "the keyword surface and the TOML keys must be the same name map"
         )
         parsed = SimulationConfig.from_toml(cfg.to_toml())
@@ -359,15 +364,23 @@ class TestDwellingConfig:
         assert cfg.config.duration == 3600
         assert cfg.defaults is None
 
-    def test_initialization_duration_round_trips(self):
-        cfg = DwellingConfig(
-            hpxml="path/to/building.xml",
-            schedule="path/to/schedules.csv",
-            weather="path/to/weather.epw",
-            config=SimulationConfig(start_time=START, duration=3600),
-            initialization_duration=3600,
-        )
-        assert cfg.initialization_duration == 3600
+    def test_initialization_duration_names_the_warmup_field(self):
+        """The removed `initialization_duration` keyword errors with the
+        removed-keys table's message, which names `SimulationConfig.warmup`
+        (the warm-up lives on the config). The class is `TypeError`, the
+        same class an unknown keyword raises."""
+        for constructor in [DwellingConfig, Dwelling.from_hpxml]:
+            kwargs: dict[str, Any] = {
+                "hpxml": "path/to/building.xml",
+                "schedule": "path/to/schedules.csv",
+                "weather": "path/to/weather.epw",
+                "config": SimulationConfig(start_time=START, duration=3600),
+                "initialization_duration": 3600,
+            }
+            with pytest.raises(TypeError, match="initialization_duration"):
+                constructor(**cast("dict[str, Any]", kwargs))
+            with pytest.raises(TypeError, match="warmup"):
+                constructor(**cast("dict[str, Any]", kwargs))
 
     def test_removed_key_resample_overrides_names_the_adapter(self):
         """The removed `resample_overrides` keyword errors with the
@@ -406,7 +419,7 @@ class TestDwellingConfig:
         scope per constructor pins the scope list."""
         for key, replacement in [
             ("duration_s", "pass duration"),
-            ("initialization_duration_s", "top level"),
+            ("initialization_duration_s", "warmup"),
         ]:
             kwargs: dict[str, Any] = {
                 "hpxml": "path/to/building.xml",

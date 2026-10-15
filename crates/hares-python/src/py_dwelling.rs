@@ -719,7 +719,7 @@ pub struct PyDwelling {
 #[pymethods]
 impl PyDwelling {
     #[classmethod]
-    #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, initialization_duration = None, defaults = None, overrides = None, **unexpected))]
+    #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, defaults = None, overrides = None, **unexpected))]
     // PyO3 #[classmethod] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     pub fn from_hpxml(
@@ -729,7 +729,6 @@ impl PyDwelling {
         weather: &Bound<'_, PyAny>,
         config: crate::py_config::PySimulationConfig,
         bldg_id: i64,
-        initialization_duration: Option<i64>,
         defaults: Option<&Bound<'_, PyAny>>,
         overrides: Option<&Bound<'_, PyDict>>,
         unexpected: Option<&Bound<'_, PyDict>>,
@@ -751,7 +750,6 @@ impl PyDwelling {
                 },
                 config,
                 bldg_id,
-                initialization_duration,
                 overrides,
                 unexpected,
             })?;
@@ -4049,7 +4047,6 @@ mod profiling_summary_tests {
                 PyString::new(py, fixture.join("weather.epw").to_str().expect("utf8")).as_any(),
                 sim_config,
                 1,
-                None,
                 Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
                 None,
                 None,
@@ -4175,7 +4172,6 @@ mod profiling_summary_tests {
                 PyString::new(py, fixture.join("weather.epw").to_str().expect("utf8")).as_any(),
                 sim_config,
                 1,
-                None,
                 Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
                 None,
                 None,
@@ -4288,7 +4284,6 @@ mod construction_gil_tests {
                 PyString::new(py, weather.to_str().expect("utf8")).as_any(),
                 sim_config_1h_900s(),
                 1,
-                None,
                 Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
                 None,
                 None,
@@ -4371,7 +4366,6 @@ mod construction_gil_tests {
                 we.as_any(),
                 sim_config_1h_900s(),
                 1,
-                None,
                 Some(de.as_any()),
                 None,
                 None,
@@ -4401,7 +4395,6 @@ mod construction_gil_tests {
                 we.as_any(),
                 sim_config_1h_900s(),
                 1,
-                None,
                 Some(de.as_any()),
                 None,
                 None,
@@ -4466,7 +4459,6 @@ mod construction_gil_tests {
                 PyString::new(py, fixture.join("weather.epw").to_str().expect("utf8")).as_any(),
                 sim_config,
                 1,
-                Some(7 * 24 * 3600),
                 Some(PyString::new(py, root.join("defaults").to_str().expect("utf8")).as_any()),
                 None,
                 None,
@@ -4554,7 +4546,6 @@ mod construction_gil_tests {
                 weather,
                 sim_config_1h_900s(),
                 1,
-                None,
                 Some(defaults),
                 None,
                 None,
@@ -4578,7 +4569,6 @@ mod construction_gil_tests {
                 weather,
                 sim_config_1h_900s(),
                 1,
-                None,
                 Some(defaults),
                 None,
                 None,

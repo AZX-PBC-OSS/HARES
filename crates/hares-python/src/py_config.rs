@@ -85,6 +85,12 @@ fn unexpected_keyword_error(
                 return Err(PyTypeError::new_err(message));
             }
         }
+        if crate::utils::is_sim_config_field_keyword(&key_str) {
+            return Err(PyTypeError::new_err(format!(
+                "{class}.__new__() got an unexpected keyword argument '{key_str}': \
+                 the field lives on the typed config: config=SimulationConfig({key_str}=...)"
+            )));
+        }
         return Err(PyTypeError::new_err(format!(
             "{class}.__new__() got an unexpected keyword argument '{key_str}'"
         )));
@@ -374,6 +380,7 @@ impl PySimulationConfig {
             site_location: site_location.map(|s| s.0).unwrap_or_default(),
             max_consecutive_step_failures,
             health_policy: health_policy.map(|p| p.0).unwrap_or_default(),
+            warmup: hares_io::Warmup::default(),
             first_hour_interpolation: first_hour,
             weather_year,
         };
@@ -642,7 +649,6 @@ pub(crate) struct DwellingConfigArgs<'a> {
     pub defaults: crate::py_inputs::DefaultsArg,
     pub config: PySimulationConfig,
     pub bldg_id: i64,
-    pub initialization_duration: Option<i64>,
     pub overrides: Option<&'a Bound<'a, PyDict>>,
     pub unexpected: Option<&'a Bound<'a, PyDict>>,
 }
@@ -678,7 +684,6 @@ impl PyDwellingConfig {
         config,
         *,
         bldg_id = 0,
-        initialization_duration = None,
         defaults = None,
         overrides = None,
         **unexpected,
@@ -691,7 +696,6 @@ impl PyDwellingConfig {
         weather: &Bound<'_, PyAny>,
         config: PySimulationConfig,
         bldg_id: i64,
-        initialization_duration: Option<i64>,
         defaults: Option<&Bound<'_, PyAny>>,
         overrides: Option<&Bound<'_, PyDict>>,
         unexpected: Option<&Bound<'_, PyDict>>,
@@ -706,7 +710,6 @@ impl PyDwellingConfig {
             },
             config,
             bldg_id,
-            initialization_duration,
             overrides,
             unexpected,
         })
@@ -750,14 +753,6 @@ impl PyDwellingConfig {
     }
 
     #[getter]
-    pub fn initialization_duration(&self) -> Option<i64> {
-        self.0
-            .settings
-            .initialization_duration
-            .map(|d| d.as_secs() as i64)
-    }
-
-    #[getter]
     pub fn overrides(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
         let Some(serde_json::Value::Object(map)) = self.0.settings.overrides.as_ref() else {
             return Ok(None);
@@ -795,8 +790,7 @@ impl PyDwellingConfig {
     ///
     /// # Errors
     ///
-    /// A removed keyword, a negative `initialization_duration`, or an
-    /// override that is not a JSON object.
+    /// A removed keyword, or an override that is not a JSON object.
     pub(crate) fn from_args(args: DwellingConfigArgs<'_>) -> PyResult<Self> {
         // Every unexpected keyword is either a removed key this surface once
         // carried (the removed-keys table's message names where the
@@ -815,14 +809,6 @@ impl PyDwellingConfig {
                     hares_io::KeyScope::PythonKeyword,
                 ],
             )?;
-        }
-
-        if let Some(init_dur) = args.initialization_duration
-            && init_dur < 0
-        {
-            return Err(PyValueError::new_err(
-                "initialization_duration must be non-negative",
-            ));
         }
 
         let parsed_overrides = parse_overrides(args.overrides)?;
@@ -851,9 +837,6 @@ impl PyDwellingConfig {
                 args.config.0,
                 parsed_overrides,
                 args.bldg_id,
-                args.initialization_duration
-                    .filter(|&d| d != 0)
-                    .map(|d| std::time::Duration::from_secs(d as u64)),
                 None,
             ),
         }))
@@ -884,8 +867,8 @@ pub(crate) struct ConstructorInputs {
 ///
 /// # Errors
 ///
-/// The config's own errors: a removed keyword, a negative
-/// `initialization_duration`, an override that is not a JSON object.
+/// The config's own errors: a removed keyword, or an override that is not
+/// a JSON object.
 pub(crate) fn resolve_args(
     args: DwellingConfigArgs<'_>,
 ) -> PyResult<(DwellingConfig, ConstructorInputs)> {

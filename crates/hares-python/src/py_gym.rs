@@ -990,7 +990,6 @@ mod tests {
             .as_any(),
             sim_config,
             0,
-            None,
             Some(PyString::new(py, root.join("defaults").to_str().expect("utf8")).as_any()),
             None,
             None,

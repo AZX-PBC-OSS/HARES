@@ -105,7 +105,7 @@ FLOOR_TILT_DEG = 180.0  # inverted horizontal (interior above, ground below)
 
 # Simulation parameters (matching 600.toml)
 TIMESTEP_S = 3600
-WARMUP_HOURS = 24  # 1 day, per 600.toml initialization_duration_s = 86400
+WARMUP_HOURS = 24  # 1 day, the 600.toml [simulation] table's own warm-up
 SIM_YEAR = 2023  # non-leap year for 365 days = 8760 hours
 
 # HVAC setpoints (matching 600.toml)

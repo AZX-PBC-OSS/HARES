@@ -118,33 +118,49 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
         // addressed by calendar date (the EnergyPlus typical-year rule),
         // so a 2024 run re-aligns at Feb 29 (the previous running-index
         // read one day late from Mar 1 on) and the annual sums move with
-        // the re-aligned weather and solar phase.
-        ("600", AnnualHeatingLoadKwh) => 3090.707314,
-        ("600", AnnualCoolingLoadKwh) => 5506.833058,
+        // the re-aligned weather and solar phase. Re-measured 2026-10-15
+        // again: the warm-up converges by the EnergyPlus criteria, which
+        // run the lightweight cases' warm-up one day longer than the old
+        // last-step rule did (2 to 3 days), and the initial condition's
+        // residual moves the annual sums by under 0.01 percent.
+        ("600", AnnualHeatingLoadKwh) => 3090.700945,
+        ("600", AnnualCoolingLoadKwh) => 5506.835817,
         // 640: heating energy vs band 2751–3803 (the dispatch
         // landing dominates the diffuse loss here). Re-measured
         // 2026-10-14: the weather reads follow the EnergyPlus rules (the
         // record of the hour the step ends in; the previous read lagged
         // one hour), moving the morning pick-up's phase. Re-measured
         // 2026-10-15 with the same calendar-date addressing cause as
-        // 600's.
-        ("640", AnnualHeatingEnergyKwh) => 1995.591629,
+        // 600's; re-measured again the same day for the EnergyPlus
+        // warm-up criteria (one more warm-up day than the old rule ran),
+        // the sum under 0.001 percent moved.
+        ("640", AnnualHeatingEnergyKwh) => 1995.574279,
         // 900: heating vs band 1170–2041 (the heavy-mass case
         // gains heating from the dispatch's setpoint landing: the old
         // state-dependent offset under-delivered). Re-measured
         // 2026-10-15: the calendar-date weather addressing re-aligns the
-        // leap-year run at Feb 29, the same cause as 600's.
-        ("900", AnnualHeatingLoadKwh) => 1069.392660,
+        // leap-year run at Feb 29, the same cause as 600's; re-measured
+        // again the same day for the EnergyPlus warm-up criteria, which
+        // run this heavyweight case's warm-up 2 to 4 days: the annual
+        // heating load moves 0.06 percent.
+        ("900", AnnualHeatingLoadKwh) => 1068.706087,
         // 600FF: peak 74.01 vs band 64.9–69.5 (min in band: strict).
         // Re-measured 2026-10-14: the weather reads follow the EnergyPlus
         // rules (the record of the hour the step ends in; the previous
         // read lagged one hour), one hour earlier solar on the peak.
-        ("600FF", PeakZoneTempC) => 74.009888,
+        // Re-measured 2026-10-15 again: the EnergyPlus warm-up criteria
+        // run this free-float case's warm-up 8 to 9 days (the old rule
+        // stopped at 8 on its last-step temperatures with the day-8
+        // daily-min residual 0.426 still open), and the warmer initial
+        // condition lifts the peak 0.36 K.
+        ("600FF", PeakZoneTempC) => 74.369992,
         // 900FF: peak 46.15 vs 41.6–44.8; min 3.26 vs −6.4…−1.6.
         // Re-measured 2026-10-14 for the same weather-phase correction
         // (the peak +0.19 K, the min +0.09 K against the 2026-10-07
-        // locks).
-        ("900FF", PeakZoneTempC) => 46.151089,
+        // locks). Re-measured 2026-10-15 again: the EnergyPlus warm-up
+        // criteria move the peak +0.24 K (the same one-day-longer warm-up
+        // cause as 600FF's); the min is unchanged on bits.
+        ("900FF", PeakZoneTempC) => 46.391880,
         ("900FF", MinZoneTempC) => 3.264846,
         _ => return None,
     })

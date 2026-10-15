@@ -6,7 +6,6 @@
 // does not even compile against the parent commit.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration as StdDuration;
 
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
@@ -24,14 +23,10 @@ fn repo_root() -> PathBuf {
 /// copied into `dir`: the ResStock home.xml, its schedule, the station
 /// weather and the replaced envelope materials file. The config the tests
 /// run reads the copies, so the originals can be deleted and a replay
-/// still has everything it needs inside the export. `initialization_duration`
-/// is the run's own (the golden config's zero-length warm-up where the
-/// horizon fits a warm-up day, `None` where it does not).
-fn consumer_shape_config(
-    dir: &Path,
-    duration_s: i64,
-    initialization_duration: Option<StdDuration>,
-) -> DwellingConfig {
+/// still has everything it needs inside the export. `warmup` is the run's
+/// own (the warm-up on where the horizon fits a warm-up day, off where it
+/// does not).
+fn consumer_shape_config(dir: &Path, duration_s: i64, warmup: bool) -> DwellingConfig {
     let fixture = repo_root().join("tests/fixtures/resstock/2025.1/bldg0176227");
     let weather = repo_root().join("tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv");
     let materials = repo_root().join("tests/fixtures/golden/consumer_shape_envelope_materials.csv");
@@ -56,12 +51,18 @@ duration = {duration_s}
 time_res = 900
 metrics = true
 master_seed = 0
+{}
 
 [[reports]]
 name = "frame"
 selection = {{ verbosity = 2 }}
 destination = "memory"
-"#
+"#,
+        if warmup {
+            String::new()
+        } else {
+            String::from("warmup = \"disabled\"")
+        }
     ))
     .expect("the sim config parses");
 
@@ -82,7 +83,6 @@ destination = "memory"
             sim_config,
             Some(json!({ "Gas Water Heater": { "ua_w_per_k": 2.0 } })),
             176_227,
-            initialization_duration,
             None,
         ),
     }
@@ -168,7 +168,7 @@ fn exported_file(dir: &Path, relative: &str) -> PathBuf {
 #[test]
 fn replay_export_reproduces_frame_bitwise() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let config = consumer_shape_config(inputs.path(), 48 * 3600, Some(StdDuration::ZERO));
+    let config = consumer_shape_config(inputs.path(), 48 * 3600, true);
     let original = run(config);
 
     let export = tempfile::tempdir().expect("the export directory");
@@ -194,7 +194,7 @@ fn replay_export_reproduces_frame_bitwise() {
 #[test]
 fn replay_export_writes_dwelling_settings() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let mut config = consumer_shape_config(inputs.path(), 4 * 3600, None);
+    let mut config = consumer_shape_config(inputs.path(), 4 * 3600, false);
     config.settings.patches = Some(hares_io::HpxmlDataPatches {
         number_of_bedrooms: Some(3.0),
     });
@@ -241,7 +241,7 @@ fn replay_export_writes_dwelling_settings() {
 #[test]
 fn replay_overrides_null_round_trips() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let mut config = consumer_shape_config(inputs.path(), 4 * 3600, None);
+    let mut config = consumer_shape_config(inputs.path(), 4 * 3600, false);
     config.settings.overrides = Some(json!({
         "Gas Water Heater": { "ua_w_per_k": 2.0, "pilot_power_w": null },
     }));
@@ -296,7 +296,7 @@ destination = "memory"
             format: WeatherFormat::Epw,
         },
         defaults: DefaultsSource::directory(repo_root().join("defaults")),
-        settings: DwellingSettings::new(sim_config, None, 1, Some(StdDuration::ZERO), None),
+        settings: DwellingSettings::new(sim_config, None, 1, None),
     };
     let original = run(config);
 
@@ -328,7 +328,7 @@ destination = "memory"
 #[test]
 fn replay_with_attached_tariff_reproduces_billing() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let config = consumer_shape_config(inputs.path(), 4 * 3600, None);
+    let config = consumer_shape_config(inputs.path(), 4 * 3600, false);
     let mut original_dwelling = Dwelling::from_config(config).expect("the dwelling builds");
     let tariff_json =
         std::fs::read_to_string(repo_root().join("tests/fixtures/urdb/flat_rate.json"))
@@ -413,7 +413,7 @@ fn assert_billing_summaries_bitwise_equal(original: &Dwelling, replayed: &Dwelli
 #[test]
 fn replay_of_a_mid_run_tariff_attach_reproduces_billing() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let config = consumer_shape_config(inputs.path(), 4 * 3600, None);
+    let config = consumer_shape_config(inputs.path(), 4 * 3600, false);
     let mut original_dwelling = Dwelling::from_config(config).expect("the dwelling builds");
     for _ in 0..4 {
         original_dwelling.step().expect("the step runs");
@@ -467,7 +467,7 @@ fn replay_of_a_mid_run_tariff_attach_reproduces_billing() {
 #[test]
 fn replay_of_a_replaced_tariff_is_refused() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let config = consumer_shape_config(inputs.path(), 4 * 3600, None);
+    let config = consumer_shape_config(inputs.path(), 4 * 3600, false);
     let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
     let flat = hares_tariff::parse_urdb(
         &std::fs::read_to_string(repo_root().join("tests/fixtures/urdb/flat_rate.json"))
@@ -519,7 +519,7 @@ fn replay_export_rejects_an_installed_domain_solver() {
     }
 
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
     dwelling
         .install_domain_solver(Box::new(StubSolver { id: DomainId(42) }))
@@ -643,7 +643,7 @@ fn replay_export_rejects_a_caller_actor_added_with_equipment() {
     }
 
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
     dwelling
         .add_equipment_with_actors(
@@ -690,7 +690,7 @@ fn replay_of_a_callback_report_replays_memory_batches_bitwise() {
     }
 
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let mut original_dwelling = Dwelling::from_config(config).expect("the dwelling builds");
     let delivered = Arc::new(Mutex::new(Vec::new()));
     original_dwelling
@@ -736,7 +736,7 @@ fn replay_of_a_callback_report_replays_memory_batches_bitwise() {
 fn replay_of_a_file_report_replays_the_file_byte_identical() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
     let outputs = tempfile::tempdir().expect("the outputs directory");
-    let mut config = consumer_shape_config(inputs.path(), 3600, None);
+    let mut config = consumer_shape_config(inputs.path(), 3600, false);
     config.settings.sim_config.reports[0].destination = hares_io::Destination::Csv {
         path: outputs.path().join("frame_output.csv"),
         overwrite: false,
@@ -783,7 +783,7 @@ fn replay_of_a_file_report_replays_the_file_byte_identical() {
 #[test]
 fn replay_records_the_exporting_build() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let original = run(config);
 
     let export = tempfile::tempdir().expect("the export directory");
@@ -810,7 +810,7 @@ fn replay_records_the_exporting_build() {
 #[test]
 fn replay_export_fails_if_input_file_changed_since_parse() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let original = run(config);
 
     let mut hpxml = std::fs::read(inputs.path().join("home.xml")).expect("the copy reads");
@@ -836,7 +836,7 @@ fn replay_export_fails_if_input_file_changed_since_parse() {
 #[test]
 fn replay_load_fails_on_a_tampered_stored_input() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let original = run(config);
 
     let export = tempfile::tempdir().expect("the export directory");
@@ -884,7 +884,7 @@ fn replay_load_fails_on_a_tampered_stored_input() {
 #[test]
 fn replay_load_fails_on_defaults_digest_mismatch() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let original = run(config);
 
     let export = tempfile::tempdir().expect("the export directory");
@@ -921,7 +921,7 @@ fn replay_export_rejects_mutated_run() {
     // BlueprintEdited: the builder's mutator ran before the freeze.
     let inputs = tempfile::tempdir().expect("the inputs directory");
     let blueprint = {
-        let mut config = consumer_shape_config(inputs.path(), 3600, None);
+        let mut config = consumer_shape_config(inputs.path(), 3600, false);
         config.settings.overrides = None;
         let mut builder =
             hares_core::DwellingBlueprintBuilder::from_config(config).expect("the builder builds");
@@ -936,7 +936,7 @@ fn replay_export_rejects_mutated_run() {
     reject_returns(&blueprint_result, &[ReplayBlocker::BlueprintEdited]);
 
     // EquipmentChanged: the dwelling's own equipment changes after build.
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let mut equipped = Dwelling::from_config(config).expect("the dwelling builds");
     equipped
         .remove_equipment("Gas Water Heater")
@@ -946,7 +946,7 @@ fn replay_export_rejects_mutated_run() {
     reject_returns(&equipped_result, &[ReplayBlocker::EquipmentChanged]);
 
     // CallerActor: an actor registered by the caller.
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let mut acted = Dwelling::from_config(config).expect("the dwelling builds");
     acted
         .add_actor_by_name(
@@ -959,7 +959,7 @@ fn replay_export_rejects_mutated_run() {
     reject_returns(&acted_result, &[ReplayBlocker::CallerActor]);
 
     // ExternalInput: a control signal pushed in by the caller.
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let mut controlled = Dwelling::from_config(config).expect("the dwelling builds");
     controlled.step().expect("the step runs");
     controlled.apply_control(
@@ -970,11 +970,11 @@ fn replay_export_rejects_mutated_run() {
     reject_returns(&controlled_result, &[ReplayBlocker::ExternalInput]);
 
     // StateRestored: a checkpoint loaded.
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let mut saved = Dwelling::from_config(config).expect("the dwelling builds");
     saved.step().expect("the step runs");
     let checkpoint = saved.save_checkpoint().expect("the checkpoint saves");
-    let config = consumer_shape_config(inputs.path(), 3600, None);
+    let config = consumer_shape_config(inputs.path(), 3600, false);
     let mut restored = Dwelling::from_config(config).expect("the dwelling builds");
     restored
         .load_checkpoint(checkpoint)
@@ -1060,7 +1060,7 @@ destination = "memory"
         schedule: Some(InputSource::Path(inputs.path().join("schedule.csv"))),
         weather: WeatherInput::Path(inputs.path().join("weather.epw")),
         defaults: DefaultsSource::directory(repo_root().join("defaults")),
-        settings: DwellingSettings::new(sim_config, None, 7, Some(StdDuration::ZERO), None),
+        settings: DwellingSettings::new(sim_config, None, 7, None),
     };
     let mut original_dwelling = Dwelling::from_config(config).expect("the dwelling builds");
     let original_seed = original_dwelling.rng.get_seed();

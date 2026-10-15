@@ -2111,6 +2111,7 @@ mod tests {
             health_policy: crate::HealthPolicy::default(),
             first_hour_interpolation: crate::FirstHour::default(),
             weather_year: crate::WeatherYear::default(),
+            warmup: crate::Warmup::default(),
         }
     }
 
@@ -2142,6 +2143,7 @@ mod tests {
             health_policy: crate::HealthPolicy::default(),
             first_hour_interpolation: crate::FirstHour::default(),
             weather_year: crate::WeatherYear::default(),
+            warmup: crate::Warmup::default(),
         }
     }
 

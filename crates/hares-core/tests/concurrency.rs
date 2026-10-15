@@ -51,6 +51,7 @@ fn sim_config(start: DateTime<FixedOffset>, duration_s: i64, step_s: i64) -> Sim
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -78,7 +79,6 @@ fn base_blueprint() -> Arc<DwellingBlueprint> {
             sim_config: sim_config(start, 24 * 3600, 900),
             overrides: None,
             bldg_id: 1,
-            initialization_duration: None,
             patches: None,
         },
     })
@@ -333,7 +333,6 @@ fn rt5_spawned_process_child() {
             sim_config: sim_config(start, 48 * 3600, 900),
             overrides: None,
             bldg_id: 1,
-            initialization_duration: None,
             patches: None,
         },
     })

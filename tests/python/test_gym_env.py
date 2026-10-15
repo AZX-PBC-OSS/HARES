@@ -85,7 +85,6 @@ def test_gym_reset_restores_snapshot_and_reseeds():
         schedule=str(fixture / "schedule.csv"),
         weather=str(fixture / "weather.epw"),
         defaults=str(HARES_DEFAULTS),
-        initialization_duration=7 * 24 * 3600,
         config=SimulationConfig(
             start_time="2023-01-01T00:00:00-07:00",
             duration=2 * 86_400,

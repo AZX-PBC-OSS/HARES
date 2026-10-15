@@ -141,7 +141,7 @@ fn resstock_fleet_manifest_rejects_homes_and_fleet_keys() {
 
     // A [[home]] entry: the homes come from the metadata.
     let with_home = format!(
-        "{}\n[[home]]\nbldg_id = 1\nhpxml = \"a.xml\"\nschedule = \"a.csv\"\nweather = \"a.epw\"\ninitialization_duration_s = 0\nweight = 1.0\noverrides = {{}}\n",
+        "{}\n[[home]]\nbldg_id = 1\nhpxml = \"a.xml\"\nschedule = \"a.csv\"\nweather = \"a.epw\"\nweight = 1.0\noverrides = {{}}\n",
         resstock_fleet_manifest(172800)
     );
     let manifest_path = write_manifest(&dir, &with_home);

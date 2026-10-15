@@ -44,6 +44,7 @@ fn sim_config(duration: Duration) -> SimulationConfig {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -57,7 +58,7 @@ fn dwelling_config(hpxml_path: PathBuf, sim: SimulationConfig) -> DwellingConfig
             project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         ),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(sim, None, 100, None, None),
+        settings: DwellingSettings::new(sim, None, 100, None),
     }
 }
 

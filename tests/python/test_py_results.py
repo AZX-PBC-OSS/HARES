@@ -77,8 +77,8 @@ def test_python_stepped_finish_equals_simulate() -> None:
 
 
 def test_health_readable_with_no_reports_requested() -> None:
-    """reports=[]: health() after 10 steps reads zero counters and warmup
-    "disabled": the live health needs no report."""
+    """reports=[]: health() after 10 steps reads zero counters and the
+    warm-up outcome the config asked for. The live health needs no report."""
     from hares import SimulationConfig
 
     dw = build(SimulationConfig(start_time="2023-01-01T00:00:00-07:00", duration=86400, time_res=900))
@@ -92,7 +92,10 @@ def test_health_readable_with_no_reports_requested() -> None:
     assert health.curve_index_clamps == 0
     assert health.fluid_payload_absences == 0
     assert health.evicted_actors == 0
-    assert health.warmup.outcome == "disabled"
+    assert health.warmup.outcome == "ran"
+    assert health.warmup.converged is True
+    days_run = health.warmup.days_run
+    assert days_run is not None and days_run >= 1
 
 
 def test_health_counts_clamped_gym_actions() -> None:

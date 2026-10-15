@@ -7,7 +7,6 @@
 use hares_core::DwellingSettings;
 use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
-use std::time::Duration as StdDuration;
 
 use arrow::array::{RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::{DataType, TimeUnit};
@@ -58,10 +57,14 @@ fn cz2a_config(
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: if warmup_s.is_some() {
+                    hares_io::Warmup::default()
+                } else {
+                    hares_io::Warmup::Disabled
+                },
             },
             None,
             1,
-            warmup_s.map(|s| StdDuration::from_secs(u64::try_from(s).expect("warm-up seconds"))),
             None,
         ),
     }

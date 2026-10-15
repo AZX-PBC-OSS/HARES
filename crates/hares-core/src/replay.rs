@@ -27,8 +27,11 @@ use crate::dwelling::{Dwelling, DwellingConfig, DwellingSettings};
 use crate::result::{BuildInfo, RunResult, TariffRecord};
 
 /// The manifest's schema version: bumped when the manifest's shape
-/// changes in a way an older export cannot load.
-const REPLAY_SCHEMA_VERSION: u32 = 1;
+/// changes in a way an older export cannot load. Version 2 dropped the
+/// `initialization_duration_s` key: the warm-up lives in the embedded
+/// `SimulationConfig`'s `warmup` field, and an older export's key is a
+/// removed key.
+const REPLAY_SCHEMA_VERSION: u32 = 2;
 
 /// The stored file names the export writes the inputs under, inside the
 /// replay directory.
@@ -102,16 +105,16 @@ struct StoredInputs {
 }
 
 /// The private manifest `replay.toml` holds: the settings the run ran
-/// under (the validated config, the building id, the patches and the
-/// warm-up duration; the overrides travel in `overrides.json` because a
-/// JSON `null` has no TOML form), the exported inputs, the attached
-/// tariff's zone and the step it attached at, and the build identity.
+/// under (the validated config, whose `warmup` field carries the warm-up,
+/// the building id and the patches; the overrides travel in
+/// `overrides.json` because a JSON `null` has no TOML form), the exported
+/// inputs, the attached tariff's zone and the step it attached at, and the
+/// build identity.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReplayManifest {
     schema_version: u32,
     bldg_id: i64,
-    initialization_duration_s: Option<u64>,
     patches: Option<hares_io::HpxmlDataPatches>,
     simulation: SimulationConfig,
     inputs: StoredInputs,
@@ -330,9 +333,6 @@ pub(crate) fn export(result: &RunResult, dir: &Path) -> Result<(), HaresError> {
     let manifest = ReplayManifest {
         schema_version: REPLAY_SCHEMA_VERSION,
         bldg_id: settings.bldg_id,
-        initialization_duration_s: settings
-            .initialization_duration
-            .map(|duration| duration.as_secs()),
         patches: settings.patches.clone(),
         simulation: config,
         inputs: StoredInputs {
@@ -523,16 +523,7 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
         (None, _) => None,
     };
 
-    let initialization_duration = manifest
-        .initialization_duration_s
-        .map(std::time::Duration::from_secs);
-    let settings = DwellingSettings::new(
-        config,
-        overrides,
-        manifest.bldg_id,
-        initialization_duration,
-        manifest.patches,
-    );
+    let settings = DwellingSettings::new(config, overrides, manifest.bldg_id, manifest.patches);
     Ok(Replay {
         config: DwellingConfig {
             hpxml,

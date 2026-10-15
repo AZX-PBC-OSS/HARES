@@ -5,9 +5,11 @@
 //! field-level defaults so that minimal config files work correctly.
 
 use std::collections::HashSet;
+use std::fmt;
 
 use chrono::{DateTime, Duration, FixedOffset};
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::output::report::{ReportSpec, Selection};
@@ -81,8 +83,8 @@ pub static REMOVED_KEYS: &[RemovedKey] = &[
     RemovedKey {
         scope: KeyScope::SimulationConfig,
         key: "initialization_duration_s",
-        replacement: "pass initialization_duration_s at the top level of the dwelling \
-                      table, not under [simulation]",
+        replacement: "the warm-up lives in SimulationConfig.warmup: \
+                      warmup = \"disabled\" or a [warmup] table of the convergence criteria",
     },
     RemovedKey {
         scope: KeyScope::SimulationConfig,
@@ -133,6 +135,18 @@ pub static REMOVED_KEYS: &[RemovedKey] = &[
         key: "rotation",
         replacement: "pass reports = [ReportSpec(name, selection, destination)]: files \
                       do not rotate; a report writes one file at its destination path",
+    },
+    RemovedKey {
+        scope: KeyScope::DwellingTable,
+        key: "initialization_duration",
+        replacement: "the warm-up lives in SimulationConfig.warmup: \
+                      warmup = \"disabled\" or a [warmup] table of the convergence criteria",
+    },
+    RemovedKey {
+        scope: KeyScope::DwellingTable,
+        key: "initialization_duration_s",
+        replacement: "the warm-up lives in SimulationConfig.warmup: \
+                      warmup = \"disabled\" or a [warmup] table of the convergence criteria",
     },
     RemovedKey {
         scope: KeyScope::PythonKeyword,
@@ -322,6 +336,14 @@ pub struct SimulationConfig {
     /// the file's own dated records.
     #[serde(default)]
     pub weather_year: WeatherYear,
+    /// The run's warm-up: disabled, or a converging warm-up governed by the
+    /// EnergyPlus warm-up convergence criteria (the default:
+    /// `WarmupConfig::default()`, tolerances 0.4 delta C and 0.04, at least
+    /// 1 and at most 25 warm-up days). Each warm-up day repeats the run's
+    /// first day and the criteria compare every zone's daily temperature
+    /// extremes and daily peak HVAC delivery day over day.
+    #[serde(default)]
+    pub warmup: Warmup,
 }
 
 /// Default for [`SimulationConfig::max_consecutive_step_failures`]: one
@@ -359,6 +381,7 @@ impl hares_types::DescribeFields for SimulationConfig {
             health_policy: HealthPolicy::sample(),
             first_hour_interpolation: FirstHour::default(),
             weather_year: WeatherYear::default(),
+            warmup: Warmup::default(),
         };
         let mut fields = describe(
             &sample,
@@ -476,6 +499,17 @@ impl hares_types::DescribeFields for SimulationConfig {
                     FieldMeta {
                         description: Some(
                             "whether the weather file is a typical (TMY-style) year or an actual one (typical or actual)",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "warmup",
+                    FieldMeta {
+                        description: Some(
+                            "the run's warm-up: \"disabled\", or a [warmup] table of the \
+                             EnergyPlus convergence criteria (temperature_tolerance_c, \
+                             loads_tolerance, min_days, max_days); the default converges",
                         ),
                         ..Default::default()
                     },
@@ -630,6 +664,189 @@ fn default_max_consecutive_step_failures() -> u32 {
     DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES
 }
 
+/// The default warm-up temperature tolerance [delta C]: EnergyPlus's
+/// `Temperature Convergence Tolerance Value` default
+/// (`idd/Energy+.idd.in:543-548`, Building field N3, `\units deltaC`,
+/// `\default .4`, allowed `(0, 0.5]`).
+pub const DEFAULT_TEMPERATURE_TOLERANCE_C: f64 = 0.4;
+
+/// The default warm-up loads tolerance (a fraction, not watts): EnergyPlus's
+/// `Loads Convergence Tolerance Value` default
+/// (`idd/Energy+.idd.in:536-542`, Building field N2, `\default .04`,
+/// allowed `(0, 0.5]`).
+pub const DEFAULT_LOADS_TOLERANCE: f64 = 0.04;
+
+/// The default minimum warm-up day count: EnergyPlus's
+/// `Minimum Number of Warmup Days` default
+/// (`idd/Energy+.idd.in:569-575`, Building field N5, `\default 1`).
+pub const DEFAULT_MIN_WARMUP_DAYS: u32 = 1;
+
+/// The default maximum warm-up day count: EnergyPlus's
+/// `Maximum Number of Warmup Days` default
+/// (`idd/Energy+.idd.in:562-568`, Building field N4, `\default 25`; the IDD
+/// note says the value "should NOT be set less than 25").
+pub const DEFAULT_MAX_WARMUP_DAYS: u32 = 25;
+
+/// The run's warm-up: disabled, or a converging warm-up governed by the
+/// EnergyPlus warm-up convergence criteria
+/// (`vendors/EnergyPlus/src/EnergyPlus/HeatBalanceManager.cc:3309-3430`,
+/// `CheckWarmupConvergence`). Each warm-up day repeats the run's first day;
+/// after each day every zone's four day-over-day residuals are compared:
+/// the daily maximum and the daily minimum zone air temperature against
+/// `temperature_tolerance_c`, and the daily peak HVAC heating and cooling
+/// delivered to the zone against `loads_tolerance` with EnergyPlus's 100 W
+/// floor (`:3320`) and 1e-4 W pass-through (`:3350`, `:3366`). Warm-up ends
+/// when every zone's checks pass on a day at or after `min_days`, or at
+/// `max_days` days, whichever comes first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Warmup {
+    /// No warm-up: the run starts from the construction's initial state and
+    /// the run health's warm-up outcome stays `Disabled`.
+    Disabled,
+    /// Warm up by the EnergyPlus criteria with the given configuration.
+    Converge(WarmupConfig),
+}
+
+impl Default for Warmup {
+    fn default() -> Self {
+        Self::Converge(WarmupConfig::default())
+    }
+}
+
+impl Warmup {
+    /// The warm-up configuration when the warm-up converges; `None` when
+    /// disabled.
+    #[must_use]
+    pub fn config(&self) -> Option<&WarmupConfig> {
+        match self {
+            Self::Disabled => None,
+            Self::Converge(config) => Some(config),
+        }
+    }
+}
+
+impl Serialize for Warmup {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Disabled => serializer.serialize_str("disabled"),
+            Self::Converge(config) => config.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Warmup {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct WarmupVisitor;
+
+        impl<'de> Visitor<'de> for WarmupVisitor {
+            type Value = Warmup;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("\"disabled\" or a [warmup] table of the convergence criteria")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                match value {
+                    "disabled" => Ok(Warmup::Disabled),
+                    other => Err(E::custom(format!(
+                        "unknown warmup spelling '{other}': the accepted forms are the string \
+                         \"disabled\" or a table of the WarmupConfig fields \
+                         (temperature_tolerance_c, loads_tolerance, min_days, max_days)"
+                    ))),
+                }
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, access: A) -> Result<Self::Value, A::Error> {
+                let config =
+                    WarmupConfig::deserialize(de::value::MapAccessDeserializer::new(access))?;
+                Ok(Warmup::Converge(config))
+            }
+        }
+
+        deserializer.deserialize_any(WarmupVisitor)
+    }
+}
+
+/// The EnergyPlus warm-up convergence criteria: the tolerances and the
+/// minimum and maximum warm-up day counts. A partial `[warmup]` table is
+/// legal; every field left unset keeps its EnergyPlus default.
+///
+/// EnergyPlus silently resets the maximum day count when the minimum is
+/// greater (`HeatBalanceManager.cc:686-697`); HARES does not substitute
+/// values: `validate()` is an error instead.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WarmupConfig {
+    /// The day-over-day temperature tolerance [delta C] on the daily maximum
+    /// and the daily minimum zone air temperature, every zone. Default
+    /// [`DEFAULT_TEMPERATURE_TOLERANCE_C`]; allowed `(0, 0.5]`
+    /// (`idd/Energy+.idd.in:543-548`).
+    pub temperature_tolerance_c: f64,
+    /// The day-over-day loads tolerance (a fraction) on the daily peak HVAC
+    /// heating and cooling delivered to the zone, every zone, with
+    /// EnergyPlus's 100 W floor on both days' peaks when today's peak exceeds
+    /// 1e-4 W (a smaller peak passes). Default [`DEFAULT_LOADS_TOLERANCE`];
+    /// allowed `(0, 0.5]` (`idd/Energy+.idd.in:536-542`).
+    pub loads_tolerance: f64,
+    /// The least warm-up day count: a converged check before this day keeps
+    /// running. Default [`DEFAULT_MIN_WARMUP_DAYS`] (`idd/Energy+.idd.in:569-575`).
+    pub min_days: u32,
+    /// The greatest warm-up day count: warm-up stops here whether or not
+    /// every zone converged, and the run continues with the outcome recorded.
+    /// Default [`DEFAULT_MAX_WARMUP_DAYS`] (`idd/Energy+.idd.in:562-568`).
+    pub max_days: u32,
+}
+
+impl Default for WarmupConfig {
+    fn default() -> Self {
+        Self {
+            temperature_tolerance_c: DEFAULT_TEMPERATURE_TOLERANCE_C,
+            loads_tolerance: DEFAULT_LOADS_TOLERANCE,
+            min_days: DEFAULT_MIN_WARMUP_DAYS,
+            max_days: DEFAULT_MAX_WARMUP_DAYS,
+        }
+    }
+}
+
+impl WarmupConfig {
+    /// Every check on the warm-up configuration, run by
+    /// [`SimulationConfig::validate`] so the criteria are validated on every
+    /// surface that validates a config.
+    ///
+    /// # Errors
+    ///
+    /// A tolerance outside `(0, 0.5]` (EnergyPlus's IDD bounds for both
+    /// fields), a non-finite tolerance, a day count of 0, or a minimum
+    /// greater than the maximum.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let tolerance_in_bounds = |name: &str, value: f64| {
+            if value.is_finite() && value > 0.0 && value <= 0.5 {
+                Ok(())
+            } else {
+                Err(ConfigError::Validation(format!(
+                    "warmup {name} must be in (0, 0.5], got {value}"
+                )))
+            }
+        };
+        tolerance_in_bounds("temperature_tolerance_c", self.temperature_tolerance_c)?;
+        tolerance_in_bounds("loads_tolerance", self.loads_tolerance)?;
+        if self.min_days == 0 || self.max_days == 0 {
+            return Err(ConfigError::Validation(format!(
+                "warmup day counts must be at least 1, got min_days {}, max_days {}",
+                self.min_days, self.max_days
+            )));
+        }
+        if self.min_days > self.max_days {
+            return Err(ConfigError::Validation(format!(
+                "warmup min_days ({}) must not exceed max_days ({}): EnergyPlus resets the \
+                 maximum to the minimum; HARES asks for the day counts it should run",
+                self.min_days, self.max_days
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl SimulationConfig {
     /// Time resolution in seconds as `u32`, for consumers that require a
     /// bounded seconds count (metrics calculators).
@@ -756,6 +973,10 @@ impl SimulationConfig {
         self.time_res_secs_u32()?;
 
         self.site_location.validate()?;
+
+        self.warmup
+            .config()
+            .map_or(Ok(()), WarmupConfig::validate)?;
 
         Ok(())
     }
@@ -1282,6 +1503,7 @@ max_evictions = 0
             health_policy: crate::HealthPolicy::default(),
             first_hour_interpolation: FirstHour::default(),
             weather_year: WeatherYear::default(),
+            warmup: crate::Warmup::default(),
         };
         let err = cfg
             .time_res_secs_u32()
@@ -1344,6 +1566,7 @@ destination = { csv = { path = "/tmp/sim_output.csv" } }
             health_policy: crate::HealthPolicy::default(),
             first_hour_interpolation: FirstHour::default(),
             weather_year: WeatherYear::default(),
+            warmup: crate::Warmup::default(),
         };
         let built_err = built
             .validate()
@@ -1389,6 +1612,7 @@ latitude_deg = 95.0
             health_policy: crate::HealthPolicy::default(),
             first_hour_interpolation: FirstHour::default(),
             weather_year: WeatherYear::default(),
+            warmup: crate::Warmup::default(),
         };
         let built_err = built
             .validate()
@@ -1529,8 +1753,10 @@ latitude_deg = 95.0
         // [output] table, the [simulation] table's old keys (the output
         // booleans among them, removed by the destinations row), and the
         // Python keyword surface's old names.
-        let expected: [(KeyScope, &str); 16] = [
+        let expected: [(KeyScope, &str); 18] = [
             (KeyScope::DwellingTable, "output"),
+            (KeyScope::DwellingTable, "initialization_duration"),
+            (KeyScope::DwellingTable, "initialization_duration_s"),
             (KeyScope::SimulationConfig, "initialization_duration_s"),
             (KeyScope::SimulationConfig, "duration_s"),
             (KeyScope::SimulationConfig, "time_res_s"),
@@ -1553,12 +1779,16 @@ latitude_deg = 95.0
                 "{key:?} must be a removed key of the {scope:?} scope"
             );
         }
-        // initialization_duration_s stays valid in the dwelling table's
-        // scope: the top-level synthetic key is not removed until B-2.
-        assert!(
-            removed_key(KeyScope::DwellingTable, "initialization_duration_s").is_none(),
-            "the top-level initialization_duration_s stays valid"
-        );
+        // The warm-up keys are removed from the dwelling table's scope and
+        // name the simulation config's warmup field.
+        for key in ["initialization_duration", "initialization_duration_s"] {
+            let replacement = removed_key(KeyScope::DwellingTable, key)
+                .unwrap_or_else(|| panic!("{key} must be a removed key of the dwelling table"));
+            assert!(
+                replacement.contains("SimulationConfig.warmup"),
+                "the {key} row must name SimulationConfig.warmup: {replacement}"
+            );
+        }
         // The output booleans' rows name the report list: every surface's
         // error points at SimulationConfig.reports.
         for key in [
@@ -1674,5 +1904,197 @@ utc_offset_h = -7.0
                 "the error names the removed key {key} and the report list, got: {err}"
             );
         }
+    }
+
+    /// A minimal config with no warmup key carries the default converging
+    /// warm-up: EnergyPlus's defaults (0.4 delta C, 0.04, at least 1 and at
+    /// most 25 warm-up days).
+    #[test]
+    fn minimal_config_warms_up_by_default() {
+        let cfg =
+            SimulationConfig::from_toml("start_time = \"2024-01-01T00:00:00Z\"\nduration = 3600\n")
+                .expect("parse minimal config");
+        assert_eq!(
+            cfg.warmup,
+            Warmup::Converge(WarmupConfig {
+                temperature_tolerance_c: 0.4,
+                loads_tolerance: 0.04,
+                min_days: 1,
+                max_days: 25,
+            }),
+            "an omitted warmup key means the default converging warm-up"
+        );
+    }
+
+    /// The three warmup TOML forms round trip: the string "disabled", the
+    /// omitted key, and a full [warmup] table, each parse to the expected
+    /// `Warmup` and serialise back to the same TOML.
+    #[test]
+    fn warmup_toml_forms_round_trip() {
+        let head = "start_time = \"2024-01-01T00:00:00Z\"\nduration = 3600\n";
+
+        let disabled = SimulationConfig::from_toml(&format!("{head}warmup = \"disabled\"\n"))
+            .expect("parse the string form");
+        assert_eq!(disabled.warmup, Warmup::Disabled);
+        let text = disabled.to_toml().expect("serialise");
+        let table: toml::Table = toml::from_str(&text).expect("parse back");
+        assert_eq!(
+            table.get("warmup").and_then(|v| v.as_str()),
+            Some("disabled"),
+            "the string form serialises as the same string: {text}"
+        );
+
+        let defaulted = SimulationConfig::from_toml(head).expect("parse the omitted key");
+        let text = defaulted.to_toml().expect("serialise");
+        let again = SimulationConfig::from_toml(&text).expect("parse back");
+        assert_eq!(again.warmup, defaulted.warmup, "the default round trips");
+        assert_eq!(
+            again.warmup,
+            Warmup::Converge(WarmupConfig::default()),
+            "the omitted key parses to the Rust default"
+        );
+
+        let full = SimulationConfig::from_toml(&format!(
+            "{head}[warmup]\ntemperature_tolerance_c = 0.3\nloads_tolerance = 0.05\nmin_days = 2\nmax_days = 20\n"
+        ))
+        .expect("parse the table form");
+        assert_eq!(
+            full.warmup,
+            Warmup::Converge(WarmupConfig {
+                temperature_tolerance_c: 0.3,
+                loads_tolerance: 0.05,
+                min_days: 2,
+                max_days: 20,
+            })
+        );
+        let text = full.to_toml().expect("serialise");
+        let again = SimulationConfig::from_toml(&text).expect("parse back");
+        assert_eq!(again.warmup, full.warmup, "the table form round trips");
+    }
+
+    /// A partial [warmup] table is legal: every unset field keeps its
+    /// EnergyPlus default, and an unknown field is named by the error.
+    #[test]
+    fn warmup_partial_table_and_unknown_field() {
+        let head = "start_time = \"2024-01-01T00:00:00Z\"\nduration = 3600\n";
+        let partial = SimulationConfig::from_toml(&format!("{head}[warmup]\nmax_days = 3\n"))
+            .expect("a partial [warmup] table is legal");
+        assert_eq!(
+            partial.warmup,
+            Warmup::Converge(WarmupConfig {
+                max_days: 3,
+                ..WarmupConfig::default()
+            })
+        );
+        let toml = format!("{head}[warmup]\nno_such_field = 1\n");
+        let err = SimulationConfig::from_toml(&toml).expect_err("an unknown field is an error");
+        assert!(
+            err.to_string().contains("no_such_field"),
+            "the error names the unknown field: {err}"
+        );
+        let toml = format!("{head}warmup = \"converge\"\n");
+        let err =
+            SimulationConfig::from_toml(&toml).expect_err("an unknown string form is an error");
+        assert!(
+            err.to_string().contains("disabled"),
+            "the error names the accepted spelling: {err}"
+        );
+    }
+
+    /// A minimum above the maximum is a config error: EnergyPlus silently
+    /// resets the maximum to the minimum
+    /// (`HeatBalanceManager.cc:686-697`); HARES asks for the day counts it
+    /// should run instead of substituting.
+    #[test]
+    fn min_days_above_max_days_is_a_config_error() {
+        let toml = "\nstart_time = \"2024-01-01T00:00:00Z\"\nduration = 3600\n[warmup]\nmin_days = 3\nmax_days = 2\n";
+        let err = SimulationConfig::from_toml(toml).expect_err("min above max is an error");
+        let message = err.to_string();
+        assert!(
+            message.contains("min_days") && message.contains("max_days"),
+            "the error names both: {message}"
+        );
+    }
+
+    /// `validate()` rejects a tolerance outside EnergyPlus's IDD bounds
+    /// `(0, 0.5]`, a day count of 0, and a minimum above the maximum.
+    #[test]
+    fn warmup_validation_bounds() {
+        let build = |mutate: fn(&mut WarmupConfig)| {
+            let mut config = WarmupConfig::default();
+            mutate(&mut config);
+            let cfg = config_for_warmup(config);
+            cfg.validate().err().map(|err| err.to_string())
+        };
+        fn config_for_warmup(warmup: WarmupConfig) -> SimulationConfig {
+            SimulationConfig {
+                start_time: chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                    .expect("a valid sample start"),
+                duration: Duration::seconds(3600),
+                time_res: Duration::seconds(60),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 10_000,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: SiteLocationOverride::default(),
+                max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: HealthPolicy::default(),
+                first_hour_interpolation: FirstHour::default(),
+                weather_year: WeatherYear::default(),
+                warmup: Warmup::Converge(warmup),
+            }
+        }
+        fn zero_temperature(config: &mut WarmupConfig) {
+            config.temperature_tolerance_c = 0.0;
+        }
+        fn above_half_temperature(config: &mut WarmupConfig) {
+            config.temperature_tolerance_c = 0.51;
+        }
+        fn zero_loads(config: &mut WarmupConfig) {
+            config.loads_tolerance = 0.0;
+        }
+        fn above_half_loads(config: &mut WarmupConfig) {
+            config.loads_tolerance = 0.51;
+        }
+        fn nonfinite_loads(config: &mut WarmupConfig) {
+            config.loads_tolerance = f64::NAN;
+        }
+        fn zero_min_days(config: &mut WarmupConfig) {
+            config.min_days = 0;
+        }
+        fn zero_max_days(config: &mut WarmupConfig) {
+            config.max_days = 0;
+        }
+        fn min_above_max(config: &mut WarmupConfig) {
+            config.min_days = 3;
+            config.max_days = 2;
+        }
+        for (name, mutate) in [
+            ("temperature 0.0", zero_temperature),
+            ("temperature 0.51", above_half_temperature),
+            ("loads 0.0", zero_loads),
+            ("loads 0.51", above_half_loads),
+            ("loads NaN", nonfinite_loads),
+            ("min_days 0", zero_min_days),
+            ("max_days 0", zero_max_days),
+            ("min above max", min_above_max),
+        ] as [(&str, fn(&mut WarmupConfig)); 8]
+        {
+            let err = build(mutate).unwrap_or_else(|| panic!("{name} must be a config error"));
+            assert!(
+                err.contains("warmup"),
+                "the {name} error names the warmup field: {err}"
+            );
+        }
+        // The boundary values are accepted: (0, 0.5] inclusive of 0.5.
+        let ok = config_for_warmup(WarmupConfig {
+            temperature_tolerance_c: 0.5,
+            loads_tolerance: 0.5,
+            ..WarmupConfig::default()
+        });
+        ok.validate().expect("0.5 is inside the allowed range");
     }
 }

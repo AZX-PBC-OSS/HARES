@@ -129,6 +129,7 @@ mod tests {
             health_policy: hares_io::HealthPolicy::default(),
             first_hour_interpolation: hares_io::FirstHour::default(),
             weather_year: hares_io::WeatherYear::default(),
+            warmup: hares_io::Warmup::default(),
         };
         let toml = toml::to_string(&config).expect("the config serialises to TOML");
         let table: toml::Table = toml.parse().expect("the TOML parses");

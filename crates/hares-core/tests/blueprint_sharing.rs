@@ -48,6 +48,7 @@ fn sim_config(start_time: DateTime<FixedOffset>, duration_s: i64, step_s: i64) -
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -64,7 +65,6 @@ fn cz4a_config(start: DateTime<FixedOffset>, duration_s: i64) -> DwellingConfig 
             sim_config: sim_config(start, duration_s, 900),
             overrides: None,
             bldg_id: 1,
-            initialization_duration: None,
             patches: None,
         },
     }
@@ -216,7 +216,6 @@ fn blueprints_from_different_hpxml_share_weather() {
         sim_config: sim_config(start, 6 * 3600, 900),
         overrides: None,
         bldg_id,
-        initialization_duration: None,
         patches: None,
     };
 
@@ -324,8 +323,7 @@ fn content_source_run_equals_path_source_run() {
         .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
         .single()
         .expect("start");
-    let settings =
-        DwellingSettings::new(sim_config(start, 24 * 3600, 900), None, 176_227, None, None);
+    let settings = DwellingSettings::new(sim_config(start, 24 * 3600, 900), None, 176_227, None);
 
     let mut content_dwelling = Dwelling::from_config(DwellingConfig {
         hpxml: InputSource::Text(hpxml_text.into()),

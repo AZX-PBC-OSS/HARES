@@ -764,7 +764,6 @@ impl PySteppableFleet {
 mod tests {
     use std::num::NonZeroUsize;
     use std::path::PathBuf;
-    use std::time::Duration as StdDuration;
 
     use hares_core::{DwellingConfig, DwellingSettings};
     use hares_io::{DefaultsSource, Frequency, InputSource, Selection, WeatherInput};
@@ -860,11 +859,6 @@ mod tests {
                     sim.clone(),
                     Some(home.overrides.clone()),
                     home.bldg_id,
-                    if home.initialization_duration_s == 0 {
-                        None
-                    } else {
-                        Some(StdDuration::from_secs(home.initialization_duration_s))
-                    },
                     None,
                 ),
             })

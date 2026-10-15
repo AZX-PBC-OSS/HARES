@@ -59,6 +59,7 @@ fn sim_config() -> SimulationConfig {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     };
     config.validate().expect("config validates");
     config
@@ -72,7 +73,7 @@ fn dwelling() -> Dwelling {
         schedule: Some(InputSource::Path(home.join("schedule.csv"))),
         weather: WeatherInput::Path(home.join("weather.epw")),
         defaults: DefaultsSource::directory(root.join("defaults")),
-        settings: DwellingSettings::new(sim_config(), None, 1, None, None),
+        settings: DwellingSettings::new(sim_config(), None, 1, None),
     })
     .expect("cz4a dwelling builds");
     // The monthly cycle closes on the start's day anniversary, so a

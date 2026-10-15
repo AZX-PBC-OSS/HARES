@@ -88,10 +88,10 @@ fn build_sample(sample: &str, month: u32) -> Dwelling {
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
             },
             None,
             1,
-            None,
             None,
         ),
         // No schedule file: the dwelling generates the schedule from the

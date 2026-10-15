@@ -29,9 +29,11 @@ pub mod weather;
 pub mod wsf;
 
 pub use config::{
-    ConfigError, DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES, DEFAULT_OUTPUT_CHUNK_SIZE,
-    DEFAULT_TIME_RES_SECS, HealthPolicy, KeyScope, MAX_VERBOSITY, REMOVED_KEYS, RemovedKey,
-    SimulationConfig, check_removed_toml_keys, removed_key, removed_key_message,
+    ConfigError, DEFAULT_LOADS_TOLERANCE, DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+    DEFAULT_MAX_WARMUP_DAYS, DEFAULT_MIN_WARMUP_DAYS, DEFAULT_OUTPUT_CHUNK_SIZE,
+    DEFAULT_TEMPERATURE_TOLERANCE_C, DEFAULT_TIME_RES_SECS, HealthPolicy, KeyScope, MAX_VERBOSITY,
+    REMOVED_KEYS, RemovedKey, SimulationConfig, Warmup, WarmupConfig, check_removed_toml_keys,
+    removed_key, removed_key_message,
 };
 pub use defaults::{
     BiquadraticCoefficients, DefaultsCategory, DefaultsError, DefaultsStore, EquipmentDefaults,

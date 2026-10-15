@@ -102,10 +102,10 @@ fn dwelling_config(run: &Run) -> DwellingConfig {
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
             },
             run.overrides.clone(),
             run.bldg_id,
-            None,
             None,
         ),
     }
@@ -658,10 +658,10 @@ fn garage_dwelling_config(hpxml: &Path) -> DwellingConfig {
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
             },
             None,
             1,
-            None,
             None,
         ),
     }

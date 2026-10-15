@@ -545,10 +545,10 @@ fn resumable_dwelling_config(case: &ResumeCase) -> DwellingConfig {
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
             },
             None,
             176_227,
-            None,
             None,
         ),
     }
@@ -833,10 +833,10 @@ fn the_boiler_fluid_publish_marker_survives_a_checkpoint_restore() {
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
             },
             None,
             2,
-            None,
             None,
         ),
     };

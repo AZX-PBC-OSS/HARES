@@ -828,13 +828,6 @@ mod tests {
                 sim.clone(),
                 Some(home.overrides.clone()),
                 home.bldg_id,
-                if home.initialization_duration_s == 0 {
-                    None
-                } else {
-                    Some(std::time::Duration::from_secs(
-                        home.initialization_duration_s,
-                    ))
-                },
                 None,
             ),
         };

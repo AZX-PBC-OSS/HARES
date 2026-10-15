@@ -40,6 +40,7 @@ time_res = 60
 duration = 600
 output_chunk_size = 1000
 master_seed = 0
+warmup = "disabled"
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0

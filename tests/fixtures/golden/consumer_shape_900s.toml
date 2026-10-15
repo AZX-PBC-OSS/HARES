@@ -11,6 +11,7 @@ duration = 31536000
 time_res = 900
 master_seed = 0
 metrics = true
+warmup = "disabled"
 
 [[simulation.reports]]
 name = "frame"
@@ -22,5 +23,4 @@ bldg_id = 176227
 hpxml = "tests/fixtures/resstock/2025.1/bldg0176227/home.xml"
 schedule = "tests/fixtures/resstock/2025.1/bldg0176227/in.schedules.csv"
 weather = "tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv"
-initialization_duration_s = 0
 overrides = { "Gas Water Heater" = { ua_w_per_k = 2.0 } }

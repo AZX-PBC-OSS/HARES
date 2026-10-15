@@ -61,10 +61,10 @@ fn config(hpxml: &Path, overrides: Option<Value>, start_hour: u32) -> DwellingCo
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
             },
             overrides,
             1,
-            None,
             None,
         ),
     }

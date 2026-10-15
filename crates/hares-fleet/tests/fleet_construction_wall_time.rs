@@ -50,6 +50,7 @@ fn fleet_construction_1000_homes_wall_time() {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::default(),
     };
 
     let configs: Vec<DwellingConfig> = (0..homes)
@@ -68,13 +69,7 @@ fn fleet_construction_1000_homes_wall_time() {
                 schedule: Some(InputSource::Path(home.join("in.schedules.csv"))),
                 weather: WeatherInput::Path(weather_path.clone()),
                 defaults: DefaultsSource::directory(project_root().join("defaults")),
-                settings: DwellingSettings::new(
-                    sim_config.clone(),
-                    None,
-                    idx as i64,
-                    Some(std::time::Duration::from_secs(7 * 24 * 3600)),
-                    None,
-                ),
+                settings: DwellingSettings::new(sim_config.clone(), None, idx as i64, None),
             }
         })
         .collect();

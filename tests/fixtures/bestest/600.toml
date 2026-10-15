@@ -12,7 +12,8 @@ internal_gains_sensible_fraction = 1.0
 # ASHRAE 140 reference bands) uses 0.3.
 internal_gains_radiant_fraction = 0.3
 
-initialization_duration_s = 86400  # 1 day warmup (lightweight construction)
+# The warm-up: the [simulation] table's warmup field, the default
+# converging warm-up (the EnergyPlus criteria).
 [simulation]
 start_time = "2024-01-01T00:00:00-07:00"
 time_res = 3600

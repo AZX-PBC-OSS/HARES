@@ -8,7 +8,6 @@ use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration as StdDuration;
 
 use arrow::array::{Array, Float64Array, StringArray, TimestampMicrosecondArray};
 use arrow::record_batch::RecordBatch;
@@ -26,8 +25,6 @@ struct FixtureConfig {
     simulation: Option<toml::Table>,
     #[serde(default)]
     bldg_id: Option<i64>,
-    #[serde(default)]
-    initialization_duration_seconds: Option<i64>,
     /// The fixture's equipment overrides, carried verbatim into the
     /// dwelling config: the battery fixtures declare their control here
     /// (`bms_mode = '"Manual"'`, the idle battery the OCHRE reference
@@ -714,10 +711,6 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
                 .overrides
                 .map(|table| serde_json::to_value(&table).expect("overrides table serializes")),
             config.bldg_id.unwrap_or(1),
-            config
-                .initialization_duration_seconds
-                .and_then(|seconds| u64::try_from(seconds).ok())
-                .map(StdDuration::from_secs),
             None,
         ),
     }

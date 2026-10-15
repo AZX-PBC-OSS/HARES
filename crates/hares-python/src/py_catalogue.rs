@@ -386,7 +386,7 @@ mod tests {
             schedule: Some(InputSource::Path(home.join("schedule.csv"))),
             weather: WeatherInput::Path(home.join("weather.epw")),
             defaults: DefaultsSource::directory(root.join("defaults")),
-            settings: DwellingSettings::new(sim.clone(), None, 1, None, None),
+            settings: DwellingSettings::new(sim.clone(), None, 1, None),
         };
         let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
         let catalogue = dwelling.catalogue();

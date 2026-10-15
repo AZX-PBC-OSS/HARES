@@ -15,8 +15,8 @@ use frame_golden::manifest::{GoldenManifest, repo_root};
 use hares_core::{RunHealth, WarmupOutcome};
 
 /// A one-day, hourly manifest against the cz4a parity fixture: 24 rows,
-/// master seed 0, no initialization (`initialization_duration_s = 0` runs
-/// no warm-up, as the Python binding's rule has it).
+/// master seed 0, the warm-up disabled (`warmup = "disabled"` runs no
+/// warm-up).
 ///
 /// The feature set names the running binary's own: these tests exercise
 /// capture stability and the round trip, not the feature gate, so the
@@ -38,6 +38,7 @@ start_time = "2023-01-01T00:00:00-07:00"
 duration = 86400
 time_res = 3600
 master_seed = 0
+warmup = "disabled"
 
 [[simulation.reports]]
 name = "frame"
@@ -49,7 +50,6 @@ bldg_id = 1
 hpxml = "tests/fixtures/parity/cz4a_ashp_hpwh/building.xml"
 schedule = "tests/fixtures/parity/cz4a_ashp_hpwh/schedule.csv"
 weather = "tests/fixtures/parity/cz4a_ashp_hpwh/weather.epw"
-initialization_duration_s = 0
 overrides = {{}}
 "#
     )
@@ -146,9 +146,8 @@ fn capture_then_compare_round_trips() {
 
 /// A one-day, hourly manifest against the cz2a parity fixture, with the
 /// warm-up setting passed through: the acceptance tests for the manifest's
-/// `initialization_duration_s` rule run the same inputs with `0` and with
-/// a positive value.
-fn cz2a_one_day_manifest(initialization_duration_s: u64) -> String {
+/// `warmup` rule run the same inputs disabled and default.
+fn cz2a_one_day_manifest(warmup_line: &str) -> String {
     let features = frame_golden::manifest::running_features()
         .into_iter()
         .map(|f| format!("\"{f}\""))
@@ -165,6 +164,7 @@ start_time = "2023-01-01T00:00:00-07:00"
 duration = 86400
 time_res = 3600
 master_seed = 0
+{warmup_line}
 
 [[simulation.reports]]
 name = "frame"
@@ -176,41 +176,36 @@ bldg_id = 1
 hpxml = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/building.xml"
 schedule = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/schedule.csv"
 weather = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/weather.epw"
-initialization_duration_s = {initialization_duration_s}
 overrides = {{}}
 "#
     )
 }
 
-fn run_cz2a_one_day(initialization_duration_s: u64) -> RunHealth {
+fn run_cz2a_one_day(warmup_line: &str) -> RunHealth {
     let dir = tempfile::tempdir().unwrap();
     let manifest_path = dir.path().join("cz2a_one_day.toml");
-    std::fs::write(
-        &manifest_path,
-        cz2a_one_day_manifest(initialization_duration_s),
-    )
-    .unwrap();
+    std::fs::write(&manifest_path, cz2a_one_day_manifest(warmup_line)).unwrap();
 
     let products = run_products(&manifest_path);
     serde_json::from_value(products.health.expect("dwelling run records health")).unwrap()
 }
 
 #[test]
-fn manifest_zero_initialization_duration_runs_no_warmup() {
-    let health = run_cz2a_one_day(0);
+fn manifest_disabled_warmup_runs_no_warmup() {
+    let health = run_cz2a_one_day("warmup = \"disabled\"");
     assert_eq!(
         health.warmup,
         WarmupOutcome::Disabled,
-        "initialization_duration_s = 0 must run no warm-up"
+        "warmup = \"disabled\" must run no warm-up"
     );
 }
 
 #[test]
-fn manifest_positive_initialization_duration_runs_warmup() {
-    let health = run_cz2a_one_day(86400);
+fn manifest_default_warmup_runs_warmup() {
+    let health = run_cz2a_one_day("");
     assert!(
         matches!(health.warmup, WarmupOutcome::Ran { .. }),
-        "a positive initialization_duration_s must run the warm-up: {:?}",
+        "the default warmup must run the warm-up: {:?}",
         health.warmup
     );
 }
@@ -233,7 +228,6 @@ bldg_id = 2
 hpxml = "tests/fixtures/resstock/2025.1/bldg0000002/home.xml"
 schedule = "tests/fixtures/resstock/2025.1/bldg0000002/in.schedules.csv"
 weather = "tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"
-initialization_duration_s = 0
 weight = {weight:.1}
 overrides = {{}}
 "#

@@ -36,6 +36,7 @@ fn sim_config(
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -50,13 +51,7 @@ fn cz4a_config(
         schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
         weather: WeatherInput::Path(fixture.join("weather.epw")),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(
-            sim_config(start_time, duration, step_s),
-            None,
-            1,
-            None,
-            None,
-        ),
+        settings: DwellingSettings::new(sim_config(start_time, duration, step_s), None, 1, None),
     }
 }
 
@@ -217,7 +212,6 @@ fn vacant_home_draws_no_appliance_hot_water() {
             sim_config(start, Duration::seconds(86_400 * 365), 3600),
             None,
             527060,
-            None,
             None,
         ),
     };

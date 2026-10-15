@@ -117,6 +117,7 @@ start_time = "2023-01-01T00:00:00-07:00"
 duration = 86400
 time_res = 3600
 master_seed = 0
+warmup = "disabled"
 
 [[simulation.reports]]
 name = "frame"
@@ -128,7 +129,6 @@ bldg_id = 1
 hpxml = "tests/fixtures/parity/cz4a_ashp_hpwh/building.xml"
 schedule = "tests/fixtures/parity/cz4a_ashp_hpwh/schedule.csv"
 weather = "tests/fixtures/parity/cz4a_ashp_hpwh/weather.epw"
-initialization_duration_s = 0
 overrides = {{}}
 "#
     )

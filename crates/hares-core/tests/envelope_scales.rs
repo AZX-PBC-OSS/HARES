@@ -55,6 +55,7 @@ fn sim_config(duration_s: i64, step_s: i64) -> SimulationConfig {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -80,7 +81,6 @@ fn base_xml_config(duration_s: i64, scales: Option<(f64, f64)>) -> DwellingConfi
             sim_config: sim_config(duration_s, 900),
             overrides,
             bldg_id: 1,
-            initialization_duration: None,
             patches: None,
         },
     }
@@ -345,7 +345,6 @@ fn config_for(
             sim_config: sim_config(duration_s, step_s),
             overrides,
             bldg_id: 1,
-            initialization_duration: None,
             patches: None,
         },
     }

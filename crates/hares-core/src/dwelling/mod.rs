@@ -257,7 +257,6 @@ pub struct DwellingSettings {
     pub sim_config: SimulationConfig,
     pub overrides: Option<serde_json::Value>,
     pub bldg_id: i64,
-    pub initialization_duration: Option<StdDuration>,
     /// HPXML data-quality patches from external metadata (e.g. ResStock).
     /// Fields supplement or correct HPXML-parsed data when the source
     /// document contains missing or invalid values.
@@ -367,16 +366,6 @@ impl hares_types::DescribeFields for DwellingSettings {
                 description: Some("the building id the RNG streams derive from".to_string()),
             },
             FieldSchema {
-                name: "initialization_duration".to_string(),
-                value_type: ValueType::DurationSeconds,
-                unit: None,
-                default: serde_json::Value::Null,
-                bounds: None,
-                description: Some(
-                    "the warm-up duration in seconds; None runs the converged warm-up".to_string(),
-                ),
-            },
-            FieldSchema {
                 name: "patches".to_string(),
                 value_type: ValueType::Object,
                 unit: None,
@@ -394,20 +383,19 @@ impl hares_types::DescribeFields for DwellingSettings {
 
 impl DwellingSettings {
     /// The settings of a config whose inputs are the four sources the
-    /// caller parsed: every non-input field moves.
+    /// caller parsed: every non-input field moves. The warm-up lives on
+    /// the sim config's `warmup` field.
     #[must_use]
     pub fn new(
         sim_config: SimulationConfig,
         overrides: Option<serde_json::Value>,
         bldg_id: i64,
-        initialization_duration: Option<StdDuration>,
         patches: Option<hares_io::HpxmlDataPatches>,
     ) -> Self {
         Self {
             sim_config,
             overrides,
             bldg_id,
-            initialization_duration,
             patches,
         }
     }
@@ -2718,6 +2706,14 @@ pub struct Dwelling {
     /// daily peaks for `WarmupResiduals`.
     step_hvac_heating_w: f64,
     step_hvac_cooling_w: f64,
+    /// Per-zone HVAC delivery of the step just simulated, the per-zone
+    /// values behind the `HVAC Heating Delivered - {zone} (W)` and
+    /// `HVAC Cooling Delivered - {zone} (W)` columns (delivered-energy
+    /// magnitudes). Updated every step by `run_timestep` from the thermal
+    /// port accumulators before they zero; the warm-up loop accumulates
+    /// these into per-zone daily peaks for the load criteria.
+    step_hvac_heating_by_zone: Vec<(ZoneId, f64)>,
+    step_hvac_cooling_by_zone: Vec<(ZoneId, f64)>,
     /// Per-zone moisture invariant capture data from `check_moisture`.
     /// Populated by check_step_invariants; consumed by the observer push
     /// when both debug_assertions and `observe` are active.
@@ -2896,6 +2892,7 @@ impl Dwelling {
             health_policy: hares_io::HealthPolicy::default(),
             first_hour_interpolation: hares_io::FirstHour::default(),
             weather_year: hares_io::WeatherYear::default(),
+            warmup: hares_io::Warmup::default(),
         };
 
         let config = DwellingConfig {
@@ -2905,13 +2902,7 @@ impl Dwelling {
             defaults: defaults_path
                 .map(DefaultsSource::directory)
                 .unwrap_or_default(),
-            settings: DwellingSettings::new(
-                sim_config,
-                overrides,
-                0,
-                Some(StdDuration::from_secs(7 * 24 * 3600)),
-                None,
-            ),
+            settings: DwellingSettings::new(sim_config, overrides, 0, None),
         };
         Self::from_config(config)
     }
@@ -3003,7 +2994,6 @@ impl Dwelling {
                 config.simulation.clone(),
                 config.overrides.clone(),
                 config.building_id.unwrap_or(0),
-                config.initialization_duration_s.map(StdDuration::from_secs),
                 None,
             ),
         };
@@ -3064,6 +3054,189 @@ fn forcing_horizon_steps(duration: Duration, time_res: StdDuration, warmup: bool
     }
     let steps_per_day = 24 * 3600 / res_secs;
     duration_steps.max(steps_per_day)
+}
+
+/// EnergyPlus's `MinLoad` for the warm-up convergence check: both days'
+/// daily peak loads are floored here before the relative comparison, so a
+/// low-load day cannot produce a huge percentage difference
+/// (`HeatBalanceManager.cc:3320`).
+const WARMUP_MIN_LOAD_W: f64 = 100.0;
+
+/// The peak load at or below which the load check passes without a
+/// comparison: "make sure load big enough to divide"
+/// (`HeatBalanceManager.cc:3350`, `:3366`).
+const WARMUP_LOAD_FLOOR_W: f64 = 1e-4;
+
+/// One warm-up day's per-zone record: the daily maximum and minimum zone
+/// air temperature and the daily peak HVAC heating and cooling delivered
+/// to the zone, the per-zone values behind the run's
+/// `HVAC Heating Delivered - {zone} (W)` and `HVAC Cooling Delivered -
+/// {zone} (W)` columns. Indexed with `latest_env.zones`; `zone_ids` is
+/// captured alongside for the per-zone lookup by id.
+pub(crate) struct WarmupDayRecord {
+    max_t: Vec<f64>,
+    min_t: Vec<f64>,
+    peak_heating_w: Vec<f64>,
+    peak_cooling_w: Vec<f64>,
+    zone_ids: Vec<ZoneId>,
+}
+
+impl WarmupDayRecord {
+    fn new(zones: &[hares_types::ZoneState]) -> Self {
+        Self {
+            max_t: vec![f64::NEG_INFINITY; zones.len()],
+            min_t: vec![f64::INFINITY; zones.len()],
+            peak_heating_w: vec![0.0; zones.len()],
+            peak_cooling_w: vec![0.0; zones.len()],
+            zone_ids: zones.iter().map(|z| z.id).collect(),
+        }
+    }
+
+    fn zone_index(&self, zone: ZoneId) -> Option<usize> {
+        self.zone_ids.iter().position(|&z| z == zone)
+    }
+}
+
+/// EnergyPlus's load residual for one zone's daily peak: when today's peak
+/// exceeds the 1e-4 W floor-of-record threshold, both days' peaks are
+/// floored at 100 W and the relative change is the residual; at or below
+/// it, the check passes and the residual is 0.0
+/// (`HeatBalanceManager.cc:3350-3364`, `:3366-3380`).
+fn warmup_load_residual(today_w: f64, yesterday_w: f64) -> f64 {
+    if today_w > WARMUP_LOAD_FLOOR_W {
+        let today = today_w.max(WARMUP_MIN_LOAD_W).abs();
+        let yesterday = yesterday_w.max(WARMUP_MIN_LOAD_W).abs();
+        (today - yesterday).abs() / today
+    } else {
+        0.0
+    }
+}
+
+/// One day's four zone checks: whether every zone's checks pass, the
+/// recorded residuals of the worst zone (largest daily-max temperature
+/// residual, its own loads beside it), and the zones failing a check.
+struct DayComparison {
+    converged: bool,
+    residuals: WarmupResiduals,
+    failing: Vec<ZoneId>,
+}
+
+/// Compares two warm-up days' records by the EnergyPlus criteria, every
+/// zone (`HeatBalanceManager.cc:3330-3380`): the daily maximum and minimum
+/// temperature change against the temperature tolerance and the daily peak
+/// heating and cooling delivered against the loads tolerance with the
+/// 100 W floor. A non-finite residual is not a comparison result: the
+/// comparison fails the run with `NanDetected` naming the zone and the
+/// warm-up day.
+fn compare_warmup_days(
+    prev: &WarmupDayRecord,
+    today: &WarmupDayRecord,
+    zone_ids: impl Iterator<Item = ZoneId>,
+    day: u32,
+    warmup: &hares_io::WarmupConfig,
+) -> Result<DayComparison> {
+    let mut converged = true;
+    let mut failing = Vec::new();
+    let mut worst_index = 0usize;
+    let mut worst_max_t = f64::MIN;
+    let mut residuals_of_worst: Option<WarmupResiduals> = None;
+
+    for (i, zone_id) in zone_ids.enumerate() {
+        let d_max = (today.max_t[i] - prev.max_t[i]).abs();
+        let d_min = (today.min_t[i] - prev.min_t[i]).abs();
+        let heating = warmup_load_residual(today.peak_heating_w[i], prev.peak_heating_w[i]);
+        let cooling = warmup_load_residual(today.peak_cooling_w[i], prev.peak_cooling_w[i]);
+        if !d_max.is_finite() || !d_min.is_finite() {
+            return Err(HaresError::NanDetected {
+                step_index: u64::from(day),
+                zone_id: Some(zone_id),
+                value_name: format!(
+                    "warm-up day {day} daily temperature extreme against the previous day"
+                ),
+            });
+        }
+        if !heating.is_finite() || !cooling.is_finite() {
+            return Err(HaresError::NanDetected {
+                step_index: u64::from(day),
+                zone_id: Some(zone_id),
+                value_name: format!("warm-up day {day} daily peak HVAC delivery"),
+            });
+        }
+        let zone_converged = d_max <= warmup.temperature_tolerance_c
+            && d_min <= warmup.temperature_tolerance_c
+            && heating <= warmup.loads_tolerance
+            && cooling <= warmup.loads_tolerance;
+        if !zone_converged {
+            converged = false;
+            failing.push(zone_id);
+        }
+        if d_max > worst_max_t {
+            worst_max_t = d_max;
+            worst_index = i;
+            residuals_of_worst = Some(WarmupResiduals {
+                worst_zone: zone_id,
+                max_temperature_c: d_max,
+                min_temperature_c: d_min,
+                heating_load: heating,
+                cooling_load: cooling,
+            });
+        }
+    }
+
+    let residuals = residuals_of_worst.unwrap_or_else(|| {
+        // No zones: nothing to compare; the record names zone 0 with zero
+        // residuals so the outcome still carries the type's invariants.
+        WarmupResiduals {
+            worst_zone: today
+                .zone_ids
+                .first()
+                .copied()
+                .unwrap_or(ZoneId(u16::try_from(worst_index).unwrap_or(u16::MAX))),
+            max_temperature_c: 0.0,
+            min_temperature_c: 0.0,
+            heating_load: 0.0,
+            cooling_load: 0.0,
+        }
+    });
+    Ok(DayComparison {
+        converged,
+        residuals,
+        failing,
+    })
+}
+
+/// The warm-up tests' injection hook: a recorded day quantity overwritten
+/// with NaN while the zone's own state stays finite, so the day-over-day
+/// comparison (not the per-step NaN check) meets the non-finite residual.
+/// The state is thread-local: a dwelling's warm-up runs on its building
+/// thread, and two tests' warm-ups must never share an arming.
+#[cfg(test)]
+pub(crate) mod warmup_test_hooks {
+    use std::cell::Cell;
+
+    thread_local! {
+        static NAN_MAX_DAY: Cell<u32> = const { Cell::new(0) };
+        static NAN_MAX_ZONE: Cell<u32> = const { Cell::new(u32::MAX) };
+    }
+
+    /// Arms the hook: on warm-up day `day`, the named zone's recorded daily
+    /// maximum temperature becomes NaN.
+    pub(crate) fn arm_nan_daily_max(day: u32, zone: u16) {
+        NAN_MAX_DAY.with(|cell| cell.set(day));
+        NAN_MAX_ZONE.with(|cell| cell.set(u32::from(zone)));
+    }
+
+    /// The hook itself, called at the day record's completion.
+    pub(crate) fn overwrite_recorded_day(record_day: u32, record: &mut super::WarmupDayRecord) {
+        let armed = NAN_MAX_DAY.with(Cell::get);
+        if armed != 0 && armed == record_day {
+            let zone = NAN_MAX_ZONE.with(Cell::get);
+            if let Some(i) = record.zone_ids.iter().position(|z| u32::from(z.0) == zone) {
+                record.max_t[i] = f64::NAN;
+            }
+            NAN_MAX_DAY.with(|cell| cell.set(0));
+        }
+    }
 }
 
 pub(crate) fn build_from_blueprint(bp: &Arc<DwellingBlueprint>) -> Result<Dwelling> {
@@ -3144,7 +3317,7 @@ fn build_from_blueprint_inner_with_seed(
 ) -> Result<Dwelling> {
     let mut dwelling = assemble_from_blueprint_with_seed(bp, settings, master_seed, warnings)?;
 
-    if let Some(_init_dur) = settings.initialization_duration {
+    if let Some(warmup_config) = settings.sim_config.warmup.config() {
         // Save RNG state before warmup. The clock is reset after warmup for
         // weather replay; restoring the RNG ensures the production phase
         // starts from the same RNG position regardless of how many warmup
@@ -3155,7 +3328,7 @@ fn build_from_blueprint_inner_with_seed(
         let rng_stream_before = dwelling.rng.get_stream();
         let rng_word_pos_before = dwelling.rng.get_word_pos();
 
-        match dwelling.run_warmup_converged_inner(0.5, 25) {
+        match dwelling.run_warmup_converged_inner(warmup_config) {
             Err(err) => {
                 // The dwelling is about to be dropped carrying the
                 // accumulated warning log; emit it so this failure carries
@@ -3207,10 +3380,10 @@ fn build_from_blueprint_inner_with_seed(
     } else {
         tracing::warn!(
             bldg_id = settings.bldg_id,
-            "initialization_duration is None: no warm-up period will run; \
+            "warmup is disabled: no warm-up period will run; \
              this produces biased heat-transfer predictions for heavyweight \
-             construction. Set initialization_duration to at least 7 days \
-             (604800 s) for concrete/masonry buildings."
+             construction. The default warm-up converges by the EnergyPlus \
+             criteria; warmup = \"disabled\" opts out."
         );
     }
 
@@ -3279,7 +3452,7 @@ fn assemble_from_blueprint_with_seed(
             horizon_steps: Some(forcing_horizon_steps(
                 config.sim_config.duration,
                 bp.time_res,
-                config.initialization_duration.is_some(),
+                config.sim_config.warmup.config().is_some(),
             )),
             first_hour_interpolation: config.sim_config.first_hour_interpolation,
             weather_year: config.sim_config.weather_year,
@@ -4039,6 +4212,8 @@ fn assemble_from_blueprint_with_seed(
         is_warming_up: false,
         step_hvac_heating_w: 0.0,
         step_hvac_cooling_w: 0.0,
+        step_hvac_heating_by_zone: Vec::new(),
+        step_hvac_cooling_by_zone: Vec::new(),
         #[cfg(all(feature = "observe", debug_assertions))]
         invariant_moisture_capture: Vec::new(),
         zone_is_conditioned: if bp.building.zones.is_empty() {
@@ -4286,7 +4461,6 @@ impl Dwelling {
                 sim_config: config,
                 overrides: settings.overrides,
                 bldg_id: self.bldg_id,
-                initialization_duration: settings.initialization_duration,
                 patches: settings.patches,
             },
             site_utc_offset_s: self.clock.start_time.offset().local_minus_utc(),
@@ -5872,30 +6046,44 @@ impl Dwelling {
         Ok(())
     }
 
-    /// Iterative warm-up convergence per EnergyPlus ERM 26.1 — Warmup Convergence.
+    /// Iterative warm-up convergence by the EnergyPlus warm-up convergence
+    /// criteria (`vendors/EnergyPlus/src/EnergyPlus/HeatBalanceManager.cc:3309-3430`,
+    /// `CheckWarmupConvergence`; the tolerances and day counts
+    /// `idd/Energy+.idd.in:536-575`, `Building` fields N2 to N5).
     ///
-    /// Repeatedly simulates the first 24-hour weather day until the maximum zone
-    /// temperature change across all conditioned zones between consecutive iterations
-    /// falls below `threshold_c` °C, up to `max_iter` iterations.
+    /// Repeatedly simulates the run's first 24-hour day. After each warm-up
+    /// day, for every zone (EnergyPlus compares every zone, unconditioned
+    /// included):
+    /// - the daily maximum zone air temperature changed from the previous
+    ///   warm-up day by at most `temperature_tolerance_c` delta C
+    ///   (`:3330-3336`), and the daily minimum the same (`:3342-3348`);
+    /// - the daily peak HVAC heating delivered to the zone: when today's
+    ///   peak exceeds 1e-4 W, both days' peaks are floored at 100 W
+    ///   (`MinLoad`, `:3320`) and the relative change must be at most
+    ///   `loads_tolerance` (`:3350-3364`); a peak at or below 1e-4 W passes;
+    /// - the daily peak HVAC cooling delivered to the zone, the same rule
+    ///   (`:3366-3380`).
     ///
-    /// EnergyPlus defaults: threshold = 0.5 °C, max_iter = 25 iterations.
-    /// EnergyPlus I/O Reference 26.1 — Simulation Parameters: Building: "This value represents the number at
-    /// which the zone temperatures must agree ... before 'convergence' is reached."
-    /// Typical convergence: 1-2 iterations for lightweight construction, 4-7 for
-    /// heavyweight (concrete slab, masonry).
+    /// Warm-up ends when every zone's four checks pass on a day at or after
+    /// `min_days`, or when `max_days` days have run. At the maximum without
+    /// convergence the run continues with the outcome recorded and a warning
+    /// naming the zones whose checks failed, EnergyPlus's `ShowSevereError`
+    /// per unconverged zone (`:3382-3424`). A day's recorded quantity that
+    /// is not finite is never a comparison result: it fails the run with
+    /// `NanDetected` naming the zone and the day.
     ///
-    /// The outcome (days run, convergence, day-over-day residuals) is recorded
-    /// on [`Self::health`] at every return path once warm-up runs.
-    pub fn run_warmup_converged(&mut self, threshold_c: f64, max_iter: u32) -> Result<u32> {
+    /// The outcome (days run, convergence, the final day's residuals) is
+    /// recorded on [`Self::health`] at every return path once warm-up runs.
+    pub fn run_warmup_converged(&mut self, warmup: &hares_io::WarmupConfig) -> Result<u32> {
         self.record_replay_blocker(hares_types::ReplayBlocker::StateRestored);
-        self.run_warmup_converged_inner(threshold_c, max_iter)
+        self.run_warmup_converged_inner(warmup)
     }
 
     /// The convergence loop's body, the record nothing path: the build's
     /// own warm-up runs through here (a caller's
     /// [`Self::run_warmup_converged`] records the state-restored replay
     /// blocker first, the build's own warm-up records nothing).
-    fn run_warmup_converged_inner(&mut self, threshold_c: f64, max_iter: u32) -> Result<u32> {
+    fn run_warmup_converged_inner(&mut self, warmup: &hares_io::WarmupConfig) -> Result<u32> {
         let time_res_s = u64::try_from(self.clock.time_res.num_seconds())
             .map_err(|_| HaresError::Io("invalid time resolution".to_string()))?;
         let steps_per_day = (24u64 * 3600).checked_div(time_res_s).unwrap_or(0);
@@ -5906,173 +6094,166 @@ impl Dwelling {
 
         self.is_warming_up = true;
 
-        let mut prev_zone_temps: Vec<f64> = Vec::new();
-        // Previous day's per-zone daily max/min temperatures and aggregate
-        // daily peak HVAC delivery: the residual baseline.
-        let mut prev_day_max_t: Option<Vec<f64>> = None;
-        let mut prev_day_min_t: Vec<f64> = Vec::new();
-        let mut prev_peak_heating_w: f64 = 0.0;
-        let mut prev_peak_cooling_w: f64 = 0.0;
+        // Previous day's per-zone daily max/min temperatures and daily peak
+        // HVAC delivery: the residual baseline. EnergyPlus keeps one record
+        // per zone (`MaxTempZone`, `MinTempZone`, `MaxHeatLoadZone`,
+        // `MaxCoolLoadZone` and their `PrevDay` pairs,
+        // `HeatBalanceManager.cc:3237-3247`, `:2888-2890`).
+        let mut prev_day: Option<WarmupDayRecord> = None;
         // Residuals of the final day (recorded on health at the return paths)
-        // and the zones whose final-day temperature residual exceeded the
-        // convergence threshold (named in the non-convergence warning).
+        // and the zones whose final-day comparison failed any of the four
+        // checks (named in the non-convergence warning).
         let mut final_residuals: Option<WarmupResiduals> = None;
-        let mut threshold_exceeding_zones: Vec<ZoneId> = Vec::new();
+        let mut failing_zones: Vec<ZoneId> = Vec::new();
 
-        for iteration in 1..=max_iter {
-            // Per-zone daily extremes and aggregate daily delivery peaks for
-            // this warm-up day, accumulated per step below.
-            let mut day_max_t: Vec<f64> = vec![f64::NEG_INFINITY; self.latest_env.zones.len()];
-            let mut day_min_t: Vec<f64> = vec![f64::INFINITY; self.latest_env.zones.len()];
-            let mut day_peak_heating_w: f64 = 0.0;
-            let mut day_peak_cooling_w: f64 = 0.0;
+        for day in 1..=warmup.max_days {
+            // Record the day: per-zone daily extremes and daily peak HVAC
+            // delivery, accumulated per step below.
+            let mut record = WarmupDayRecord::new(&self.latest_env.zones);
 
             // Reset clock to start of first day for weather replay.
             // Thermal state carries forward from previous iteration:
-            // EnergyPlus ERM 26.1 — Warmup Convergence — initial conditions for each
-            // warmup day are the final conditions from the previous warmup day.
+            // initial conditions for each warmup day are the final
+            // conditions from the previous warmup day.
             self.clock.current_step = 0;
 
             for _ in 0..steps_per_day {
                 if let Err(err) = self.run_timestep(false) {
                     // The run failed mid-warm-up: exit warm-up mode and
                     // record the outcome honestly (stopped during
-                    // `iteration`, not converged) before propagating.
+                    // `day`, not converged) before propagating.
                     self.is_warming_up = false;
                     self.health.warmup = WarmupOutcome::Ran {
-                        days_run: iteration,
+                        days_run: day,
                         converged: false,
                         residuals: final_residuals.clone(),
                     };
                     return Err(err);
                 }
                 for (i, zone) in self.latest_env.zones.iter().enumerate() {
-                    day_max_t[i] = day_max_t[i].max(zone.temperature_c);
-                    day_min_t[i] = day_min_t[i].min(zone.temperature_c);
+                    record.max_t[i] = record.max_t[i].max(zone.temperature_c);
+                    record.min_t[i] = record.min_t[i].min(zone.temperature_c);
                 }
-                day_peak_heating_w = day_peak_heating_w.max(self.step_hvac_heating_w);
-                day_peak_cooling_w = day_peak_cooling_w.max(self.step_hvac_cooling_w);
-            }
-
-            // Collect conditioned zone temperatures from the environment state.
-            // Order is stable: both `latest_env.zones` and `zone_is_conditioned`
-            // are aligned by construction.
-            let zone_temps: Vec<f64> = (0..self.latest_env.zones.len())
-                .filter(|&i| self.zone_is_conditioned[i])
-                .map(|i| self.latest_env.zones[i].temperature_c)
-                .collect();
-
-            if let Some(prev_max_t) = &prev_day_max_t {
-                // Day-over-day residuals per zone: |Δ daily max| and
-                // |Δ daily min|, worst zone = largest max of the two. The
-                // aggregate daily-peak heating/cooling relative changes are
-                // attributed to that zone's row (delivery is measured in
-                // aggregate only).
-                let mut worst_idx = 0usize;
-                let mut worst_residual = f64::MIN;
-                let mut worst_dmax = 0.0f64;
-                let mut worst_dmin = 0.0f64;
-                threshold_exceeding_zones.clear();
-                for (i, zone) in self.latest_env.zones.iter().enumerate() {
-                    let d_max = (day_max_t[i] - prev_max_t[i]).abs();
-                    let d_min = (day_min_t[i] - prev_day_min_t[i]).abs();
-                    let residual = d_max.max(d_min);
-                    if residual > worst_residual {
-                        worst_residual = residual;
-                        worst_idx = i;
-                        worst_dmax = d_max;
-                        worst_dmin = d_min;
-                    }
-                    if residual >= threshold_c {
-                        threshold_exceeding_zones.push(zone.id);
+                for &(zone, heating_w) in &self.step_hvac_heating_by_zone {
+                    if let Some(i) = record.zone_index(zone) {
+                        record.peak_heating_w[i] = record.peak_heating_w[i].max(heating_w);
                     }
                 }
-                let heating_load = if prev_peak_heating_w > 0.0 {
-                    (day_peak_heating_w - prev_peak_heating_w).abs() / prev_peak_heating_w
-                } else {
-                    0.0
-                };
-                let cooling_load = if prev_peak_cooling_w > 0.0 {
-                    (day_peak_cooling_w - prev_peak_cooling_w).abs() / prev_peak_cooling_w
-                } else {
-                    0.0
-                };
-                final_residuals = Some(WarmupResiduals {
-                    worst_zone: self.latest_env.zones[worst_idx].id,
-                    max_temperature_c: worst_dmax,
-                    min_temperature_c: worst_dmin,
-                    heating_load,
-                    cooling_load,
-                });
+                for &(zone, cooling_w) in &self.step_hvac_cooling_by_zone {
+                    if let Some(i) = record.zone_index(zone) {
+                        record.peak_cooling_w[i] = record.peak_cooling_w[i].max(cooling_w);
+                    }
+                }
             }
 
-            if !prev_zone_temps.is_empty() {
-                // EnergyPlus ERM 26.1 — Warmup Convergence:
-                // max |ΔT_zone| across all conditioned zones. Convergence
-                // criterion: 0.5 °C (EnergyPlus I/O Reference default).
-                let max_delta = prev_zone_temps
-                    .iter()
-                    .zip(zone_temps.iter())
-                    .map(|(prev, curr)| (prev - curr).abs())
-                    .fold(0.0_f64, f64::max);
+            // The test hook: a recorded day quantity overwritten with a
+            // non-finite value after the day's record completes, while the
+            // zone's own state stays finite, so the next day's comparison
+            // meets the NaN residual.
+            #[cfg(test)]
+            warmup_test_hooks::overwrite_recorded_day(day, &mut record);
 
-                if max_delta < threshold_c {
-                    tracing::info!(
-                        iterations = iteration,
-                        max_delta_c = max_delta,
-                        threshold_c,
-                        "warm-up converged"
-                    );
+            if let Some(prev) = &prev_day {
+                let comparison = compare_warmup_days(
+                    prev,
+                    &record,
+                    self.latest_env.zones.iter().map(|z| z.id),
+                    day,
+                    warmup,
+                );
+                let comparison = match comparison {
+                    Ok(comparison) => comparison,
+                    // The comparison itself failed (a non-finite residual):
+                    // record the outcome honestly before the failure
+                    // propagates, the way the mid-day failure path does.
+                    Err(err) => {
+                        self.is_warming_up = false;
+                        self.health.warmup = WarmupOutcome::Ran {
+                            days_run: day,
+                            converged: false,
+                            residuals: final_residuals.clone(),
+                        };
+                        return Err(err);
+                    }
+                };
+                let DayComparison {
+                    converged,
+                    residuals,
+                    failing,
+                } = comparison;
+                final_residuals = Some(residuals);
+                failing_zones = failing;
+                // EnergyPlus's per-day trace: the four residuals of every
+                // zone.
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    for (i, zone) in self.latest_env.zones.iter().enumerate() {
+                        tracing::debug!(
+                            day,
+                            zone = %zone.id,
+                            max_temperature_c = (record.max_t[i] - prev.max_t[i]).abs(),
+                            min_temperature_c = (record.min_t[i] - prev.min_t[i]).abs(),
+                            heating_load = warmup_load_residual(
+                                record.peak_heating_w[i],
+                                prev.peak_heating_w[i],
+                            ),
+                            cooling_load = warmup_load_residual(
+                                record.peak_cooling_w[i],
+                                prev.peak_cooling_w[i],
+                            ),
+                            converged,
+                            "warm-up day comparison"
+                        );
+                    }
+                }
+
+                if converged && day >= warmup.min_days {
+                    tracing::info!(days = day, "warm-up converged by the EnergyPlus criteria");
                     self.is_warming_up = false;
                     self.health.warmup = WarmupOutcome::Ran {
-                        days_run: iteration,
+                        days_run: day,
                         converged: true,
                         residuals: final_residuals.clone(),
                     };
-                    return Ok(iteration);
+                    return Ok(day);
                 }
             }
 
-            prev_zone_temps = zone_temps;
-            prev_day_max_t = Some(day_max_t);
-            prev_day_min_t = day_min_t;
-            prev_peak_heating_w = day_peak_heating_w;
-            prev_peak_cooling_w = day_peak_cooling_w;
+            prev_day = Some(record);
         }
 
         self.is_warming_up = false;
 
         // Honest warning surface: the run proceeded without a converged
         // initial state, so the non-convergence is counted in health AND
-        // pushed as a run warning naming the zones whose day-over-day
-        // temperature residual exceeded the convergence threshold (the
-        // worst-residual zone when none individually exceeds it).
+        // pushed as a run warning naming the zones whose checks failed
+        // (the worst-residual zone when none individually fails).
         self.health.warmup = WarmupOutcome::Ran {
-            days_run: max_iter,
+            days_run: warmup.max_days,
             converged: false,
             residuals: final_residuals.clone(),
         };
-        let warned_zones = if threshold_exceeding_zones.is_empty() {
+        let warned_zones = if failing_zones.is_empty() {
             final_residuals
                 .as_ref()
                 .map(|r| vec![r.worst_zone])
                 .unwrap_or_default()
         } else {
-            threshold_exceeding_zones
+            failing_zones
         };
         self.warnings.push_from(
             "warmup",
             format!(
-                "warm-up failed to converge within {max_iter} iterations; proceeding with \
-                 current thermal state; zones exceeding the {threshold_c} °C daily \
-                 residual: {warned_zones:?}"
+                "warm-up failed to converge within {} days by the EnergyPlus criteria \
+                 (temperature tolerance {} delta C, loads tolerance {}); proceeding with \
+                 current thermal state; zones failing a check: {warned_zones:?}",
+                warmup.max_days, warmup.temperature_tolerance_c, warmup.loads_tolerance
             ),
         );
         tracing::warn!(
-            iterations = max_iter,
-            "warm-up failed to converge within {} iterations; \
+            days = warmup.max_days,
+            "warm-up failed to converge within {} days by the EnergyPlus criteria; \
              proceeding with current thermal state",
-            max_iter
+            warmup.max_days
         );
         // The policy's warm-up requirement is checked when warm-up ends:
         // a non-converged warm-up fails the run (counted first, as above),
@@ -6088,7 +6269,7 @@ impl Dwelling {
                 }),
             );
         }
-        Ok(max_iter)
+        Ok(warmup.max_days)
     }
 
     /// Returns true if an actor interest was triggered by state changes
@@ -7649,6 +7830,33 @@ impl Dwelling {
         // the warm-up loop's daily peaks; see `step_hvac_heating_w`.
         self.step_hvac_heating_w = hvac_heating_w;
         self.step_hvac_cooling_w = hvac_cooling_w;
+        // The per-zone delivery, the per-zone columns' own values: the
+        // thermal port accumulators still hold the step's equipment
+        // contributions (ports.zero() runs after record_step).
+        self.step_hvac_heating_by_zone = self
+            .ports
+            .thermal
+            .iter()
+            .map(|thermal| {
+                (
+                    thermal.zone,
+                    thermal.sensible_for_category(ThermalCategory::HvacHeating),
+                )
+            })
+            .collect();
+        self.step_hvac_cooling_by_zone = self
+            .ports
+            .thermal
+            .iter()
+            .map(|thermal| {
+                (
+                    thermal.zone,
+                    thermal
+                        .sensible_for_category(ThermalCategory::HvacCooling)
+                        .abs(),
+                )
+            })
+            .collect();
         if hvac_heating_w < 0.0 {
             tracing::warn!(
                 hvac_heating_w = hvac_heating_w,
@@ -8959,7 +9167,6 @@ destination = "memory"
                     hares_io::SimulationConfig::from_toml(&sim_toml).expect("sim config parses"),
                     None,
                     1,
-                    None,
                     None,
                 ),
             })
@@ -14282,7 +14489,6 @@ occupancy = 1.0
                 config.simulation.clone(),
                 config.overrides.clone(),
                 config.building_id.unwrap_or(0),
-                config.initialization_duration_s.map(StdDuration::from_secs),
                 None,
             ),
         };
@@ -17557,7 +17763,6 @@ destination = "memory"
                 None,
                 1,
                 None,
-                None,
             ),
         })
         .expect("dwelling builds")
@@ -20330,12 +20535,17 @@ latent_gain_fraction = 0.08
     fn warmup_nonconvergence_recorded_and_warned() {
         let mut dwelling = bestest_dwelling();
 
-        // A 0.0 °C threshold demands two bitwise-identical warm-up days'
-        // end states: the criterion is strict less-than, so the run is
-        // non-converging by construction.
+        // A 0.0 °C temperature tolerance demands two bitwise-identical
+        // warm-up days' daily extremes: the stochastic dwelling never
+        // repeats a day bit for bit, so the run is non-converging by
+        // construction.
         let days = dwelling
-            .run_warmup_converged(0.0, 2)
-            .expect("warm-up runs to its iteration cap");
+            .run_warmup_converged(&hares_io::WarmupConfig {
+                temperature_tolerance_c: 0.0,
+                max_days: 2,
+                ..hares_io::WarmupConfig::default()
+            })
+            .expect("warm-up runs to its day cap");
 
         assert_eq!(days, 2);
         match &dwelling.health().warmup {
@@ -20373,7 +20583,13 @@ latent_gain_fraction = 0.08
     fn warmup_residuals_recorded_without_changing_days_run() {
         let mut dwelling = bestest_dwelling();
 
-        let days = dwelling.run_warmup_converged(0.5, 3).expect("warm-up runs");
+        let days = dwelling
+            .run_warmup_converged(&hares_io::WarmupConfig {
+                temperature_tolerance_c: 0.5,
+                max_days: 3,
+                ..hares_io::WarmupConfig::default()
+            })
+            .expect("warm-up runs");
 
         match &dwelling.health().warmup {
             WarmupOutcome::Ran {
@@ -20395,6 +20611,299 @@ latent_gain_fraction = 0.08
                 } else {
                     assert!(residuals.is_none(), "one warm-up day has no predecessor");
                 }
+            }
+            other => panic!("expected WarmupOutcome::Ran, got {other:?}"),
+        }
+    }
+
+    /// A parity-fixture warm-up candidate: the fixture's inputs on its own
+    /// first day, the warm-up setting given (the build's own warm-up
+    /// disabled when the test runs the loop itself, so the loop under test
+    /// is the one the test calls, from the cold construction state).
+    fn parity_candidate(
+        fixture: &str,
+        start: &str,
+        step_s: i64,
+        warmup: hares_io::Warmup,
+    ) -> DwellingConfig {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/parity")
+            .join(fixture);
+        DwellingConfig {
+            hpxml: InputSource::Path(fixture.join("building.xml")),
+            schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
+            weather: WeatherInput::Path(fixture.join("weather.epw")),
+            defaults: DefaultsSource::directory(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults"),
+            ),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: DateTime::parse_from_rfc3339(start).expect("start time"),
+                    duration: chrono::Duration::days(2),
+                    time_res: chrono::Duration::seconds(step_s),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: Default::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup,
+                },
+                None,
+                1,
+                None,
+            ),
+        }
+    }
+    fn bestest_fixture_path(fixture_name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/bestest")
+            .join(fixture_name)
+    }
+
+    /// The tolerance test's candidate is the heavyweight free-float pair's
+    /// 900FF: a day's temperature residual lies in (0.4, 0.5] (the day-8
+    /// daily-min residual 0.426), so the looser tolerance stops one day
+    /// earlier. The measured day counts are pinned exactly.
+    #[test]
+    fn warmup_tolerance_changes_days_run() {
+        let bestest_days = |temperature_tolerance_c: f64| {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let original = std::fs::read_to_string(bestest_fixture_path("900ff.toml"))
+                .expect("the fixture reads");
+            let fixed = original
+                .replace(
+                    "../../../data/examples/USA_CO_Denver.epw",
+                    &root
+                        .join("data/examples/USA_CO_Denver.epw")
+                        .display()
+                        .to_string(),
+                )
+                .replace(
+                    "master_seed = 0",
+                    &format!(
+                        "master_seed = 0\nwarmup = {{ temperature_tolerance_c = {temperature_tolerance_c} }}"
+                    ),
+                );
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("900ff.toml");
+            std::fs::write(&path, fixed).expect("write the TOML");
+            let dwelling = Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
+                .expect("the candidate builds");
+            match &dwelling.health().warmup {
+                WarmupOutcome::Ran { days_run, .. } => *days_run,
+                other => panic!("expected Ran, got {other:?}"),
+            }
+        };
+        let days_at_05 = bestest_days(0.5);
+        let days_at_04 = bestest_days(0.4);
+        assert_eq!(
+            days_at_05, 8,
+            "the temperature tolerance 0.5 accepts the day-8 residuals (dmax 0.359, dmin 0.426)"
+        );
+        assert_eq!(
+            days_at_04, 9,
+            "the default 0.4 rejects the day-8 daily-min residual 0.426 and runs one more day"
+        );
+        assert!(
+            days_at_05 < days_at_04,
+            "the looser tolerance stops earlier"
+        );
+    }
+
+    /// The load test's candidate is the heavyweight conditioned 900: on
+    /// day 3 the temperature residuals pass (0.30/0.34) while the daily
+    /// peak heating still changes 11.6 percent, so the default loads
+    /// tolerance runs one more day than the loose 0.5.
+    #[test]
+    fn warmup_load_criterion_extends_warmup() {
+        let bestest_days = |loads_tolerance: f64| {
+            let original = std::fs::read_to_string(bestest_fixture_path("900.toml"))
+                .expect("the fixture reads");
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let fixed = original
+                .replace(
+                    "../../../data/examples/USA_CO_Denver.epw",
+                    &root
+                        .join("data/examples/USA_CO_Denver.epw")
+                        .display()
+                        .to_string(),
+                )
+                .replace(
+                    "master_seed = 0",
+                    &format!("master_seed = 0\nwarmup = {{ loads_tolerance = {loads_tolerance} }}"),
+                );
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("900.toml");
+            std::fs::write(&path, fixed).expect("write the TOML");
+            let dwelling = Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
+                .expect("the candidate builds");
+            match &dwelling.health().warmup {
+                WarmupOutcome::Ran { days_run, .. } => *days_run,
+                other => panic!("expected Ran, got {other:?}"),
+            }
+        };
+        let days_default_loads = bestest_days(0.04);
+        let days_loose_loads = bestest_days(0.5);
+        assert_eq!(
+            days_default_loads, 4,
+            "the default loads tolerance rejects the day-3 peak-heating change 0.116"
+        );
+        assert_eq!(
+            days_loose_loads, 3,
+            "the loose 0.5 accepts the day-3 loads and stops at the temperatures"
+        );
+        assert!(
+            days_default_loads > days_loose_loads,
+            "the load criterion demands more iterations than the temperature rule alone"
+        );
+    }
+
+    /// The minimum-day-count test's candidate is the leap fixture (it
+    /// converges on day 2 under the defaults): min_days = 3 runs exactly
+    /// three days.
+    #[test]
+    fn warmup_min_days_is_honoured() {
+        let default_days = {
+            let config = parity_candidate(
+                "cz4a_ashp_hpwh",
+                "2024-02-27T00:00:00-07:00",
+                900,
+                hares_io::Warmup::default(),
+            );
+            let dwelling = Dwelling::from_config(config).expect("the candidate builds");
+            match &dwelling.health().warmup {
+                WarmupOutcome::Ran {
+                    days_run,
+                    converged,
+                    ..
+                } => {
+                    assert!(converged);
+                    assert_eq!(*days_run, 2, "the leap candidate converges on day 2");
+                    *days_run
+                }
+                other => panic!("expected Ran, got {other:?}"),
+            }
+        };
+        assert_eq!(default_days, 2);
+
+        let config = parity_candidate(
+            "cz4a_ashp_hpwh",
+            "2024-02-27T00:00:00-07:00",
+            900,
+            hares_io::Warmup::Converge(hares_io::WarmupConfig {
+                min_days: 3,
+                ..hares_io::WarmupConfig::default()
+            }),
+        );
+        let dwelling = Dwelling::from_config(config).expect("the candidate builds");
+        match &dwelling.health().warmup {
+            WarmupOutcome::Ran {
+                days_run,
+                converged,
+                ..
+            } => {
+                assert_eq!(*days_run, 3, "min_days = 3 runs exactly three days");
+                assert!(converged, "day 3's checks pass");
+            }
+            other => panic!("expected Ran, got {other:?}"),
+        }
+    }
+
+    /// The non-convergence test's candidate is the cz2a fixture (its
+    /// default days_run is 3): max_days = 2 stops without convergence and
+    /// records the outcome and a warning naming the zones whose checks
+    /// failed.
+    #[test]
+    fn warmup_nonconvergence_is_recorded() {
+        let config = parity_candidate(
+            "cz2a_gas_furnace_ac_res_wh",
+            "2023-01-01T00:00:00-07:00",
+            3600,
+            hares_io::Warmup::Converge(hares_io::WarmupConfig {
+                max_days: 2,
+                ..hares_io::WarmupConfig::default()
+            }),
+        );
+        let dwelling = Dwelling::from_config(config).expect("the candidate builds");
+        match &dwelling.health().warmup {
+            WarmupOutcome::Ran {
+                days_run,
+                converged,
+                residuals,
+            } => {
+                assert_eq!(*days_run, 2);
+                assert!(!converged);
+                assert!(
+                    residuals.is_some(),
+                    "two warm-up days ran, so a predecessor existed and residuals were computed"
+                );
+            }
+            other => panic!("expected WarmupOutcome::Ran, got {other:?}"),
+        }
+        let warmup_warnings = dwelling
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("warm-up failed to converge"))
+            .count();
+        assert_eq!(
+            warmup_warnings, 1,
+            "exactly one warm-up non-convergence warning; warnings: {:?}",
+            dwelling.warnings
+        );
+        assert!(
+            dwelling
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("ZoneId(2)")),
+            "the warning names the zone whose daily-min residual failed: {:?}",
+            dwelling.warnings
+        );
+    }
+
+    /// A non-finite residual is never a comparison result: a recorded
+    /// day-1 daily maximum overwritten with NaN (the zone's own state
+    /// stays finite, so the per-step NaN check is not what fires) fails
+    /// the day-2 comparison with `NanDetected` naming the zone and day 2.
+    #[test]
+    fn warmup_nan_residual_fails_the_run() {
+        let config = parity_candidate(
+            "cz2a_gas_furnace_ac_res_wh",
+            "2023-01-01T00:00:00-07:00",
+            3600,
+            hares_io::Warmup::Disabled,
+        );
+        let mut dwelling = Dwelling::from_config(config).expect("the candidate builds");
+        warmup_test_hooks::arm_nan_daily_max(1, 1);
+        let err = dwelling
+            .run_warmup_converged(&hares_io::WarmupConfig::default())
+            .expect_err("the day-2 comparison meets the NaN residual");
+        assert!(
+            matches!(
+                &err,
+                HaresError::NanDetected {
+                    step_index: 2,
+                    zone_id: Some(zone),
+                    value_name
+                } if zone.0 == 1 && value_name.contains("day 2")
+            ),
+            "the failure names the zone and day 2: {err:?}"
+        );
+        // The outcome is recorded before the failure propagates.
+        match &dwelling.health().warmup {
+            WarmupOutcome::Ran {
+                days_run,
+                converged,
+                ..
+            } => {
+                assert_eq!(*days_run, 2);
+                assert!(!converged);
             }
             other => panic!("expected WarmupOutcome::Ran, got {other:?}"),
         }
@@ -20597,7 +21106,11 @@ latent_gain_fraction = 0.08
         // two consecutive warm-up days' end states, so warm-up exits
         // without meeting it and the strict policy escalates.
         let err = dwelling
-            .run_warmup_converged(1e-9, 1)
+            .run_warmup_converged(&hares_io::WarmupConfig {
+                temperature_tolerance_c: 1e-9,
+                max_days: 1,
+                ..hares_io::WarmupConfig::default()
+            })
             .expect_err("the strict policy escalates the non-convergence");
 
         assert!(
@@ -20624,17 +21137,16 @@ latent_gain_fraction = 0.08
         );
     }
 
-    /// The strict policy with no initialization duration configured:
-    /// warm-up never runs, so its convergence requirement has nothing to
-    /// reject and the run passes with the outcome recorded as Disabled.
-    /// The policy rides the TOML so it is live at construction, where the
-    /// warm-up decision happens.
+    /// The strict policy with the warm-up disabled: warm-up never runs, so
+    /// its convergence requirement has nothing to reject and the run passes
+    /// with the outcome recorded as Disabled. The policy rides the TOML so
+    /// it is live at construction, where the warm-up decision happens.
     #[test]
     fn strict_policy_with_no_warmup_configured_runs_disabled_and_passes() {
         let dir = tempfile::tempdir().expect("temp dir");
         let toml_path = dir.path().join("no-warmup-strict.toml");
         // The same shape the reproducibility fixture uses, with the
-        // initialization duration left out entirely.
+        // warm-up spelled disabled.
         let toml_content = r#"building_id = 2003
 
 [simulation]
@@ -20643,6 +21155,7 @@ time_res = 3600
 duration = 86400
 output_chunk_size = 1000
 master_seed = 42
+warmup = "disabled"
 
 [simulation.health_policy]
 max_port_rollbacks = 0
@@ -20983,7 +21496,10 @@ occupancy = 1.0
         replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
 
         let err = dwelling
-            .run_warmup_converged(0.5, 2)
+            .run_warmup_converged(&hares_io::WarmupConfig {
+                max_days: 2,
+                ..hares_io::WarmupConfig::default()
+            })
             .expect_err("a NaN zone temperature during warm-up must fail the run");
 
         assert!(
@@ -21004,7 +21520,10 @@ occupancy = 1.0
         dwelling.set_hvac_negative_energy_failure_for_test();
 
         let err = dwelling
-            .run_warmup_converged(0.5, 2)
+            .run_warmup_converged(&hares_io::WarmupConfig {
+                max_days: 2,
+                ..hares_io::WarmupConfig::default()
+            })
             .expect_err("the armed seam must fail the warm-up run");
 
         assert!(
@@ -21023,7 +21542,6 @@ occupancy = 1.0
 
         let toml_content = r#"building_id = 2002
 
-initialization_duration_s = 86400
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
 time_res = 3600

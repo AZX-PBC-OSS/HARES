@@ -1,6 +1,7 @@
 building_id = 200
 
-initialization_duration_s = 86400  # 1 day warmup (lightweight construction)
+# The warm-up: the [simulation] table's warmup field, the default
+# converging warm-up (the EnergyPlus criteria).
 [simulation]
 start_time = "2024-07-01T00:00:00Z"
 time_res = 60

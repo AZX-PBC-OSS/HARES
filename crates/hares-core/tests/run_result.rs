@@ -59,7 +59,6 @@ fn dwelling_config(sim_toml: &str) -> DwellingConfig {
             None,
             1,
             None,
-            None,
         ),
     }
 }

@@ -41,6 +41,7 @@ fn config(time_res: i64, duration_secs: i64, start: &str) -> SimulationConfig {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -176,7 +177,7 @@ fn hourly_step_reads_the_record_of_the_hour_it_ends() {
         schedule: Some(hares_io::InputSource::Path(cz4a_dir().join("schedule.csv"))),
         weather: hares_io::WeatherInput::Path(weather_path),
         defaults: hares_io::DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(cfg, None, 1, None, None),
+        settings: DwellingSettings::new(cfg, None, 1, None),
     })
     .expect("the dwelling builds");
     let result = dwelling.simulate().expect("the run completes");
@@ -256,7 +257,7 @@ fn first_hour_run_frame(first_hour: hares_io::FirstHour) -> Vec<u64> {
         schedule: Some(hares_io::InputSource::Path(cz4a_dir().join("schedule.csv"))),
         weather: hares_io::WeatherInput::Path(weather_path),
         defaults: hares_io::DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(cfg, None, 1, None, None),
+        settings: DwellingSettings::new(cfg, None, 1, None),
     })
     .expect("the dwelling builds");
     let result = dwelling.simulate().expect("the run completes");

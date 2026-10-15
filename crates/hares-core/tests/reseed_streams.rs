@@ -38,18 +38,18 @@ fn cz5a_config(master_seed: u64, warmup: bool) -> DwellingConfig {
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                // Warm-up on for the stepped dwelling; disabled for the
+                // fresh build whose construction assignment the reseeded
+                // streams must equal (a warmed build's streams have
+                // already advanced past their starts).
+                warmup: if warmup {
+                    hares_io::Warmup::default()
+                } else {
+                    hares_io::Warmup::Disabled
+                },
             },
             None,
             1,
-            // Warm-up on for the stepped dwelling; None for the fresh
-            // build whose construction assignment the reseeded streams
-            // must equal (a warmed build's streams have already advanced
-            // past their starts).
-            if warmup {
-                Some(std::time::Duration::from_secs(7 * 24 * 3600))
-            } else {
-                None
-            },
             None,
         ),
     }

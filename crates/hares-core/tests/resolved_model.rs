@@ -57,10 +57,10 @@ fn config(hpxml: &Path) -> DwellingConfig {
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
             },
             None,
             1,
-            None,
             None,
         ),
     }
@@ -310,7 +310,7 @@ fn parity_furnace_dwelling() -> Dwelling {
         schedule: Some(InputSource::Path(root.join("schedule.csv"))),
         weather: WeatherInput::Path(root.join("weather.epw")),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(sim_config, None, 1, None, None),
+        settings: DwellingSettings::new(sim_config, None, 1, None),
     })
     .expect("the fixture dwelling builds")
 }

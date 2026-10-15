@@ -172,14 +172,6 @@ pub struct HomeEntry {
     pub hpxml: String,
     pub schedule: String,
     pub weather: String,
-    /// Warm-up setting: `0` runs no warm-up and a positive value runs the
-    /// engine's converging warm-up: the rule the Python binding applies
-    /// (`crates/hares-python/src/py_dwelling.rs`: zero maps to
-    /// `initialization_duration: None`, a positive value to `Some`). The
-    /// engine ignores the value's magnitude: any positive setting runs the
-    /// same fixed convergence loop, so the number of warm-up days is not
-    /// chosen here.
-    pub initialization_duration_s: u64,
     /// The home's sample weight: what the home contributes to the fleet
     /// aggregate. Required for kind "fleet" and rejected for kind
     /// "dwelling"; a NaN, infinite or negative value fails the run when
@@ -298,6 +290,7 @@ const SIMULATION_KEYS: &[&str] = &[
     "health_policy",
     "first_hour_interpolation",
     "weather_year",
+    "warmup",
 ];
 
 /// The feature set the running binary was built with. The tool's features
@@ -654,6 +647,7 @@ mod tests {
             health_policy: hares_io::HealthPolicy::default(),
             first_hour_interpolation: hares_io::FirstHour::default(),
             weather_year: hares_io::WeatherYear::default(),
+            warmup: hares_io::Warmup::default(),
         };
         let text = cfg.to_toml().expect("serialise the config");
         let table: toml::Table = toml::from_str(&text).expect("parse the TOML back");

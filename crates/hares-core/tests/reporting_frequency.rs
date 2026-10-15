@@ -57,6 +57,7 @@ fn sim_config(
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -77,7 +78,6 @@ fn cz4a_dwelling(
             sim_config(start, duration_s, step_s, verbosity, chunk),
             None,
             1,
-            None,
             None,
         ),
     };

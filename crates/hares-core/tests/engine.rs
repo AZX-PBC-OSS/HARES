@@ -156,6 +156,7 @@ fn simulation_config_with_frame(csv_path: PathBuf, with_frame: bool) -> Simulati
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -190,7 +191,7 @@ fn run_success_produces_metrics_and_output_path() {
         schedule: Some(InputSource::Path(scratch.schedule())),
         weather: WeatherInput::Path(scratch.weather()),
         defaults: DefaultsSource::directory(repo_defaults_path()),
-        settings: DwellingSettings::new(simulation_config(csv_path.clone()), None, 123, None, None),
+        settings: DwellingSettings::new(simulation_config(csv_path.clone()), None, 123, None),
     };
 
     let engine = SimulationEngine::new();
@@ -234,7 +235,6 @@ fn run_returns_err_for_missing_hpxml_path() {
             None,
             1,
             None,
-            None,
         ),
     };
 
@@ -258,7 +258,6 @@ fn run_returns_err_for_missing_weather_path() {
             simulation_config(scratch.path("output.csv")),
             None,
             2,
-            None,
             None,
         ),
     };
@@ -285,7 +284,6 @@ fn run_with_streaming_output_computes_metrics() {
             simulation_config_with_frame(scratch.path(&format!("retain_{retain}.csv")), retain),
             None,
             123,
-            None,
             None,
         ),
     };
@@ -360,7 +358,6 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
             None,
             123,
             None,
-            None,
         ),
     };
 
@@ -412,7 +409,7 @@ fn run_with_zero_duration_is_a_validate_error() {
         schedule: Some(InputSource::Path(scratch.schedule())),
         weather: WeatherInput::Path(scratch.weather()),
         defaults: DefaultsSource::directory(repo_defaults_path()),
-        settings: DwellingSettings::new(sim_config, None, 123, None, None),
+        settings: DwellingSettings::new(sim_config, None, 123, None),
     };
 
     let engine = SimulationEngine::new();
@@ -446,7 +443,6 @@ fn run_without_metrics_request_returns_none_metrics() {
             },
             None,
             123,
-            None,
             None,
         ),
     };

@@ -377,7 +377,6 @@ impl Fleet {
                             sim_config.clone(),
                             None,
                             building.bldg_id,
-                            Some(std::time::Duration::from_secs(7 * 24 * 3600)),
                             Some(hares_io::HpxmlDataPatches::from_resstock_characteristics(
                                 &building.characteristics,
                             )),
@@ -1878,6 +1877,7 @@ fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: hares_io::FirstHour::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::default(),
     }
 }
 
@@ -2262,6 +2262,7 @@ mod tests {
             health_policy: hares_io::HealthPolicy::default(),
             first_hour_interpolation: hares_io::FirstHour::default(),
             weather_year: hares_io::WeatherYear::default(),
+            warmup: hares_io::Warmup::Disabled,
         }
     }
 
@@ -2283,7 +2284,6 @@ mod tests {
                     None,
                     idx as i64 + 1,
                     None,
-                    None,
                 ),
             })
             .collect()
@@ -2302,7 +2302,6 @@ mod tests {
                     simulation_config(Path::new(MISSING_ROOT).join(format!("output-{idx}.csv"))),
                     None,
                     idx as i64 + 1,
-                    None,
                     None,
                 ),
             })
@@ -3462,7 +3461,7 @@ mod tests {
             schedule: None,
             weather: WeatherInput::Path(PathBuf::from("no.epw")),
             defaults: DefaultsSource::default(),
-            settings: DwellingSettings::new(resstock_sim_config(None), None, 1, None, None),
+            settings: DwellingSettings::new(resstock_sim_config(None), None, 1, None),
         };
         let fleet = Fleet::from_buildings(vec![config])
             .expect("the configs carry no reserved report or shared destination");
@@ -3762,10 +3761,10 @@ mod tests {
                     health_policy: hares_io::HealthPolicy::default(),
                     first_hour_interpolation: hares_io::FirstHour::default(),
                     weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::default(),
                 },
                 None,
                 bldg_id,
-                Some(std::time::Duration::ZERO),
                 None,
             ),
         }
@@ -4051,10 +4050,10 @@ mod tests {
                     health_policy: hares_io::HealthPolicy::default(),
                     first_hour_interpolation: hares_io::FirstHour::default(),
                     weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
                 },
                 None,
                 bldg_id,
-                None,
                 None,
             ),
         };
@@ -4221,7 +4220,6 @@ mod tests {
                 Some(serde_json::json!({"Battery": {"bms_mode": "\"Manual\""}})),
                 2,
                 None,
-                None,
             ),
         };
         // A battery variable's name, from the battery home's own catalogue.
@@ -4243,7 +4241,6 @@ mod tests {
                 simulation_config(dir.path().join("plain.csv")),
                 None,
                 1,
-                None,
                 None,
             ),
         };
@@ -4332,7 +4329,6 @@ mod tests {
                 },
                 None,
                 bldg_id,
-                None,
                 None,
             ),
         };
@@ -4462,10 +4458,10 @@ mod tests {
                         health_policy: hares_io::HealthPolicy::default(),
                         first_hour_interpolation: hares_io::FirstHour::default(),
                         weather_year: hares_io::WeatherYear::default(),
+                        warmup: hares_io::Warmup::Disabled,
                     },
                     None,
                     bldg_id,
-                    None,
                     None,
                 ),
             }
@@ -4708,10 +4704,10 @@ mod tests {
                     health_policy: hares_io::HealthPolicy::default(),
                     first_hour_interpolation: hares_io::FirstHour::default(),
                     weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
                 },
                 None,
                 bldg_id,
-                None,
                 None,
             ),
         };
@@ -4764,10 +4760,10 @@ mod tests {
                     health_policy: hares_io::HealthPolicy::default(),
                     first_hour_interpolation: hares_io::FirstHour::default(),
                     weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
                 },
                 None,
                 bldg_id,
-                None,
                 None,
             ),
         };
@@ -4910,7 +4906,6 @@ mod tests {
                     simulation_config(PathBuf::from("unused.csv")),
                     None,
                     1,
-                    None,
                     None,
                 ),
                 site_utc_offset_s: 0,
@@ -5057,10 +5052,10 @@ mod tests {
                         health_policy: hares_io::HealthPolicy::default(),
                         first_hour_interpolation: hares_io::FirstHour::default(),
                         weather_year: hares_io::WeatherYear::default(),
+                        warmup: hares_io::Warmup::Disabled,
                     },
                     overrides,
                     bldg_id,
-                    None,
                     None,
                 ),
             };
@@ -5257,10 +5252,10 @@ mod tests {
                     health_policy: hares_io::HealthPolicy::default(),
                     first_hour_interpolation: hares_io::FirstHour::default(),
                     weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
                 },
                 None,
                 1,
-                None,
                 None,
             ),
         };
@@ -5444,10 +5439,10 @@ mod tests {
                     health_policy: hares_io::HealthPolicy::default(),
                     first_hour_interpolation: hares_io::FirstHour::default(),
                     weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
                 },
                 None,
                 bldg_id,
-                None,
                 None,
             ),
         };
@@ -5538,10 +5533,10 @@ mod tests {
                     health_policy: hares_io::HealthPolicy::default(),
                     first_hour_interpolation: hares_io::FirstHour::default(),
                     weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::default(),
                 },
                 None,
                 bldg_id,
-                Some(std::time::Duration::ZERO),
                 None,
             ),
         }
@@ -5890,10 +5885,10 @@ mod tests {
                     health_policy: hares_io::HealthPolicy::default(),
                     first_hour_interpolation: hares_io::FirstHour::default(),
                     weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
                 },
                 None,
                 bldg_id,
-                None,
                 None,
             ),
         };

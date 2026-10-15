@@ -55,6 +55,7 @@ fn test_config(deadband: Option<f64>) -> SimulationConfig {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::default(),
     }
 }
 

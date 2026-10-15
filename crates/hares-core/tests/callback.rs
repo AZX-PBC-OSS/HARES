@@ -92,6 +92,7 @@ fn config(retain_batches: bool, output_path: &std::path::Path) -> SimulationConf
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -102,13 +103,7 @@ fn dwelling(sim_config: SimulationConfig, bldg_id: i64) -> Dwelling {
         schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
         weather: WeatherInput::Path(fixture.join("weather.epw")),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(
-            sim_config,
-            None,
-            bldg_id,
-            Some(std::time::Duration::from_secs(7 * 24 * 3600)),
-            None,
-        ),
+        settings: DwellingSettings::new(sim_config, None, bldg_id, None),
     })
     .expect("the fixture dwelling builds")
 }

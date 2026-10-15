@@ -59,7 +59,7 @@ mod tests {
             fs::read_to_string(bestest_fixture("900ff.toml")).expect("900ff.toml must be readable");
 
         // Shorten the simulation to 48 hours (172800 s) for test speed.
-        let shortened = original.replace("duration_s = 31536000", "duration_s = 172800");
+        let shortened = original.replace("duration = 31536000", "duration = 172800");
 
         // Fix the relative EPW path to be absolute.
         let epw_abs = project_root()
@@ -82,11 +82,19 @@ mod tests {
         let original =
             fs::read_to_string(bestest_fixture("900ff.toml")).expect("900ff.toml must be readable");
 
-        let shortened = original.replace("duration_s = 31536000", "duration_s = 172800");
+        let shortened = original.replace("duration = 31536000", "duration = 172800");
+        // The warm-up is disabled in the [simulation] table: the warm-up's
+        // default is the converging warm-up, and this fixture's premise is
+        // the cold construction state.
         let stripped: String = shortened
             .lines()
-            .filter(|line| !line.trim_start().starts_with("initialization_duration_s"))
-            .map(|line| format!("{line}\n"))
+            .map(|line| {
+                if line.trim_start() == "master_seed = 0" {
+                    format!("{line}\nwarmup = \"disabled\"\n")
+                } else {
+                    format!("{line}\n")
+                }
+            })
             .collect();
 
         let epw_abs = project_root()
@@ -112,7 +120,7 @@ mod tests {
             fs::read_to_string(bestest_fixture("900ff.toml")).expect("900ff.toml must be readable");
 
         // Shorten simulation and keep warmup config present so warmup runs.
-        let shortened = original.replace("duration_s = 31536000", "duration_s = 172800");
+        let shortened = original.replace("duration = 31536000", "duration = 172800");
 
         let epw_abs = project_root()
             .join("data/examples/USA_CO_Denver.epw")

@@ -85,7 +85,6 @@ fn dwelling_with_schedule(schedule_path: PathBuf) -> Dwelling {
             None,
             1,
             None,
-            None,
         ),
     };
     Dwelling::from_config(config).expect("the dwelling builds")

@@ -135,10 +135,27 @@ def _frame_reports(verbosity: int) -> list:
 
 
 def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
-    """Run HARES via simulate() and parse the DataFrame for column kWh."""
-    from hares import Dwelling as HaresDwelling
+    """Run HARES via simulate() and parse the DataFrame for column kWh.
 
-    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, master_seed=42, reports=_frame_reports(6)))
+    The comparison holds both sides cold: OCHRE runs no initialization
+    here (`initialization_time` is None, so its Dwelling simulates from
+    its own initial state) and the HARES side holds its warm-up disabled
+    for the same premise (the warm-up defaults on everywhere else). The
+    warm-up's effect on the initial condition is the goldens' own
+    movement, measured in the ledger's measurement log; comparing a
+    warmed HARES state against a cold OCHRE state would measure the two
+    initializations against each other, not the physics."""
+    from hares import Dwelling as HaresDwelling
+    from hares import SimulationConfig
+
+    config = SimulationConfig.from_toml(
+        "start_time = \"2023-05-05T13:00:00-07:00\"\n"
+        "duration = 3600\n"
+        "time_res = 60\n"
+        "master_seed = 42\n"
+        "warmup = \"disabled\"\n"
+    )
+    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults=str(HARES_DEFAULTS), config=config)
     dwelling.initialize()
     df = dwelling.simulate().reports[0].table()
 
@@ -151,10 +168,20 @@ def _run_hares_simulate(output_dir: Path) -> dict[str, float]:
 
 
 def _run_hares_simulate_24h(output_dir: Path) -> dict[str, float]:
-    """Run HARES via simulate() and parse the DataFrame for the 24-hour window."""
+    """Run HARES via simulate() and parse the DataFrame for the 24-hour
+    window, under the same cold-both-sides premise as the one-hour
+    comparison (see `_run_hares_simulate`)."""
     from hares import Dwelling as HaresDwelling
+    from hares import SimulationConfig
 
-    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES_24H, time_res=TIME_RES_MIN * 60, duration=DURATION_H_24 * 3600, master_seed=42, reports=_frame_reports(6)))
+    config = SimulationConfig.from_toml(
+        "start_time = \"2023-05-05T00:00:00-07:00\"\n"
+        "duration = 86400\n"
+        "time_res = 60\n"
+        "master_seed = 42\n"
+        "warmup = \"disabled\"\n"
+    )
+    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, _held_weather(output_dir, TIME_RES_MIN * 60), defaults=str(HARES_DEFAULTS), config=config)
     dwelling.initialize()
     df = dwelling.simulate().reports[0].table()
 

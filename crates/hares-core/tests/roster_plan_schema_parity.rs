@@ -47,6 +47,7 @@ fn sim_config(csv_path: PathBuf) -> SimulationConfig {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -77,7 +78,6 @@ fn ochre_dwelling(hpxml_name: &str, output_dir: &tempfile::TempDir) -> Dwelling 
             sim_config(output_dir.path().join("out.csv")),
             overrides,
             100,
-            None,
             None,
         ),
     })

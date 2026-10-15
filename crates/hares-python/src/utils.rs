@@ -23,7 +23,14 @@ const SIM_CONFIG_FIELD_KEYWORDS: &[&str] = &[
     "civil_timezone",
     "site_location",
     "max_consecutive_step_failures",
+    "warmup",
 ];
+
+/// Whether the keyword names a `SimulationConfig` field: the error names
+/// the typed config it belongs in.
+pub(crate) fn is_sim_config_field_keyword(key: &str) -> bool {
+    SIM_CONFIG_FIELD_KEYWORDS.contains(&key)
+}
 
 /// The error for one keyword a surface's signature does not carry, in the
 /// removed-key order: a key of the removed-keys table (any keyword scope)

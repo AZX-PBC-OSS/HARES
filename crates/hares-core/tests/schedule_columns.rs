@@ -114,6 +114,7 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -169,7 +170,6 @@ fn built_consumer_shape_home() -> (Dwelling, tempfile::TempDir) {
             sim,
             Some(overrides_json),
             home["bldg_id"].as_integer().expect("bldg id"),
-            None,
             None,
         ),
     };
@@ -316,6 +316,7 @@ fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(bldg.join("home.xml")),
@@ -324,7 +325,7 @@ fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
             project_root().join("tests/fixtures/resstock/2025.1/weather/G3400270_2018.csv"),
         ),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(sim, None, 176_775, None, None),
+        settings: DwellingSettings::new(sim, None, 176_775, None),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds from bldg0176775");
     dwelling.step().expect("a step of the ResStock home runs");

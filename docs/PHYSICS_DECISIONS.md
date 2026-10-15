@@ -395,3 +395,62 @@ checks a table's row count against the engine, not against its own
 calendar arithmetic. At `tracing` debug, the calendar mapping and day
 type are logged at each day boundary where a wrap or leap-day rule
 applies.
+
+## Warm-up converges by the EnergyPlus criteria
+
+The run's warm-up repeats the run's first day until the EnergyPlus
+warm-up convergence criteria are met
+(`vendors/EnergyPlus/src/EnergyPlus/HeatBalanceManager.cc:3309-3430`,
+`CheckWarmupConvergence`; the tolerances and day counts are the
+`Building` object's fields N2 to N5, `idd/Energy+.idd.in:536-575`), or
+until the maximum day count is reached, whichever comes first. After
+each warm-up day, for every zone (EnergyPlus compares every zone,
+unconditioned included):
+
+- the daily maximum zone air temperature changed from the previous
+  warm-up day by at most the temperature tolerance, and the daily
+  minimum the same (`:3330-3336`, `:3342-3348`);
+- the daily peak HVAC heating delivered to the zone: when today's peak
+  exceeds 1e-4 W, both days' peaks are floored at 100 W (`MinLoad`,
+  `:3320`) and the relative change must be at most the loads tolerance
+  (`:3350-3364`); a peak at or below 1e-4 W passes;
+- the daily peak HVAC cooling delivered to the zone, the same rule
+  (`:3366-3380`).
+
+The defaults are EnergyPlus's: the temperature tolerance 0.4 delta C,
+the loads tolerance 0.04 (a fraction; the IDD gives the field
+`\units W` at `Energy+.idd.in:542` but the code uses it as a
+fraction), at least 1 and at most 25 warm-up days. A minimum above the
+maximum is a configuration error in HARES; EnergyPlus silently resets
+the maximum to the minimum with a warning
+(`HeatBalanceManager.cc:686-697`). At the maximum without convergence
+the run continues: the outcome is recorded on the run health, a
+warning names the zones whose checks failed, and a health policy may
+escalate the non-convergence to a run failure. EnergyPlus reports its
+`ShowSevereError` per unconverged zone and continues
+(`:3382-3424`). A non-finite residual is never a comparison result:
+it fails the run with `NanDetected` naming the zone and the day.
+
+HARES previously compared only the last step's temperatures of the
+conditioned zones between consecutive warm-up days at 0.5 delta C,
+never the loads, the daily extremes, the unconditioned zones or a
+minimum day count; the doc comment called 0.5 the EnergyPlus default,
+which the EnergyPlus sources do not say (the IDD default is 0.4). The
+days-run delta of the new criteria against the old rule, measured on
+the warm-up fixtures: the conditioned homes that stopped at 2 days now
+run 3 (their first day-over-day daily-extreme and load residuals sit
+above the 0.4 and 0.04 tolerances the old rule never read), the leap
+fixture now converges on day 2 where the old rule took 3, and the
+heavyweight BESTEST 900 pair runs 4 days where the old rule stopped at
+2 with a 5.2 delta C daily-min residual and a 47 percent load residual
+still open. The per-day per-zone residual tables are in the
+measurement log.
+
+OCHRE runs a fixed `initialization_time` with no convergence test
+(`vendors/OCHRE/ochre/Simulator.py:136-140`): the reference
+initializes by simulating forward from the start for the fixed period
+and resetting the clock, whatever the residuals. The warm-up's initial
+condition feeds every record; a HARES-OCHRE comparison's first
+simulated window inherits whatever each side's initialization
+produced, so the days-run delta above is a difference between the two
+initializations, not a defect of either.

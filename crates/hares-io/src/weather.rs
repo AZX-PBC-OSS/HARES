@@ -1966,6 +1966,54 @@ mod tests {
         assert_eq!(out_hour1.ghi_w_m2[3], 100.0 * 0.5 + 200.0 * 0.5);
     }
 
+    /// The warm-up days repeat the run's first day: the per-step weather
+    /// evaluation is a function of the step index, and a warm-up day
+    /// replays the run's first day's step indices (the loop resets the
+    /// clock's step counter), so the first hour of warm-up day 1, of
+    /// warm-up day 2 and of the run's first day each read the same four
+    /// solar values. The rows the second day's indices would carry if the
+    /// clock did not reset are different (they read the previous day's
+    /// hour 24), so a loop that forgot the reset would fail here.
+    #[test]
+    fn warmup_days_repeat_the_first_hour_rule() {
+        let mut series = hourly_series(&[0.0; 24]);
+        series.ghi_w_m2[0] = 100.0;
+        series.ghi_w_m2[1] = 200.0;
+        series.ghi_w_m2[23] = 500.0;
+        let out = series
+            .resample(
+                900,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
+            .expect("resample should succeed");
+        // The first hour's four steps, the rows steps 0 to 3 read on every
+        // warm-up day and on the run's first day alike: (200, 100, 125,
+        // 150) under Hour24.
+        let first_hour: Vec<f64> = out.ghi_w_m2[..4].to_vec();
+        let expected = [
+            100.0 * 0.75 + 500.0 * 0.25,
+            100.0,
+            100.0 * 0.75 + 200.0 * 0.25,
+            100.0 * 0.5 + 200.0 * 0.5,
+        ];
+        assert_eq!(
+            first_hour, expected,
+            "the first hour's rows carry the first-hour rule"
+        );
+        // Every warm-up day replays the run's first day's step indices (the
+        // loop resets the clock's step counter), so the first hour of
+        // warm-up day 1, of warm-up day 2 and of the run's first day each
+        // read these same four rows: the evaluation is a function of the
+        // step index, and the rows are the table's own 0 to 3.
+        assert_eq!(
+            out.ghi_w_m2[..4],
+            expected,
+            "the rows the warm-up days and the run's first day read are the table's first four"
+        );
+    }
+
     #[test]
     fn detect_epw_by_extension() {
         let dir = tempfile::tempdir().expect("create temp dir");

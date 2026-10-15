@@ -407,13 +407,14 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(sim, Some(overrides), 100, None, None),
+        settings: DwellingSettings::new(sim, Some(overrides), 100, None),
     };
     SimulationEngine::new()
         .run(config)
@@ -488,13 +489,14 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(sim, Some(overrides), 100, None, None),
+        settings: DwellingSettings::new(sim, Some(overrides), 100, None),
     };
     let err = SimulationEngine::new()
         .run(config)
@@ -622,13 +624,14 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(sim, Some(overrides), 100, None, None),
+        settings: DwellingSettings::new(sim, Some(overrides), 100, None),
     };
     let err = SimulationEngine::new()
         .run(config)
@@ -693,13 +696,14 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     };
     let base = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path.clone()),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(sim, None, 100, None, None),
+        settings: DwellingSettings::new(sim, None, 100, None),
     };
 
     // Control: the identical build with no overrides payload must succeed —

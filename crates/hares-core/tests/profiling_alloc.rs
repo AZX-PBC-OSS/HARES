@@ -57,7 +57,7 @@ fn load_cz2a_fixture() -> Dwelling {
         defaults: DefaultsSource::directory(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults"),
         ),
-        settings: DwellingSettings::new(sim_config, None, bldg_id, None, None),
+        settings: DwellingSettings::new(sim_config, None, bldg_id, None),
     };
 
     Dwelling::from_config(config).expect("fixture dwelling must load")

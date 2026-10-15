@@ -250,10 +250,14 @@ impl DwellingBlueprintBuilder {
         let effective_zone = inputs.effective_climate_zone.clone();
 
         let time_res = super::conversions::chrono_to_std_duration(settings.sim_config.time_res)?;
-        let init_chrono = settings
-            .initialization_duration
-            .map(|d| Duration::seconds(d.as_secs() as i64))
-            .unwrap_or(Duration::zero());
+        // The warm-up's extra clock span: a converging warm-up replays one
+        // 24-hour day (the run's first day), so the clock needs a day's
+        // span beyond the run; disabled, none.
+        let init_chrono = if settings.sim_config.warmup.config().is_some() {
+            Duration::hours(24)
+        } else {
+            Duration::zero()
+        };
 
         #[cfg(feature = "dst")]
         let parsed_civil_tz: Option<chrono_tz::Tz> = settings

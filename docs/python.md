@@ -645,3 +645,24 @@ golden fixtures re-captured.
   no GHI; a recorded extension). Every golden re-captured again (the
   solar reads move); the per-golden deltas are in the measurement log,
   recorded separately from the point-value rule's.
+
+- 2026-10-15: the warm-up converges by the EnergyPlus temperature and
+  load criteria: after each repeated first day, every zone's daily
+  maximum and minimum temperature and daily peak HVAC heating and
+  cooling delivery are compared day over day against the tolerances
+  (0.4 delta C and 0.04, EnergyPlus's defaults), with the minimum and
+  maximum day counts (1 and 25). The old rule compared only the last
+  step's conditioned-zone temperatures at 0.5 delta C and ignored
+  loads, daily extremes, unconditioned zones and the day-count minimum.
+  The `initialization_duration` settings are removed everywhere: the
+  warm-up lives in `SimulationConfig.warmup` (the TOML `warmup =
+  "disabled"` or a `[warmup]` table of the four criteria). The warmed
+  fixtures' warm-ups run longer under the real criteria, so their
+  initial conditions move and the goldens re-captured are
+  `full_year_hourly`, `full_year_900s_dst`, `leap_year_february_900s`,
+  `weather_wrap_900s`, `month_boundary_billing_3600s`,
+  `fleet_mixed_offset` and `resstock_2025_fleet` (each warmed home's
+  warm-up days changed); the warm-up-disabled fixtures
+  (`consumer_shape_900s`, `fleet_same_offset_300s`) are unchanged. The
+  days-run table and the first-day energy deltas are in the measurement
+  log.

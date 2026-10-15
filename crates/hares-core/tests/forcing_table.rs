@@ -10,7 +10,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration as StdDuration;
 
 use arrow::array::{Array, Float64Array, RecordBatch};
 use arrow::compute::concat_batches;
@@ -61,6 +60,7 @@ fn sim_config(
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -76,10 +76,17 @@ fn cz4a_config(
         weather: hares_io::WeatherInput::Path(cz4a().join("weather.epw")),
         defaults: hares_io::DefaultsSource::directory(repo_root().join("defaults")),
         settings: DwellingSettings {
-            sim_config: sim_config(start_time, days, 900, civil_timezone),
+            // The warm-up rides the sim config's warmup field: on for the
+            // callers that pass a day count, disabled for the rest.
+            sim_config: {
+                let mut sim = sim_config(start_time, days, 900, civil_timezone);
+                if warmup_s.is_some() {
+                    sim.warmup = hares_io::Warmup::default();
+                }
+                sim
+            },
             overrides: None,
             bldg_id: 1,
-            initialization_duration: warmup_s.map(StdDuration::from_secs),
             patches: None,
         },
     }
@@ -223,13 +230,11 @@ fn cz4a_settings(start_time: DateTime<chrono::FixedOffset>, days: i64) -> Dwelli
         sim_config: sim_config(start_time, days, 900, None),
         overrides: None,
         bldg_id: 1,
-        initialization_duration: None,
         patches: None,
     }
 }
 
-/// `forcing_computed_once_per_weather_and_time_grid`: three dwellings built
-/// from one parsed-weather handle on one time grid step ten steps each; the
+/// `forcing_computed_once_per_weather_and_time_grid`: three dwellings built/// from one parsed-weather handle on one time grid step ten steps each; the
 /// forcing computation counter moves by one (the table resolved once on the
 /// handle), not by the thirty per-step computations the duplicated path
 /// performs.
@@ -323,7 +328,6 @@ fn forcing_table_run_equals_uncached_run_consumer_shape() {
             sim_config: sim_config(start_at("2018-01-01T00:00:00-08:00"), 1, 900, None),
             overrides: Some(serde_json::json!({"Gas Water Heater": {"ua_w_per_k": 2.0}})),
             bldg_id: 176_227,
-            initialization_duration: None,
             patches: None,
         },
     };
@@ -547,7 +551,6 @@ fn blueprints_from_different_hpxml_share_forcing() {
         sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
         overrides: None,
         bldg_id: 1,
-        initialization_duration: None,
         patches: None,
     };
 
@@ -621,7 +624,6 @@ fn azimuth_change_shares_the_table() {
         sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
         overrides: None,
         bldg_id: 1,
-        initialization_duration: None,
         patches: None,
     };
     let blueprint_for = |hpxml_path: &Path| {
@@ -721,7 +723,6 @@ fn base_config(hpxml_path: &Path, inputs: &SharedInputs) -> DwellingConfig {
             sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
             overrides: None,
             bldg_id: 1,
-            initialization_duration: None,
             patches: None,
         },
     }
@@ -846,7 +847,6 @@ fn dropped_dwellings_drop_their_forcing_tables() {
                 sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
                 overrides: None,
                 bldg_id: i64::try_from(variant + 1).unwrap_or(1),
-                initialization_duration: None,
                 patches: None,
             },
         };

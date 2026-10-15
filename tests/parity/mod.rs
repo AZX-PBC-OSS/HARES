@@ -6,7 +6,6 @@ use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration as StdDuration;
 
 use arrow::array::{Array, Float64Array};
 use corpus::{DiscoveredFixture, ParityFixture, discover_fixtures};
@@ -102,8 +101,6 @@ struct FixtureConfig {
     simulation: Option<toml::Table>,
     #[serde(default)]
     bldg_id: Option<i64>,
-    #[serde(default)]
-    initialization_duration_seconds: Option<i64>,
     #[serde(default)]
     property_parity: Option<PropertyParityExpectations>,
     /// EV fixture policy (see `ev_override`): models the vehicle the
@@ -541,10 +538,6 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
             // Immediate strategy pin the HARES side).
             dwelling_overrides(&config, &fixture.building_xml)?,
             config.bldg_id.unwrap_or(1),
-            config
-                .initialization_duration_seconds
-                .and_then(|seconds| u64::try_from(seconds).ok())
-                .map(StdDuration::from_secs),
             None,
         ),
     };

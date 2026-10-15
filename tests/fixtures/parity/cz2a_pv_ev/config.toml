@@ -6,6 +6,11 @@ duration = 3600
 time_res = 60
 output_chunk_size = 1000
 master_seed = 0
+# The reference this fixture carries was generated with both sides cold
+# (OCHRE's initialization_time is None; the engine's warm-up disabled):
+# the comparison's initial condition is part of the premise. See
+# tests/python/generate_parity_reference.py.
+warmup = "disabled"
 
 [[simulation.reports]]
 name = "frame"

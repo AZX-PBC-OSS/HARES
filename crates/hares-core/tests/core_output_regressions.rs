@@ -61,7 +61,7 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
         defaults: DefaultsSource::directory(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults"),
         ),
-        settings: DwellingSettings::new(sim_config, overrides, bldg_id, None, None),
+        settings: DwellingSettings::new(sim_config, overrides, bldg_id, None),
     };
 
     Dwelling::from_config(config).expect("fixture dwelling must load")

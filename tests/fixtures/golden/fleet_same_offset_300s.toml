@@ -12,6 +12,7 @@ duration = 172800
 time_res = 300
 master_seed = 0
 metrics = true
+warmup = "disabled"
 
 [[simulation.reports]]
 name = "frame"
@@ -23,7 +24,6 @@ bldg_id = 1
 hpxml = "tests/fixtures/resstock/2025.1/bldg0176227/home.xml"
 schedule = "tests/fixtures/resstock/2025.1/bldg0176227/in.schedules.csv"
 weather = "tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv"
-initialization_duration_s = 0
 weight = 1.0
 overrides = {}
 
@@ -32,7 +32,6 @@ bldg_id = 2
 hpxml = "tests/fixtures/resstock/2025.1/bldg0176227/home.xml"
 schedule = "tests/fixtures/resstock/2025.1/bldg0176227/in.schedules.csv"
 weather = "tests/fixtures/resstock/2025.1/weather/G0600650_2018.csv"
-initialization_duration_s = 0
 weight = 2.5
 overrides = {}
 
@@ -41,6 +40,5 @@ bldg_id = 3
 hpxml = "tests/fixtures/resstock/2025.1/bldg0176227/home.xml"
 schedule = "tests/fixtures/resstock/2025.1/bldg0176227/in.schedules.csv"
 weather = "tests/fixtures/resstock/2025.1/weather/G0600790_2018.csv"
-initialization_duration_s = 0
 weight = 0.5
 overrides = {}

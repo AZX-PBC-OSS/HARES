@@ -45,6 +45,7 @@ fn config(time_res: i64, duration_secs: i64, start: &str) -> SimulationConfig {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: WeatherYear::Typical,
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -377,7 +378,7 @@ fn start_on_skipped_feb29_is_a_validate_error() {
         schedule: Some(hares_io::InputSource::Path(home.join("schedule.csv"))),
         weather: hares_io::WeatherInput::Path(home.join("weather.epw")),
         defaults: hares_io::DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(cfg, None, 1, None, None),
+        settings: DwellingSettings::new(cfg, None, 1, None),
     });
     let err = match result {
         Err(err) => err,

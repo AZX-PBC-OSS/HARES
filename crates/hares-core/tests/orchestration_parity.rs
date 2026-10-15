@@ -370,7 +370,10 @@ fn stale_zone_temp_regression_occupancy_gain_raises_mean_zone_temperature() {
     let path_b = dir.path().join("stale-b.toml");
 
     // Dwelling A: occupancy = 1.0 → apply_occupancy_gains deposits 75 W sensible
-    // (plus latent) into the zone thermal port every step.
+    // (plus latent) into the zone thermal port every step. The warm-up is
+    // disabled: the derivation below is the cold-start transient's; a
+    // warmed pair would sit at each dwelling's own occupancy-dependent
+    // equilibrium, past this band's ceiling.
     fs::write(
         &path_a,
         r#"building_id = 1
@@ -381,6 +384,7 @@ time_res = 60
 duration = 21600
 output_chunk_size = 1000
 master_seed = 0
+warmup = "disabled"
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -421,6 +425,7 @@ time_res = 60
 duration = 21600
 output_chunk_size = 1000
 master_seed = 0
+warmup = "disabled"
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0

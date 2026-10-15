@@ -121,6 +121,7 @@ fn sim_config(duration: Duration, csv_path: Option<PathBuf>, verbosity: u8) -> S
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -136,7 +137,7 @@ fn dwelling_config(
             project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         ),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(sim, overrides, 100, None, None),
+        settings: DwellingSettings::new(sim, overrides, 100, None),
     }
 }
 
@@ -314,7 +315,6 @@ fn fixture_dwelling_config(
                 sim_config(Duration::hours(1), None, 0),
                 overrides,
                 100,
-                None,
                 None,
             ),
         },
@@ -875,7 +875,6 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
             Some(overrides),
             100,
             None,
-            None,
         ),
     };
     SimulationEngine::new().run(config).expect("engine.run");
@@ -997,7 +996,6 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
             sim_config(Duration::days(45), Some(csv_path.clone()), 5),
             Some(overrides),
             100,
-            None,
             None,
         ),
     };
@@ -1831,7 +1829,6 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
             Some(overrides),
             100,
             None,
-            None,
         ),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -2199,7 +2196,6 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
             Some(overrides),
             100,
             None,
-            None,
         ),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -2415,7 +2411,6 @@ fn user_added_actor_resolves_its_equipment_binding_on_add() {
             sim_config(Duration::hours(6), None, 0),
             Some(serde_json::json!({ "Battery": { "bms_mode": "\"Manual\"" } })),
             100,
-            None,
             None,
         ),
     };

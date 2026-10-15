@@ -73,6 +73,7 @@ fn sim_config(
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -84,7 +85,7 @@ fn dwelling_config(hpxml: &Path, sim: hares_core::SimulationConfig) -> DwellingC
             project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         ),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(sim, None, 100, None, None),
+        settings: DwellingSettings::new(sim, None, 100, None),
     }
 }
 

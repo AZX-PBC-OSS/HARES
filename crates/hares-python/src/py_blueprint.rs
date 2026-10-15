@@ -43,7 +43,7 @@ impl PyDwellingBlueprint {
     /// or parsed handles. A handle is shared: its parse is used as is, a
     /// path is parsed here.
     #[classmethod]
-    #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, initialization_duration = None, defaults = None, overrides = None, **unexpected))]
+    #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, defaults = None, overrides = None, **unexpected))]
     // PyO3 #[classmethod] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     pub fn from_hpxml(
@@ -53,7 +53,6 @@ impl PyDwellingBlueprint {
         weather: &Bound<'_, PyAny>,
         config: crate::py_config::PySimulationConfig,
         bldg_id: i64,
-        initialization_duration: Option<i64>,
         defaults: Option<&Bound<'_, PyAny>>,
         overrides: Option<&Bound<'_, PyDict>>,
         unexpected: Option<&Bound<'_, PyDict>>,
@@ -73,7 +72,6 @@ impl PyDwellingBlueprint {
                 },
                 config,
                 bldg_id,
-                initialization_duration,
                 overrides,
                 unexpected,
             })?;

@@ -27,7 +27,7 @@ fn cz4a_config(sim: SimulationConfig) -> DwellingConfig {
         schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
         weather: WeatherInput::Path(fixture.join("weather.epw")),
         defaults: DefaultsSource::directory(project_root().join("defaults")),
-        settings: DwellingSettings::new(sim, None, 1, None, None),
+        settings: DwellingSettings::new(sim, None, 1, None),
     }
 }
 
@@ -53,6 +53,7 @@ fn cz4a_sim_config() -> SimulationConfig {
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 

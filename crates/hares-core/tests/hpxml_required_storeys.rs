@@ -54,10 +54,10 @@ fn ach50_infiltration_without_floors_above_grade_is_an_error() {
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
             },
             None,
             1,
-            None,
             None,
         ),
     };

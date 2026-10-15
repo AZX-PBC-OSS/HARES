@@ -46,18 +46,16 @@ class SimulationPlan:
         time_res_s: int = 300,
         verbosity: int = 0,
         master_seed: int = 42,
-        initialization_duration: int = 604800,  # 7 days
         **extra_kwargs: Any,
     ):
         self.hpxml = hpxml
         self.schedule = schedule
         self.weather = weather
         # Every simulation-level field rides on the one SimulationConfig the
-        # constructor builds, so a plan can configure recording like any
-        # other caller. The verbosity memory report retains the run's
-        # batches: run() returns the report's frame, whose full schema
-        # exists only when a memory report retains the flushed batches. A
-        # caller can still pass `reports` explicitly through extra_kwargs.
+        # constructor builds, so a plan can configure recording and the
+        # warm-up like any other caller (warmup=None disables; the default
+        # converges). A caller can still pass `reports` explicitly through
+        # extra_kwargs.
         self._sim_kwargs: dict[str, Any] = {
             "time_res": time_res_s,
             "master_seed": master_seed,
@@ -72,7 +70,6 @@ class SimulationPlan:
         self.base_kwargs: dict[str, Any] = {
             "defaults": defaults,
             "bldg_id": bldg_id,
-            "initialization_duration": initialization_duration,
         }
         self.segments: list[SimulationSegment] = []
 
@@ -105,12 +102,6 @@ class SimulationPlan:
 
         for i, seg in enumerate(self.segments):
             kwargs = dict(self.base_kwargs)
-            if i > 0:
-                # Zero initialization_duration for segments 1+.
-                # After segment 0's warmup restore_building_state transfers
-                # the thermal state forward, so re-initialization is unnecessary
-                # and would reset the dwelling state.
-                kwargs["initialization_duration"] = 0
 
             bp = DwellingBlueprint.from_hpxml(
                 self.hpxml,

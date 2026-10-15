@@ -81,10 +81,10 @@ fn bldg2_january_config() -> DwellingConfig {
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
                 weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::default(),
             },
             None,
             2,
-            Some(std::time::Duration::from_secs(7 * 24 * 3600)),
             None,
         ),
     }

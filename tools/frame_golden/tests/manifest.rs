@@ -48,7 +48,7 @@ fn manifest_text(kind: &str, features: &str, homes: usize) -> String {
     );
     for bldg_id in 1..=homes {
         text.push_str(&format!(
-            "\n[[home]]\nbldg_id = {bldg_id}\nhpxml = \"building.xml\"\nschedule = \"schedule.csv\"\nweather = \"weather.epw\"\ninitialization_duration_s = 0\noverrides = {{}}\n"
+            "\n[[home]]\nbldg_id = {bldg_id}\nhpxml = \"building.xml\"\nschedule = \"schedule.csv\"\nweather = \"weather.epw\"\noverrides = {{}}\n"
         ));
     }
     text

@@ -2067,6 +2067,7 @@ mod tests {
             health_policy: hares_io::HealthPolicy::default(),
             first_hour_interpolation: hares_io::FirstHour::default(),
             weather_year: hares_io::WeatherYear::default(),
+            warmup: hares_io::Warmup::Disabled,
         };
         let weather_avgs = super::WeatherAverages {
             avg_wind_m_s: 2.0,
@@ -2135,6 +2136,7 @@ mod tests {
             health_policy: hares_io::HealthPolicy::default(),
             first_hour_interpolation: hares_io::FirstHour::default(),
             weather_year: hares_io::WeatherYear::default(),
+            warmup: hares_io::Warmup::Disabled,
         };
         let weather_avgs = super::WeatherAverages {
             avg_wind_m_s: 2.0,

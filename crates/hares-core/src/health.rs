@@ -189,15 +189,17 @@ impl ActorTimings {
 /// How the warm-up convergence loop ended.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WarmupOutcome {
-    /// Warm-up never ran (no initialization duration configured, or a
+    /// Warm-up never ran (the run's warm-up is `Warmup::Disabled`, or a
     /// degenerate zero-step day).
     Disabled,
     /// Warm-up ran to a stop.
     Ran {
         /// Warm-up days simulated (iterations of the 24-hour replay).
         days_run: u32,
-        /// Whether the per-day temperature change fell below the
-        /// convergence threshold before the iteration cap.
+        /// Whether every zone's four EnergyPlus checks (daily maximum and
+        /// minimum temperature, daily peak heating and cooling delivery)
+        /// passed on a day at or after the minimum day count, before the
+        /// maximum day count was reached.
         converged: bool,
         /// Day-over-day residuals of the final warm-up day against the day
         /// before it; `None` when only one warm-up day ran (no
@@ -206,27 +208,34 @@ pub enum WarmupOutcome {
     },
 }
 
-/// Day-over-day residuals of the final warm-up day.
+/// Day-over-day residuals of the final warm-up day, by the EnergyPlus
+/// warm-up convergence criteria
+/// (`vendors/EnergyPlus/src/EnergyPlus/HeatBalanceManager.cc:3309-3430`).
 ///
-/// The load residuals describe the run's warm-up quality, not a per-zone
-/// load audit: HVAC delivery is only measured in aggregate, so the
-/// aggregate daily-peak heating/cooling relative changes are attributed to
-/// the worst-temperature-residual zone's row. The zone scope is ALL zones
-/// (unconditioned included) even though the convergence criterion is
-/// conditioned zones only: a converged run can still carry an
-/// unconditioned-zone residual.
+/// The recorded row is the worst zone's: the zone with the largest
+/// day-over-day daily-maximum temperature residual, with its own daily-min
+/// temperature residual and its own daily-peak HVAC heating and cooling
+/// relative changes beside it. The comparison checks every zone's four
+/// residuals (all zones, unconditioned included, as EnergyPlus does); a
+/// converged run's recorded row can still name a zone whose own residuals
+/// were not the binding ones, and the non-convergence warning names every
+/// zone failing a check.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WarmupResiduals {
-    /// Zone with the largest day-over-day temperature residual
-    /// (max of |Δ daily max|, |Δ daily min|).
+    /// Zone with the largest day-over-day daily-maximum temperature
+    /// residual; the row's other residuals are this zone's own.
     pub worst_zone: ZoneId,
     /// |Δ daily max temperature| of [`Self::worst_zone`] [°C].
     pub max_temperature_c: f64,
     /// |Δ daily min temperature| of [`Self::worst_zone`] [°C].
     pub min_temperature_c: f64,
-    /// Relative change of the aggregate daily peak heating (fraction).
+    /// Relative change of [`Self::worst_zone`]'s own daily peak heating
+    /// delivered (fraction, EnergyPlus's 100 W floor and 1e-4 W
+    /// pass-through applied).
     pub heating_load: f64,
-    /// Relative change of the aggregate daily peak cooling (fraction).
+    /// Relative change of [`Self::worst_zone`]'s own daily peak cooling
+    /// delivered (fraction, EnergyPlus's 100 W floor and 1e-4 W
+    /// pass-through applied).
     pub cooling_load: f64,
 }
 
