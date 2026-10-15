@@ -991,6 +991,78 @@ warm-up manifests); B-1a (first-hour rule during warm-up), B-1c.
 **Measurement:** per golden with warm-up, days run before and after, and the
 first-day energy delta on each of the candidates A to D.
 
+**State:** committed `4d54618e` (branch `row/r83-b2-b3`, worktree
+`r83-b2-b3`, based on `765968ed`). In brief: `SimulationConfig.warmup:
+Warmup` (`Disabled` or `Converge(WarmupConfig)`, the hand-written serde
+taking the string `"disabled"` or a `[warmup]` table, the Rust default
+`Converge(WarmupConfig::default())` with the EnergyPlus defaults 0.4
+delta C, 0.04, 1 day, 25 days; `validate()` rejects a tolerance outside
+(0, 0.5], a day count of 0 and `min_days > max_days`, naming both), the
+`initialization_duration` Python keyword and `DwellingConfig` settings
+field and the synthetic TOML top-level `initialization_duration_s` all
+removed (three `REMOVED_KEYS` rows: the two `DwellingTable` rows naming
+`SimulationConfig.warmup`, and the `SimulationConfig`-scope row's
+message rewritten to the same), the replay manifest's
+`initialization_duration_s` gone with the warm-up riding its embedded
+config (`REPLAY_SCHEMA_VERSION` 1 to 2), the frame_golden manifest's
+per-home key gone (the manifest's `[simulation]` table carries the
+`warmup` key; `SIMULATION_KEYS` gains it and its struct pin re-verified),
+and every committed manifest and BESTEST fixture migrated (the zero
+warm-ups spelled `[simulation] warmup = "disabled"`, the positive
+values dropped to the default). The convergence loop is the EnergyPlus
+`CheckWarmupConvergence` rule: every zone's (unconditioned included)
+daily maximum and minimum temperature against the temperature tolerance
+and daily peak HVAC heating and cooling delivered against the loads
+tolerance with the 100 W floor and the 1e-4 W pass-through, the
+delivery read per zone from the thermal port accumulators (the
+per-zone values behind the run's `HVAC Heating/Cooling Delivered -
+{zone} (W)` columns), the stop rule converged-and-past-`min_days` or
+`max_days`, a non-finite residual failing the run with `NanDetected`
+naming the zone and the warm-up day (the outcome recorded before the
+failure propagates), the four residuals traced at debug per zone per
+day, `WarmupResiduals` now the worst zone's own four residuals (the
+worst zone by the daily-max temperature residual; the old aggregate
+load attribution's doc comment gone), the build's warm-up driven by the
+config (the disabled warm-up warns; the Rust convenience constructor
+takes the config's value like every other path), and
+`docs/PHYSICS_DECISIONS.md`'s warm-up section with the citations, the
+days-run deltas and OCHRE's fixed `initialization_time`
+(`vendors/OCHRE/ochre/Simulator.py:136-140`). RED first: the
+acceptance tests failed at the base on the missing API; the fixture
+selection's census and the two heavyweight candidates the entry's four
+could not stand in for (the tolerance band and the load-blocked day
+are the BESTEST 900 pair's), the days-run before/after table, the
+first-day energy deltas, the drift locks' re-measure (every move inside
+the locks' 1 percent, the pins re-captured with the cause) and the
+OCHRE comparison's stated cold-both-sides premise are in
+`02-measurement.md`. The goldens: `consumer_shape_900s` and
+`fleet_same_offset_300s` bitwise identical (their warm-ups disabled);
+the seven warmed fixtures' frames moved from row 0 (the initial
+condition) and were re-captured twice byte-identical, the days-run
+deltas their cause. The acceptance tests: `warmup_tolerance_changes_days_run`
+on BESTEST 900FF (8 days at 0.5 against 9 at 0.4),
+`warmup_load_criterion_extends_warmup` on BESTEST 900 (4 days at the
+default loads tolerance against 3 at the loose 0.5),
+`warmup_min_days_is_honoured` on the leap candidate (exactly 3),
+`warmup_nonconvergence_is_recorded` on the cz2a candidate (the outcome
+recorded and the warning naming the failing zones),
+`warmup_nan_residual_fails_the_run` on the cz2a candidate (the test
+hook's injected day-1 NaN, the day-2 comparison failing with
+`NanDetected` naming the zone and day 2), `warmup_toml_forms_round_trip`
+and `min_days_above_max_days_is_a_config_error` in `hares-io`'s config
+tests, `warmup_days_repeat_the_first_hour_rule` beside B-1b's first-hour
+test, and OR-7's `frame_starts_at_start_time_with_exact_row_count`
+running warm-up-enabled in `time_column.rs`. The Python `warmup`
+keyword of `SimulationConfig` (B-3's surface) landed in this commit:
+the B-2 gate's parity tests state their cold-both-sides premise through
+it, and the removal row's replacement keyword cannot be absent from the
+surface the same commit strips the old spelling from. Gates at the tip:
+fmt clean, clippy `--workspace --all-targets --all-features -D warnings`
+clean, nextest `--workspace --all-features -j 2` 8101/8101 (6 skipped),
+`pytest -m ''` 1763 passed + 6 xfailed, 0 failed, 0 errors, pyright 0,
+the nine goldens bitwise after the declared movement (compare-all 8 +
+dst 1).
+
 ## B-3: Python warm-up default equals Rust's
 
 **Kind:** numeric fix (`numeric_fixes`: Python warm-up default equal to
@@ -1047,6 +1119,51 @@ difference between a Python run of the `consumer_shape_900s` inputs with no
 the first ran. The
 calibration consumer's fit moves by this change (it never passes the
 keyword); B1 absorbs it (`08-consumer.md` CN-4).
+
+**State:** committed `3935e940` (branch `row/r83-b2-b3`, worktree
+`r83-b2-b3`, on B-2's `4d54618e`). In brief: the `WarmupConfig` frozen
+pyclass over the Rust type (a partial construction keeps the Rust
+defaults for the unset fields; the validation the TOML path runs runs
+here too) and the `SimulationConfig.warmup` keyword with the three
+cases: an omitted keyword is the Rust default (`Warmup::default()`,
+distinguished from an explicit `None` by the keyword's
+`PyWarmupArg::Absent` signature default, a custom `FromPyObject`
+extractor over `WarmupConfig | None`), an explicit `warmup=None` is
+`Warmup::Disabled`, and a `WarmupConfig` sets the criteria; the
+`warmup` getter/setter read `WarmupConfig | None`; `warmup` joins
+`SIM_CONFIG_FIELD_KEYWORDS`, so a `warmup=` keyword on the dwelling
+constructors names `config=SimulationConfig(warmup=...)`; the stub
+carries the three cases in `SimulationConfig`'s docstring and the
+`WarmupConfig` class; `python/hares/__init__.py` exports
+`WarmupConfig`; the dwelling constructors take the config only as
+`config=`, so `warmup=` beside it is the config-field TypeError, not a
+removed key. `SimulationPlan`'s segments 1+ pass `warmup=None` through
+their configs (the segment 0 warm-up's state the
+`restore_building_state` transfer discards otherwise). The acceptance
+tests: `python_and_rust_warmup_defaults_agree` (the Python surface and
+the Rust convenience constructor, both on the cz4a inputs for 2 days
+at 3600 s, equal `WarmupOutcome`s; in `py_result.rs`'s tests, where the
+crate-private Python surface is reachable),
+`explicit_none_disables_warmup` and
+`test_warmup_config_sets_the_criteria` (a non-converging home at
+`max_days=2` records `Ran { converged: false, days_run: 2 }`),
+`initialization_duration_kwarg_names_warmup` (both dwelling
+constructors), `test_docs_warmup_example` (the docs' Warm-up section's
+example, which builds a dwelling with `WarmupConfig(max_days=2)` and
+reads `health.warmup`, runs as written), and the docs/python.md
+Warm-up section with the three cases and the defaults. The measurement
+is in `02-measurement.md`: the no-keyword run warmed 2 days, converged;
+the per-column maximum absolute differences against `warmup=None` over
+48 h at 900 s (the zone temperatures up to 1.358 delta C, the gas
+power 0.086 therms/hour, the total electric power 0.046 kW). The
+calibration consumer never passes the keyword and warms up from this
+row on; B1 absorbs its fit (`08-consumer.md` CN-4). No golden
+re-captured: the golden manifests run through the Rust adapter, which
+B-3 does not change. Gates at the tip: fmt clean, clippy
+`--workspace --all-targets --all-features -D warnings` clean, nextest
+`--workspace --all-features -j 2` 8101/8101 (6 skipped), `pytest -m ''`
+1763 passed + 6 xfailed, 0 failed, 0 errors, pyright 0, the nine
+goldens bitwise (compare-all 8 + dst 1).
 
 ## B-4: billing month boundary
 

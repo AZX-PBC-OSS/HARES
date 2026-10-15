@@ -3155,3 +3155,104 @@ and its expected step count now reads the engine's own simulated year
 (8736). The checkpoint acceptance's tail now runs the engine's
 simulated step count (the leap-year run's end sits 96 steps before the
 calendar arithmetic's).
+
+### The warm-up criteria row, 2026-10-15 (the worktree `r83-b2-b3`)
+
+The warm-up's stop rule changed from the old rule (the last step's
+conditioned-zone temperatures between consecutive days at 0.5 delta C,
+25 days, no minimum) to the EnergyPlus criteria (every zone's daily
+temperature extremes against 0.4 delta C and daily peak HVAC delivery
+against 0.04, with the 100 W floor and the 1e-4 W pass-through, at
+least 1 and at most 25 days). Days run per fixture, the old rule
+against the new criteria: `full_year_hourly` 2 -> 3,
+`full_year_900s_dst` 2 -> 3, `leap_year_february_900s` 3 -> 2,
+`weather_wrap_900s` 2 -> 3, `month_boundary_billing_3600s` 2 -> 3, the
+BESTEST 600FF 8 -> 9 and the BESTEST 900 2 -> 4. The movement's cause:
+the old rule stopped on last-step temperatures while the day-over-day
+daily-extreme and load residuals were still open (the cz2a fixture's
+first comparison carries a 2.18 delta C daily-min residual on its
+garage and a 47 percent heating-load residual on the cz4a heat pump);
+conversely the leap fixture's old rule needed a third day its daily
+extremes did not.
+
+Fixture selection (recorded, then pinned). The candidates, each warmed
+up on its own first day with `min_days = max_days = 25` so every
+compared day's four residuals per zone are recorded, from the cold
+construction state: (A) `full_year_hourly`'s cz2a gas furnace and AC
+(2023-01-01, 3600 s), (B) `full_year_900s_dst`'s cz4a heat pump
+(2023-01-01, 900 s), (C) `leap_year_february_900s`'s cz4a (2024-02-27,
+900 s), (D) `tests/fixtures/parity/cz6b_resistance_res_wh/`
+(2023-01-01, 3600 s), and two heavyweight BESTEST homes added by this
+row: (E) `900ff` (concrete, free float; the entry's four candidates are
+all lightweight and cannot exhibit the tolerance band or a
+load-blocked day) and (F) `900` (concrete, conditioned ideal HVAC).
+The defaults' days run: A 3, B 3, C 2, D 3, E 9, F 4. The decisive
+residuals (day, zone, the four residuals):
+
+- A day 2: zone 1 dmax 0.016 dmin 0.114 heat 0.083; zone 2 dmax 0.042
+  dmin 2.179 (the unconditioned garage's day-1 warm-up transient; the
+  old rule never looked at it). Day 3: every residual inside tolerance.
+- B day 2: zone 1 dmax 3.603 dmin 0.007 heat 0.881; day 3 zone 1 dmin
+  0.278 heat 0.003. The 3.6 swings reappear on days 4 to 7 and 11 to
+  17 (the heat pump water heater's stochastic draws), decaying to
+  0.28/0.0001.
+- C day 2: zone 1 dmax 0.003 dmin 0.007 heat 0.034; zone 2 dmax 0.015
+  dmin 0.190. Converged on day 2.
+- D day 2: zone 1 dmax 0.000003 dmin 0.0014 heat 0.081; zone 2 dmin
+  2.190 (the same garage transient as A's). Day 3: inside tolerance.
+- E day 2 to 8: dmax 8.31, 4.90, 2.90, 1.72, 1.02, 0.605, 0.359; dmin
+  11.38, 6.18, 3.52, 2.09, 1.21, 0.718, 0.426 (the day-8 daily-min
+  residual lies in (0.4, 0.5]). The loads are 0 (free float): the load
+  criterion never binds.
+- F day 2: dmax 1.704 dmin 5.222 heat 0.900; day 3: dmax 0.300 dmin
+  0.343 heat 0.116 (the temperature residuals pass at day 3 while the
+  daily peak heating still changes 11.6 percent); day 4: heat 0.025.
+  The loads extend the warm-up one day past the temperature rule.
+
+The acceptance tests pin, by name, the first candidate in the order A
+to D, extended to E and F where the entry's four have no candidate:
+`warmup_tolerance_changes_days_run` on E (days run 8 at 0.5 against 9
+at 0.4), `warmup_load_criterion_extends_warmup` on F (4 days at the
+default 0.04 against 3 at the loose 0.5), `warmup_min_days_is_honoured`
+on C (min_days 3 runs exactly 3), `warmup_nonconvergence_is_recorded`
+on A (max_days 2 stops with converged false and the warning naming the
+failing zones), and `warmup_nan_residual_fails_the_run` on A.
+
+First-day energy delta, the old stop against the new criteria's stop
+(the warm-up forced to the old day count, then the default; the run's
+first day's HVAC delivery summed): A 458.7 Wh (0.68 percent of the
+day's heating), B 140.7 Wh (0.19 percent), C 3.7 Wh (0.009 percent), D
+485.3 Wh (0.71 percent); no cooling delivered in January on either
+side.
+
+The BESTEST drift locks re-measured with the cause (the warm-up days
+moved: the 900 pair 2 to 4 and 8 to 9, the lightweight 600 and 640 one
+day longer under the daily-extreme criteria): 600 heating
+3090.707 -> 3090.701 kWh, 600 cooling 5506.833 -> 5506.836 kWh, 640
+heating energy 1995.592 -> 1995.574 kWh, 900 heating 1069.393 ->
+1068.706 kWh, 600FF peak 74.010 -> 74.370 C, 900FF peak 46.151 ->
+46.392 C, the 900FF min unchanged on bits. Every move is inside the
+lock's 1 percent; the pins re-captured to the measured values with the
+cause in `tests/bestest/mod.rs`'s `drift_baseline`.
+
+The OCHRE comparison's premise is cold-on-both-sides and is now stated
+in the test: OCHRE's `initialization_time` is `None` there (the
+reference simulates from its own initial state; the fixed
+initialization run only happens when a caller asks for it) and the
+HARES side's config holds its warm-up disabled (`warmup = "disabled"`,
+spelled through `from_toml`) for the same premise. The warm-up's
+initial-condition movement is the goldens' own, measured above; the
+parity's strict agreement is bitwise-close again once both sides hold
+the premise.
+
+The Python surface row's own measurement: the `consumer_shape_900s`
+inputs run through Python with no `warmup` keyword (the default, the
+warm-up ran 2 days, converged) against the same run with `warmup=None`
+(disabled), both 48 h at 900 s, the per-column maximum absolute
+difference: the zone temperatures 1.358 delta C (Zone 3), 0.733 delta C
+(Indoor), 0.652 delta C (Zone 2); the gas power 0.086 therms/hour (the
+total the same); the total electric power 0.046 kW. The warmed run's
+first 48 h draws less gas: the warmed initial condition's heating
+demand is the smaller one, and a Python evaluation that never passes
+the keyword (the calibration consumer's own case) inherits it from
+this row on.
