@@ -722,6 +722,83 @@ step count); `03-output-reporting.md` OR-7 (the row-count test and the
 the delta on the days after Feb 29; the delta on every golden that starts
 after Feb 29 of a leap year.
 
+**State:** committed (2026-10-15, branch `row/r81-b1c`, worktree
+`r81-b1c`, cut from `9356e2ec`). The weather is addressed by calendar
+date: a new `WeatherYear {Typical, Actual}` config field (serde
+`weather_year`, Python `weather_year="typical"|"actual"`, default
+`Typical`, EnergyPlus's "Treat Weather as Actual" = No) joins the
+forcing key and the resample cache key, and the reads go through a new
+`WeatherAddressing` (hares-io): `Typical` maps the run step's local
+standard time month, day and hour into the file's own calendar (the
+365-day ordinal shares the schedule's `schedule_day_ordinal`; a 366-day
+file reads the leap calendar's), wrapping past Dec 31 at the file's Jan
+1 by day of year; `Actual` builds the file's dated-stamp index (the
+records' `(date, slot-within-day)`, the stamps the parsers now keep as
+the files state them: year, month, day, hour, minute), checks at
+construction that the run's first and last steps lie inside the file's
+dated records (an `IntervalEnd` file's range runs from its first stamp
+less one interval to its last stamp) naming both ranges otherwise, and
+fails a run that includes a Feb 29 the file has no records for, naming
+the year. A file whose data period is not a complete year is a
+construction error naming the period and the water-mains and
+ground-temperature inputs (the EPW reader keeps the DATA PERIODS
+period in `WeatherMeta`, parses the header's month/day fields by
+EnergyPlus's both-numeric month/day rule, and accepts the count the
+declared period names, so a partial file reaches construction whole);
+the count error names the period and the same reason. The Feb 29 rule
+the binding section states: the skip is
+`weather_year == Typical && the file has no Feb 29 records`; the run's
+clock (`SimClock.skip_feb29`) maps the step index to time with every
+skipped Feb 29 inserted (the clock steps from the last step of Feb 28
+to Mar 1 00:00) and `total_steps` is the run's simulated step count
+(the calendar steps less the skipped day's), the forcing table and the
+per-step path sharing the one mapping (`StepWeatherEvaluator::time_at`),
+the `ResolvedClock` `validate()` reports carrying it, a start on a
+skipped Feb 29 a `DwellingBlueprint` construction error naming the
+date, and the day types every simulated date's readers see (the
+schedule's and the HPXML profiles' weekday/weekend) the date's own
+calendar weekday: the one departure from EnergyPlus, which advances the
+day of week per simulated day and lands one weekday behind its own
+Input Output Reference calls incorrect. The record lookup is by calendar
+date never by a running index (`compute_annual_offset` deleted with its
+tests, replaced by the addressing's unit tests, the leap-year-over-a-
+365-day-file cases among them). The tracing at debug logs the mapping
+and day type at each wrap and leap-day boundary. Fixtures:
+`cz4a_with_feb29.epw` (the header's leap flag Yes, the 24 Feb 29
+records as a block after Feb 28 hour 24, year 1996, dry bulb 50.0 C),
+`cz4a_january.epw` (the period 1/1 to 1/31, 744 records),
+`G0600770_restamped_2020.csv` (the 2018 records restamped by interval to
+2020, no record covering Feb 29). RED first: the acceptance file
+(`crates/hares-core/tests/weather_year.rs`, the entry's thirteen cases
+plus the leap-crossing wrap differential and the actual-year positive
+read) failed to compile at the base on the missing `WeatherYear` API
+with only the tests applied, and the differentials failed at the parent
+on the behaviour (the one-day-late reads, the 480-row Feb 29 runs, the
+unguarded Feb 29 start). The forcing-key test
+(`forcing_key_differs_by_weather_year`, in `environment.rs`'s module)
+holds `Arc::ptr_eq` false for two managers over one parsed weather
+differing only in the rule. PY-8's surface: the field joins the one
+`SimulationConfig` (the constructor, the getter and setter, the stub,
+`docs/python.md`'s Time section gaining the leap-day rule). OR-7's
+`frame_starts_at_start_time_with_exact_row_count` unchanged and green
+(its 2023 inputs carry no skipped day; the simulated count is the
+engine's own everywhere). The schedule's `schedule_day_ordinal` doc
+updated (the Feb 29 to Mar 1 slot applies only to a typical file that
+has Feb 29 records). The gates at the final state (canonical env
+`uv sync --locked --all-extras --all-groups` + `uv run maturin
+develop`): fmt clean, clippy `--workspace --all-targets --all-features
+-D warnings` clean, nextest `--workspace --all-features -j 2`
+8088/8088 (6 skipped; the one `a_packed_ref_move_reruns_the_build`
+failure under the raw invocation is the host's 1Password commit
+signing, green with the git config neutralised and green at the base),
+`pytest -m ''` 1755 passed + 6 xfailed, 0 failed, 0 errors, pyright 0,
+the goldens: seven bitwise identical and the leap fixture's declared
+movement re-captured twice byte-identical (the dst set's
+`full_year_900s_dst` identical); the movement and the BESTEST drift
+locks' re-measure in `02-measurement.md`'s calendar-weather section.
+`docs/PHYSICS_DECISIONS.md` records the rule, the EnergyPlus behaviour
+and the day-type departure with the citations.
+
 ## B-2: warm-up converges by the EnergyPlus criteria
 
 **Kind:** numeric fix (`numeric_fixes`: EnergyPlus-grade warm-up

@@ -3099,7 +3099,59 @@ rule preserves the hourly and annual totals exactly (the weights sum to
 one over each hour's steps; EnergyPlus's own note, "the total solar for
 a day should agree"): the annual mean of the step values over the cz4a
 file at 900 s measured identical (225.750685 W/m2 both rules, delta
-0.000000). The movement is within-day phase, and the goldens' verbosity-2
-frames carry no insolation or solar-gain columns, so the solar heat
-gains' per-golden delta is not derivable from the committed products;
-the PV and HVAC deltas above carry the record.
+0.000000). The movement is within-day phase, and the goldens'
+verbosity-2 frames carry no insolation or solar-gain columns, so the
+solar heat gains' per-golden delta is not derivable from the committed
+products; the PV and HVAC deltas above carry the record.
+
+### The calendar weather row, 2026-10-15 (the row 81 worktree `r81-b1c`)
+
+The golden movement of the calendar-date addressing: exactly one golden
+moved; the other seven are bitwise identical under both feature sets
+(compare-all 8 with the re-captured mover + the dst set's
+`full_year_900s_dst` identical). The movement's cause: the 2024 leap
+year's Feb 29 is not simulated over a typical file without Feb 29
+records (the EnergyPlus rule), so the run's simulated step count is the
+calendar's less the skipped day's, and every date after Feb 28 reads
+its own calendar date's records where the previous running-index rule
+read one day late.
+
+- `leap_year_february_900s` (2024-02-27, 5 days, 900 s, warm-up 7 d):
+  the frame's rows 480 to 384 (480 calendar steps less the 96 of Feb
+  29); the run's simulated duration 120.0 to 96.0 h; the row after Feb
+  28 23:45 labelled Mar 1 00:00. Run metrics (the parent
+  `9356e2ec`'s capture against the fix): gross/net consumption
+  236.908 -> 197.662 kWh; hvac_heating 156.867 -> 136.318 kWh;
+  hvac_cooling 4.963 -> 4.300 kWh; cooking 10.858 -> 7.857; lighting
+  17.164 -> 13.616; other 17.226 -> 12.010; plug loads 17.241 ->
+  13.477; refrigeration 5.551 -> 4.559; ventilation 2.394 -> 1.915;
+  water heating 4.644 -> 3.610. The rolling demand-window peaks are
+  unchanged (the 15/30/60-min peaks fall before Feb 29: 21.4137,
+  12.3710, 7.4182 kW identical on bits); the per-end-use peaks
+  identical except other (2.5666 -> 2.5473 kW) and water heating
+  (0.51959 -> 0.51958 kW). Frame column means: outdoor dry bulb 5.553
+  -> 4.361 C, indoor 20.775 -> 20.760 C, HVAC heating mean 1.307 ->
+  1.420 kW. The end-use totals drop by close to the one day in five the
+  run no longer simulates, with the remainder the re-aligned weather's
+  own phase.
+- `consumer_shape_900s`, `fleet_mixed_offset`, `fleet_same_offset_300s`,
+  `full_year_hourly`, `month_boundary_billing_3600s`, `weather_wrap_900s`,
+  `resstock_2025_fleet`: bitwise identical (their spans carry no leap
+  Feb 29; the calendar addressing reproduces the running-index rule's
+  reads for non-leap spans exactly). The warm-up replay reads the run's
+  first day only, so no warm-up read moves.
+- `full_year_900s_dst` (the dst feature set): bitwise identical (2023,
+  non-leap).
+
+The BESTEST drift locks re-measured with the cause (the 600FF fixture
+runs 2024, so its simulated year is 8736 steps and its annual sums move
+with the re-aligned weather): 600 heating 3122.278 -> 3090.707 kWh,
+600 cooling 5542.032 -> 5506.833 kWh, 640 heating energy 2018.333 ->
+1995.592 kWh, 900 heating 1105.795 -> 1069.393 kWh; the 600FF and 900FF
+free-float peaks and mins stayed inside their baselines' 1 percent and
+were not re-measured. The `case_600ff_zone_air_balance_residual_bounded`
+bounds held (max 931.4 W, mean 195.4 W, inside the measured envelope)
+and its expected step count now reads the engine's own simulated year
+(8736). The checkpoint acceptance's tail now runs the engine's
+simulated step count (the leap-year run's end sits 96 steps before the
+calendar arithmetic's).
