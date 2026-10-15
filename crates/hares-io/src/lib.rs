@@ -115,7 +115,10 @@ pub use tmy3::parse_tmy3;
 pub use unavailable_periods::{
     NaturalVentilation, UnavailableKind, UnavailablePeriod, apply_unavailable_periods,
 };
-pub use weather::{FirstHour, RecordLabel, WeatherField, WeatherMeta, WeatherTimeSeries};
+pub use weather::{
+    DataPeriod, FirstHour, RecordLabel, RecordStamp, WeatherAddressing, WeatherField, WeatherMeta,
+    WeatherTimeSeries, WeatherYear,
+};
 pub use weather::{
     WeatherFormat, detect_weather_format, parse_weather, parse_weather_with_elevation,
     parse_weather_with_location, read_weather_meta,

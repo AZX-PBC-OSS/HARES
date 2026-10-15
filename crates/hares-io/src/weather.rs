@@ -3,7 +3,7 @@
 use std::io::BufRead;
 use std::path::Path;
 
-use chrono::{Datelike, Timelike};
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -30,6 +30,134 @@ pub enum WeatherFormat {
     /// Reference: Wilcox & Marion (2008), NREL/TP-581-43156.
     /// <https://docs.nrel.gov/docs/fy08osti/43156.pdf>
     Tmy3,
+}
+
+/// Whether the run treats the weather file as a typical (TMY-style) year
+/// or an actual one: EnergyPlus's RunPeriod "Treat Weather as Actual",
+/// which defaults to No (`idd/Energy+.idd.in:1480-1484`).
+///
+/// `Typical`: the file's month, day and hour address the records
+/// whatever the stamps' years; a run past Dec 31 wraps to Jan 1 of the
+/// file (wrap by day of year); a run year's Feb 29 uses the file's Feb
+/// 29 records when it has them and is not simulated when it does not
+/// (`WeatherManager.cc:2816-2828`).
+///
+/// `Actual`: the run's first and last steps must lie inside the file's
+/// own dated records, and a run that includes a Feb 29 the file has no
+/// records for is fatal (`WeatherManager.cc:888-899, 2832-2836,
+/// 904-926, 990`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeatherYear {
+    /// The file is a typical (TMY-style) year: month, day and hour
+    /// address the records whatever their years, runs wrap by day of
+    /// year, and a Feb 29 the file lacks is not simulated. The default
+    /// (EnergyPlus's "Treat Weather as Actual" = No).
+    #[default]
+    Typical,
+    /// The file is an actual year: the run must lie inside the file's
+    /// own dated records.
+    Actual,
+}
+
+impl WeatherYear {
+    /// Whether the run skips Feb 29 days over this file: the typical
+    /// rule with a file that carries no Feb 29 records. EnergyPlus
+    /// simulates such a leap year as a 365-day year, skipping every Feb
+    /// 29 record met in a non-leap run year and the missing one in a
+    /// leap one (`WeatherManager.cc:2816-2828`, the condition at
+    /// `:2817`; HARES follows it for weather and schedules, with
+    /// calendar day types).
+    #[must_use]
+    pub fn skips_feb29(self, file: &WeatherTimeSeries) -> bool {
+        matches!(self, Self::Typical) && !file.has_feb29()
+    }
+}
+
+/// A weather file's declared data period (the EPW DATA PERIODS header's
+/// start and end day/month; the count-derived period for formats without
+/// the header).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataPeriod {
+    pub start_month: u32,
+    pub start_day: u32,
+    pub end_month: u32,
+    pub end_day: u32,
+}
+
+impl DataPeriod {
+    /// A complete year: Jan 1 to Dec 31, the period every weather file a
+    /// HARES run reads must declare.
+    #[must_use]
+    pub const fn complete_year() -> Self {
+        Self {
+            start_month: 1,
+            start_day: 1,
+            end_month: 12,
+            end_day: 31,
+        }
+    }
+
+    /// Whether the period covers the complete year, Jan 1 to Dec 31.
+    #[must_use]
+    pub const fn is_complete_year(&self) -> bool {
+        self.start_month == 1 && self.start_day == 1 && self.end_month == 12 && self.end_day == 31
+    }
+}
+
+impl std::fmt::Display for DataPeriod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}/{} to {}/{}",
+            self.start_month, self.start_day, self.end_month, self.end_day
+        )
+    }
+}
+
+/// One weather record's dated stamp, as the file states it: the year,
+/// month and day of the record's date, the file's own hour field, and
+/// the file's own minute field. The stamps are the file's own dates:
+/// an actual-year run is checked against them.
+///
+/// The hour field keeps the file's convention: EPW, TMY3 and the
+/// ResStock CSV state 1..=24 (hour-ending; 24 is the day's last hour),
+/// PSM3 states 0..=23 (hour-beginning).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordStamp {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+}
+
+impl RecordStamp {
+    /// The stamp's date.
+    #[must_use]
+    pub fn date(&self) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(self.year, u32::from(self.month), u32::from(self.day))
+            .unwrap_or_else(|| {
+                chrono::NaiveDate::from_ymd_opt(2000, 1, 1).expect("a valid fallback date")
+            })
+    }
+
+    /// Whether the stamp is a Feb 29.
+    #[must_use]
+    pub fn is_feb29(&self) -> bool {
+        self.month == 2 && self.day == 29
+    }
+
+    /// The stamp as a naive datetime: the date at midnight plus the
+    /// hour's end (an hour field of 24 is the day's last hour, ending at
+    /// the next midnight) and the minute field.
+    #[must_use]
+    pub fn stamp_datetime(&self) -> Option<chrono::NaiveDateTime> {
+        self.date()
+            .and_hms_opt(0, 0, 0)?
+            .checked_add_signed(chrono::Duration::hours(i64::from(self.hour)))?
+            .checked_add_signed(chrono::Duration::minutes(i64::from(self.minute)))
+    }
 }
 
 /// Detect the weather file format from its path extension and (for CSV) header content.
@@ -171,6 +299,7 @@ pub fn read_weather_meta(path: impl AsRef<Path>) -> Result<WeatherMeta, WeatherE
             wf_allows_leap_years: true,
             source_step_secs: 3600,
             record_label: RecordLabel::IntervalEnd,
+            data_period: DataPeriod::complete_year(),
             has_embedded_location: false,
             station_wmo: None,
         }),
@@ -472,6 +601,18 @@ pub struct WeatherMeta {
     /// TMY3 and ResStock CSV are hour-ending (`IntervalEnd`); PSM3 is
     /// hour-beginning (`IntervalStart`). See [`RecordLabel`].
     pub record_label: RecordLabel,
+    /// The file's declared data period (the EPW DATA PERIODS header's
+    /// start and end day/month; the count-derived period for the formats
+    /// without the header). Every file a run reads must declare a
+    /// complete year: the water-mains annual mean and monthly range and
+    /// the ground temperature the parsers derive from twelve monthly
+    /// dry-bulb means need twelve complete months (the binding "Weather"
+    /// section of the numeric-fixes ledger; EnergyPlus runs a partial
+    /// typical period when the run lies inside it,
+    /// `WeatherManager.cc:941-991`, but its weather-file water-mains
+    /// correlation otherwise falls back to a fixed 10.0 C, and HARES
+    /// substitutes no value it was not given).
+    pub data_period: DataPeriod,
     /// Whether this weather format embeds its own site location (latitude,
     /// longitude, timezone) in its header. EPW, PSM3, and TMY3 do (`true`);
     /// ResStock CSV does not (`false`) and is parsed with `0.0` placeholders
@@ -533,6 +674,12 @@ pub struct WeatherTimeSeries {
     /// Design conditions parsed from the EPW header line 2, or `None`
     /// for formats that lack them (PSM3, TMY3, ResStock CSV).
     pub design_conditions: Option<DesignConditions>,
+    /// Each record's dated stamp as the file states it (year, month,
+    /// day, hour and minute), one per record, so an actual-year run is
+    /// checked against the file's own dates. Empty for a series built in
+    /// code or derived by resampling (whose rows are no longer the
+    /// file's records).
+    pub stamps: Vec<RecordStamp>,
     pub dry_bulb_c: Vec<f64>,
     pub dew_point_c: Vec<f64>,
     pub rel_humidity_pct: Vec<f64>,
@@ -567,6 +714,24 @@ impl WeatherTimeSeries {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Whether the file carries Feb 29 records: any stamp dated Feb 29.
+    /// A series without stamps (built in code) carries none.
+    #[must_use]
+    pub fn has_feb29(&self) -> bool {
+        self.stamps.iter().any(RecordStamp::is_feb29)
+    }
+
+    /// The position of the record stamped at `t` (the stamp's own date,
+    /// hour and minute fields as a time of day: an hour field of 24 is
+    /// the day's last hour, ending at the next midnight). `None` when no
+    /// record carries that stamp.
+    #[must_use]
+    pub fn find_stamp(&self, t: chrono::NaiveDateTime) -> Option<usize> {
+        self.stamps
+            .iter()
+            .position(|stamp| stamp.stamp_datetime() == Some(t))
     }
 
     /// Indexed access into a specific weather column.
@@ -635,12 +800,18 @@ impl WeatherTimeSeries {
         target_step_secs: u32,
         first_hour: FirstHour,
         start: chrono::NaiveDateTime,
+        weather_year: WeatherYear,
     ) -> Result<Self, WeatherError> {
         if target_step_secs == 0 {
             return Err(WeatherError::Resample(
                 "target_step_secs must be > 0".to_string(),
             ));
         }
+
+        // The calendar-date addressing the run's reads use (the typical
+        // and actual year rules): the interpolation's first-hour rule and
+        // the construction checks resolve records through it.
+        let addressing = WeatherAddressing::new(self, weather_year)?;
 
         let source = self.meta.source_step_secs;
 
@@ -710,6 +881,7 @@ impl WeatherTimeSeries {
                     ..self.meta.clone()
                 },
                 design_conditions: self.design_conditions,
+                stamps: Vec::new(),
                 dry_bulb_c,
                 dew_point_c,
                 rel_humidity_pct,
@@ -746,7 +918,12 @@ impl WeatherTimeSeries {
                  timesteps per hour evenly divisible into 60"
             )));
         }
-        self.interpolate_hourly_records((3600 / target_step_secs) as usize, first_hour, start)
+        self.interpolate_hourly_records(
+            (3600 / target_step_secs) as usize,
+            first_hour,
+            start,
+            &addressing,
+        )
     }
 
     /// The EnergyPlus interpolation of an hourly file at a step shorter
@@ -777,6 +954,7 @@ impl WeatherTimeSeries {
         steps_per_hour: usize,
         first_hour: FirstHour,
         start: chrono::NaiveDateTime,
+        addressing: &WeatherAddressing,
     ) -> Result<Self, WeatherError> {
         let n = steps_per_hour;
         let len = self.len();
@@ -791,19 +969,10 @@ impl WeatherTimeSeries {
             )));
         }
 
-        // The run's start in seconds into the file's year, the same
-        // mapping the per-step read uses: the naive local wall clock,
-        // records addressed from the file's first record.
-        let seconds_into_year = u64::from(start.ordinal0()) * 86_400
-            + u64::from(start.hour()) * 3_600
-            + u64::from(start.minute()) * 60
-            + u64::from(start.second());
-        let year_secs = len as u64 * 3_600;
-        let target_secs = 3_600 / n as u64;
-        let offset_row = ((seconds_into_year % year_secs) / target_secs) as usize % (len * n);
-        // The hour containing the run's start: its steps interpolate from
-        // the record the first-hour rule names.
-        let first_hour_k = offset_row / n;
+        // The run's start's record, addressed by calendar date: the hour
+        // containing the run's start, whose steps interpolate from the
+        // record the first-hour rule names.
+        let first_hour_k = addressing.record_at(start)?;
         let first_day = first_hour_k / 24;
         let first_hour_prev = match first_hour {
             FirstHour::Hour24 => first_day * 24 + 23,
@@ -818,6 +987,7 @@ impl WeatherTimeSeries {
                 ..self.meta.clone()
             },
             design_conditions: self.design_conditions,
+            stamps: Vec::new(),
             dry_bulb_c: vec![0.0; rows],
             dew_point_c: vec![0.0; rows],
             rel_humidity_pct: vec![0.0; rows],
@@ -1006,6 +1176,255 @@ fn prev_record_index(k: usize, first_hour_k: usize, first_hour_prev: usize, len:
     }
 }
 
+/// The calendar-date addressing of a weather file's records: which file
+/// record a run step at a given local standard time reads. Records are
+/// addressed by the local standard time date and hour (the site's
+/// standard offset), never by the civil time of a `civil_timezone` with
+/// daylight saving, and never by a running index.
+///
+/// `Typical`: the file's month, day and hour address the records
+/// whatever the stamps' years (a run past Dec 31 continues at Jan 1 of
+/// the file, wrap by day of year). `Actual`: the run is checked against
+/// the file's own dated stamps.
+#[derive(Debug, Clone)]
+pub struct WeatherAddressing {
+    year: WeatherYear,
+    /// The file's interval per record, in seconds.
+    file_interval_secs: u32,
+    records_per_hour: usize,
+    /// The file's day count (its records per day × 24).
+    file_days: usize,
+    /// The file's record count.
+    file_len: usize,
+    /// `Actual` only: (record date, the record's position within its
+    /// day) -> the record's row. The key's position-within-day is the
+    /// record's own slot (its stamp's hour at the file's interval), so a
+    /// step at local standard time `t` looks up `(t's date, t's seconds
+    /// of day / interval)`.
+    actual_index: Option<std::collections::HashMap<(chrono::NaiveDate, u32), usize>>,
+    /// `Actual` only: the file's dated range, from its first stamp's
+    /// interval start to its last stamp's interval end. An `IntervalEnd`
+    /// file's range runs from its first stamp less one interval to its
+    /// last stamp.
+    actual_range: Option<(chrono::NaiveDateTime, chrono::NaiveDateTime)>,
+}
+
+impl WeatherAddressing {
+    /// The addressing for one parsed file under one weather-year rule.
+    ///
+    /// # Errors
+    ///
+    /// [`WeatherError::Validation`] when the file's data period is not a
+    /// complete year (naming the period and the inputs that need a
+    /// complete year), or `Actual` is requested over a file with no
+    /// dated stamps.
+    pub fn new(series: &WeatherTimeSeries, year: WeatherYear) -> Result<Self, WeatherError> {
+        let period = series.meta.data_period;
+        if !period.is_complete_year() {
+            return Err(WeatherError::Validation(format!(
+                "the weather file's data period {period} is not a complete year: every weather \
+                 file must cover Jan 1 to Dec 31, because the water mains annual mean and \
+                 monthly range and the ground temperature derived from twelve monthly dry-bulb \
+                 means need a complete year; EnergyPlus runs a partial typical period when the \
+                 run lies inside it, but HARES derives the mains from the weather file and \
+                 substitutes no value it was not given"
+            )));
+        }
+        let file_interval_secs = series.meta.source_step_secs;
+        let records_per_hour = usize::from((3600 / file_interval_secs.max(1)) as u16).max(1);
+        let file_days = series.len() / (24 * records_per_hour);
+        let file_len = series.len();
+        let (actual_index, actual_range) = match year {
+            WeatherYear::Typical => (None, None),
+            WeatherYear::Actual => {
+                if series.stamps.len() != series.len() || series.stamps.is_empty() {
+                    return Err(WeatherError::Validation(
+                        "an actual-year run needs a weather file with dated records; this \
+                         weather series carries none"
+                            .to_string(),
+                    ));
+                }
+                let mut index = std::collections::HashMap::with_capacity(series.len());
+                let mut day_start = 0usize;
+                let mut current_date = series.stamps[0].date();
+                for (i, stamp) in series.stamps.iter().enumerate() {
+                    if stamp.date() != current_date {
+                        current_date = stamp.date();
+                        day_start = i;
+                    }
+                    index.insert((current_date, (i - day_start) as u32), i);
+                }
+                let interval = i64::from(file_interval_secs);
+                let stamp_time = |stamp: &RecordStamp| {
+                    stamp.date().and_hms_opt(0, 0, 0).expect("midnight")
+                        + chrono::Duration::hours(i64::from(stamp.hour))
+                };
+                let range = match series.meta.record_label {
+                    RecordLabel::IntervalEnd => (
+                        stamp_time(&series.stamps[0]) - chrono::Duration::seconds(interval),
+                        stamp_time(series.stamps.last().expect("non-empty")),
+                    ),
+                    RecordLabel::IntervalStart => (
+                        stamp_time(&series.stamps[0]),
+                        stamp_time(series.stamps.last().expect("non-empty"))
+                            + chrono::Duration::seconds(interval),
+                    ),
+                };
+                (Some(index), Some(range))
+            }
+        };
+        Ok(Self {
+            year,
+            file_interval_secs,
+            records_per_hour,
+            file_days,
+            file_len,
+            actual_index,
+            actual_range,
+        })
+    }
+
+    /// The weather-year rule the addressing was built under.
+    #[must_use]
+    pub fn year(&self) -> WeatherYear {
+        self.year
+    }
+
+    /// The file's day count.
+    #[must_use]
+    pub fn file_days(&self) -> usize {
+        self.file_days
+    }
+
+    /// The file's dated range, for `Actual`: from the first stamp's
+    /// interval start to the last stamp's interval end.
+    #[must_use]
+    pub fn actual_range(&self) -> Option<(chrono::NaiveDateTime, chrono::NaiveDateTime)> {
+        self.actual_range
+    }
+
+    /// The day index (0-based) of `date` in the file's own calendar: a
+    /// 366-day file is indexed by the leap calendar's ordinal, a 365-day
+    /// file (and any shorter series) by the shared 365-day ordinal, whose
+    /// leap-year rule maps a date after Feb 29 one slot back. The modulo
+    /// wraps a day index past the file's own days at the file's Jan 1
+    /// (wrap by day of year) and keeps short series addressable.
+    #[must_use]
+    pub fn typical_day_index(&self, date: chrono::NaiveDate) -> u32 {
+        let ordinal = if self.file_days == 366 {
+            // The file's own leap calendar: the month-and-day slot of a
+            // 366-day file, independent of the run year.
+            chrono::NaiveDate::from_ymd_opt(2020, date.month(), date.day())
+                .expect("a real month and day")
+                .ordinal()
+        } else {
+            hares_types::schedule_day_ordinal(&date)
+        };
+        (ordinal - 1) % self.file_days.max(1) as u32
+    }
+
+    /// The file record (0-based row) the run step starting at `t` (local
+    /// standard time) reads.
+    ///
+    /// # Errors
+    ///
+    /// [`WeatherError::Validation`] when `Actual` addressing finds no
+    /// record for the step's date and hour: the step lies outside the
+    /// file's dated records.
+    pub fn record_at(&self, t: chrono::NaiveDateTime) -> Result<usize, WeatherError> {
+        use chrono::Timelike;
+        let secs_of_day = t.hour() * 3600 + t.minute() * 60 + t.second();
+        let slot = secs_of_day / self.file_interval_secs;
+        match &self.actual_index {
+            None => {
+                let day = self.typical_day_index(t.date());
+                // The modulo wraps a slot past the file's own records at
+                // the file's Jan 1 and keeps a short (sub-year) series
+                // addressable; for a complete-year file the index is
+                // always inside and the modulo is a no-op.
+                Ok((day as usize * 24 * self.records_per_hour + slot as usize)
+                    % self.file_len.max(1))
+            }
+            Some(index) => index.get(&(t.date(), slot)).copied().ok_or_else(|| {
+                WeatherError::Validation(format!(
+                    "no weather record covers local standard time {t}: the step's date and hour \
+                     are outside the file's dated records"
+                ))
+            }),
+        }
+    }
+
+    /// Whether the run's calendar interval `[start, end)` can be addressed
+    /// by this file under the `Actual` rule: every Feb 29 the interval
+    /// includes must have records (a run that includes a leap year with a
+    /// file that has no Feb 29 fails naming the year), and the interval's
+    /// first and last steps must lie inside the file's dated records.
+    ///
+    /// # Errors
+    ///
+    /// [`WeatherError::Validation`] naming the year or both ranges.
+    pub fn check_actual_run(
+        &self,
+        start: chrono::NaiveDateTime,
+        end: chrono::NaiveDateTime,
+        step_secs: u32,
+    ) -> Result<(), WeatherError> {
+        let Some(range) = self.actual_range else {
+            return Ok(());
+        };
+        // Every Feb 29 the run includes must have records.
+        for year in start.year()..=end.year() {
+            if !is_leap(year) {
+                continue;
+            }
+            let Some(feb29) = chrono::NaiveDate::from_ymd_opt(year, 2, 29) else {
+                continue;
+            };
+            let feb29_start = feb29.and_hms_opt(0, 0, 0).expect("midnight");
+            let feb29_end = feb29
+                .succ_opt()
+                .expect("a date after Feb 29")
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight");
+            if feb29_start < end && feb29_end > start {
+                let covered = self
+                    .actual_index
+                    .as_ref()
+                    .map(|index| index.keys().any(|(date, _)| *date == feb29))
+                    .unwrap_or(false);
+                if !covered {
+                    return Err(WeatherError::Validation(format!(
+                        "the actual-year run includes {year}, a leap year, but the weather file \
+                         has no Feb 29 records: an actual-year run over a file that does not \
+                         cover Feb 29 of a leap year cannot simulate that day"
+                    )));
+                }
+            }
+        }
+        // The interval's first and last steps must lie inside the file's
+        // dated records.
+        let last_step = end - chrono::Duration::seconds(i64::from(step_secs));
+        for t in [start, last_step] {
+            if self.record_at(t).is_err() {
+                return Err(WeatherError::Validation(format!(
+                    "the actual-year run {} to {} lies outside the weather file's dated records \
+                     {} to {}: the run's first and last steps must lie inside the file's own \
+                     dates",
+                    start.date(),
+                    end,
+                    range.0,
+                    range.1
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_leap(year: i32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
 /// The circular interpolation of one direction pair at one weight: the
 /// shortest arc, as the engine's circular interpolation has always
 /// computed it (EnergyPlus's `interpolateWindDirection`,
@@ -1059,8 +1478,8 @@ fn sum_downsample(values: &[f64], ratio: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FirstHour, RecordLabel, WeatherError, WeatherField, WeatherMeta, WeatherTimeSeries,
-        solar_interpolation_weight,
+        DataPeriod, FirstHour, RecordLabel, WeatherError, WeatherField, WeatherMeta,
+        WeatherTimeSeries, WeatherYear, solar_interpolation_weight,
     };
     use chrono::NaiveDate;
 
@@ -1083,6 +1502,7 @@ mod tests {
             wf_allows_leap_years: true,
             source_step_secs: 3600,
             record_label: RecordLabel::IntervalEnd,
+            data_period: DataPeriod::complete_year(),
             has_embedded_location: true,
             station_wmo: None,
         }
@@ -1095,6 +1515,7 @@ mod tests {
         WeatherTimeSeries {
             meta: meta(),
             design_conditions: None,
+            stamps: Vec::new(),
             dry_bulb_c: hour_values.to_vec(),
             dew_point_c: vec![0.0; 24],
             rel_humidity_pct: vec![0.0; 24],
@@ -1158,7 +1579,12 @@ mod tests {
         day2[0] = 4.0;
         let series = two_day_series(&day1, &day2);
         let out = series
-            .resample(900, FirstHour::default(), start_midnight(1))
+            .resample(
+                900,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         assert_eq!(out.len(), 48 * 4);
         let n = 4.0_f64;
@@ -1181,7 +1607,12 @@ mod tests {
         day2[0] = 6.0;
         let series = two_day_series(&day1, &day2);
         let out = series
-            .resample(600, FirstHour::default(), start_midnight(1))
+            .resample(
+                600,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         let n = 6.0_f64;
         for ts in 1..=6_usize {
@@ -1207,7 +1638,12 @@ mod tests {
         // The run's first hour is hour 1; read hour 2's rows, whose
         // previous hour is hour 1: 350 to 10 over four steps.
         let out = series
-            .resample(900, FirstHour::default(), start_midnight(1))
+            .resample(
+                900,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         let expected = [355.0, 0.0, 5.0, 10.0];
         for (ts, expected_value) in expected.iter().enumerate() {
@@ -1230,7 +1666,12 @@ mod tests {
         series.liquid_precip_m[0] = 2.0;
         series.liquid_precip_m[1] = 6.0;
         let out = series
-            .resample(900, FirstHour::default(), start_midnight(1))
+            .resample(
+                900,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         let n = 4.0_f64;
         for (ts, (w_prev, w_this)) in [(0.75, 0.25), (0.5, 0.5), (0.25, 0.75), (0.0, 1.0)]
@@ -1255,7 +1696,12 @@ mod tests {
         series.meta.source_step_secs = 900;
         for step in [300, 1800] {
             let err = series
-                .resample(step, FirstHour::default(), start_midnight(1))
+                .resample(
+                    step,
+                    FirstHour::default(),
+                    start_midnight(1),
+                    WeatherYear::Typical,
+                )
                 .expect_err("the interval mismatch is an error");
             assert!(err.to_string().contains("900"), "{err}");
             assert!(err.to_string().contains(&step.to_string()), "{err}");
@@ -1267,7 +1713,12 @@ mod tests {
     fn resample_rejects_non_divisor_step() {
         let series = hourly_series(&[0.0; 24]);
         let err = series
-            .resample(7, FirstHour::default(), start_midnight(1))
+            .resample(
+                7,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect_err("non-divisor timestep should fail");
         assert!(matches!(err, WeatherError::Resample(_)));
         assert!(err.to_string().contains("divide the hour"), "{err}");
@@ -1277,7 +1728,12 @@ mod tests {
     fn resample_same_resolution_returns_clone() {
         let series = hourly_series(&[0.0; 24]);
         let resampled = series
-            .resample(3600, FirstHour::default(), start_midnight(1))
+            .resample(
+                3600,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("same-res should succeed");
         assert_eq!(resampled, series);
     }
@@ -1293,7 +1749,12 @@ mod tests {
         day1[3] = 16.0;
         let series = two_day_series(&day1, &[0.0; 24]);
         let down = series
-            .resample(7200, FirstHour::default(), start_midnight(1))
+            .resample(
+                7200,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("downsample should succeed");
         assert_eq!(down.len(), 24);
         // The two-hour step's mean covers records 0 and 1: 10 and 12.
@@ -1308,7 +1769,12 @@ mod tests {
         series.ground_temp_c = (0..24).map(|h| 10.0 + h as f64 * 0.1).collect();
         series.surface_albedo = Some((0..24).map(|h| 0.2 + h as f64 * 0.01).collect());
         let out = series
-            .resample(900, FirstHour::default(), start_midnight(1))
+            .resample(
+                900,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         for h in 0..24 {
             for ts in 1..=4 {
@@ -1335,7 +1801,12 @@ mod tests {
         // The run starts at hour 2: hour 2's rows read prev = hour 1
         // (400), this = hour 2 (800), next = hour 3 (0).
         let out = series
-            .resample(900, FirstHour::default(), start_midnight(1))
+            .resample(
+                900,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         let expected = [700.0, 800.0, 600.0, 400.0];
         for (ts, expected_value) in expected.iter().enumerate() {
@@ -1357,7 +1828,12 @@ mod tests {
         series.ghi_w_m2[0] = 400.0;
         series.ghi_w_m2[1] = 800.0;
         let out = series
-            .resample(600, FirstHour::default(), start_midnight(1))
+            .resample(
+                600,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         let weights: Vec<f64> = (1..=6)
             .map(|ts| solar_interpolation_weight(6, ts))
@@ -1417,7 +1893,12 @@ mod tests {
         series.ghi_w_m2[23] = 500.0;
         series.ghi_w_m2[24] = 900.0;
         let out = series
-            .resample(900, FirstHour::default(), start_midnight(1))
+            .resample(
+                900,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         let expected = [
             500.0 * 0.75 + 300.0 * 0.25,
@@ -1445,7 +1926,12 @@ mod tests {
         series.ghi_w_m2[1] = 200.0;
         series.ghi_w_m2[23] = 500.0;
         let out = series
-            .resample(900, FirstHour::default(), start_midnight(1))
+            .resample(
+                900,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         // Under Hour24: the first hour's previous-hour record is hour 24
         // (500). The four steps read (100 * 0.75 + 500 * 0.25), 100,
@@ -1467,7 +1953,12 @@ mod tests {
         // Under Hour1: the previous-hour record is hour 1 itself, so the
         // first step reads 100 throughout and the rest are unchanged.
         let out_hour1 = series
-            .resample(900, FirstHour::Hour1, start_midnight(1))
+            .resample(
+                900,
+                FirstHour::Hour1,
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         assert_eq!(out_hour1.ghi_w_m2[0], 100.0);
         assert_eq!(out_hour1.ghi_w_m2[1], 100.0);
@@ -1537,7 +2028,12 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         series.rel_humidity_pct = vec![50.0; 24];
 
         let resampled = series
-            .resample(900, FirstHour::default(), start_midnight(1))
+            .resample(
+                900,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         assert_eq!(resampled.len(), 96);
 
@@ -1568,7 +2064,12 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         series.dry_bulb_c[0] = 4.0;
         series.dry_bulb_c[23] = 40.0;
         let out = series
-            .resample(900, FirstHour::default(), start_midnight(1))
+            .resample(
+                900,
+                FirstHour::default(),
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         let n = 4.0_f64;
         for ts in 1..=4_usize {
@@ -1591,7 +2092,12 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         series.dry_bulb_c[0] = 4.0;
         series.dry_bulb_c[23] = 40.0;
         let out = series
-            .resample(900, FirstHour::Hour1, start_midnight(1))
+            .resample(
+                900,
+                FirstHour::Hour1,
+                start_midnight(1),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         for ts in 1..=4_usize {
             assert_eq!(
@@ -1615,7 +2121,12 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         day2[23] = 222.0;
         let series = two_day_series(&day1, &day2);
         let out = series
-            .resample(900, FirstHour::default(), start_midnight(2))
+            .resample(
+                900,
+                FirstHour::default(),
+                start_midnight(2),
+                WeatherYear::Typical,
+            )
             .expect("resample should succeed");
         let n = 4.0_f64;
         for ts in 1..=4_usize {

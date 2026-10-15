@@ -113,6 +113,7 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
     }
 }
 
@@ -314,6 +315,7 @@ fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(bldg.join("home.xml")),

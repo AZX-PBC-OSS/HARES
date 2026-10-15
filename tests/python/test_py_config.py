@@ -190,6 +190,18 @@ class TestSimulationConfig:
         with pytest.raises(ValueError, match="setpoint_deadband_c must be finite"):
             SimulationConfig(start_time=START, duration=3600, setpoint_deadband_c=-1.0)
 
+    def test_weather_year_defaults_to_typical_and_accepts_actual(self):
+        cfg = SimulationConfig(start_time=START, duration=3600)
+        assert cfg.weather_year == "typical", "the default is EnergyPlus's (Treat Weather as Actual = No)"
+        actual = SimulationConfig(start_time=START, duration=3600, weather_year="actual")
+        assert actual.weather_year == "actual"
+        with pytest.raises(ValueError, match="weather_year must be 'typical' or 'actual'"):
+            SimulationConfig(start_time=START, duration=3600, weather_year="mayan")
+
+    def test_weather_year_round_trips_through_toml(self):
+        cfg = SimulationConfig(start_time=START, duration=3600, weather_year="actual")
+        assert SimulationConfig.from_toml(cfg.to_toml()).weather_year == "actual"
+
     def test_step_failure_budget_is_configurable(self):
         cfg = SimulationConfig(start_time=START, duration=3600, max_consecutive_step_failures=0)
         assert cfg.max_consecutive_step_failures == 0

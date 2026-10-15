@@ -125,6 +125,7 @@ pub fn parse_resstock_csv_str(
 
     // First pass: parse all data rows.
     struct RawRow {
+        year: i32,
         month: u32,
         day: u32,
         hour: u32,
@@ -181,11 +182,11 @@ pub fn parse_resstock_csv_str(
         // ResStock uses end-of-interval timestamps (01:00 = hour 1).
         // EPW convention: hour 1..=24. ResStock 00:00 → hour 24 of prev day.
         let hour_0based = dt.hour();
-        let (month, day, hour) = if hour_0based == 0 {
+        let (year, month, day, hour) = if hour_0based == 0 {
             let prev = dt.date() - chrono::Days::new(1);
-            (prev.month(), prev.day(), 24u32)
+            (prev.year(), prev.month(), prev.day(), 24u32)
         } else {
-            (dt.month(), dt.day(), hour_0based)
+            (dt.year(), dt.month(), dt.day(), hour_0based)
         };
 
         let dry_bulb_c = parse_field(fields[col_indices.dry_bulb], row_num, "dry_bulb")?;
@@ -242,6 +243,7 @@ pub fn parse_resstock_csv_str(
         }
 
         raw_rows.push(RawRow {
+            year,
             month,
             day,
             hour,
@@ -362,6 +364,9 @@ pub fn parse_resstock_csv_str(
         // real NREL ResStock AMY 2018 CSV files (G0100630_2018.csv,
         // G5107750_2018.csv).
         record_label: RecordLabel::IntervalEnd,
+        // The record count the parser validated decides the period: the
+        // 8760/8784 counts are complete years.
+        data_period: crate::weather::DataPeriod::complete_year(),
         has_embedded_location: false,
         station_wmo: None,
     };
@@ -369,6 +374,16 @@ pub fn parse_resstock_csv_str(
     Ok(WeatherTimeSeries {
         meta,
         design_conditions: None,
+        stamps: raw_rows
+            .iter()
+            .map(|row| crate::weather::RecordStamp {
+                year: row.year,
+                month: row.month as u8,
+                day: row.day as u8,
+                hour: row.hour as u8,
+                minute: 0,
+            })
+            .collect(),
         dry_bulb_c,
         dew_point_c,
         rel_humidity_pct,

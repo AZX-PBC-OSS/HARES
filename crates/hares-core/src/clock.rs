@@ -21,9 +21,9 @@
 #[cfg(feature = "observe")]
 use std::cell::Cell;
 
-use chrono::{DateTime, Duration, FixedOffset};
 #[cfg(all(feature = "dst", feature = "observe"))]
-use chrono::{Datelike, Timelike};
+use chrono::Timelike;
+use chrono::{DateTime, Datelike, Duration, FixedOffset};
 
 /// Monotonic simulation clock over a fixed horizon.
 ///
@@ -40,6 +40,14 @@ pub struct SimClock {
     pub time_res: Duration,
     pub duration: Duration,
     pub(crate) current_step: u64,
+    /// Whether Feb 29 days are skipped (not simulated): the typical-year
+    /// rule over a weather file that has no Feb 29 records. The clock
+    /// steps from the last step of Feb 28 to Mar 1 00:00, no step is
+    /// labelled Feb 29, and the run's step count is the calendar steps
+    /// less the skipped day's. Weather and schedules share the one rule
+    /// (EnergyPlus, "Treat Weather as Actual" = No, simulates such a leap
+    /// year as a 365-day year).
+    pub skip_feb29: bool,
     /// DST-aware IANA timezone for civil time queries.
     /// When set, [`current_civil_time`](Self::current_civil_time) converts the
     /// fixed-offset clock position through DST rules.
@@ -87,6 +95,7 @@ impl SimClock {
             time_res,
             duration,
             current_step: 0,
+            skip_feb29: false,
             #[cfg(feature = "dst")]
             civil_tz: None,
             #[cfg(feature = "observe")]
@@ -105,11 +114,22 @@ impl SimClock {
     }
 
     /// Current local time at the active step index.
+    ///
+    /// With `skip_feb29` set, the mapping from the step index to time
+    /// inserts one day for every skipped Feb 29 at or before the step's
+    /// linear position: the step whose linear time would land on a Feb 29
+    /// lands on Mar 1 00:00, no step is labelled Feb 29, and every later
+    /// date reads its own calendar date.
     #[must_use]
     pub fn current_time(&self) -> DateTime<FixedOffset> {
         let time_res_secs = self.time_res.num_seconds();
         let step_secs = i64::try_from(self.current_step).unwrap_or(i64::MAX);
-        self.start_time + Duration::seconds(time_res_secs.saturating_mul(step_secs))
+        let linear = self.start_time + Duration::seconds(time_res_secs.saturating_mul(step_secs));
+        if !self.skip_feb29 {
+            return linear;
+        }
+        let skipped_days = skipped_feb29_days_from_start(self.start_time, linear);
+        linear + Duration::days(i64::from(skipped_days))
     }
 
     /// DST-aware civil (wall-clock) time at the current step.
@@ -150,7 +170,10 @@ impl SimClock {
 
     /// Total number of simulation steps.
     ///
-    /// Uses integer floor division `duration / time_res`.
+    /// Uses integer floor division `duration / time_res`. With
+    /// `skip_feb29` set, the count is the run's simulated step count: the
+    /// calendar steps less every skipped Feb 29's steps inside the
+    /// interval `[start, start + duration)`.
     #[must_use]
     pub fn total_steps(&self) -> u64 {
         let res = self.time_res.num_seconds();
@@ -161,8 +184,75 @@ impl SimClock {
         if duration_secs <= 0 {
             return 0;
         }
-        u64::try_from(duration_secs / res).unwrap_or(0)
+        let calendar_steps = u64::try_from(duration_secs / res).unwrap_or(0);
+        if !self.skip_feb29 {
+            return calendar_steps;
+        }
+        let end = self.start_time + self.duration;
+        let skipped_secs = skipped_feb29_seconds(self.start_time, end);
+        let skipped_steps = u64::try_from(skipped_secs / res).unwrap_or(0);
+        calendar_steps.saturating_sub(skipped_steps)
     }
+}
+
+/// The skipped Feb 29 days (their count) from the run's start up to and
+/// including the linear position `linear`: every Feb 29 midnight in
+/// `[start, linear]`. The step whose linear time lands on a skipped day's
+/// midnight lands on the day after it.
+pub(crate) fn skipped_feb29_days_from_start(
+    start: DateTime<FixedOffset>,
+    linear: DateTime<FixedOffset>,
+) -> u32 {
+    use chrono::TimeZone;
+    let offset = *start.offset();
+    let mut count = 0u32;
+    for year in start.year()..=linear.year() {
+        let Some(feb29) = chrono::NaiveDate::from_ymd_opt(year, 2, 29) else {
+            continue;
+        };
+        let Some(day_start) = offset
+            .from_local_datetime(&feb29.and_hms_opt(0, 0, 0).expect("midnight"))
+            .single()
+        else {
+            continue;
+        };
+        if day_start >= start && day_start <= linear {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// The seconds of skipped Feb 29 days inside the run's calendar interval
+/// `[start, end)`: the overlap of every Feb 29 with the interval.
+pub(crate) fn skipped_feb29_seconds(
+    start: DateTime<FixedOffset>,
+    end: DateTime<FixedOffset>,
+) -> i64 {
+    use chrono::TimeZone;
+    let offset = *start.offset();
+    let mut total = 0i64;
+    for year in start.year()..=end.year() {
+        let Some(feb29) = chrono::NaiveDate::from_ymd_opt(year, 2, 29) else {
+            continue;
+        };
+        let Some(day_start) = offset
+            .from_local_datetime(&feb29.and_hms_opt(0, 0, 0).expect("midnight"))
+            .single()
+        else {
+            continue;
+        };
+        if day_start >= end {
+            break;
+        }
+        let day_end = day_start + Duration::days(1);
+        let from = day_start.max(start);
+        let to = day_end.min(end);
+        if to > from {
+            total += (to - from).num_seconds();
+        }
+    }
+    total
 }
 
 impl Iterator for SimClock {

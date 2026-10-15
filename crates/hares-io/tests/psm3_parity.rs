@@ -225,7 +225,12 @@ fn psm3_detects_hourly_resolution() {
 fn psm3_5min_no_resample_at_300s() {
     let ts = load_fixture();
     let resampled = ts
-        .resample(300, hares_io::FirstHour::default(), test_start())
+        .resample(
+            300,
+            hares_io::FirstHour::default(),
+            test_start(),
+            hares_io::WeatherYear::Typical,
+        )
         .expect("no-op resample should succeed");
     assert_eq!(resampled.len(), ts.len());
     assert_eq!(resampled.meta.source_step_secs, 300);
@@ -245,7 +250,12 @@ fn psm3_subhourly_file_at_another_interval_is_an_error() {
     let ts = load_fixture();
     for step in [900, 3600] {
         let err = ts
-            .resample(step, hares_io::FirstHour::default(), test_start())
+            .resample(
+                step,
+                hares_io::FirstHour::default(),
+                test_start(),
+                hares_io::WeatherYear::Typical,
+            )
             .expect_err("the interval mismatch is an error");
         assert!(err.to_string().contains("300"), "{err}");
         assert!(err.to_string().contains(&step.to_string()), "{err}");

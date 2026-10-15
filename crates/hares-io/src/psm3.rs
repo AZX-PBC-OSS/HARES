@@ -136,6 +136,9 @@ fn parse_header_meta(names_line: &str, values_line: &str) -> Result<WeatherMeta,
         // PSM3 stamps every record at its interval's start: the hour
         // field runs 0 to 23 and the record stamped h covers [h, h + 1 h).
         record_label: RecordLabel::IntervalStart,
+        // The count check validates a complete year (365 or 366 days at
+        // the file's interval).
+        data_period: crate::weather::DataPeriod::complete_year(),
         has_embedded_location: true,
         station_wmo: None,
     })
@@ -192,7 +195,7 @@ pub(crate) fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, Weathe
         None
     };
     let mut horizontal_infrared_w_m2 = Vec::with_capacity(n);
-    let mut timestamps: Vec<(u32, u32, u32)> = Vec::with_capacity(n); // (month, day, hour)
+    let mut timestamps: Vec<(i32, u32, u32, u32, u32)> = Vec::with_capacity(n); // (year, month, day, hour, minute)
 
     for (data_idx, line) in data_lines.iter().enumerate() {
         let row = data_idx + 1;
@@ -260,6 +263,8 @@ pub(crate) fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, Weathe
         let month = parse_data_u32(&fields, col_map.month, row, "Month")?;
         let day = parse_data_u32(&fields, col_map.day, row, "Day")?;
         let hour = parse_data_u32(&fields, col_map.hour, row, "Hour")?;
+        let minute = parse_data_u32(&fields, col_map.minute, row, "Minute")?;
+        let year = parse_data_i32(&fields, col_map.year, row, "Year")?;
 
         if let Some(idx) = col_map.surface_albedo {
             let val = parse_data_f64(&fields, idx, row, "Surface Albedo")?;
@@ -298,7 +303,7 @@ pub(crate) fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, Weathe
         dhi_w_m2.push(dhi);
         wind_speed_m_s.push(ws);
         wind_dir_deg.push(wd);
-        timestamps.push((month, day, hour));
+        timestamps.push((year, month, day, hour, minute));
     }
 
     // Validate record count against expected year length.
@@ -335,7 +340,7 @@ pub(crate) fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, Weathe
     };
 
     let mut ground_temp_c = Vec::with_capacity(n);
-    for &(month, day, hour) in &timestamps {
+    for &(_year, month, day, hour, _minute) in &timestamps {
         ground_temp_c.push(interpolate_ground_temp_c(
             &monthly_ground_temps,
             month,
@@ -360,6 +365,18 @@ pub(crate) fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, Weathe
     Ok(WeatherTimeSeries {
         meta,
         design_conditions: None,
+        stamps: timestamps
+            .iter()
+            .map(
+                |&(year, month, day, hour, minute)| crate::weather::RecordStamp {
+                    year,
+                    month: month as u8,
+                    day: day as u8,
+                    hour: hour as u8,
+                    minute: minute as u8,
+                },
+            )
+            .collect(),
         dry_bulb_c,
         dew_point_c,
         rel_humidity_pct,
@@ -511,12 +528,12 @@ fn validate_record_count(n: usize, step_secs: u32) -> Result<(), WeatherError> {
 /// Compute monthly average dry-bulb from sub-hourly data by grouping timestamps.
 fn compute_monthly_means_sub_hourly(
     dry_bulb_c: &[f64],
-    timestamps: &[(u32, u32, u32)],
+    timestamps: &[(i32, u32, u32, u32, u32)],
 ) -> Option<[f64; 12]> {
     let mut sums = [0.0f64; 12];
     let mut counts = [0u32; 12];
 
-    for (i, &(month, _, _)) in timestamps.iter().enumerate() {
+    for (i, &(_, month, _, _, _)) in timestamps.iter().enumerate() {
         let m = (month as usize).checked_sub(1)?;
         if m >= 12 {
             return None;
@@ -582,6 +599,23 @@ fn parse_data_u32(
     raw.trim().parse::<u32>().map_err(|_| {
         WeatherError::Parse(format!(
             "row {row}: failed to parse `{name}` as u32: `{}`",
+            raw.trim()
+        ))
+    })
+}
+
+fn parse_data_i32(
+    fields: &[&str],
+    idx: usize,
+    row: usize,
+    name: &str,
+) -> Result<i32, WeatherError> {
+    let raw = fields.get(idx).ok_or_else(|| {
+        WeatherError::Parse(format!("row {row}: missing field `{name}` at index {idx}"))
+    })?;
+    raw.trim().parse::<i32>().map_err(|_| {
+        WeatherError::Parse(format!(
+            "row {row}: failed to parse `{name}` as i32: `{}`",
             raw.trim()
         ))
     })
@@ -735,6 +769,7 @@ mod tests {
                     .expect("date")
                     .and_hms_opt(0, 0, 0)
                     .expect("midnight"),
+                crate::weather::WeatherYear::Typical,
             )
             .expect_err("the interval mismatch is an error");
         assert!(err.to_string().contains("900"), "{err}");

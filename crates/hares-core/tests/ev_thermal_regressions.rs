@@ -406,6 +406,7 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path),
@@ -486,6 +487,7 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path),
@@ -619,6 +621,7 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
     };
     let config = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path),
@@ -689,6 +692,7 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
     };
     let base = DwellingConfig {
         hpxml: InputSource::Path(hpxml_path.clone()),

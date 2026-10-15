@@ -120,6 +120,7 @@ fn sim_config(duration: Duration, csv_path: Option<PathBuf>, verbosity: u8) -> S
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
     }
 }
 

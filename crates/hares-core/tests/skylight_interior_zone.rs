@@ -199,6 +199,7 @@ fn dwelling_config(hpxml_xml: &str) -> (DwellingConfig, tempfile::TempDir) {
                 max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 health_policy: hares_io::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
             },
             None,
             7,

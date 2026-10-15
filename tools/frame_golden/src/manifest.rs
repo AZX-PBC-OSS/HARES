@@ -297,6 +297,7 @@ const SIMULATION_KEYS: &[&str] = &[
     "max_consecutive_step_failures",
     "health_policy",
     "first_hour_interpolation",
+    "weather_year",
 ];
 
 /// The feature set the running binary was built with. The tool's features
@@ -652,6 +653,7 @@ mod tests {
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: hares_io::HealthPolicy::default(),
             first_hour_interpolation: hares_io::FirstHour::default(),
+            weather_year: hares_io::WeatherYear::default(),
         };
         let text = cfg.to_toml().expect("serialise the config");
         let table: toml::Table = toml::from_str(&text).expect("parse the TOML back");

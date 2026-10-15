@@ -1680,6 +1680,7 @@ pub(crate) fn build_synthetic_weather(
         wf_allows_leap_years: true,
         source_step_secs: 3600,
         record_label: hares_io::RecordLabel::IntervalEnd,
+        data_period: hares_io::DataPeriod::complete_year(),
         has_embedded_location: true,
         station_wmo: None,
     };
@@ -1931,6 +1932,7 @@ pub(crate) fn build_synthetic_weather(
     Ok(WeatherTimeSeries {
         meta,
         design_conditions: None,
+        stamps: Vec::new(),
         dry_bulb_c,
         dew_point_c: vec![dew_point_c; n],
         rel_humidity_pct: vec![config.weather.rel_humidity_pct; n],

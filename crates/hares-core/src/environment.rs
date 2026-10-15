@@ -5,12 +5,12 @@ use std::time::Duration as StdDuration;
 
 #[cfg(test)]
 use chrono::Duration;
-use chrono::{DateTime, Datelike, FixedOffset, Timelike};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Timelike};
 use hares_io::forcing::{ForcingKey, ForcingRow, ForcingTable};
 use hares_io::hpxml::building::{BoundaryType, ZoneType};
 use hares_io::{
-    Building, ParsedWeather, ScheduleTimeSeries, SiteLocation, WeatherInput, WeatherMeta,
-    WeatherTimeSeries, monthly_day_counts,
+    Building, ParsedWeather, ScheduleTimeSeries, SiteLocation, WeatherAddressing, WeatherInput,
+    WeatherMeta, WeatherTimeSeries, monthly_day_counts,
 };
 use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherField};
 use hares_physics::{
@@ -100,15 +100,34 @@ pub(crate) struct StepWeather {
 }
 
 /// The per-step weather evaluation's inputs: the resampled series, the
-/// resolved metadata (the site's values), the start offset, the mains
-/// constants and the forcing table for the time grid. The environment
-/// update and [`crate::resample_weather`] evaluate steps through it, so
-/// the run's internal series and the exposed one are one computation.
+/// parsed file the records are addressed in (the stamps and the dated
+/// range), the calendar-date addressing (the weather-year rule), the
+/// resolved metadata (the site's values), the mains constants and the
+/// forcing table for the time grid. The environment update and
+/// [`crate::resample_weather`] evaluate steps through it, so the run's
+/// internal series and the exposed one are one computation.
 #[derive(Clone)]
 pub(crate) struct StepWeatherEvaluator {
     weather: Arc<WeatherTimeSeries>,
+    /// The calendar-date addressing: which file record a step at a local
+    /// standard time reads, by the weather-year rule.
+    addressing: WeatherAddressing,
+    /// How a file record maps to a resampled row: directly (the file at
+    /// the run's step), through the interpolation's steps per hour, or
+    /// through the downsample's ratio.
+    layout: RecordLayout,
+    /// The run's first step's local standard time.
+    start_time: DateTime<FixedOffset>,
+    /// The run's step, in seconds.
+    step_secs: u32,
+    /// Whether Feb 29 days are skipped (the typical-year rule over a
+    /// file without Feb 29 records): the clock's own mapping shares it.
+    skip_feb29: bool,
+    /// The run's first step's row in the resampled series (the calendar
+    /// address of the start time): the solar override's running-index
+    /// base and the initial conditions' read.
+    start_row: usize,
     weather_meta: WeatherMeta,
-    weather_start_offset: usize,
     mains_t_annual_avg_c: f64,
     mains_dt_annual_range_c: f64,
     mains_hemisphere: Hemisphere,
@@ -119,6 +138,20 @@ pub(crate) struct StepWeatherEvaluator {
     civil_tz: Option<chrono_tz::Tz>,
     forcing: Option<Arc<ForcingTable>>,
     forcing_key: ForcingKey,
+}
+
+/// How a file record maps to a resampled row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordLayout {
+    /// The file at the run's own step: the records are the rows.
+    Direct,
+    /// An hourly file at a step shorter than an hour: the record's row
+    /// block is `record * steps_per_hour`, the step's own row inside it
+    /// by its fraction of the hour.
+    Interpolate { steps_per_hour: usize },
+    /// An hourly file at a step longer than an hour: the row is the mean
+    /// of `ratio` records, so the row is `record / ratio`.
+    Downsample { ratio: usize },
 }
 
 /// The evaluator's construction inputs and the failure a construction or
@@ -141,7 +174,8 @@ impl std::fmt::Debug for StepWeatherEvaluator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StepWeatherEvaluator")
             .field("weather_len", &self.weather.len())
-            .field("weather_start_offset", &self.weather_start_offset)
+            .field("file_days", &self.addressing.file_days())
+            .field("weather_year", &self.forcing_key.weather_year)
             .field("mains_t_annual_avg_c", &self.mains_t_annual_avg_c)
             .field("mains_dt_annual_range_c", &self.mains_dt_annual_range_c)
             .field("ground_phase_day", &self.ground_phase_day)
@@ -153,17 +187,22 @@ impl std::fmt::Debug for StepWeatherEvaluator {
 impl StepWeatherEvaluator {
     /// The evaluator for one weather and time grid: the same derivation
     /// the manager's construction runs after the resample — the resolved
-    /// site's values into the manager's own metadata copy, the start
-    /// offset, the mains inputs, the hemisphere and phase rules, the
-    /// civil timezone, and the forcing table resolved on the
-    /// parsed-weather handle when the caller carries one (a table shared
-    /// with the handle's other constructions), built privately when not.
+    /// site's values into the manager's own metadata copy, the
+    /// calendar-date addressing (the weather-year rule against the
+    /// parsed file), the start record, the mains inputs, the hemisphere
+    /// and phase rules, the civil timezone, and the forcing table
+    /// resolved on the parsed-weather handle when the caller carries one
+    /// (a table shared with the handle's other constructions), built
+    /// privately when not.
     ///
-    /// `horizon_steps` sizes a privately built table; `None` sizes it to
-    /// the weather series' length, the run's own default.
+    /// `horizon_steps` sizes a privately built table and bounds the
+    /// actual-year range check; `None` sizes it to the weather series'
+    /// length, the run's own default.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         weather: Arc<WeatherTimeSeries>,
+        file: Arc<WeatherTimeSeries>,
+        weather_year: hares_io::WeatherYear,
         resolved_site: Option<&SiteLocation>,
         step_secs: u32,
         start_time: DateTime<FixedOffset>,
@@ -176,6 +215,63 @@ impl StepWeatherEvaluator {
             return Err(StepWeatherError::EmptyWeather);
         }
 
+        // The calendar-date addressing: the typical and actual year
+        // rules, the complete-year requirement (a partial file is a
+        // construction error naming its data period and the inputs that
+        // need a complete year), and, for an actual-year run, the range
+        // and leap checks against the file's own dated stamps.
+        let addressing = WeatherAddressing::new(&file, weather_year)
+            .map_err(|err| EnvironmentManagerError::WeatherAddressing(err.to_string()))?;
+        let layout = match (file.meta.source_step_secs, step_secs) {
+            (file_step, run_step) if file_step == run_step => RecordLayout::Direct,
+            (3600, run_step) if run_step < 3600 => RecordLayout::Interpolate {
+                steps_per_hour: 3600 / run_step as usize,
+            },
+            (3600, run_step) => RecordLayout::Downsample {
+                ratio: run_step as usize / 3600,
+            },
+            (file_step, _) => {
+                return Err(StepWeatherError::Manager(
+                    EnvironmentManagerError::WeatherResample(WeatherError::Resample(format!(
+                        "the weather file's interval per record ({file_step} s) does not match \
+                         the run's step ({step_secs} s): a sub-hourly weather file's interval \
+                         must equal the run's step, as in EnergyPlus (number of intervals per \
+                         hour on Weather file does not match specified number of Time Steps \
+                         Per Hour)"
+                    ))),
+                ));
+            }
+        };
+        // The weather-year rule's Feb 29 skip: the typical rule over a
+        // file without Feb 29 records. The run's clock and the forcing
+        // table's step-to-time mapping share the flag. The actual-year
+        // checks run before any record lookup, so their error names the
+        // ranges, not the first step's slot.
+        let skip_feb29 = weather_year.skips_feb29(&file);
+        if weather_year == hares_io::WeatherYear::Actual {
+            let horizon = horizon_steps.unwrap_or(u64::try_from(weather.len()).unwrap_or(u64::MAX));
+            let end = start_time.naive_local()
+                + chrono::Duration::seconds(
+                    i64::from(step_secs).saturating_mul(i64::try_from(horizon).unwrap_or(i64::MAX)),
+                );
+            addressing
+                .check_actual_run(start_time.naive_local(), end, step_secs)
+                .map_err(|err| EnvironmentManagerError::WeatherAddressing(err.to_string()))?;
+        }
+        let start_record = addressing
+            .record_at(start_time.naive_local())
+            .map_err(|err| EnvironmentManagerError::WeatherAddressing(err.to_string()))?;
+        // The start's row in the resampled series: the read the run's
+        // first step reaches (the solar override's running-index base).
+        let start_secs_in_hour = (start_time.minute() * 60 + start_time.second()) as usize;
+        let start_row = match layout {
+            RecordLayout::Direct => start_record,
+            RecordLayout::Interpolate { steps_per_hour } => {
+                start_record * steps_per_hour + start_secs_in_hour / step_secs as usize
+            }
+            RecordLayout::Downsample { ratio } => start_record / ratio,
+        };
+
         // The manager's own metadata copy: the shared weather series is
         // never mutated, so the resolved site location (the blueprint's
         // resolution of the HPXML site, the weather header and the
@@ -183,7 +279,7 @@ impl StepWeatherEvaluator {
         // reader here (the solar position's latitude and longitude, the
         // hemisphere rule, the barometric elevation, the start-offset
         // warning) read.
-        let mut weather_meta = weather.meta.clone();
+        let mut weather_meta = file.meta.clone();
         if let Some(site_location) = resolved_site {
             weather_meta.latitude = site_location.latitude_deg;
             weather_meta.longitude = site_location.longitude_deg;
@@ -208,9 +304,8 @@ impl StepWeatherEvaluator {
             );
         }
 
-        // Compute start offsets: weather and schedule time series are annual starting Jan 1.
-        // Offset into them based on the simulation start time so step 0 reads the correct row.
-        let weather_start_offset = compute_annual_offset(start_time, step_secs, weather.len());
+        // The weather and schedule time series are addressed by calendar
+        // date; the mains inputs come from the file's own records.
         let (mains_t_annual_avg_c, mains_dt_annual_range_c) =
             compute_mains_inputs(&weather, step_secs);
 
@@ -248,6 +343,7 @@ impl StepWeatherEvaluator {
             time_res_secs: step_secs,
             local_start: start_time.naive_local(),
             first_hour_interpolation: first_hour,
+            weather_year,
             utc_offset_secs: start_time.offset().local_minus_utc(),
             horizon_steps: horizon_steps.unwrap_or_else(|| weather.len() as u64).max(1),
             latitude_bits: weather_meta.latitude.to_bits(),
@@ -255,22 +351,23 @@ impl StepWeatherEvaluator {
             elevation_bits: weather_meta.elevation_m.to_bits(),
             civil_timezone: civil_timezone.map(str::to_owned),
         };
+        let build = || {
+            build_forcing_table(
+                &weather,
+                &weather_meta,
+                &addressing,
+                layout,
+                step_secs,
+                start_time,
+                skip_feb29,
+                forcing_key.horizon_steps,
+                #[cfg(feature = "dst")]
+                civil_tz.as_ref(),
+            )
+        };
         let forcing = if FORCE_PER_STEP_FORCING.load(std::sync::atomic::Ordering::Relaxed) {
             None
         } else {
-            let horizon_steps = forcing_key.horizon_steps;
-            let build = || {
-                build_forcing_table(
-                    &weather,
-                    &weather_meta,
-                    weather_start_offset,
-                    step_secs,
-                    start_time,
-                    horizon_steps,
-                    #[cfg(feature = "dst")]
-                    civil_tz.as_ref(),
-                )
-            };
             Some(match weather_handle {
                 Some(handle) => handle.forcing_table(&forcing_key, build)?,
                 None => {
@@ -283,8 +380,13 @@ impl StepWeatherEvaluator {
 
         Ok(Self {
             weather,
+            addressing,
+            layout,
+            start_time,
+            step_secs,
+            skip_feb29,
+            start_row,
             weather_meta,
-            weather_start_offset,
             mains_t_annual_avg_c,
             mains_dt_annual_range_c,
             mains_hemisphere,
@@ -303,17 +405,54 @@ impl StepWeatherEvaluator {
     /// evaluator's own construction key).
     fn forcing_row(&self, now: DateTime<FixedOffset>, step: usize) -> Option<ForcingRow> {
         let table = self.forcing.as_ref()?;
-        let res_secs = i64::from(self.forcing_key.time_res_secs);
-        let expected = self.forcing_key.local_start
-            + chrono::Duration::seconds(
-                res_secs.saturating_mul(i64::try_from(step).unwrap_or(i64::MAX)),
-            );
-        if now.naive_local() != expected
+        if now.naive_local() != self.time_at(u64::try_from(step).ok()?).naive_local()
             || now.offset().local_minus_utc() != self.forcing_key.utc_offset_secs
         {
             return None;
         }
         table.get_row(step).copied()
+    }
+
+    /// The step's start time by the run's calendar: the linear time with
+    /// every skipped Feb 29 at or before it inserted (the skip flag the
+    /// weather-year rule computed at construction). The run's clock
+    /// carries the same mapping, so the clock's `now` and this agree.
+    #[must_use]
+    pub(crate) fn time_at(&self, step: u64) -> DateTime<FixedOffset> {
+        let linear = self.start_time
+            + chrono::Duration::seconds(
+                i64::from(self.step_secs).saturating_mul(i64::try_from(step).unwrap_or(i64::MAX)),
+            );
+        if !self.skip_feb29 {
+            return linear;
+        }
+        let skipped_days = crate::clock::skipped_feb29_days_from_start(self.start_time, linear);
+        linear + chrono::Duration::days(i64::from(skipped_days))
+    }
+
+    /// The file record (0-based row) the run step starting at `now`
+    /// reads, addressed by calendar date.
+    fn record_at(&self, now: NaiveDateTime) -> Result<usize, HaresError> {
+        self.addressing
+            .record_at(now)
+            .map_err(|err| HaresError::Io(format!("weather read failed: {err}")))
+    }
+
+    /// The resampled series' row (the read the step's start reaches) for
+    /// the run step starting at `now`: the record the calendar-date
+    /// addressing names, laid out by the file-to-row relation.
+    fn row_at(&self, now: NaiveDateTime) -> Result<usize, HaresError> {
+        let record = self.record_at(now)?;
+        Ok(match self.layout {
+            RecordLayout::Direct => record,
+            RecordLayout::Interpolate { steps_per_hour } => {
+                use chrono::Timelike;
+                let secs_in_hour = (now.minute() * 60 + now.second()) as usize;
+                let ts = secs_in_hour / self.step_secs as usize;
+                record * steps_per_hour + ts
+            }
+            RecordLayout::Downsample { ratio } => record / ratio,
+        })
     }
 
     /// One step's weather: the channels the state's weather carries, the
@@ -327,11 +466,43 @@ impl StepWeatherEvaluator {
         let step = usize::try_from(step)
             .map_err(|_| HaresError::InvalidState("the step counter exceeds usize".to_string()))?;
         let weather_len = self.weather.len();
+        // The read the step's start reaches, addressed by the calendar
+        // date of `now` (the local standard time; daylight saving shifts
+        // schedules, not weather). Never a running index.
         let weather_idx = if weather_len == 0 {
             0
         } else {
-            (step + self.weather_start_offset) % weather_len
+            self.row_at(now.naive_local())?
         };
+        // The calendar mapping's audit trail: at each day boundary where
+        // a wrap or leap-day rule applies, the mapping and the day type,
+        // at debug.
+        {
+            let t = now.naive_local();
+            if t.hour() == 0 && t.minute() == 0 && t.second() == 0 {
+                let date = t.date();
+                let prev = date.pred_opt().expect("a date");
+                if date.ordinal0() == 0 {
+                    tracing::debug!(
+                        date = date.to_string(),
+                        day_type = date.weekday().to_string(),
+                        weather_idx,
+                        "weather wrap: the run passed Dec 31 and continues at Jan 1 of the file"
+                    );
+                }
+                let leap =
+                    date.year() % 4 == 0 && (date.year() % 100 != 0 || date.year() % 400 == 0);
+                if leap && prev.month() == 2 && prev.day() == 29 && self.skip_feb29 {
+                    tracing::debug!(
+                        date = date.to_string(),
+                        day_type = date.weekday().to_string(),
+                        weather_idx,
+                        "weather leap-day skip: Feb 29 is not simulated over this typical \
+                         file; the day type stays the calendar's own weekday"
+                    );
+                }
+            }
+        }
 
         let outdoor_temp_c = self.weather.get(WeatherField::DryBulbC, weather_idx);
         let dew_point_c = self.weather.get(WeatherField::DewPointC, weather_idx);
@@ -480,6 +651,8 @@ pub struct SurfaceGeometry {
 pub enum EnvironmentManagerError {
     #[error("weather resample error: {0}")]
     WeatherResample(#[from] WeatherError),
+    #[error("{0}")]
+    WeatherAddressing(String),
     #[error("schedule resample error: {0}")]
     ScheduleResample(#[from] ScheduleError),
     #[error("time_res must be non-zero")]
@@ -548,6 +721,11 @@ pub struct EnvironmentInitOptions<'a> {
     /// hourly and the step is shorter than an hour. The default is
     /// EnergyPlus's own: hour 24 of the run's first day.
     pub first_hour_interpolation: hares_io::FirstHour,
+    /// The weather-year rule: whether the file is a typical (TMY-style)
+    /// year or an actual one. The default is `Typical` (EnergyPlus's
+    /// "Treat Weather as Actual" = No). It changes which records a step
+    /// reads, so it joins the forcing key and the Feb 29 skip rule.
+    pub weather_year: hares_io::WeatherYear,
 }
 
 /// Produces a complete [`EnvironmentState`] at each timestep.
@@ -617,16 +795,6 @@ pub struct EnvironmentManager {
 
 /// The weather a manager is constructed from: the blueprint's
 /// parsed-weather handle (the resampled series is the handle's cached one,
-/// and the forcing table resolves on the handle's map, shared with every
-/// construction from that handle and dropped with it), or an owned
-/// resampled series (the test constructor, which builds a private table:
-/// there is no handle to share through, and the table dies with the
-/// manager).
-enum WeatherSource<'a> {
-    Shared(&'a ParsedWeather),
-    Owned(Arc<WeatherTimeSeries>),
-}
-
 impl EnvironmentManager {
     /// Build an environment manager from weather/schedule series and parsed HPXML building.
     ///
@@ -671,10 +839,14 @@ impl EnvironmentManager {
             return Err(EnvironmentManagerError::ZeroTimeResolution);
         }
 
-        let weather = Arc::new(weather.resample(
+        // The file the records are addressed in is the series itself; a
+        // resample at a different step derives a new series from it.
+        let file = Arc::new(weather);
+        let weather = Arc::new(file.resample(
             step_secs,
             options.first_hour_interpolation,
             start_time.naive_local(),
+            options.weather_year,
         )?);
         if weather.is_empty() {
             return Err(EnvironmentManagerError::EmptyWeather);
@@ -686,13 +858,7 @@ impl EnvironmentManager {
         }
 
         Self::from_resampled(
-            WeatherSource::Owned(weather),
-            schedule,
-            building,
-            step_secs,
-            start_time,
-            None,
-            options,
+            file, weather, schedule, building, step_secs, start_time, None, None, options,
         )
     }
 
@@ -719,38 +885,42 @@ impl EnvironmentManager {
         if step_secs == 0 {
             return Err(EnvironmentManagerError::ZeroTimeResolution);
         }
+        // The resampled series is the handle's cached one (one resample
+        // per unique grid), and the forcing table resolves on the
+        // handle's map, shared with every construction from the handle.
+        let file = weather_handle.series();
+        let weather = weather_handle.resampled(
+            step_secs,
+            options.first_hour_interpolation,
+            start_time.naive_local(),
+            options.weather_year,
+        )?;
         Self::from_resampled(
-            WeatherSource::Shared(weather_handle),
+            file,
+            weather,
             schedule,
             building,
             step_secs,
             start_time,
             Some(site_location),
+            Some(weather_handle),
             options,
         )
     }
 
     /// The shared constructor tail: everything after the resample.
+    #[allow(clippy::too_many_arguments)]
     fn from_resampled(
-        weather: WeatherSource<'_>,
+        file: Arc<WeatherTimeSeries>,
+        weather: Arc<WeatherTimeSeries>,
         schedule: ScheduleTimeSeries,
         building: &Building,
         step_secs: u32,
         start_time: DateTime<FixedOffset>,
         site_location: Option<&SiteLocation>,
+        weather_handle: Option<&ParsedWeather>,
         options: EnvironmentInitOptions<'_>,
     ) -> Result<Self, EnvironmentManagerError> {
-        let (weather, weather_handle) = match weather {
-            WeatherSource::Shared(handle) => (
-                handle.resampled(
-                    step_secs,
-                    options.first_hour_interpolation,
-                    start_time.naive_local(),
-                )?,
-                Some(handle),
-            ),
-            WeatherSource::Owned(series) => (series, None),
-        };
         if weather.is_empty() {
             return Err(EnvironmentManagerError::EmptyWeather);
         }
@@ -779,6 +949,8 @@ impl EnvironmentManager {
         // through its field.
         let weather_evaluator = StepWeatherEvaluator::new(
             Arc::clone(&weather),
+            file,
+            options.weather_year,
             site_location,
             step_secs,
             start_time,
@@ -807,9 +979,11 @@ impl EnvironmentManager {
             .map(|idx| ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)));
         let surfaces = build_surface_geometry(building)?;
         // The initial conditions read the weather at the run's start: the
-        // record of the hour the start lies in, the same mapping every
-        // step's read uses.
-        let init_offset = compute_annual_offset(start_time, step_secs, weather.len());
+        // record of the hour the start lies in, the same calendar-date
+        // addressing every step's read uses.
+        let init_offset = weather_evaluator
+            .row_at(start_time.naive_local())
+            .map_err(EnvironmentManagerError::Forcing)?;
         let initial_outdoor_temp_c = weather
             .dry_bulb_c
             .get(init_offset)
@@ -1262,7 +1436,7 @@ impl EnvironmentManager {
         // returned to self.solar_irradiance_buf for reuse next step.
         self.solar_irradiance_buf.clear();
         if let Some(ref overrides) = self.solar_override {
-            let idx = (step + self.weather_evaluator.weather_start_offset) % overrides.len();
+            let idx = (step + self.weather_evaluator.start_row) % overrides.len();
             self.solar_irradiance_buf.extend_from_slice(&overrides[idx]);
         } else {
             self.solar_irradiance_buf
@@ -1488,16 +1662,25 @@ impl EnvironmentManager {
 /// values the per-step computation's solar position and hemisphere rule
 /// read (`self.weather_meta`), never the shared series' raw header: the
 /// two paths must read one site.
+///
+/// The step's time is the run's calendar mapping (the Feb 29 skip
+/// inserted) and the record the step reads is addressed by that time's
+/// calendar date, the same functions the evaluator's per-step path uses.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn build_forcing_table(
     weather: &WeatherTimeSeries,
     weather_meta: &WeatherMeta,
-    weather_start_offset: usize,
+    addressing: &WeatherAddressing,
+    layout: RecordLayout,
     step_secs: u32,
     local_start: DateTime<FixedOffset>,
+    skip_feb29: bool,
     horizon_steps: u64,
     #[cfg(feature = "dst")] civil_tz: Option<&chrono_tz::Tz>,
 ) -> Result<ForcingTable, HaresError> {
+    use crate::clock::skipped_feb29_days_from_start;
+
     let is_southern = weather_meta.latitude < 0.0;
     let mains_hemisphere = if is_southern {
         Hemisphere::Southern
@@ -1510,9 +1693,31 @@ fn build_forcing_table(
     let rows: Result<Vec<ForcingRow>, HaresError> = (0..horizon_steps)
         .map(|step_index| {
             let step_secs_u = i64::try_from(step_index).unwrap_or(i64::MAX);
-            let now =
+            let linear =
                 local_start + chrono::Duration::seconds(step_secs_i64.saturating_mul(step_secs_u));
-            let weather_idx = (step_index as usize + weather_start_offset) % weather.len();
+            // The step's time by the run's calendar: the skip inserted.
+            let now = if skip_feb29 {
+                linear
+                    + chrono::Duration::days(i64::from(skipped_feb29_days_from_start(
+                        local_start,
+                        linear,
+                    )))
+            } else {
+                linear
+            };
+            // The record the step's start reads, addressed by calendar
+            // date, laid out to the resampled row.
+            let record = addressing
+                .record_at(now.naive_local())
+                .map_err(|err| HaresError::Io(format!("weather read failed: {err}")))?;
+            let weather_idx = match layout {
+                RecordLayout::Direct => record,
+                RecordLayout::Interpolate { steps_per_hour } => {
+                    let secs_in_hour = (now.minute() * 60 + now.second()) as usize;
+                    record * steps_per_hour + secs_in_hour / step_secs as usize
+                }
+                RecordLayout::Downsample { ratio } => record / ratio,
+            };
             let outdoor_temp_c = weather.get(WeatherField::DryBulbC, weather_idx);
             let dew_point_c = weather.get(WeatherField::DewPointC, weather_idx);
             let pressure_kpa = weather.get(WeatherField::PressureKpa, weather_idx);
@@ -1557,43 +1762,6 @@ fn build_forcing_table(
         })
         .collect();
     Ok(ForcingTable::from_rows(rows?))
-}
-
-/// Compute the step offset into an annual weather file for a given start time.
-///
-/// Weather files are indexed by **local standard time** (LST). The simulation
-/// start time is already in local time (`DateTime<FixedOffset>`), so no
-/// UTC→LST conversion is needed -- we extract wall-clock components directly.
-///
-/// The resolved series is addressed by the step's coverage: the row the
-/// read reaches at the step's start is the row of the step ending
-/// `step_secs` later (EnergyPlus reaches a record's value at the end of
-/// its hour, Input Output Reference "Weather Data Hourly Interpolation"),
-/// and the offset carries no shift: the row index into the resolved
-/// series is the step count from the year's start to the step's start.
-fn compute_annual_offset(
-    start_time: DateTime<FixedOffset>,
-    step_secs: u32,
-    weather_len: usize,
-) -> usize {
-    if step_secs == 0 {
-        return 0;
-    }
-
-    let doy0 = start_time.ordinal0() as u64;
-    let h = start_time.hour() as u64;
-    let m = start_time.minute() as u64;
-    let s = start_time.second() as u64;
-    let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
-
-    // Year length in seconds derived from the actual weather array size.
-    // After resampling, weather_len rows at step_secs each covers one year
-    // (365 or 366 days).  EPW, PSM3, and TMY3 all support leap-year files;
-    // using the actual row count avoids mis-indexing for 8784-row (leap) files.
-    let year_secs = weather_len as u64 * step_secs as u64;
-    let shifted = (seconds_into_year + year_secs) % year_secs;
-
-    (shifted / step_secs as u64) as usize
 }
 
 /// Compute offset into the schedule time series.
@@ -2019,17 +2187,31 @@ pub fn resample_weather(
         step_secs,
         config.first_hour_interpolation,
         config.start_time.naive_local(),
+        config.weather_year,
     )?;
+    // The run's simulated step count and step times: the calendar
+    // mapping with the weather-year rule's Feb 29 skip inserted, the
+    // same mapping the run's clock carries.
+    let skip_feb29 = config.weather_year.skips_feb29(&handle.series());
+    let steps = if skip_feb29 {
+        let end = config.start_time + config.duration;
+        let skipped_secs = crate::clock::skipped_feb29_seconds(config.start_time, end);
+        steps.saturating_sub(u64::try_from(skipped_secs / i64::from(step_secs)).unwrap_or(0))
+    } else {
+        steps
+    };
     let evaluator = StepWeatherEvaluator::new(
         series,
+        handle.series(),
+        config.weather_year,
         Some(site),
         step_secs,
         config.start_time,
         config.civil_timezone.as_deref(),
         config.first_hour_interpolation,
-        // The horizon the run's own table is sized to: the weather
-        // series' length covers every step of the horizon.
-        None,
+        // The horizon the run's own table is sized to: the run's own
+        // steps.
+        Some(steps),
         Some(&handle),
     )
     .map_err(|err| match err {
@@ -2058,10 +2240,7 @@ pub fn resample_weather(
     let mut mains_temp = Vec::with_capacity(steps as usize);
 
     for step in 0..steps {
-        let now = config.start_time
-            + chrono::Duration::seconds(
-                i64::from(step_secs).saturating_mul(i64::try_from(step).unwrap_or(i64::MAX)),
-            );
+        let now = evaluator.time_at(step);
         let weather = evaluator.evaluate(now, step)?;
         // The Time column: the step's naive local wall clock, the same
         // convention the report's Time column carries (the wall-clock
@@ -2121,10 +2300,67 @@ pub fn resample_weather(
 mod tests {
     use super::*;
     use chrono::{DateTime, FixedOffset, TimeZone};
+    use hares_io::WeatherYear;
     use hares_io::hpxml::building::XmlNode;
     use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
     use hares_physics::psychrometrics::wet_bulb_from_humidity_ratio;
     use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc as StdArc;
+
+    /// Two managers over one parsed weather, differing only in
+    /// `weather_year`, hold different forcing tables: the rule changes
+    /// which records a step reads, so it joins the forcing key and the
+    /// two constructions never share one table.
+    #[test]
+    fn forcing_key_differs_by_weather_year() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let weather_path = repo.join("tests/fixtures/weather/G0600770_restamped_2020.csv");
+        let handle = ParsedWeather::parse(&hares_io::WeatherInput::Path(weather_path))
+            .expect("the weather parses");
+        let step_secs = 3600u32;
+        let start = FixedOffset::west_opt(6 * 3600)
+            .expect("offset")
+            .with_ymd_and_hms(2020, 6, 1, 0, 0, 0)
+            .single()
+            .expect("start");
+        let mut tables = Vec::new();
+        for year in [WeatherYear::Typical, WeatherYear::Actual] {
+            let options = EnvironmentInitOptions {
+                weather_year: year,
+                horizon_steps: Some(24),
+                ..EnvironmentInitOptions::default()
+            };
+            let manager = EnvironmentManager::new_shared(
+                &handle,
+                schedule_series(),
+                &building(Some(21.0)),
+                std::time::Duration::from_secs(u64::from(step_secs)),
+                start,
+                &SiteLocation {
+                    latitude_deg: 43.0,
+                    longitude_deg: -89.0,
+                    elevation_m: 300.0,
+                    utc_offset_h: -6.0,
+                    latitude_source: hares_io::FieldSource::WeatherFile,
+                    longitude_source: hares_io::FieldSource::WeatherFile,
+                    elevation_source: hares_io::FieldSource::WeatherFile,
+                    utc_offset_source: hares_io::FieldSource::WeatherFile,
+                },
+                options,
+            )
+            .expect("the manager builds over the actual 2020 file");
+            let table = manager
+                .forcing_table()
+                .expect("the forcing table was built")
+                .clone();
+            tables.push(table);
+        }
+        assert!(
+            !StdArc::ptr_eq(&tables[0], &tables[1]),
+            "two grids differing only in weather_year hold different tables"
+        );
+    }
 
     fn utc_offset() -> FixedOffset {
         FixedOffset::east_opt(0).expect("offset")
@@ -2158,10 +2394,12 @@ mod tests {
                 wf_allows_leap_years: true,
                 source_step_secs: 3600,
                 record_label: hares_io::RecordLabel::IntervalEnd,
+                data_period: hares_io::DataPeriod::complete_year(),
                 has_embedded_location: true,
                 station_wmo: None,
             },
             design_conditions: None,
+            stamps: Vec::new(),
             dry_bulb_c: mix(10.0, 20.0),
             dew_point_c: mix(2.0, 3.0),
             rel_humidity_pct: mix(50.0, 55.0),
@@ -2913,9 +3151,9 @@ mod tests {
         // June 21 at solar noon for a south-facing building at lat 40°N.
         // High DNI (800), moderate DHI (100) -- Perez conditions satisfied (dhi >= 1).
         let mut weather = weather_series();
-        weather.dni_w_m2 = vec![800.0, 800.0];
-        weather.dhi_w_m2 = vec![100.0, 100.0];
-        weather.ghi_w_m2 = vec![700.0, 700.0];
+        weather.dni_w_m2 = vec![800.0; 24];
+        weather.dhi_w_m2 = vec![100.0; 24];
+        weather.ghi_w_m2 = vec![700.0; 24];
 
         let mut manager = EnvironmentManager::new(
             weather,
@@ -3107,82 +3345,142 @@ mod tests {
         }
     }
 
-    /// compute_annual_offset: leap year (2024) -- May 5 noon.
-    /// Feb has 29 days so May 5 = ordinal 126, ordinal0 = 125.
-    /// (125*86400 + 12*3600) / 3600 = 3012.
-    #[test]
-    fn annual_offset_leap_year_may_5_noon() {
-        let start = utc_offset().with_ymd_and_hms(2024, 5, 5, 12, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(start, 3600, 8784), 3012);
+    // ----- the calendar-date addressing's unit tests (the
+    // compute_annual_offset tests' replacements: the same values where
+    // they were right, the leap-year-over-a-365-day-file cases where
+    // they were one day late) -----
+
+    /// A synthetic typical file of `days` days, hourly, every field a
+    /// plain series (the record values the tests don't read through
+    /// this helper).
+    fn daily_weather(days: usize) -> WeatherTimeSeries {
+        let n = days * 24;
+        let mut series = weather_series();
+        for column in [
+            &mut series.dry_bulb_c,
+            &mut series.dew_point_c,
+            &mut series.rel_humidity_pct,
+            &mut series.pressure_kpa,
+            &mut series.ghi_w_m2,
+            &mut series.dni_w_m2,
+            &mut series.dhi_w_m2,
+            &mut series.wind_speed_m_s,
+            &mut series.wind_dir_deg,
+            &mut series.opaque_sky_cover,
+            &mut series.horizontal_infrared_w_m2,
+            &mut series.sky_temp_c,
+            &mut series.ground_temp_c,
+            &mut series.liquid_precip_m,
+        ] {
+            *column = vec![0.0; n];
+        }
+        series.stamps = Vec::new();
+        series
     }
 
-    /// compute_annual_offset: non-leap year (2023) -- May 5 noon.
-    /// (124*86400 + 12*3600) / 3600 = 2988.
-    #[test]
-    fn annual_offset_non_leap_year_may_5_noon() {
-        let start = utc_offset().with_ymd_and_hms(2023, 5, 5, 12, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(start, 3600, 8760), 2988);
+    /// The record a step at `t` reads over `days` days, typical rule.
+    fn typical_record(days: usize, t: chrono::NaiveDateTime) -> usize {
+        let series = daily_weather(days);
+        WeatherAddressing::new(&series, WeatherYear::Typical)
+            .expect("the addressing builds")
+            .record_at(t)
+            .expect("the step is addressable")
     }
 
-    /// compute_annual_offset: leap year Jan 1 00:00 → index 0.
+    /// Leap year (2024), May 5 noon, over a 366-day file: the leap
+    /// calendar's ordinal decides (126 -> day 125, +12 h = 3012).
     #[test]
-    fn annual_offset_leap_year_jan_1() {
-        let start = utc_offset().with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(start, 3600, 8784), 0);
+    fn addressing_leap_year_may_5_noon_over_366() {
+        let t = utc_offset()
+            .with_ymd_and_hms(2024, 5, 5, 12, 0, 0)
+            .unwrap()
+            .naive_local();
+        assert_eq!(typical_record(366, t), 3012);
     }
 
-    /// compute_annual_offset: non-leap year Jan 1 00:00 → index 0.
+    /// Leap year (2024), May 5 noon, over a 365-day file: the shared
+    /// 365-day ordinal decides (125 -> day 124, +12 h = 2988).
     #[test]
-    fn annual_offset_non_leap_year_jan_1() {
-        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(start, 3600, 8760), 0);
+    fn addressing_leap_year_may_5_noon_over_365() {
+        let t = utc_offset()
+            .with_ymd_and_hms(2024, 5, 5, 12, 0, 0)
+            .unwrap()
+            .naive_local();
+        assert_eq!(typical_record(365, t), 2988);
     }
 
-    /// compute_annual_offset: leap year Dec 31 23:00.
-    /// With 8784 hourly rows (366 days), Dec 31 ordinal0=365, seconds_into_year
-    /// = 365*86400 + 23*3600 = 31,618,800.  year_secs = 8784*3600 = 31,622,400.
-    /// shifted = 31,618,800 % 31,622,400 = 31,618,800.  31,618,800 / 3600 = 8783.
+    /// Non-leap year (2023), May 5 noon over a 365-day file:
+    /// 124*24 + 12 = 2988.
     #[test]
-    fn annual_offset_leap_year_dec_31() {
-        let start = utc_offset()
-            .with_ymd_and_hms(2024, 12, 31, 23, 0, 0)
-            .unwrap();
-        assert_eq!(compute_annual_offset(start, 3600, 8784), 8783);
+    fn addressing_non_leap_year_may_5_noon() {
+        let t = utc_offset()
+            .with_ymd_and_hms(2023, 5, 5, 12, 0, 0)
+            .unwrap()
+            .naive_local();
+        assert_eq!(typical_record(365, t), 2988);
     }
 
-    /// compute_annual_offset: non-leap year Dec 31 23:00.
-    /// (364*86400 + 23*3600) / 3600 = 8759.
+    /// Jan 1 00:00 → record 0, either year either file.
     #[test]
-    fn annual_offset_non_leap_year_dec_31() {
-        let start = utc_offset()
-            .with_ymd_and_hms(2023, 12, 31, 23, 0, 0)
-            .unwrap();
-        assert_eq!(compute_annual_offset(start, 3600, 8760), 8759);
+    fn addressing_jan_1() {
+        for (y, days) in [(2024, 366usize), (2023, 365usize)] {
+            let t = utc_offset()
+                .with_ymd_and_hms(y, 1, 1, 0, 0, 0)
+                .unwrap()
+                .naive_local();
+            assert_eq!(typical_record(days, t), 0);
+        }
     }
 
-    /// compute_annual_offset: leap year Feb 29 → ordinal0 = 59.
-    /// (59*86400 + 6*3600) / 3600 = 1422.
+    /// A leap-year run's Mar 1 reads the 365-day file's Mar 1 record
+    /// (day 59), the case the running-index rule read one day late.
     #[test]
-    fn annual_offset_leap_year_feb_29() {
-        let start = utc_offset().with_ymd_and_hms(2024, 2, 29, 6, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(start, 3600, 8784), 1422);
+    fn addressing_leap_year_mar_1_over_365() {
+        let t = utc_offset()
+            .with_ymd_and_hms(2024, 3, 1, 0, 0, 0)
+            .unwrap()
+            .naive_local();
+        assert_eq!(typical_record(365, t), 59 * 24);
     }
 
-    /// compute_annual_offset: non-leap year Mar 1 → ordinal0 = 59.
-    /// (59*86400 + 6*3600) / 3600 = 1422.
+    /// The wrap: 2025's Jan 1 reads the file's Jan 1 (record 0).
     #[test]
-    fn annual_offset_non_leap_year_mar_1() {
-        let start = utc_offset().with_ymd_and_hms(2023, 3, 1, 6, 0, 0).unwrap();
-        assert_eq!(compute_annual_offset(start, 3600, 8760), 1422);
+    fn addressing_wraps_to_jan_1() {
+        let t = utc_offset()
+            .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+            .unwrap()
+            .naive_local();
+        assert_eq!(typical_record(365, t), 0);
     }
 
-    /// compute_annual_offset: sub-hourly resolution (15-min steps).
-    /// start = 2023-01-01T01:30:00: seconds=5400.  35040 rows at 15-min.
-    /// year_secs = 35040*900 = 31,536,000 (= 365*86400).  5400/900 = 6.
+    /// A leap year's Feb 29 over a 366-day file reads the file's Feb 29
+    /// records (day 59).
     #[test]
-    fn annual_offset_15min_resolution() {
-        let start = utc_offset().with_ymd_and_hms(2023, 1, 1, 1, 30, 0).unwrap();
-        assert_eq!(compute_annual_offset(start, 900, 35040), 6);
+    fn addressing_feb_29_over_366() {
+        let t = utc_offset()
+            .with_ymd_and_hms(2024, 2, 29, 0, 0, 0)
+            .unwrap()
+            .naive_local();
+        assert_eq!(typical_record(366, t), 59 * 24);
+    }
+
+    /// Sub-hourly resolution: a 15-min step's record is the same day
+    /// slot arithmetic at 96 rows per day.
+    #[test]
+    fn addressing_15min_resolution() {
+        let t = utc_offset()
+            .with_ymd_and_hms(2023, 1, 1, 1, 30, 0)
+            .unwrap()
+            .naive_local();
+        let series = daily_weather(365);
+        let addressing =
+            WeatherAddressing::new(&series, WeatherYear::Typical).expect("the addressing builds");
+        // The FILE record at 1:30 (hour 2's slot 2 in hour-ending rows)
+        // is 0*24 + 1; the row a 15-min step reads inside the hour is
+        // the record's own slot arithmetic, exercised through row_at's
+        // caller (the evaluator's interpolate layout), so here the
+        // record is asserted.
+        assert_eq!(addressing.record_at(t).expect("addressable"), 1);
     }
 
     // ----- compute_schedule_offset leap-year tests (T-0032) -----
@@ -3287,10 +3585,12 @@ mod tests {
                 wf_allows_leap_years: true,
                 source_step_secs: 3600,
                 record_label: hares_io::RecordLabel::IntervalEnd,
+                data_period: hares_io::DataPeriod::complete_year(),
                 has_embedded_location: true,
                 station_wmo: None,
             },
             design_conditions: None,
+            stamps: Vec::new(),
             dry_bulb_c: vec![20.0; n],
             dew_point_c: vec![10.0; n],
             rel_humidity_pct: vec![50.0; n],
@@ -3766,10 +4066,12 @@ mod tests {
                 wf_allows_leap_years: true,
                 source_step_secs: step_secs,
                 record_label: hares_io::RecordLabel::IntervalEnd,
+                data_period: hares_io::DataPeriod::complete_year(),
                 has_embedded_location: true,
                 station_wmo: None,
             },
             design_conditions: None,
+            stamps: Vec::new(),
             dry_bulb_c: dry_bulb,
             dew_point_c: vec![0.0; n],
             rel_humidity_pct: vec![50.0; n],
@@ -3830,10 +4132,12 @@ mod tests {
                 wf_allows_leap_years: true,
                 source_step_secs: step_secs,
                 record_label: hares_io::RecordLabel::IntervalEnd,
+                data_period: hares_io::DataPeriod::complete_year(),
                 has_embedded_location: true,
                 station_wmo: None,
             },
             design_conditions: None,
+            stamps: Vec::new(),
             dry_bulb_c,
             dew_point_c: vec![0.0; n],
             rel_humidity_pct: vec![50.0; n],
@@ -3906,10 +4210,12 @@ mod tests {
                 wf_allows_leap_years: true,
                 source_step_secs: step_secs,
                 record_label: hares_io::RecordLabel::IntervalEnd,
+                data_period: hares_io::DataPeriod::complete_year(),
                 has_embedded_location: true,
                 station_wmo: None,
             },
             design_conditions: None,
+            stamps: Vec::new(),
             dry_bulb_c: dry_bulb,
             dew_point_c: vec![0.0; n],
             rel_humidity_pct: vec![50.0; n],
@@ -3984,10 +4290,12 @@ mod tests {
                     wf_allows_leap_years: true,
                     source_step_secs: 3600,
                     record_label: hares_io::RecordLabel::IntervalEnd,
+                    data_period: hares_io::DataPeriod::complete_year(),
                     has_embedded_location: true,
                     station_wmo: None,
                 },
                 design_conditions: None,
+                stamps: Vec::new(),
                 dry_bulb_c: (0..n).map(|i| i as f64 * 0.01).collect(),
                 dew_point_c: vec![2.0; n],
                 rel_humidity_pct: vec![50.0; n],

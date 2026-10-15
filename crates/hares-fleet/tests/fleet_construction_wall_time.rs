@@ -49,6 +49,7 @@ fn fleet_construction_1000_homes_wall_time() {
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
     };
 
     let configs: Vec<DwellingConfig> = (0..homes)

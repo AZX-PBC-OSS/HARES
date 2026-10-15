@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::output::report::{ReportSpec, Selection};
 use crate::site_location::SiteLocationOverride;
-use crate::weather::FirstHour;
+use crate::weather::{FirstHour, WeatherYear};
 
 /// Errors produced during config deserialization and validation.
 #[derive(Debug, Error)]
@@ -312,6 +312,16 @@ pub struct SimulationConfig {
     /// a sub-hourly file (the records are read directly).
     #[serde(default)]
     pub first_hour_interpolation: FirstHour,
+    /// Whether the weather file is a typical (TMY-style) year or an
+    /// actual one (`typical`, the default, or `actual`): EnergyPlus's
+    /// RunPeriod "Treat Weather as Actual", which defaults to No. The
+    /// rule decides which records a step reads: a typical file is
+    /// addressed by month, day and hour whatever its years (a run past
+    /// Dec 31 wraps to Jan 1 of the file, and a Feb 29 the file has no
+    /// records for is not simulated); an actual-year run must lie inside
+    /// the file's own dated records.
+    #[serde(default)]
+    pub weather_year: WeatherYear,
 }
 
 /// Default for [`SimulationConfig::max_consecutive_step_failures`]: one
@@ -348,6 +358,7 @@ impl hares_types::DescribeFields for SimulationConfig {
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: HealthPolicy::sample(),
             first_hour_interpolation: FirstHour::default(),
+            weather_year: WeatherYear::default(),
         };
         let mut fields = describe(
             &sample,
@@ -456,6 +467,15 @@ impl hares_types::DescribeFields for SimulationConfig {
                     FieldMeta {
                         description: Some(
                             "which hour's record the run's first hour interpolates from (hour24 or hour1)",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "weather_year",
+                    FieldMeta {
+                        description: Some(
+                            "whether the weather file is a typical (TMY-style) year or an actual one (typical or actual)",
                         ),
                         ..Default::default()
                     },
@@ -1261,6 +1281,7 @@ max_evictions = 0
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: crate::HealthPolicy::default(),
             first_hour_interpolation: FirstHour::default(),
+            weather_year: WeatherYear::default(),
         };
         let err = cfg
             .time_res_secs_u32()
@@ -1322,6 +1343,7 @@ destination = { csv = { path = "/tmp/sim_output.csv" } }
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: crate::HealthPolicy::default(),
             first_hour_interpolation: FirstHour::default(),
+            weather_year: WeatherYear::default(),
         };
         let built_err = built
             .validate()
@@ -1366,6 +1388,7 @@ latitude_deg = 95.0
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: crate::HealthPolicy::default(),
             first_hour_interpolation: FirstHour::default(),
+            weather_year: WeatherYear::default(),
         };
         let built_err = built
             .validate()

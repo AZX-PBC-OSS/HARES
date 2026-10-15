@@ -19,7 +19,9 @@ use hares_physics::constants::{
 use hares_types::parse_trimmed_f64;
 use tracing::{debug, warn};
 
-use crate::weather::{RecordLabel, WeatherError, WeatherMeta, WeatherTimeSeries};
+use crate::weather::{
+    DataPeriod, RecordLabel, RecordStamp, WeatherError, WeatherMeta, WeatherTimeSeries,
+};
 
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
 const EXPECTED_RECORDS_LEAP: usize = 8784;
@@ -31,6 +33,7 @@ const IDX_YEAR: usize = 0;
 const IDX_MONTH: usize = 1;
 const IDX_DAY: usize = 2;
 const IDX_HOUR: usize = 3;
+const IDX_MINUTE: usize = 4;
 
 const IDX_DRY_BULB_C: usize = 6;
 const IDX_DEW_POINT_C: usize = 7;
@@ -195,17 +198,18 @@ pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, Weather
     let _ = comments_2_line;
 
     let mut meta = parse_location_header(location_line)?;
-    let records_per_hour = ensure_hourly_data_period(data_period_line)?;
+    let (records_per_hour, data_period) = parse_data_period(data_period_line)?;
     // A sub-hourly file (N records per hour) is read in order at its own
     // interval: source step 3600/N. Every record's stamp labels its
     // interval's end (the minute field is the interval's closing minute),
     // at every records-per-hour, so the run at the file's own interval
     // reads each record at the step it covers.
     meta.source_step_secs = 3600 / records_per_hour;
+    meta.data_period = data_period;
     let epw_ground_temps = parse_ground_temperatures(ground_temp_line);
 
     let mut records = Vec::new();
-    let mut record_datetimes = Vec::new();
+    let mut record_stamps = Vec::new();
     let mut precip_field_absent = false;
     let mut precip_sentinel_seen = false;
 
@@ -228,11 +232,22 @@ pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, Weather
                 "row {row}: hour must be in 1..=24, got {hour}"
             )));
         }
-        let date = NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
-            WeatherError::Validation(format!(
+        // The record's minute field, kept as the file states it (the
+        // interval's closing minute; hourly files write 0 or 60, some
+        // writers a whole-number float).
+        let minute_raw = parse_f64(fields[IDX_MINUTE], row, "minute")?;
+        let minute = minute_raw.floor();
+        if !(0.0..=60.0).contains(&minute) {
+            return Err(WeatherError::Validation(format!(
+                "row {row}: minute must be in 0..=60, got {minute_raw}"
+            )));
+        }
+        let minute = minute as u32;
+        if NaiveDate::from_ymd_opt(year, month, day).is_none() {
+            return Err(WeatherError::Validation(format!(
                 "row {row}: invalid date year={year}, month={month}, day={day}"
-            ))
-        })?;
+            )));
+        }
 
         let dry_bulb_c = parse_f64(fields[IDX_DRY_BULB_C], row, "dry_bulb_c")?;
         if !(-60.0..=55.0).contains(&dry_bulb_c) {
@@ -335,7 +350,13 @@ pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, Weather
             ground_temp_c: f64::NAN,
             liquid_precip_m,
         });
-        record_datetimes.push((date, hour));
+        record_stamps.push(RecordStamp {
+            year,
+            month: u8::try_from(month).unwrap_or(u8::MAX),
+            day: u8::try_from(day).unwrap_or(u8::MAX),
+            hour: u8::try_from(hour).unwrap_or(u8::MAX),
+            minute: u8::try_from(minute).unwrap_or(u8::MAX),
+        });
     }
 
     if precip_field_absent {
@@ -349,11 +370,33 @@ pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, Weather
         );
     }
 
-    let expected_standard = EXPECTED_RECORDS_STANDARD * records_per_hour as usize;
-    let expected_leap = EXPECTED_RECORDS_LEAP * records_per_hour as usize;
+    // The record count must match the file's own data period: a
+    // complete-year period (Jan 1 to Dec 31) carries 8760 records, or
+    // 8784 when the file observes the leap day; a partial period carries
+    // the period's days (28 or 29 when it spans February). Every weather
+    // file a run reads needs a complete year: the water-mains annual
+    // mean and monthly range and the ground temperature derived from
+    // twelve monthly dry-bulb means need twelve complete months, and
+    // HARES substitutes no value it was not given.
+    let (expected_standard, expected_leap) = if data_period.is_complete_year() {
+        (
+            EXPECTED_RECORDS_STANDARD * records_per_hour as usize,
+            EXPECTED_RECORDS_LEAP * records_per_hour as usize,
+        )
+    } else {
+        let days = data_period_day_count(data_period, false);
+        let days_leap = data_period_day_count(data_period, true);
+        (
+            days * 24 * records_per_hour as usize,
+            days_leap * 24 * records_per_hour as usize,
+        )
+    };
     if records.len() != expected_standard && records.len() != expected_leap {
         return Err(WeatherError::Validation(format!(
-            "EPW record count must be {expected_standard} or {expected_leap}, got {}",
+            "EPW record count must be {expected_standard} or {expected_leap} for the data \
+             period {data_period} (a complete year: the water mains annual mean and monthly \
+             range and the ground temperature derived from twelve monthly dry-bulb means need \
+             a complete year), got {}",
             records.len()
         )));
     }
@@ -369,15 +412,15 @@ pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, Weather
         );
         // Retain only records that are NOT Feb 29.
         let mut retained = Vec::with_capacity(expected_standard);
-        let mut retained_dt = Vec::with_capacity(expected_standard);
-        for (rec, dt) in records.into_iter().zip(record_datetimes) {
-            if !(dt.0.month() == 2 && dt.0.day() == 29) {
+        let mut retained_stamps = Vec::with_capacity(expected_standard);
+        for (rec, stamp) in records.into_iter().zip(record_stamps) {
+            if !stamp.is_feb29() {
                 retained.push(rec);
-                retained_dt.push(dt);
+                retained_stamps.push(stamp);
             }
         }
         records = retained;
-        record_datetimes = retained_dt;
+        record_stamps = retained_stamps;
     }
 
     let is_leap_year = records.len() == expected_leap;
@@ -387,9 +430,7 @@ pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, Weather
     // exist because the strip loop above removed Feb 29 when the header
     // said No.
     if records.len() == expected_leap && wf_allows_leap_years {
-        let has_feb29 = record_datetimes
-            .iter()
-            .any(|(date, _)| date.month() == 2 && date.day() == 29);
+        let has_feb29 = record_stamps.iter().any(RecordStamp::is_feb29);
         if !has_feb29 {
             return Err(WeatherError::Validation(
                 "EPW file has 8784 records with leap year observed=true \
@@ -411,28 +452,34 @@ pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, Weather
         Some(gt) => gt,
         None => {
             let mut hourly_dry_bulb: Vec<f64> = Vec::with_capacity(records.len());
-            let mut previous: Option<(chrono::NaiveDate, u32)> = None;
-            for (record, (date, hour)) in records.iter().zip(&record_datetimes) {
-                if previous != Some((*date, *hour)) {
+            let mut previous: Option<RecordStamp> = None;
+            for (record, stamp) in records.iter().zip(&record_stamps) {
+                let key = (stamp.date(), stamp.hour);
+                if previous
+                    .as_ref()
+                    .is_none_or(|prev| (prev.date(), prev.hour) != key)
+                {
                     hourly_dry_bulb.push(record.dry_bulb_c);
-                    previous = Some((*date, *hour));
+                    previous = Some(*stamp);
                 }
             }
             doe2_ground_temp_monthly(&hourly_dry_bulb, is_leap_year, 1)?
         }
     };
 
-    for (record, (date, hour)) in records.iter_mut().zip(&record_datetimes) {
+    for (record, stamp) in records.iter_mut().zip(&record_stamps) {
         record.ground_temp_c = interpolate_ground_temp_c(
             &monthly_ground_temps,
-            date.month(),
-            date.day(),
-            *hour,
+            u32::from(stamp.month),
+            u32::from(stamp.day),
+            u32::from(stamp.hour),
             is_leap_year,
         )?;
     }
 
-    Ok(records_to_series(meta, design_conditions, &records))
+    let mut series = records_to_series(meta, design_conditions, &records);
+    series.stamps = record_stamps;
+    Ok(series)
 }
 
 fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
@@ -468,6 +515,9 @@ fn parse_location_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         // EPW uses hour-ending convention: a record stamped "12" covers
         // 11:00-12:00.
         record_label: RecordLabel::IntervalEnd,
+        // The full parse writes the header's own DATA PERIODS; the
+        // header-only read assumes the format's complete year.
+        data_period: crate::weather::DataPeriod::complete_year(),
         has_embedded_location: true,
         station_wmo,
     })
@@ -540,7 +590,14 @@ fn parse_holidays_daylight_header(line: &str) -> Result<bool, WeatherError> {
     }
 }
 
-fn ensure_hourly_data_period(line: &str) -> Result<u32, WeatherError> {
+/// Parse the EPW DATA PERIODS header (line 8): the records per hour and
+/// the data period the header declares (the start and end day/month of
+/// the single data period).
+///
+/// The header's fields: `DATA PERIODS,N,N1,S1,E1` where N is the number
+/// of data periods, N1 the records per hour, S1 the start day/month and
+/// E1 the end day/month, each day/month written ` D/ M`.
+fn parse_data_period(line: &str) -> Result<(u32, DataPeriod), WeatherError> {
     let fields: Vec<&str> = line.split(',').collect();
     if fields.len() < DATA_PERIOD_MIN_FIELDS {
         return Err(WeatherError::Parse(
@@ -563,7 +620,61 @@ fn ensure_hourly_data_period(line: &str) -> Result<u32, WeatherError> {
         )));
     }
 
-    Ok(records_per_hour)
+    let parse_day_month = |raw: &str, name: &str| -> Result<(u32, u32), WeatherError> {
+        let text = raw.trim();
+        let (month, day) = text.split_once('/').ok_or_else(|| {
+            WeatherError::Parse(format!(
+                "DATA PERIODS {name} must be month/day (e.g. 12/31), got `{text}`"
+            ))
+        })?;
+        // Both numeric is month/day, the rule EnergyPlus's date-token
+        // reader applies ("if both numeric, mon / day", General.cc
+        // DetermineDateTokens); a month may also be spelled out.
+        let month = month.trim().parse::<u32>().map_err(|_| {
+            WeatherError::Parse(format!(
+                "DATA PERIODS {name} month is not a number: `{month}`"
+            ))
+        })?;
+        let day = day.trim().parse::<u32>().map_err(|_| {
+            WeatherError::Parse(format!("DATA PERIODS {name} day is not a number: `{day}`"))
+        })?;
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return Err(WeatherError::Parse(format!(
+                "DATA PERIODS {name} must be a month in 1..=12 and a day in 1..=31, got \
+                 `{text}`"
+            )));
+        }
+        Ok((month, day))
+    };
+
+    let (start_month, start_day) = match fields.len() {
+        len if len >= 7 => parse_day_month(fields[5], "start day/month")?,
+        _ => (1, 1),
+    };
+    let (end_month, end_day) = match fields.len() {
+        len if len >= 7 => parse_day_month(fields[6], "end day/month")?,
+        _ => (31, 12),
+    };
+
+    let period = DataPeriod {
+        start_month,
+        start_day,
+        end_month,
+        end_day,
+    };
+    Ok((records_per_hour, period))
+}
+
+/// The inclusive day count of a data period within one calendar year:
+/// `leap_year` selects February's length (the period's day span differs
+/// only when it crosses February).
+fn data_period_day_count(period: DataPeriod, leap_year: bool) -> usize {
+    let reference: i32 = if leap_year { 2000 } else { 2001 };
+    let start = NaiveDate::from_ymd_opt(reference, period.start_month, period.start_day)
+        .expect("a valid start date");
+    let end = NaiveDate::from_ymd_opt(reference, period.end_month, period.end_day)
+        .expect("a valid end date");
+    usize::try_from((end - start).num_days() + 1).unwrap_or(0)
 }
 
 /// Parses the monthly ground temperatures from the GROUND TEMPERATURES header line.
@@ -1138,6 +1249,7 @@ fn records_to_series(
     WeatherTimeSeries {
         meta,
         design_conditions,
+        stamps: Vec::new(),
         dry_bulb_c,
         dew_point_c,
         rel_humidity_pct,

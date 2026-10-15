@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Duration, FixedOffset};
+use chrono::{DateTime, Datelike, Duration, FixedOffset};
 use hares_io::{
     Catalogue, EquipmentSpec, InputRecords, ParsedInputs, SiteLocation, epw::DesignConditions,
     hpxml::resolve_equipment, site_location::resolve_site_location,
@@ -276,6 +276,25 @@ impl DwellingBlueprintBuilder {
         let naive_utc = settings.sim_config.start_time.naive_local() - tz_offset;
         let local_start = DateTime::<FixedOffset>::from_naive_utc_and_offset(naive_utc, tz_offset);
 
+        // A start_time on a skipped Feb 29 is an error naming the date:
+        // the day is not simulated (the weather-year rule's Feb 29 skip
+        // depends on the weather file, which SimulationConfig::validate
+        // does not see), so the run cannot start there.
+        if settings
+            .sim_config
+            .weather_year
+            .skips_feb29(&inputs.weather.series())
+        {
+            let start_date = settings.sim_config.start_time.naive_local().date();
+            if start_date.month() == 2 && start_date.day() == 29 {
+                return Err(HaresError::Io(format!(
+                    "the simulation starts on {start_date}, a Feb 29 the weather file has no \
+                     records for: a typical-year run over a file without Feb 29 does not \
+                     simulate that day, so the run cannot start on it"
+                )));
+            }
+        }
+
         let equipment_specs = resolve_equipment(
             &building,
             effective_zone.as_deref(),
@@ -444,6 +463,7 @@ impl DwellingBlueprintBuilder {
             step_secs,
             settings.sim_config.first_hour_interpolation,
             settings.sim_config.start_time.naive_local(),
+            settings.sim_config.weather_year,
         )?;
         let resampled_schedule = Arc::new(
             inputs

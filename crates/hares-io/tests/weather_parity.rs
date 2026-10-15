@@ -374,7 +374,12 @@ fn real_epw_interpolated_to_60s_stays_within_record_bounds() {
 
     let weather = hares_io::parse_epw(&epw_path).expect("EPW should parse");
     let resampled = weather
-        .resample(60, hares_io::FirstHour::default(), test_start())
+        .resample(
+            60,
+            hares_io::FirstHour::default(),
+            test_start(),
+            hares_io::WeatherYear::Typical,
+        )
         .expect("resample to 60s should succeed");
 
     assert_eq!(
@@ -492,7 +497,12 @@ fn hourly_step_reads_the_record_of_the_hour_it_ends() {
         .join("../../tests/fixtures/weather/test_location.epw");
     let weather = hares_io::parse_epw(&epw_path).expect("EPW should parse");
     let resampled = weather
-        .resample(3600, hares_io::FirstHour::default(), test_start())
+        .resample(
+            3600,
+            hares_io::FirstHour::default(),
+            test_start(),
+            hares_io::WeatherYear::Typical,
+        )
         .expect("resample to the hour should succeed");
     assert_eq!(resampled.len(), weather.len());
     assert_eq!(resampled.dry_bulb_c, weather.dry_bulb_c);

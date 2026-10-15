@@ -329,3 +329,69 @@ Three places, deliberate:
   horizontal in its per-timestep weather (the `WeatherVars` set,
   `WeatherManager.hh:713-732`); HARES applies the same midpoint weights
   to GHI as to beam and diffuse, a HARES extension recorded as such.
+
+## Weather is addressed by calendar date: typical and actual years, wrap, Feb 29
+
+A run's steps read weather records by the step's **local standard time
+calendar date and hour** (the site's standard offset; daylight saving
+shifts schedules, not weather), never by a running index. The config
+field `weather_year` selects the EnergyPlus rule: `typical` (the
+default) or `actual` (RunPeriod "Treat Weather as Actual", which
+defaults to No, `idd/Energy+.idd.in:1480-1484`).
+
+- **Typical.** The file's month, day and hour address the records
+  whatever the stamps' years: a run past Dec 31 continues at Jan 1 of
+  the file (wrap by day of year, `WeatherManager.cc:929-941`). A file
+  whose data period is not a complete year (Jan 1 to Dec 31) is a
+  construction error naming the period and the inputs that need a
+  complete year: the water-mains annual mean and monthly range and the
+  ground temperature the parsers derive from twelve monthly dry-bulb
+  means. EnergyPlus runs a partial typical period when the run lies
+  inside it (`WeatherManager.cc:941-991`), but its weather-file
+  water-mains correlation needs twelve complete months and otherwise
+  falls back to a fixed 10.0 C; HARES always derives the mains from the
+  weather file and substitutes no value it was not given, so a partial
+  file has nothing to run on.
+- **Feb 29.** In a non-leap run year a typical file's Feb 29 records
+  are skipped (`WeatherManager.cc:2816-2828`, the condition at
+  `:2817`). For a leap-year run over a file that has no Feb 29, HARES
+  does what EnergyPlus does: Feb 29 is **not simulated** (EnergyPlus
+  simulates such a year as a 365-day year: `IsLeapYear` requires the
+  file to allow leap years (`:8456`), `LeapYearAdd` is 0 (`:873-876,
+  1906`), and the missing Feb 29 is fatal only for actual weather
+  (`:2832-2836`)). The run still covers the calendar interval
+  `[start, start + duration)`: the clock steps from the last step of
+  Feb 28 to Mar 1 00:00, no output row is labelled Feb 29, and every
+  later date reads its own calendar date's records. Weather and
+  schedules share the one rule (the schedule's own 365-day row
+  mapping). A typical file that has Feb 29 records is read by a
+  leap-year run, and then no day is skipped. A `start_time` on a
+  skipped Feb 29 is a construction error naming the date.
+- **Day types.** The day type every simulated date's readers see (the
+  schedule's weekday and weekend profiles, the HPXML weekday/weekend
+  setpoint profiles) is the date's own **calendar weekday**, including
+  after a skipped Feb 29. This is the one weather edge case where HARES
+  departs from EnergyPlus: EnergyPlus advances the day of week by one
+  per simulated day (`WeatherManager.cc:2856-2859`), so after a skipped
+  Feb 29 every later date is one weekday behind its calendar weekday,
+  which its own Input Output Reference calls incorrect: "when the
+  weather is treated as non-actual, the leap day will be skipped if it
+  is not present, resulting in incorrect day types for the remainder of
+  the year"
+  (`doc/input-output-reference/src/overview/group-location-climate-weather-file-access.tex:597-601`).
+  HARES does not reproduce that known defect: a schedule's weekday and
+  weekend profiles must fall on the days the calendar says.
+- **Actual.** The run's first and last steps must lie inside the
+  file's own dated records (the stamps the parser keeps as the file
+  states them; an `IntervalEnd` file's dated range runs from its first
+  stamp less one interval to its last stamp), or construction fails
+  naming both ranges (`WeatherManager.cc:904-926`, fatal at `:990`).
+  A run that includes a Feb 29 the file has no records for fails
+  construction naming the year (`:888-899`, `:993-996`).
+
+The resolved clock a validate() reports carries the run's simulated
+step count (the calendar steps less any skipped Feb 29), so a caller
+checks a table's row count against the engine, not against its own
+calendar arithmetic. At `tracing` debug, the calendar mapping and day
+type are logged at each day boundary where a wrap or leap-day rule
+applies.

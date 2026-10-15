@@ -90,14 +90,14 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
     let mut dhi_w_m2 = Vec::with_capacity(n);
     let mut wind_speed_m_s = Vec::with_capacity(n);
     let mut wind_dir_deg = Vec::with_capacity(n);
-    // (month, day, hour_1_to_24) -- EPW end-of-interval convention.
-    let mut timestamps: Vec<(u32, u32, u32)> = Vec::with_capacity(n);
+    // (year, month, day, hour_1_to_24) -- EPW end-of-interval convention.
+    let mut timestamps: Vec<(i32, u32, u32, u32)> = Vec::with_capacity(n);
 
     for (data_idx, line) in data_lines.iter().enumerate() {
         let row = data_idx + 3; // 1-based, accounting for 2 header lines
         let fields: Vec<&str> = line.split(',').collect();
 
-        let (month, day, hour) = parse_datetime(&fields, &col_map, row)?;
+        let (year, month, day, hour) = parse_datetime(&fields, &col_map, row)?;
 
         let db = parse_f64(&fields, col_map.dry_bulb, row, "Dry-bulb")?;
         if !(-60.0..=55.0).contains(&db) {
@@ -168,7 +168,7 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
         dhi_w_m2.push(dhi);
         wind_speed_m_s.push(ws);
         wind_dir_deg.push(wd);
-        timestamps.push((month, day, hour));
+        timestamps.push((year, month, day, hour));
     }
 
     // Sky temperature via compute_sky_temp_c — passes IR=0.0 so the function
@@ -185,7 +185,7 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
     // Ground temperature via DOE-2 sinusoidal model.
     let monthly_ground_temps = doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year, 1)?;
     let mut ground_temp_c = Vec::with_capacity(n);
-    for &(month, day, hour) in &timestamps {
+    for &(_year, month, day, hour) in &timestamps {
         ground_temp_c.push(interpolate_ground_temp_c(
             &monthly_ground_temps,
             month,
@@ -203,6 +203,16 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
     Ok(WeatherTimeSeries {
         meta,
         design_conditions: None,
+        stamps: timestamps
+            .iter()
+            .map(|&(year, month, day, hour)| crate::weather::RecordStamp {
+                year,
+                month: month as u8,
+                day: day as u8,
+                hour: hour as u8,
+                minute: 0,
+            })
+            .collect(),
         dry_bulb_c,
         dew_point_c,
         rel_humidity_pct,
@@ -252,6 +262,8 @@ fn parse_station_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         // each measurement interval (e.g., hour 1 = 00:01-01:00).
         // See Wilcox & Marion 2008, NREL/TP-581-43156. Consistent with EPW.
         record_label: RecordLabel::IntervalEnd,
+        // The count check above validated a complete year.
+        data_period: crate::weather::DataPeriod::complete_year(),
         has_embedded_location: true,
         station_wmo: Some(fields[0].trim())
             .filter(|id| !id.is_empty())
@@ -315,7 +327,7 @@ fn build_column_map(col_names: &[&str]) -> Result<Tmy3ColumnMap, WeatherError> {
     })
 }
 
-/// Parse the date and time fields and return `(month, day, hour_1_to_24)`.
+/// Parse the date and time fields and return `(year, month, day, hour_1_to_24)`.
 ///
 /// TMY3 date format: `MM/DD/YYYY`, time format: `HH:MM`.
 /// Hour `01:00` represents the interval ending at 01:00 (end-of-interval, matching EPW).
@@ -323,7 +335,7 @@ fn parse_datetime(
     fields: &[&str],
     col_map: &Tmy3ColumnMap,
     row: usize,
-) -> Result<(u32, u32, u32), WeatherError> {
+) -> Result<(i32, u32, u32, u32), WeatherError> {
     let date_str = fields
         .get(col_map.date)
         .ok_or_else(|| WeatherError::Parse(format!("row {row}: missing Date field")))?
@@ -348,7 +360,7 @@ fn parse_datetime(
         )));
     }
 
-    Ok((date.month(), date.day(), hh))
+    Ok((date.year(), date.month(), date.day(), hh))
 }
 
 fn parse_hhmm(s: &str, row: usize) -> Result<(u32, u32), WeatherError> {

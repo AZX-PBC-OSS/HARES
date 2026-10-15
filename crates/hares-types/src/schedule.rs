@@ -163,10 +163,14 @@ impl TimeWindow {
 /// non-leap calendar (the generated timestamps use 2007), while a
 /// simulation's timestamps can fall in a leap year. In a leap year, dates
 /// after Feb 29 shift one day back so the row lookup lands on the row
-/// whose data the step reads, and Feb 29 itself shares the Mar 1 slot
-/// (both map to the same schedule row, so their flag state must agree).
-/// Every calendar-day comparison against a schedule row goes through
-/// this, so the mapping stays in one place.
+/// whose data the step reads, and Feb 29 itself maps to the Mar 1 slot.
+/// The weather-year rule (the calendar-date addressing) keeps the two in
+/// step: over a typical file without Feb 29 records the day is not
+/// simulated at all (no step reads a Feb 29 slot, so the sharing never
+/// fires); a typical file that has Feb 29 records is read by a leap-year
+/// run, and that day's schedule row is the Mar 1 slot this function
+/// names. Every calendar-day comparison against a schedule row goes
+/// through this, so the mapping stays in one place.
 #[must_use]
 pub fn schedule_day_ordinal<T: Datelike>(date: &T) -> u32 {
     let ordinal = date.ordinal();

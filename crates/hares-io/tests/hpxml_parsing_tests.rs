@@ -67,6 +67,7 @@ fn empty_weather_meta() -> WeatherMeta {
         wf_allows_leap_years: true,
         source_step_secs: 3600,
         record_label: hares_io::RecordLabel::IntervalEnd,
+        data_period: hares_io::DataPeriod::complete_year(),
         has_embedded_location: false,
         station_wmo: None,
     }
@@ -75,6 +76,7 @@ fn empty_weather_meta() -> WeatherMeta {
 fn empty_weather_ts() -> WeatherTimeSeries {
     WeatherTimeSeries {
         meta: empty_weather_meta(),
+        stamps: Vec::new(),
         dry_bulb_c: vec![20.0],
         dew_point_c: vec![10.0],
         rel_humidity_pct: vec![50.0],

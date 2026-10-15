@@ -38,6 +38,10 @@ pub struct ForcingKey {
     /// run's first hour's steps read (hour 24 or hour 1 of the first
     /// day), so two grids differing only in the rule never share a table.
     pub first_hour_interpolation: crate::weather::FirstHour,
+    /// The weather-year rule (typical or actual). It changes which
+    /// records a step reads (the calendar-date addressing), so two grids
+    /// differing only in the rule never share a table.
+    pub weather_year: crate::weather::WeatherYear,
     /// The resolved site's UTC offset in seconds.
     pub utc_offset_secs: i32,
     /// The horizon in steps: the number of rows the table holds. The

@@ -168,10 +168,22 @@ counting the steps that contributed a value.
 `step()`'s dict carries `"timestamp"` as a naive `datetime` equal to the
 row's `Time`. A schedule row maps to a step by the step's local time of
 year divided by the step length, over a 365-day year: dates after
-February 28 in a leap year take their non-leap ordinal (February 29
-shares March 1's row). With `civil_timezone` set, the local time is the
-step's civil time in that zone, so the schedule follows the wall clock
-through daylight saving.
+February 28 in a leap year take their non-leap ordinal. With
+`civil_timezone` set, the local time is the step's civil time in that
+zone, so the schedule follows the wall clock through daylight saving.
+
+The weather is read by calendar date under the EnergyPlus typical and
+actual year rules (the config's `weather_year`, `typical` by default):
+a typical file is addressed by month, day and hour whatever its years,
+a run past Dec 31 wraps to Jan 1 of the file, and a Feb 29 the file has
+no records for is **not simulated** (the typical rule over a leap-year
+run): no row is labelled Feb 29, the clock steps from the last step of
+Feb 28 to Mar 1 00:00, the day types of the later dates stay the
+calendar's own weekdays, and a run's step count is the calendar's less
+the skipped day's. An `actual` year run must lie inside the file's own
+dated records. (The schedule's February 29 note above now applies only
+to a typical file that has Feb 29 records, which a leap-year run reads;
+the day is otherwise not simulated.)
 
 ```python
 from datetime import datetime

@@ -782,6 +782,7 @@ mod tests {
             wf_allows_leap_years: true,
             source_step_secs: 3600,
             record_label: crate::weather::RecordLabel::IntervalEnd,
+            data_period: crate::weather::DataPeriod::complete_year(),
             has_embedded_location: true,
             station_wmo: None,
         }

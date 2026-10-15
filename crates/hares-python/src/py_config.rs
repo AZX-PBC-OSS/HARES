@@ -283,6 +283,7 @@ impl PySimulationConfig {
         max_consecutive_step_failures = hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy = None,
         first_hour_interpolation = "hour24",
+        weather_year = "typical",
         **unexpected
     ))]
     // PyO3 #[new] with kwargs maps 1:1 to Python kwargs; builder adds no value here.
@@ -302,6 +303,7 @@ impl PySimulationConfig {
         max_consecutive_step_failures: u32,
         health_policy: Option<PyHealthPolicy>,
         first_hour_interpolation: &str,
+        weather_year: &str,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         if let Some(unexpected) = unexpected {
@@ -330,6 +332,16 @@ impl PySimulationConfig {
             other => {
                 return Err(PyValueError::new_err(format!(
                     "first_hour_interpolation must be 'hour24' or 'hour1', got '{other}'"
+                )));
+            }
+        };
+
+        let weather_year = match weather_year {
+            "typical" => hares_io::WeatherYear::Typical,
+            "actual" => hares_io::WeatherYear::Actual,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "weather_year must be 'typical' or 'actual', got '{other}'"
                 )));
             }
         };
@@ -363,6 +375,7 @@ impl PySimulationConfig {
             max_consecutive_step_failures,
             health_policy: health_policy.map(|p| p.0).unwrap_or_default(),
             first_hour_interpolation: first_hour,
+            weather_year,
         };
         inner
             .validate()
@@ -519,6 +532,30 @@ impl PySimulationConfig {
     #[setter]
     pub fn set_civil_timezone(&mut self, value: Option<String>) -> PyResult<()> {
         self.assign(|cfg| cfg.civil_timezone = value)
+    }
+
+    /// The weather-year rule: "typical" (the default, EnergyPlus's
+    /// "Treat Weather as Actual" = No) or "actual".
+    #[getter]
+    pub fn weather_year(&self) -> String {
+        match self.0.weather_year {
+            hares_io::WeatherYear::Typical => "typical".to_string(),
+            hares_io::WeatherYear::Actual => "actual".to_string(),
+        }
+    }
+
+    #[setter]
+    pub fn set_weather_year(&mut self, value: &str) -> PyResult<()> {
+        let year = match value {
+            "typical" => hares_io::WeatherYear::Typical,
+            "actual" => hares_io::WeatherYear::Actual,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "weather_year must be 'typical' or 'actual', got '{other}'"
+                )));
+            }
+        };
+        self.assign(|cfg| cfg.weather_year = year)
     }
 
     #[getter]
@@ -904,6 +941,7 @@ mod tests {
             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
             "hour24",
+            "typical",
             None,
         )?;
         Ok(cfg.0)
@@ -967,6 +1005,7 @@ mod tests {
                     hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     None,
                     "hour24",
+                    "typical",
                     Some(&dict),
                 )
                 .expect_err("a removed keyword is an error");
@@ -997,6 +1036,7 @@ mod tests {
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
                 "hour24",
+                "typical",
                 Some(&dict),
             )
             .expect_err("an unknown keyword is an error");
@@ -1029,6 +1069,7 @@ mod tests {
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
                 "hour24",
+                "typical",
                 Some(&dict),
             )
             .expect_err("duration_s is a removed keyword");

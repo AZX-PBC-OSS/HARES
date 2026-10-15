@@ -2895,6 +2895,7 @@ impl Dwelling {
             max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: hares_io::HealthPolicy::default(),
             first_hour_interpolation: hares_io::FirstHour::default(),
+            weather_year: hares_io::WeatherYear::default(),
         };
 
         let config = DwellingConfig {
@@ -3192,6 +3193,16 @@ fn build_from_blueprint_inner_with_seed(
             civil.civil_tz = bp.parsed_civil_tz;
             civil
         };
+        // The weather-year rule's Feb 29 skip: the clock steps from the
+        // last step of Feb 28 to Mar 1 00:00 when the day is not
+        // simulated (the typical rule over a file without Feb 29
+        // records), and the run's step count is the calendar steps less
+        // the skipped day's.
+        let mut clock = clock;
+        clock.skip_feb29 = settings
+            .sim_config
+            .weather_year
+            .skips_feb29(&bp.inputs.weather.series());
         dwelling.clock = clock;
     } else {
         tracing::warn!(
@@ -3245,6 +3256,14 @@ fn assemble_from_blueprint_with_seed(
         civil.civil_tz = bp.parsed_civil_tz;
         civil
     };
+    // The weather-year rule's Feb 29 skip, the production clock's own
+    // flag (the warm-up replays the run's first day, which no skip
+    // falls inside).
+    let mut clock = clock;
+    clock.skip_feb29 = config
+        .sim_config
+        .weather_year
+        .skips_feb29(&bp.inputs.weather.series());
 
     let mut environment = EnvironmentManager::new_shared(
         &bp.inputs.weather,
@@ -3263,6 +3282,7 @@ fn assemble_from_blueprint_with_seed(
                 config.initialization_duration.is_some(),
             )),
             first_hour_interpolation: config.sim_config.first_hour_interpolation,
+            weather_year: config.sim_config.weather_year,
         },
     )
     .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
@@ -3865,8 +3885,28 @@ fn assemble_from_blueprint_with_seed(
                 start: local_start.naive_local(),
                 utc_offset_s: (bp.site_location.utc_offset_h * 3600.0).round() as i32,
                 time_res_s: step_secs,
-                steps: u64::try_from(config.sim_config.duration.num_seconds()).unwrap_or(0)
-                    / u64::from(step_secs),
+                // The run's simulated step count: the calendar steps
+                // less every skipped Feb 29's steps (the weather-year
+                // rule's Feb 29 skip).
+                steps: {
+                    let calendar_steps = u64::try_from(config.sim_config.duration.num_seconds())
+                        .unwrap_or(0)
+                        / u64::from(step_secs);
+                    if config
+                        .sim_config
+                        .weather_year
+                        .skips_feb29(&bp.inputs.weather.series())
+                    {
+                        let end = config.sim_config.start_time + config.sim_config.duration;
+                        let skipped_secs =
+                            crate::clock::skipped_feb29_seconds(config.sim_config.start_time, end);
+                        calendar_steps.saturating_sub(
+                            u64::try_from(skipped_secs / i64::from(step_secs)).unwrap_or(0),
+                        )
+                    } else {
+                        calendar_steps
+                    }
+                },
             },
         }
     };
@@ -19468,8 +19508,11 @@ latent_gain_fraction = 0.08
 
         // The tail crosses the February close (the step whose start is
         // Mar 1 00:00 UTC) and the window's re-sum cadence (the push count
-        // passes a multiple of 1000 well inside the tail).
-        const TAIL: usize = 2749;
+        // passes a multiple of 1000 well inside the tail). The run
+        // simulates 2024's Feb 29 as a typical year without Feb 29
+        // records, so its end sits 96 steps (the skipped day) before the
+        // calendar arithmetic's 5800.
+        const TAIL: usize = 2653;
         for i in 0..TAIL {
             let continuous_step = continuous.step().expect("step");
             let resumed_step = resumed.step().expect("step");
