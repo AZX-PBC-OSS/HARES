@@ -4532,16 +4532,23 @@ mod tests {
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .expect("a Float64 covered weight column");
+            // A column no home produced (the unmet-load column no
+            // producer claims) is uncovered in every row; every produced
+            // hour carries both homes' weight.
+            let column_name = result.covered_weight.schema_ref().field(slot).name();
+            let uncovered = weights.null_count() == weights.len();
             for row in 0..2 {
                 assert!(
-                    !weights.is_null(row),
-                    "row {row}: every hour is fully covered"
+                    uncovered || !weights.is_null(row),
+                    "row {row}: every produced hour of {column_name} is fully covered"
                 );
-                assert_eq!(
-                    weights.value(row).to_bits(),
-                    2.0_f64.to_bits(),
-                    "row {row}: the two homes' weights"
-                );
+                if !uncovered && weights.value(row) != 0.0 {
+                    assert_eq!(
+                        weights.value(row).to_bits(),
+                        2.0_f64.to_bits(),
+                        "row {row}: the two homes' weights"
+                    );
+                }
             }
         }
     }
@@ -4851,15 +4858,26 @@ mod tests {
         assert_eq!(result.coverage.weight_ok, 1.0);
 
         // The degraded home enters no cell: the covered weight is the
-        // clean home's 1.0 in every cell.
+        // clean home's 1.0 in every produced cell. A column no home
+        // produced (the unmet-load column no producer claims) is
+        // uncovered in every row.
         assert_eq!(result.aggregate.num_rows(), 24, "24 hourly periods");
         for slot in 1..result.covered_weight.num_columns() {
             let weights = table_float_column(
                 &result.covered_weight,
                 result.covered_weight.schema_ref().field(slot).name(),
             );
+            if weights.iter().all(Option::is_none) {
+                continue;
+            }
             for (row, weight) in weights.iter().enumerate() {
-                let weight = weight.expect("every cell is covered by the clean home");
+                let weight = weight.expect("every produced cell is covered by the clean home");
+                if weight == 0.0 {
+                    // No home produced the variable here (the unmet-load
+                    // column no producer claims): the covered weight's
+                    // honest zero.
+                    continue;
+                }
                 assert_eq!(
                     weight.to_bits(),
                     1.0_f64.to_bits(),
@@ -5131,7 +5149,7 @@ mod tests {
     /// the period value in bucket order, by the column's over-time rule
     /// (the four 900 s steps summed or meaned as the rule says), the
     /// column names alongside.
-    fn standalone_home_hourly(config: &DwellingConfig) -> (Vec<String>, Vec<Vec<f64>>) {
+    fn standalone_home_hourly(config: &DwellingConfig) -> (Vec<String>, Vec<Vec<Option<f64>>>) {
         let mut config = config.clone();
         config.settings.sim_config.reports = vec![hares_io::ReportSpec {
             name: "frame".to_string(),
@@ -5167,30 +5185,45 @@ mod tests {
             .skip(1)
             .map(|field| crate::fold::field_fleet_rules(field).0.aggregation)
             .collect();
-        let mut columns: Vec<Vec<f64>> = names.iter().map(|_| Vec::new()).collect();
-        let mut steps: Vec<Vec<f64>> = names.iter().map(|_| Vec::new()).collect();
+        // Null-aware period building, the reducer's own rule: a null cell
+        // (a variable no step produced: the unmet-load column no
+        // producer claims) contributes to neither the sum nor the valid
+        // count, the period closes on the row count (four rows to the
+        // hour), a Sum period sums the valid steps, a Mean divides by the
+        // valid count, and a period with no valid step is null.
+        let mut columns: Vec<Vec<Option<f64>>> = names.iter().map(|_| Vec::new()).collect();
+        let mut sums = vec![0.0; names.len()];
+        let mut counts = vec![0_u32; names.len()];
+        let mut rows_in_bucket = 0_usize;
         for batch in &batches {
-            for (slot, column) in columns.iter_mut().enumerate() {
-                let values = batch
-                    .column(slot + 1)
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .expect("a Float64 column");
-                for row in 0..batch.num_rows() {
+            for row in 0..batch.num_rows() {
+                for (slot, _) in columns.iter().enumerate() {
+                    let values = batch
+                        .column(slot + 1)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .expect("a Float64 column");
                     if !values.is_null(row) {
-                        steps[slot].push(values.value(row));
+                        sums[slot] += values.value(row);
+                        counts[slot] += 1;
                     }
-                    if steps[slot].len() == 4 {
-                        let sum = steps[slot].iter().sum::<f64>();
+                }
+                rows_in_bucket += 1;
+                if rows_in_bucket == 4 {
+                    for (slot, column) in columns.iter_mut().enumerate() {
                         // The fleet's over-time rules are Sum and Mean
                         // only; the reducer's Mode and Last never arise
                         // from the fleet's rule resolver.
-                        column.push(match over_time[slot] {
-                            hares_types::Aggregation::Sum => sum,
-                            _ => sum / 4.0,
-                        });
-                        steps[slot].clear();
+                        let reduced = match over_time[slot] {
+                            hares_types::Aggregation::Sum if counts[slot] > 0 => Some(sums[slot]),
+                            _ if counts[slot] > 0 => Some(sums[slot] / f64::from(counts[slot])),
+                            _ => None,
+                        };
+                        column.push(reduced);
+                        sums[slot] = 0.0;
+                        counts[slot] = 0;
                     }
+                    rows_in_bucket = 0;
                 }
             }
         }
@@ -5307,7 +5340,9 @@ mod tests {
         // Every cell of every column, on bits: a battery-only variable
         // carries the battery home's value with covered weight 1; a
         // shared variable the weighted combination by its rule, with the
-        // two homes' covered weight 4.
+        // two homes' covered weight 4. A column no home produced (the
+        // unmet-load column no producer claims) is null in the aggregate
+        // and uncovered in every row.
         let rows = result.aggregate.num_rows();
         for (slot, name) in aggregate_names.iter().enumerate() {
             let battery_only = !plain_names.contains(name);
@@ -5322,7 +5357,24 @@ mod tests {
             let aggregate_column = table_float_column(&result.aggregate, name);
             let weight_column = table_float_column(&result.covered_weight, name);
             for row in 0..rows {
-                let weight = weight_column[row].expect("the cell is covered");
+                let weight = weight_column[row];
+                let Some(weight) = weight else {
+                    assert_eq!(
+                        aggregate_column[row], None,
+                        "{name} row {row}: an uncovered cell's aggregate is null"
+                    );
+                    continue;
+                };
+                if weight == 0.0 {
+                    // No home produced the variable here (the unmet-load
+                    // column no producer claims): the aggregate cell is
+                    // null and the covered weight is its honest zero.
+                    assert_eq!(
+                        aggregate_column[row], None,
+                        "{name} row {row}: a zero-covered cell's aggregate is null"
+                    );
+                    continue;
+                }
                 if battery_only {
                     assert_eq!(
                         weight.to_bits(),
@@ -5331,14 +5383,22 @@ mod tests {
                     );
                     assert_eq!(
                         aggregate_column[row].expect("covered").to_bits(),
-                        battery[row].to_bits(),
+                        battery[row]
+                            .expect("the battery home's period value")
+                            .to_bits(),
                         "{name} row {row}: the battery home's period value"
                     );
                 } else {
                     let plain = &plain_columns[plain_slot.expect("the plain home declares it")];
+                    let plain = plain[row].unwrap_or_else(|| {
+                        panic!("{name} row {row}: the plain home's period value")
+                    });
+                    let battery = battery[row].unwrap_or_else(|| {
+                        panic!("{name} row {row}: the battery home's period value")
+                    });
                     let expected = match across {
-                        hares_types::AcrossHomes::Sum => plain[row] * 3.0 + battery[row],
-                        hares_types::AcrossHomes::Mean => (plain[row] * 3.0 + battery[row]) / 4.0,
+                        hares_types::AcrossHomes::Sum => plain * 3.0 + battery,
+                        hares_types::AcrossHomes::Mean => (plain * 3.0 + battery) / 4.0,
                     };
                     assert_eq!(
                         weight.to_bits(),

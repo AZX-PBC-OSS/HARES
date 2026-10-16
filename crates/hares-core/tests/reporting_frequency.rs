@@ -6,7 +6,7 @@ use hares_core::DwellingSettings;
 use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
-use arrow::array::{Float64Array, RecordBatch};
+use arrow::array::{Array, Float64Array, RecordBatch};
 use arrow::datatypes::Schema;
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_control::DispatchRequest;
@@ -460,7 +460,7 @@ fn batch_fed_reducer_equals_row_fed_reducer() {
     // One row per flushed batch, so every step's row is at hand as the
     // per-step feed runs.
     let mut dwelling = cz4a_dwelling(start, 86_400, 900, 4, 1);
-    let mut step_rows: Vec<(i64, Vec<f64>)> = Vec::new();
+    let mut step_rows: Vec<(i64, Vec<f64>, Vec<bool>)> = Vec::new();
     let mut schema: Option<std::sync::Arc<Schema>> = None;
     let steps = 86_400_i64 / 900;
     for _ in 0..steps {
@@ -471,20 +471,21 @@ fn batch_fed_reducer_equals_row_fed_reducer() {
             schema = Some(batch.schema());
         }
         // The per-step feed: the run's fixed offset applied to the step's
-        // instant, the values read off the frozen plan's recorded row.
+        // instant, the values and their validity read off the recorded
+        // row (the not-applicable cells are null in both feeds).
         let step_time = dwelling.latest_env().current_time;
         let local_ms = local_ms_of_run(step_time);
-        let values: Vec<f64> = (1..batch.num_columns())
+        let (values, valid): (Vec<f64>, Vec<bool>) = (1..batch.num_columns())
             .map(|column| {
-                batch
+                let array = batch
                     .column(column)
                     .as_any()
                     .downcast_ref::<Float64Array>()
-                    .expect("float64 value column")
-                    .value(0)
+                    .expect("float64 value column");
+                (array.value(0), array.is_valid(0))
             })
-            .collect();
-        step_rows.push((local_ms, values));
+            .unzip();
+        step_rows.push((local_ms, values, valid));
     }
     let schema = schema.expect("chunk size one flushes every step's row");
     let rules = rules_for(&schema, &dwelling.catalogue());
@@ -497,10 +498,9 @@ fn batch_fed_reducer_equals_row_fed_reducer() {
     let mut row_rows = Vec::new();
     let mut batch_rows = Vec::new();
 
-    for (local_ms, values) in &step_rows {
-        let valid = vec![true; values.len()];
+    for (local_ms, values, valid) in &step_rows {
         row_fed
-            .push_row(*local_ms, values, &valid, &mut sink(&mut row_rows))
+            .push_row(*local_ms, values, valid, &mut sink(&mut row_rows))
             .expect("the run's rows feed the reducer");
     }
     collect(row_fed, &mut row_rows);

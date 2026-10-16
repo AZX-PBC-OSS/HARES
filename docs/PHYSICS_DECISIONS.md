@@ -487,3 +487,28 @@ move (the one tariffed golden closes no billing boundary inside its run);
 a run that spans a cycle boundary moves the boundary step's energy, cost
 and peak from the closing period's summary to the opening one's, with
 the totals across the periods unchanged.
+
+## A not-applicable output value is null, never 0.0
+
+An output column's cell reads null wherever the underlying quantity does
+not apply to the current state, so the consumers' statistics (means,
+sums) are not poisoned by zeros-as-data. The catalogue decides, per
+variable, what a missing value means (`VariableDef.nullable`,
+`crates/hares-io/src/output/catalogue.rs`), and every variable's
+nullability is logged at catalogue build (`tracing` at `debug`):
+
+| Variable class | Nullability | What a missing value means |
+|---|---|---|
+| Electric power, gas power, energy, capacity (thermal output), reactive power, backup resistance power (ER), fan power, main power, runtime fraction, latent gains, the on/off schedule state, the end-use aggregates | not nullable | physically zero when the component is inactive: the producer writes 0.0; a declared channel's absence is a wiring defect that fails the run (OR-5) |
+| Operating mode, setpoint, SOC, COP, sensible heat ratio, speed index, defrost state, power factor at zero apparent power (was the 1.0 sentinel), the scheduled and runtime setpoint columns before the first reconcile, every actor telemetry field, every verbosity-8 pass-through field as its `TelemetryField` declares | nullable | a missing value is null in the report |
+| Summed cells (duct losses, end-use aggregates) | nullable | a zeroed accumulator per step; null only when the dwelling has no contributing equipment, which the catalogue knows at assembly |
+
+The producers that publish `None`: the heat-pump heater, the heat-pump
+cooler and the air conditioner write COP `None` when the step's runtime
+is 0 or the mode is Off (the ratio is undefined without compressor
+input); the cooling equipment writes the sensible heat ratio only when
+the step's sensible cooling is above 0 (the init insert of 1.0 is
+removed). Metrics and aggregation: a sum skips nulls; a mean divides by
+the count of non-null cells and the count is reported as the variable's
+companion valid-count variable; a period or fold with no non-null cell
+is null.

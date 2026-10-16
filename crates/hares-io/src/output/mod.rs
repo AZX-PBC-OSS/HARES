@@ -44,7 +44,7 @@ pub use metrics::{
 };
 pub use reduce::{PeriodCalendar, PeriodReducer, PeriodRow, ReduceError, TimeRule};
 pub use report::{
-    Destination, Frequency, ReportSpec, RowPlan, RowPlanError, SchemaSurface, Selection,
+    Destination, Frequency, ReportSpec, RowPlan, RowPlanError, RowWriter, SchemaSurface, Selection,
     VariableSurface, resolve_selection,
 };
 pub use writer::{OutputError, ReportRowsSnapshot, StreamingRecorder};

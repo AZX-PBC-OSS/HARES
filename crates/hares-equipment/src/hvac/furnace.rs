@@ -1112,7 +1112,7 @@ fn setpoint_telemetry_fields() -> Vec<TelemetryField> {
 
 fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField::power_kw(tk::FAN_KW, "Electric furnace fan electric power"),
+        TelemetryField::power_kw(tk::FAN_KW, "Electric furnace fan electric power").not_nullable(),
         TelemetryField::power_kw(tk::ELECTRIC_KW, "Electric furnace active power draw"),
         TelemetryField::power_kvar(
             tk::REACTIVE_POWER_KVAR,
@@ -1134,7 +1134,8 @@ fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField::ratio(
             tk::RUNTIME_FRACTION,
             "Runtime fraction (duty cycle / PLR) [0..1]",
-        ),
+        )
+        .not_nullable(),
         TelemetryField::power_kw(
             tk::MAIN_POWER_KW,
             "Main power (total_input - fan) per OCHRE HVAC.py:575",
@@ -1198,7 +1199,7 @@ fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
 
 fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField::power_kw(tk::FAN_KW, "Gas furnace fan-only electric power"),
+        TelemetryField::power_kw(tk::FAN_KW, "Gas furnace fan-only electric power").not_nullable(),
         TelemetryField::power_kw(
             tk::ELECTRIC_KW,
             "Total electric power draw (fan-only for gas furnace)",
@@ -1232,7 +1233,8 @@ fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField::ratio(
             tk::RUNTIME_FRACTION,
             "Runtime fraction (duty cycle / PLR) [0..1]",
-        ),
+        )
+        .not_nullable(),
         TelemetryField::power_kw(
             tk::MAIN_POWER_KW,
             "Main power (gas input in kW) per OCHRE HVAC.py:575",

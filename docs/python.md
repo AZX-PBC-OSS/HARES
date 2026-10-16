@@ -763,3 +763,20 @@ golden fixtures re-captured.
   the HVAC family their declarations carry; the ground-source and
   water-loop heat pump heaters gain the defrost and ER columns their
   pan heater declaration carries and the old name matcher missed).
+- 2026-10-16: a not-applicable output value is null, never 0.0: every
+  output column's cell where the underlying quantity does not apply to
+  the current state reads null (the Arrow null, Python `None` in the
+  polars frames), so means and sums are not poisoned by zeros-as-data.
+  The catalogue declares every variable's nullability; the not-nullable
+  quantities (the electric power, gas power, energy, capacity, reactive
+  power, ER power, fan power, main power, runtime fraction, latent
+  gains, schedule state and end-use aggregates: physically zero when
+  inactive) keep their zeros. The heat pump's and air conditioner's COP
+  is null when the step's compressor did not run, the sensible heat
+  ratio null when the step delivered no sensible cooling, an actor
+  telemetry key the actor did not emit is null, the setpoint columns
+  are null before the first reconcile, and a column no producer claims
+  (the unmet-load column) is null. Every golden re-captured (compare-all
+  8 + dst 1, twice byte-identical): the unmet column's cells 0.0 to
+  null and the schema's nullable flags; no metric, health or billing
+  figure moved.

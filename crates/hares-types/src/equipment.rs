@@ -1412,12 +1412,15 @@ pub fn validate_core_contract(
     if !caps.contains(CoreCapabilities::HAS_SETPOINT) && co.state.setpoint_c.is_some() {
         unexpected_bits |= 128;
     }
-    if caps.contains(CoreCapabilities::HAS_COP) && co.performance.cop.is_none() {
-        missing_bits |= 256;
-    }
     if !caps.contains(CoreCapabilities::HAS_COP) && co.performance.cop.is_some() {
         unexpected_bits |= 256;
     }
+    // HAS_COP does not require the COP at every step: the COP of a step
+    // with no compressor input (runtime 0, the mode Off or Standby) is
+    // undefined, and the step publishes None, the output cell null (B-6).
+    // A declared HAS_COP equipment that never reports a COP shows up as a
+    // run of null COP cells, not a contract failure; the value's
+    // plausibility bounds below still apply when it is present.
 
     if missing_bits == 0 && unexpected_bits == 0 {
         let checks: [(&str, Option<f64>); 7] = [

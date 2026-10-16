@@ -1363,7 +1363,15 @@ impl CoolingCore {
             compressor_kw * self.hvac.config.space_fraction,
         );
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
-        self.telemetry.set(tk::SHR, self.hvac.config.shr);
+        // SHR is written only while the step's sensible cooling is above
+        // 0; the key is unregistered until the first cooling step (no init
+        // insert), so a never-cooled unit's SHR output cell is null, never
+        // a 1.0 sentinel. The record path pairs the value with the step's
+        // delivered sensible cooling, so an off step's stale last value
+        // stays output-invisible.
+        if sensible_cooling_w > 0.0 {
+            self.telemetry.insert(tk::SHR, self.hvac.config.shr);
+        }
         let original_mode = self.operating_mode;
         let post_dse_sensible_w = sensible_cooling_w * dse;
         let post_dse_latent_w = latent_cooling_w * dse;
@@ -1391,26 +1399,30 @@ impl CoolingCore {
         self.telemetry
             .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
         // COP per AHRI/SEER convention: excludes fan power from denominator.
+        // The COP of a step with no compressor input is undefined, not zero:
+        // None (the cell null) when the compressor did not run.
         let compressor_only_w = power_kw_to_w(compressor_kw);
         let total_cooling_w = sensible_cooling_w + latent_cooling_w;
         let cop = if compressor_only_w > 1e-6 {
-            total_cooling_w / compressor_only_w
+            Some(
+                (total_cooling_w / compressor_only_w)
+                    // AHRI 210/240-2023: AC cooling COP ~2.3–4.1 W/W; clamp to [0.0, 8.0]
+                    // to exclude physically impossible values from telemetry. Non-finite
+                    // input survives the clamp: a NaN COP reaching telemetry is a typed
+                    // error in every build.
+                    .clamp(0.0, 8.0),
+            )
         } else {
-            0.0
-        }
-        // AHRI 210/240-2023: AC cooling COP ~2.3–4.1 W/W; clamp to [0.0, 8.0]
-        // to exclude physically impossible values from telemetry. Non-finite
-        // input survives the clamp: a NaN COP reaching telemetry is a typed
-        // error in every build.
-        .clamp(0.0, 8.0);
-        if !cop.is_finite() {
+            None
+        };
+        if cop.is_some_and(|cop| !cop.is_finite()) {
             return Err(HaresError::InvariantViolation {
                 check_name: "ac_cooling_cop_finite".to_string(),
-                value: cop,
+                value: cop.unwrap_or(f64::NAN),
                 tolerance: 0.0,
             });
         }
-        self.telemetry.set(tk::COP, cop);
+        self.telemetry.set(tk::COP, cop.unwrap_or(0.0));
         self.telemetry
             .set(tk::RUNTIME_FRACTION, self.last_cooling_rtf.clamp(0.0, 1.0));
         // Sub-metering telemetry is scaled by space_fraction, matching ELECTRIC_KW
@@ -1507,7 +1519,7 @@ impl CoolingCore {
                 setpoint_c: Some(active_setpoint_c),
             },
             performance: CorePerformance {
-                cop: Some(cop),
+                cop,
                 main_power_kw: Some(compressor_kw * self.hvac.config.space_fraction),
             },
         };
@@ -2041,7 +2053,11 @@ impl CoolingCore {
                 setpoint_c: Some(active_setpoint_c),
             },
             performance: CorePerformance {
-                cop: Some(0.0),
+                // The restore instant's COP: None while the restored mode is
+                // idle (the next step recomputes it), the guard-allowed 0.0
+                // while it is active, so the restored output stays one
+                // `validate_core_contract` accepts.
+                cop: decoded.operating_mode.is_active().then_some(0.0),
                 main_power_kw: None,
             },
         };

@@ -60,7 +60,7 @@ use hares_io::{
     MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX, MODE_SUFFIX, MetricsCalculator,
     PAN_HEATER_POWER_SUFFIX, POWER_FACTOR_SUFFIX, PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX,
     PvPanelDefaults, REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
-    RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL, SCHEDULE_SUFFIX,
+    RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL, RowWriter, SCHEDULE_SUFFIX,
     SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
     SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, SetpointSource,
     SimulationConfig, StreamingRecorder, WeatherInput, end_use_electric_power_column,
@@ -1233,6 +1233,12 @@ struct OutputRowBindings {
     end_use_aggregates: Vec<Option<usize>>,
     /// Telemetry key to output column of each actor, in actor order.
     actors: Vec<Vec<(String, usize)>>,
+    /// The slots valid every step whose value is the row's zero: the
+    /// summed cells whose contributors exist (the duct losses slot when
+    /// the dwelling has HVAC equipment; every bound end-use aggregate
+    /// slot), and the not-nullable columns a roster change orphaned. The
+    /// step marks them valid after the producers write.
+    always_valid_slots: Vec<usize>,
     /// The diagnostics block's slots, present only when the frozen schema
     /// carries the block (the run requested the diagnostics report). The
     /// per-step gate rides this `Option`: with `None` the step reads and
@@ -1374,13 +1380,78 @@ fn build_output_row_bindings(
     let first_hvac = equipment
         .iter()
         .position(|eq| eq.descriptor().end_use.is_hvac_or_water_heating());
+    let dwelling = build_dwelling_columns(&column_index, first_hvac);
+    let equipment_columns = plan_equipment_columns(equipment, &column_index, expected)?;
+    let end_use_aggregates = build_end_use_aggregate_indices(equipment, &column_index);
+    // The slots valid every step whose value is the row's zero:
+    // - the summed cells whose contributors exist: the duct-losses slot
+    //   counts only when the dwelling has HVAC equipment (a non-HVAC
+    //   equipment binds the aggregate's slot but contributes no duct
+    //   distribution); an end-use aggregate slot exists only for an end
+    //   use with at least one contributing equipment (the catalogue emits
+    //   the column for no other);
+    // - a not-nullable column whose producer left the roster: a mid-run
+    //   remove against the frozen schema keeps the column (the reports'
+    //   schemas never change mid-run) with nothing producing it; the
+    //   variable's declaration says never null, so the row's zero stands
+    //   (the cell's meaning reverts to the equipment's inactive zero).
+    let has_hvac = equipment
+        .iter()
+        .any(|eq| eq.descriptor().end_use.is_hvac_or_water_heating());
+    let mut always_valid_slots: Vec<usize> = end_use_aggregates
+        .iter()
+        .take(equipment.len())
+        .flatten()
+        .copied()
+        .collect();
+    if has_hvac {
+        always_valid_slots.extend(equipment_columns.iter().filter_map(|c| c.duct_losses));
+    }
+    let claimed = claimed_slots(&dwelling, &equipment_columns, &end_use_aggregates);
+    for (slot, field) in schema.fields().iter().skip(1).enumerate() {
+        if !field.is_nullable() && !claimed.contains(&slot) {
+            always_valid_slots.push(slot);
+        }
+    }
+
     Ok(OutputRowBindings {
-        dwelling: build_dwelling_columns(&column_index, first_hvac),
-        equipment: plan_equipment_columns(equipment, &column_index, expected)?,
-        end_use_aggregates: build_end_use_aggregate_indices(equipment, &column_index),
+        dwelling,
+        equipment: equipment_columns,
+        end_use_aggregates,
         actors: build_actor_column_map(actors, &column_index),
+        always_valid_slots,
         diagnostics: build_diagnostics_bindings(schema),
     })
+}
+
+/// The producer slots the current bindings claim: the dwelling totals',
+/// every bound equipment column's and every end-use aggregate's. The
+/// always-valid slot rule subtracts this set from the frozen schema's
+/// not-nullable columns to find the orphans a roster change left.
+fn claimed_slots(
+    dwelling: &DwellingColumns,
+    equipment: &[EquipmentColumns],
+    end_use_aggregates: &[Option<usize>],
+) -> std::collections::HashSet<usize> {
+    let mut claimed = std::collections::HashSet::new();
+    claimed.extend(dwelling.total_electric);
+    claimed.extend(dwelling.total_gas);
+    claimed.extend(dwelling.total_reactive);
+    for cols in equipment {
+        claimed.extend(cols.electric_power);
+        claimed.extend(cols.gas_power);
+        claimed.extend(cols.capacity);
+        claimed.extend(cols.reactive_power);
+        claimed.extend(cols.energy_kwh);
+        claimed.extend(cols.schedule);
+        claimed.extend(cols.er_power);
+        claimed.extend(cols.fan_power);
+        claimed.extend(cols.main_power);
+        claimed.extend(cols.runtime_fraction);
+        claimed.extend(cols.latent_gains);
+    }
+    claimed.extend(end_use_aggregates.iter().flatten());
+    claimed
 }
 
 /// Writes one step's diagnostics columns into the plan row: the zone
@@ -1388,18 +1459,19 @@ fn build_output_row_bindings(
 /// electrical net from the ports, and the thermal solver's component
 /// gains. The values are the per-step diagnostics CSV's row semantics
 /// (a zone absent from the environment or the ports records 0.0, the same
-/// default the CSV's row writer applied), at full f64 precision.
+/// default the CSV's row writer applied), at full f64 precision. Every
+/// bound slot is written, valid every step.
 fn write_diagnostics_row(
-    row: &mut [f64],
+    writer: &mut RowWriter<'_>,
     diag: &DiagnosticsBindings,
     step: u64,
     env: &EnvironmentState,
     ports: &PortSlots,
     gains: &EnvelopeComponentGains,
 ) {
-    row[diag.step] = step as f64;
-    row[diag.timestamp_s] = env.current_time.timestamp() as f64;
-    row[diag.outdoor_temp_c] = env.weather.outdoor_temp_c;
+    writer.write(diag.step, step as f64);
+    writer.write(diag.timestamp_s, env.current_time.timestamp() as f64);
+    writer.write(diag.outdoor_temp_c, env.weather.outdoor_temp_c);
     for zone in &diag.zones {
         let temp = env
             .zones
@@ -1407,22 +1479,34 @@ fn write_diagnostics_row(
             .find(|z| z.id == zone.zone)
             .map(|z| z.temperature_c)
             .unwrap_or(0.0);
-        row[zone.temp_c] = temp;
+        writer.write(zone.temp_c, temp);
         let thermal = ports.thermal.iter().find(|t| t.zone == zone.zone);
-        row[zone.thermal_gain_w] = thermal.map_or(0.0, |t| t.heat().sensible_w());
-        row[zone.latent_gain_w] = thermal.map_or(0.0, |t| t.heat().latent_w);
+        writer.write(
+            zone.thermal_gain_w,
+            thermal.map_or(0.0, |t| t.heat().sensible_w()),
+        );
+        writer.write(
+            zone.latent_gain_w,
+            thermal.map_or(0.0, |t| t.heat().latent_w),
+        );
     }
-    row[diag.electrical_net_kw] = power_w_to_kw(ports.electrical.net_active_w());
-    row[diag.electrical_net_kvar] = ports.electrical.reactive_power_kvar;
-    row[diag.envelope.port_radiant_w] = gains.port_radiant_w;
-    row[diag.envelope.port_shortwave_w] = gains.port_shortwave_w;
-    row[diag.envelope.port_convective_w] = gains.port_convective_w;
-    row[diag.envelope.window_solar_w] = gains.window_solar_w;
-    row[diag.envelope.opaque_solar_lwr_w] = gains.opaque_solar_lwr_w;
-    row[diag.envelope.interior_lwr_w] = gains.interior_lwr_w;
-    row[diag.envelope.internal_gain_w] = gains.internal_gain_w;
-    row[diag.envelope.air_density_kg_m3] = gains.air_density_kg_m3;
-    row[diag.envelope.ghi_w_m2] = env.weather.ghi_w_m2;
+    writer.write(
+        diag.electrical_net_kw,
+        power_w_to_kw(ports.electrical.net_active_w()),
+    );
+    writer.write(
+        diag.electrical_net_kvar,
+        ports.electrical.reactive_power_kvar,
+    );
+    writer.write(diag.envelope.port_radiant_w, gains.port_radiant_w);
+    writer.write(diag.envelope.port_shortwave_w, gains.port_shortwave_w);
+    writer.write(diag.envelope.port_convective_w, gains.port_convective_w);
+    writer.write(diag.envelope.window_solar_w, gains.window_solar_w);
+    writer.write(diag.envelope.opaque_solar_lwr_w, gains.opaque_solar_lwr_w);
+    writer.write(diag.envelope.interior_lwr_w, gains.interior_lwr_w);
+    writer.write(diag.envelope.internal_gain_w, gains.internal_gain_w);
+    writer.write(diag.envelope.air_density_kg_m3, gains.air_density_kg_m3);
+    writer.write(diag.envelope.ghi_w_m2, env.weather.ghi_w_m2);
 }
 
 /// Resolves v8 per-equipment telemetry diagnostic columns for the given
@@ -2604,6 +2688,9 @@ pub struct Dwelling {
     /// values one report's projection selects, pushed to that report's
     /// recorder. Cleared and refilled per report per step.
     projected_row_buf: Vec<f64>,
+    /// The projected row's validity, parallel to `projected_row_buf`, fed
+    /// to the recorders with every pushed row.
+    projected_valid_buf: Vec<bool>,
     /// Schedule column index for the occupancy time series, or `None` if the
     /// schedule does not include an occupancy column.
     occupancy_column_idx: Option<usize>,
@@ -4159,6 +4246,7 @@ fn assemble_from_blueprint_with_seed(
         #[cfg(test)]
         snapshot_allocations: SnapshotAllocations::default(),
         projected_row_buf: Vec::new(),
+        projected_valid_buf: Vec::new(),
         occupancy_column_idx,
         occupancy_scale,
         prev_humidity_ratios: init_humidity_ratios,
@@ -8054,18 +8142,18 @@ impl Dwelling {
         // per row as the milliseconds the Timestamp(Millisecond, None)
         // field carries.
         let time_ms = step.timestamp.and_utc().timestamp_millis();
-        let row = self.roster.row_plan.row_mut();
+        let mut writer = self.roster.row_plan.writer();
         let dwelling_columns = &self.roster.bindings.dwelling;
 
         if let Some(idx) = dwelling_columns.total_electric {
-            row[idx] = step.net_electric_power_kw;
+            writer.write(idx, step.net_electric_power_kw);
         }
         if let Some(idx) = dwelling_columns.total_gas {
             let gas_w = self.ports.fuel.get(hares_types::FuelType::Gas);
-            row[idx] = gas_w / GAS_THERMS_PER_HOUR_TO_W;
+            writer.write(idx, gas_w / GAS_THERMS_PER_HOUR_TO_W);
         }
         if let Some(idx) = dwelling_columns.total_reactive {
-            row[idx] = self.electrical_solver.net_reactive_kvar();
+            writer.write(idx, self.electrical_solver.net_reactive_kvar());
         }
 
         // Per-equipment columns via the frozen plan's producer bindings. The
@@ -8081,102 +8169,189 @@ impl Dwelling {
         {
             let co = eq.core_output();
             if let Some(idx) = cols.mode {
-                row[idx] = co.state.operating_mode.map_or(0.0, |m| m.as_code());
+                writer.write_opt(idx, co.state.operating_mode.map(|m| m.as_code()));
             }
             if let Some(idx) = cols.setpoint {
-                row[idx] = co.state.setpoint_c.unwrap_or(0.0);
+                writer.write_opt(idx, co.state.setpoint_c);
             }
             if let Some(idx) = cols.soc {
-                row[idx] = co.state.soc.map_or(0.0, |soc| soc.get());
+                writer.write_opt(idx, co.state.soc.map(|soc| soc.get()));
             }
             if let Some(idx) = cols.schedule {
                 let is_active = co
                     .state
                     .operating_mode
                     .is_some_and(|m| m != hares_types::OperatingMode::Off);
-                row[idx] = if is_active { 1.0 } else { 0.0 };
+                writer.write(idx, if is_active { 1.0 } else { 0.0 });
             }
             if let Some(idx) = cols.speed {
-                row[idx] = co.state.speed_index.map_or(0.0, |s| s as f64);
+                writer.write_opt(idx, co.state.speed_index.map(f64::from));
             }
             if let Some(idx) = cols.defrost_state {
-                row[idx] = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0); // allowed: defrost cycle state remains telemetry-only until CoreOutput gains a defrost_state field.
+                writer.write_opt(idx, eq.telemetry().get(tk::DEFROST_CYCLE_STATE)); // allowed: defrost cycle state remains telemetry-only until CoreOutput gains a defrost_state field.
             }
             for &(key, idx) in &cols.v8_state_columns {
-                row[idx] = eq.telemetry().get(key).unwrap_or(0.0); // allowed: v8 telemetry pass-through uses pre-resolved tk:: constants bound to `key`.
+                writer.write_opt(idx, eq.telemetry().get(key)); // allowed: v8 telemetry pass-through uses pre-resolved tk:: constants bound to `key`.
             }
             if self.step_failed[eq_idx] {
+                // The step failed and was rolled back: the equipment
+                // delivered nothing this step. The not-nullable flow
+                // columns read their inactive zeros (the same zeros the
+                // success path's substitutions give an inactive
+                // component), and the nullable ones stay unwritten, null.
+                if let Some(idx) = cols.electric_power {
+                    writer.write(idx, 0.0);
+                }
+                if let Some(idx) = cols.gas_power {
+                    writer.write(idx, 0.0);
+                }
+                if let Some(idx) = cols.capacity {
+                    writer.write(idx, 0.0);
+                }
+                if let Some(idx) = cols.reactive_power {
+                    writer.write(idx, 0.0);
+                }
+                if let Some(idx) = cols.energy_kwh {
+                    writer.write(idx, 0.0);
+                }
+                if let Some(idx) = cols.er_power {
+                    writer.write(idx, 0.0);
+                }
+                if let Some(idx) = cols.fan_power {
+                    writer.write(idx, 0.0);
+                }
+                if let Some(idx) = cols.main_power {
+                    writer.write(idx, 0.0);
+                }
+                if let Some(idx) = cols.runtime_fraction {
+                    writer.write(idx, 0.0);
+                }
+                if let Some(idx) = cols.latent_gains {
+                    writer.write(idx, 0.0);
+                }
                 continue;
             }
             if let Some(idx) = cols.electric_power {
-                row[idx] = co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
+                // Not nullable: the quantity is physically zero when its
+                // component is inactive (an undeclared channel is the zero,
+                // the declared one's absence the contract's wiring defect).
+                writer.write(
+                    idx,
+                    co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw()),
+                );
             }
             if let Some(idx) = cols.gas_power {
-                row[idx] =
-                    co.flows.fuel_w.map_or(0.0, |f| f.consumption_w) / GAS_THERMS_PER_HOUR_TO_W;
+                writer.write(
+                    idx,
+                    co.flows.fuel_w.map_or(0.0, |f| f.consumption_w) / GAS_THERMS_PER_HOUR_TO_W,
+                );
             }
             if let Some(idx) = cols.capacity {
                 // Capacity column is always a positive magnitude (OCHRE HVAC.py:598:
                 // `capacity_list` is asserted strictly positive). thermal_output_w uses
                 // the signed convention (negative for cooling), so take abs().
+                // Not nullable: 0.0 when the equipment reports no thermal
+                // channel (inactive).
                 let capacity_w = co
                     .flows
                     .thermal_output_w
                     .map(f64::abs)
                     .or(co.flows.sensible_cooling_w.map(f64::abs))
                     .unwrap_or(0.0);
-                row[idx] = capacity_w;
+                writer.write(idx, capacity_w);
             }
             if let Some(idx) = cols.cop {
-                row[idx] = co.performance.cop.unwrap_or(0.0);
+                // Nullable: the COP of a step with no compressor input is
+                // undefined, the cell null (today a 0.0 sentinel).
+                writer.write_opt(idx, co.performance.cop);
             }
             if let Some(idx) = cols.reactive_power {
                 let q = co.flows.reactive_power_kvar.unwrap_or(0.0);
-                row[idx] = q;
+                writer.write(idx, q);
                 if let Some(pf_idx) = cols.power_factor {
                     let p = co.flows.electric_kw.map_or(0.0, |e| e.signed_kw());
                     let s = (p * p + q * q).sqrt();
-                    row[pf_idx] = if s > 1e-9 { (p / s).abs() } else { 1.0 };
+                    // Zero apparent power has no power factor: the ratio is
+                    // undefined, the cell null (today it carried the 1.0
+                    // sentinel).
+                    writer.write_opt(pf_idx, (s > 1e-9).then(|| (p / s).abs()));
                 }
             }
             if let Some(idx) = cols.energy_kwh {
                 let dt_hours = self.latest_env.time_step_secs() / SECONDS_PER_HOUR;
-                let electric_kw = co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw());
-                row[idx] = electric_kw * dt_hours;
+                // Not nullable: the step's energy is zero when the
+                // equipment drew nothing.
+                writer.write(
+                    idx,
+                    co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw()) * dt_hours,
+                );
             }
             if let Some(idx) = cols.er_power {
                 // OCHRE HVAC.py:1464-1467: ER Power = er_capacity * er_eir_rated * space_fraction / 1000.
                 // Maps to BACKUP_ER_KW (already space-fraction-adjusted in heater step).
-                row[idx] = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0); // allowed: ER power remains telemetry-only until CoreOutput gains an er_power field.
+                writer.write(
+                    idx,
+                    eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0), // allowed: ER power remains telemetry-only until CoreOutput gains an er_power field.
+                );
             }
             // Per-equipment HVAC performance columns at v7.
             // Some read from CoreOutput (setpoint, capacity, COP, speed, main_power),
             // the rest remain telemetry-only until their fields are promoted.
             if let Some(idx) = cols.shr {
-                row[idx] = eq.telemetry().get(tk::SHR).unwrap_or(0.0); // allowed: SHR remains telemetry-only until CoreOutput gains an SHR field.
+                // The sensible heat ratio exists while the step delivered
+                // sensible cooling: the cell is null otherwise (the
+                // telemetry key holds the last cooling step's value, not a
+                // per-step presence), never a 0.0 sentinel.
+                writer.write_opt(
+                    idx,
+                    co.flows
+                        .sensible_cooling_w
+                        .filter(|sc| *sc < 0.0)
+                        .and_then(|_| eq.telemetry().get(tk::SHR)), // allowed: SHR remains telemetry-only until CoreOutput gains an SHR field.
+                );
             }
             if let Some(idx) = cols.fan_power {
-                row[idx] = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0); // allowed: fan power remains telemetry-only until CoreOutput gains a fan power field.
+                writer.write(
+                    idx,
+                    eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0), // allowed: fan power remains telemetry-only until CoreOutput gains a fan power field.
+                );
             }
             if let Some(idx) = cols.main_power {
-                row[idx] = co.performance.main_power_kw.unwrap_or(0.0);
+                writer.write(idx, co.performance.main_power_kw.unwrap_or(0.0));
             }
             if let Some(idx) = cols.runtime_fraction {
-                row[idx] = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0); // allowed: runtime fraction remains telemetry-only until CoreOutput gains an RTF field.
+                writer.write(
+                    idx,
+                    eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0), // allowed: runtime fraction remains telemetry-only until CoreOutput gains an RTF field.
+                );
             }
             if let Some(idx) = cols.latent_gains {
                 // OCHRE HVAC.py:595: Latent Gains = latent_gain * space_fraction (pre-DSE).
-                row[idx] = eq.telemetry().get(tk::LATENT_GAINS_W).unwrap_or(0.0); // allowed: latent gains remains telemetry-only until CoreOutput gains a latent gains field.
+                writer.write(
+                    idx,
+                    eq.telemetry().get(tk::LATENT_GAINS_W).unwrap_or(0.0), // allowed: latent gains remains telemetry-only until CoreOutput gains a latent gains field.
+                );
             }
             if let Some(idx) = cols.duct_losses {
                 // Aggregate column: sum duct_loss_w across all HVAC equipment.
                 // Only the first equipment's index is used; all HVAC contributions
                 // are accumulated into the same row slot.
-                row[idx] += eq.telemetry().get(tk::DUCT_LOSS_W).unwrap_or(0.0); // allowed: duct loss remains telemetry-only until CoreOutput gains a duct loss field.
+                writer.add(
+                    idx,
+                    eq.telemetry().get(tk::DUCT_LOSS_W).unwrap_or(0.0), // allowed: duct loss remains telemetry-only until CoreOutput gains a duct loss field.
+                );
             }
             for &(key, idx) in &cols.v8_flow_columns {
-                row[idx] = eq.telemetry().get(key).unwrap_or(0.0); // allowed: v8 telemetry pass-through uses pre-resolved tk:: constants bound to `key`.
+                writer.write_opt(idx, eq.telemetry().get(key)); // allowed: v8 telemetry pass-through uses pre-resolved tk:: constants bound to `key`.
             }
+        }
+
+        // The slots whose value is the row's zero every step: the summed
+        // cells' accumulator when its contributors exist, and the
+        // not-nullable columns a roster change orphaned (see the
+        // bindings' builder).
+        for &slot in &self.roster.bindings.always_valid_slots {
+            writer.mark_valid(slot);
         }
 
         // Per-EndUse aggregate electric power columns.
@@ -8194,22 +8369,26 @@ impl Dwelling {
             if let Some(idx) = agg_idx_opt
                 && !self.step_failed[eq_idx]
             {
-                row[idx] += self.equipment[eq_idx]
-                    .core_output()
-                    .flows
-                    .electric_kw
-                    .map_or(0.0, |e| e.net_consumption_kw());
+                writer.add(
+                    idx,
+                    self.equipment[eq_idx]
+                        .core_output()
+                        .flows
+                        .electric_kw
+                        .map_or(0.0, |e| e.net_consumption_kw()),
+                );
             }
         }
 
         // Actor telemetry columns: pre-resolved column indices avoid
         // per-timestep format!() allocation (parallel to the plan's
-        // equipment bindings).
+        // equipment bindings). A key the actor did not emit this step
+        // leaves its cell unwritten, null.
         for (actor, pre_resolved) in self.actors.iter().zip(&self.roster.bindings.actors) {
             if let Some(tel) = actor.telemetry() {
                 for (key, column_idx) in pre_resolved {
                     if let Some(value) = tel.get(key) {
-                        row[*column_idx] = value;
+                        writer.write(*column_idx, value);
                     }
                 }
             }
@@ -8218,18 +8397,18 @@ impl Dwelling {
         // Zone temperature columns -- direct index lookup, no allocations.
         for (i, &(_, temp_c)) in self.roster.zone_temp_scratch.iter().enumerate() {
             if let Some(idx) = self.roster.zones.zone_temp_col_indices[i] {
-                row[idx] = temp_c;
+                writer.write(idx, temp_c);
             }
         }
         // Fallback for old-style column name
         if let Some(idx) = dwelling_columns.indoor_temp_fallback
             && let Some(&(_, temp_c)) = self.roster.zone_temp_scratch.first()
         {
-            row[idx] = temp_c;
+            writer.write(idx, temp_c);
         }
 
         if let Some(idx) = dwelling_columns.outdoor_dry_bulb {
-            row[idx] = self.latest_env.weather.outdoor_temp_c;
+            writer.write(idx, self.latest_env.weather.outdoor_temp_c);
         }
 
         // Envelope, boundary, and HVAC thermal gains from the thermal
@@ -8238,89 +8417,90 @@ impl Dwelling {
         let gains = self.thermal_solver.component_gains();
         for &(term, idx) in &dwelling_columns.envelope {
             if let Some(idx) = idx {
-                row[idx] = term(gains);
+                writer.write(idx, term(gains));
             }
         }
 
         if let Some(idx) = dwelling_columns.ground_temp {
-            row[idx] = self.latest_env.weather.ground_temp_c;
+            writer.write(idx, self.latest_env.weather.ground_temp_c);
         }
         if let Some(idx) = dwelling_columns.mains_temp {
-            row[idx] = self.latest_env.weather.mains_temp_c;
+            writer.write(idx, self.latest_env.weather.mains_temp_c);
         }
         // The engine's per-step weather channels (the resample_weather
         // row): the run's internal series, the values the environment's
         // evaluation carried this step.
         if let Some(idx) = dwelling_columns.outdoor_humidity_ratio {
-            row[idx] = self.latest_env.weather.outdoor_humidity_ratio;
+            writer.write(idx, self.latest_env.weather.outdoor_humidity_ratio);
         }
         if let Some(idx) = dwelling_columns.pressure_kpa {
-            row[idx] = self.latest_env.weather.pressure_kpa;
+            writer.write(idx, self.latest_env.weather.pressure_kpa);
         }
         if let Some(idx) = dwelling_columns.wind_speed_m_s {
-            row[idx] = self.latest_env.weather.wind_speed_m_s;
+            writer.write(idx, self.latest_env.weather.wind_speed_m_s);
         }
         if let Some(idx) = dwelling_columns.sky_temp_c {
-            row[idx] = self.latest_env.weather.sky_temp_c;
+            writer.write(idx, self.latest_env.weather.sky_temp_c);
         }
         if let Some(idx) = dwelling_columns.ghi_w_m2 {
-            row[idx] = self.latest_env.weather.ghi_w_m2;
+            writer.write(idx, self.latest_env.weather.ghi_w_m2);
         }
         if let Some(idx) = dwelling_columns.dni_w_m2 {
-            row[idx] = self.latest_env.weather.dni_w_m2;
+            writer.write(idx, self.latest_env.weather.dni_w_m2);
         }
         if let Some(idx) = dwelling_columns.dhi_w_m2 {
-            row[idx] = self.latest_env.weather.dhi_w_m2;
+            writer.write(idx, self.latest_env.weather.dhi_w_m2);
         }
 
         // Setpoint chain: dwelling-level context columns for control auditing.
         // Read from the first HVAC equipment that publishes these keys; setpoint
         // reconciliation writes them to all HVAC equipment telemetry, so any
         // one carries the correct value. The equipment position is frozen
-        // with the plan (every roster change rebuilds it).
+        // with the plan (every roster change rebuilds it). Before the first
+        // reconcile the keys are absent and the cells stay unwritten, null.
         if let Some(first_hvac_pos) = dwelling_columns.first_hvac {
             let first_hvac = &self.equipment[first_hvac_pos];
             if let Some(idx) = dwelling_columns.scheduled_heating_setpoint {
-                // allowed: setpoint telemetry keys are populated by HVAC equipment
-                // reconcile logic after the first timestep. Before that, get() returns
-                // None — 0.0 is the safe pre-init sentinel for output-column display.
-                row[idx] = first_hvac
-                    .telemetry()
-                    .get(tk::SCHEDULE_HEATING_SETPOINT_C)
-                    .unwrap_or(0.0);
+                writer.write_opt(
+                    idx,
+                    // allowed: setpoint telemetry keys are populated by HVAC
+                    // equipment reconcile logic after the first timestep; before
+                    // that the cell stays unwritten, null.
+                    first_hvac.telemetry().get(tk::SCHEDULE_HEATING_SETPOINT_C),
+                );
             }
             if let Some(idx) = dwelling_columns.scheduled_cooling_setpoint {
-                // allowed: see SCHEDULED_HEATING_SETPOINT_COL comment above.
-                row[idx] = first_hvac
-                    .telemetry()
-                    .get(tk::SCHEDULE_COOLING_SETPOINT_C)
-                    .unwrap_or(0.0);
+                writer.write_opt(
+                    idx,
+                    // allowed: see the scheduled heating setpoint read above.
+                    first_hvac.telemetry().get(tk::SCHEDULE_COOLING_SETPOINT_C),
+                );
             }
             if let Some(idx) = dwelling_columns.runtime_heating_setpoint {
-                // allowed: see SCHEDULED_HEATING_SETPOINT_COL comment above.
-                row[idx] = first_hvac
-                    .telemetry()
-                    .get(tk::RUNTIME_HEATING_SETPOINT_C)
-                    .unwrap_or(0.0);
+                writer.write_opt(
+                    idx,
+                    // allowed: see the scheduled heating setpoint read above.
+                    first_hvac.telemetry().get(tk::RUNTIME_HEATING_SETPOINT_C),
+                );
             }
             if let Some(idx) = dwelling_columns.runtime_cooling_setpoint {
-                // allowed: see SCHEDULED_HEATING_SETPOINT_COL comment above.
-                row[idx] = first_hvac
-                    .telemetry()
-                    .get(tk::RUNTIME_COOLING_SETPOINT_C)
-                    .unwrap_or(0.0);
+                writer.write_opt(
+                    idx,
+                    // allowed: see the scheduled heating setpoint read above.
+                    first_hvac.telemetry().get(tk::RUNTIME_COOLING_SETPOINT_C),
+                );
             }
         }
 
         for &(zone, value) in &gains.infiltration_by_zone {
             if let Some(&idx) = self.roster.zones.infiltration_columns.get(&zone) {
-                row[idx] = value;
+                writer.write(idx, value);
             }
         }
 
         for &(zone, value) in &gains.interior_lwr_by_zone {
             if let Some(&idx) = self.roster.zones.lwr_columns.get(&zone) {
-                row[idx] = value;
+                writer.write(idx, value);
             }
         }
 
@@ -8333,10 +8513,16 @@ impl Dwelling {
         // verbosity 5, not here.
         for thermal in &self.ports.thermal {
             if let Some(&(heat_idx, cool_idx)) = self.roster.zones.hvac_columns.get(&thermal.zone) {
-                row[heat_idx] = thermal.sensible_for_category(ThermalCategory::HvacHeating);
-                row[cool_idx] = thermal
-                    .sensible_for_category(ThermalCategory::HvacCooling)
-                    .abs();
+                writer.write(
+                    heat_idx,
+                    thermal.sensible_for_category(ThermalCategory::HvacHeating),
+                );
+                writer.write(
+                    cool_idx,
+                    thermal
+                        .sensible_for_category(ThermalCategory::HvacCooling)
+                        .abs(),
+                );
             }
         }
 
@@ -8346,7 +8532,7 @@ impl Dwelling {
         // lookups default to 0.0 the same way), at full f64 precision.
         if let Some(diag) = &self.roster.bindings.diagnostics {
             write_diagnostics_row(
-                row,
+                &mut writer,
                 diag,
                 self.clock.current_step(),
                 &self.latest_env,
@@ -8355,7 +8541,6 @@ impl Dwelling {
             );
         }
 
-        let row = self.roster.row_plan.row();
         // Every report's recorder gets the row its selection projected out
         // of the union row, in the report's own column order. The
         // projections were copied at freeze; the union row's borrow ends
@@ -8365,7 +8550,7 @@ impl Dwelling {
         // onward. `None` when the run did not request metrics: the step
         // pays one branch and nothing else.
         if let Some(calculator) = self.metrics_calculator.as_mut() {
-            calculator.accumulate_row(row).map_err(|err| {
+            calculator.accumulate_row(writer.row()).map_err(|err| {
                 HaresError::InvalidState(format!("metrics accumulation failed: {err}"))
             })?;
         }
@@ -8376,8 +8561,13 @@ impl Dwelling {
         {
             self.projected_row_buf.clear();
             self.projected_row_buf
-                .extend(projection.iter().map(|&slot| row[slot]));
-            if let Err(err) = recorder.push_row(time_ms, &self.projected_row_buf) {
+                .extend(projection.iter().map(|&slot| writer.row()[slot]));
+            self.projected_valid_buf.clear();
+            self.projected_valid_buf
+                .extend(projection.iter().map(|&slot| writer.valid(slot)));
+            if let Err(err) =
+                recorder.push_row(time_ms, &self.projected_row_buf, &self.projected_valid_buf)
+            {
                 return Err(Self::recorder_error("record push", err));
             }
         }
@@ -18392,7 +18582,9 @@ destination = "memory"
             },
         )
         .expect("recorder");
-        recorder.push_row(0, &[0.0, 0.0]).expect("push row");
+        recorder
+            .push_row(0, &[0.0, 0.0], &[true, true])
+            .expect("push row");
         dwelling.recorders = vec![recorder];
         // The plan must reach the bindings rebuild (not stop at the
         // no-reports gate): one report whose selection promises the

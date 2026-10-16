@@ -871,6 +871,42 @@ mod tests {
     }
 
     #[test]
+    fn mean_excludes_nulls_and_reports_valid_count() {
+        // The acceptance's exact shape: an hourly mean over four steps
+        // with one null equals the mean of three and reports a valid count
+        // of 3.
+        let mut reducer = PeriodReducer::new(
+            Frequency::Hourly,
+            PeriodCalendar::default(),
+            vec![TimeRule {
+                aggregation: Aggregation::Mean,
+                ..rule(Aggregation::Mean)
+            }],
+        )
+        .expect("reducer builds");
+        let base = local_ms_at(offset(), 2023, 1, 1, 0, 0);
+        let mut rows = Vec::new();
+        for (i, (value, valid)) in [(10.0, true), (20.0, false), (30.0, true), (40.0, true)]
+            .into_iter()
+            .enumerate()
+        {
+            reducer
+                .push_row(
+                    base + i64::try_from(i).expect("step index") * STEP_MS,
+                    &[value],
+                    &[valid],
+                    &mut sink(&mut rows),
+                )
+                .expect("the hour's rows feed the reducer");
+        }
+        collect(reducer, &mut rows);
+        assert_eq!(rows.len(), 1);
+        let mean: f64 = (10.0 + 30.0 + 40.0) / 3.0;
+        assert_eq!(rows[0].values[0].to_bits(), mean.to_bits());
+        assert_eq!(rows[0].valid_steps, &[3]);
+    }
+
+    #[test]
     fn null_cells_excluded_with_valid_count() {
         let mut reducer = PeriodReducer::new(
             Frequency::Hourly,

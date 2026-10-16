@@ -97,7 +97,8 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField::ratio(
             tk::RUNTIME_FRACTION,
             "Compressor runtime fraction (part-load ratio) this timestep",
-        ),
+        )
+        .not_nullable(),
         TelemetryField::power_kw(tk::COMPRESSOR_KW, "Compressor-only electric power"),
         TelemetryField::power_kw(
             tk::MAIN_POWER_KW,
@@ -147,8 +148,9 @@ pub(super) fn heater_telemetry_fields() -> Vec<TelemetryField> {
             tk::RUNTIME_COOLING_SETPOINT_C,
             "Runtime override cooling setpoint (0.0 when no override active)",
         ),
-        TelemetryField::power_kw(tk::FAN_KW, "Fan/blower electric power"),
-        TelemetryField::power_kw(tk::BACKUP_ER_KW, "Electric resistance backup heater power"),
+        TelemetryField::power_kw(tk::FAN_KW, "Fan/blower electric power").not_nullable(),
+        TelemetryField::power_kw(tk::BACKUP_ER_KW, "Electric resistance backup heater power")
+            .not_nullable(),
         TelemetryField::power_kw(tk::PAN_HEATER_KW, "Minisplit pan/crankcase heater power"),
         TelemetryField::power_kw(
             tk::PUMP_POWER_KW,

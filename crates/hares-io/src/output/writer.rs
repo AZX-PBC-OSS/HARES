@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use arrow::array::{Float64Array, RecordBatch, TimestampMillisecondArray};
+use arrow::array::{Array, Float64Array, RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::Schema;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
@@ -110,6 +110,12 @@ pub struct ReportRowsSnapshot {
     /// Every row's values, row-major: `timestamps.len()` rows of one
     /// entry per value column, in the schema's order.
     pub values: Vec<f64>,
+    /// Every row's per-column validity, row-major in the same shape as
+    /// `values`: a false entry is a null cell. The null cells the engine
+    /// writes (a not-applicable value is null, never a substituted 0.0)
+    /// survive the checkpoint bit for bit.
+    #[serde(default)]
+    pub valid: Vec<bool>,
     /// The trailing rows that were still buffered (not yet flushed) when
     /// the checkpoint was taken.
     pub buffered_rows: usize,
@@ -148,6 +154,7 @@ impl StreamingRecorder {
         let buffered = self.timestamp_buf.len();
         let mut timestamps = Vec::with_capacity(self.total_rows);
         let mut values = Vec::with_capacity(self.total_rows * width);
+        let mut valid = Vec::with_capacity(self.total_rows * width);
         // The flushed batches' rows first, in flush order: the batches'
         // schema is the recorder's own.
         for batch in &self.flushed_batches {
@@ -169,6 +176,7 @@ impl StreamingRecorder {
             for r in 0..batch.num_rows() {
                 timestamps.push(ts.value(r));
                 for column in &columns {
+                    valid.push(column.is_valid(r));
                     values.push(column.value(r));
                 }
             }
@@ -176,13 +184,15 @@ impl StreamingRecorder {
         // Then the buffered rows.
         for r in 0..buffered {
             timestamps.push(self.timestamp_buf[r]);
-            for buf in &self.value_bufs {
+            for (buf, valid_buf) in self.value_bufs.iter().zip(&self.valid_bufs) {
+                valid.push(valid_buf[r]);
                 values.push(buf[r]);
             }
         }
         ReportRowsSnapshot {
             timestamps,
             values,
+            valid,
             buffered_rows: buffered,
             batches_built: self.batches_built,
             chunk_size: self.chunk_size,
@@ -221,6 +231,14 @@ impl StreamingRecorder {
                 width
             )));
         }
+        if snapshot.valid.len() != rows * width {
+            return Err(OutputError::Snapshot(format!(
+                "the rows carry {} validity entries for {} rows of {} columns",
+                snapshot.valid.len(),
+                rows,
+                width
+            )));
+        }
         if snapshot.buffered_rows > rows {
             return Err(OutputError::Snapshot(format!(
                 "the buffered tail ({}) exceeds the rows ({rows})",
@@ -236,10 +254,11 @@ impl StreamingRecorder {
         }
         let flushed = rows - snapshot.buffered_rows;
 
-        let row_at = |r: usize| -> (i64, &[f64]) {
+        let row_at = |r: usize| -> (i64, &[f64], &[bool]) {
             (
                 snapshot.timestamps[r],
                 &snapshot.values[r * width..(r + 1) * width],
+                &snapshot.valid[r * width..(r + 1) * width],
             )
         };
 
@@ -255,8 +274,10 @@ impl StreamingRecorder {
                 snapshot.timestamps[start..end].to_vec(),
             )));
             for c in 0..width {
-                let column: Vec<f64> = (start..end)
-                    .map(|r| snapshot.values[r * width + c])
+                let column: Vec<Option<f64>> = (start..end)
+                    .map(|r| {
+                        snapshot.valid[r * width + c].then_some(snapshot.values[r * width + c])
+                    })
                     .collect();
                 columns.push(Arc::new(Float64Array::from(column)));
             }
@@ -270,11 +291,17 @@ impl StreamingRecorder {
         for buf in &mut self.value_bufs {
             buf.clear();
         }
+        for valid_buf in &mut self.valid_bufs {
+            valid_buf.clear();
+        }
         for r in flushed..rows {
-            let (timestamp, values) = row_at(r);
+            let (timestamp, values, valid) = row_at(r);
             self.timestamp_buf.push(timestamp);
             for (buf, &value) in self.value_bufs.iter_mut().zip(values) {
                 buf.push(value);
+            }
+            for (buf, &valid) in self.valid_bufs.iter_mut().zip(valid) {
+                buf.push(valid);
             }
         }
         self.total_rows = rows;
@@ -299,6 +326,10 @@ pub struct StreamingRecorder {
     chunk_size: usize,
     timestamp_buf: Vec<i64>,
     value_bufs: Vec<Vec<f64>>,
+    /// Per-column validity parallel to `value_bufs`: the null cells the
+    /// rows carry (a not-applicable value is null, never a substituted
+    /// 0.0), flushed into the batches' validity bitmaps.
+    valid_bufs: Vec<Vec<bool>>,
     /// The report's destination: the retention rule and, for a file, the
     /// publish target.
     destination: Destination,
@@ -400,6 +431,9 @@ impl StreamingRecorder {
             chunk_size,
             timestamp_buf: Vec::with_capacity(chunk_size),
             value_bufs: (0..n_value_cols)
+                .map(|_| Vec::with_capacity(chunk_size))
+                .collect(),
+            valid_bufs: (0..n_value_cols)
                 .map(|_| Vec::with_capacity(chunk_size))
                 .collect(),
             destination,
@@ -612,10 +646,21 @@ impl StreamingRecorder {
     /// wall-clock milliseconds (the `Timestamp(Millisecond, None)` Time
     /// field's value; the schema metadata's `hares:utc_offset_s` recovers
     /// the instant); `values` contains the report's numeric columns in the
-    /// report's schema order (excluding the timestamp column).
+    /// report's schema order (excluding the timestamp column), and `valid`
+    /// their validity in the same order: a false entry writes a null cell.
     ///
     /// Automatically flushes when the buffer reaches `chunk_size`.
-    pub fn push_row(&mut self, timestamp: i64, values: &[f64]) -> Result<(), OutputError> {
+    ///
+    /// # Errors
+    ///
+    /// [`OutputError::ColumnMismatch`] when either slice is not one entry
+    /// per value column.
+    pub fn push_row(
+        &mut self,
+        timestamp: i64,
+        values: &[f64],
+        valid: &[bool],
+    ) -> Result<(), OutputError> {
         let expected = self.value_bufs.len();
         if values.len() != expected {
             return Err(OutputError::ColumnMismatch {
@@ -623,10 +668,19 @@ impl StreamingRecorder {
                 got: values.len(),
             });
         }
+        if valid.len() != expected {
+            return Err(OutputError::ColumnMismatch {
+                expected,
+                got: valid.len(),
+            });
+        }
 
         self.timestamp_buf.push(timestamp);
         for (buf, &val) in self.value_bufs.iter_mut().zip(values.iter()) {
             buf.push(val);
+        }
+        for (buf, &valid) in self.valid_bufs.iter_mut().zip(valid.iter()) {
+            buf.push(valid);
         }
         self.total_rows += 1;
 
@@ -727,10 +781,22 @@ impl StreamingRecorder {
         let timestamps = std::mem::take(&mut self.timestamp_buf);
         columns.push(Arc::new(TimestampMillisecondArray::from(timestamps)));
 
-        // Drain each f64 buffer into a Float64Array.
-        for buf in &mut self.value_bufs {
+        // Drain each f64 buffer into a Float64Array carrying the rows'
+        // validity: a cleared entry is a null cell in the batch. The
+        // all-valid common case builds no validity bitmap at all.
+        let valids: Vec<Vec<bool>> = self.valid_bufs.iter_mut().map(std::mem::take).collect();
+        for (buf, valid) in self.value_bufs.iter_mut().zip(valids) {
             let data = std::mem::take(buf);
-            columns.push(Arc::new(Float64Array::from(data)));
+            let column = if valid.iter().all(|&valid| valid) {
+                Float64Array::from(data)
+            } else {
+                Float64Array::from_iter(
+                    data.into_iter()
+                        .zip(valid)
+                        .map(|(value, valid)| valid.then_some(value)),
+                )
+            };
+            columns.push(Arc::new(column));
         }
 
         let batch = RecordBatch::try_new(Arc::clone(&self.schema), columns)?;
@@ -789,7 +855,11 @@ mod tests {
 
         for (i, (e, g)) in test_values.iter().enumerate() {
             recorder
-                .push_row(i64::try_from(i).expect("row index") * 60_000, &[*e, *g])
+                .push_row(
+                    i64::try_from(i).expect("row index") * 60_000,
+                    &[*e, *g],
+                    &[true, true],
+                )
                 .unwrap();
         }
 
@@ -854,8 +924,10 @@ mod tests {
         )
         .unwrap();
 
-        recorder.push_row(0, &[1.0, 2.0]).unwrap();
-        recorder.push_row(60_000, &[3.0, 4.0]).unwrap();
+        recorder.push_row(0, &[1.0, 2.0], &[true, true]).unwrap();
+        recorder
+            .push_row(60_000, &[3.0, 4.0], &[true, true])
+            .unwrap();
 
         let summary = recorder.finish().unwrap();
         assert_eq!(summary.row_count, 2);
@@ -877,7 +949,11 @@ mod tests {
 
         for i in 0..total_rows {
             recorder
-                .push_row(i64::try_from(i).expect("row index"), &[i as f64, 0.0])
+                .push_row(
+                    i64::try_from(i).expect("row index"),
+                    &[i as f64, 0.0],
+                    &[true, true],
+                )
                 .unwrap();
         }
 
@@ -924,7 +1000,7 @@ mod tests {
         let schema = test_schema();
         let mut recorder = recorder_at(schema, &path, 100);
 
-        let result = recorder.push_row(0, &[1.0]); // 1 value, expects 2
+        let result = recorder.push_row(0, &[1.0], &[true]); // 1 value, expects 2
         assert!(result.is_err());
     }
 
@@ -937,7 +1013,9 @@ mod tests {
         let mut recorder = recorder_at(schema, &path, 1000);
 
         for i in 0..5 {
-            recorder.push_row(i64::from(i), &[i as f64, 0.0]).unwrap();
+            recorder
+                .push_row(i64::from(i), &[i as f64, 0.0], &[true, true])
+                .unwrap();
         }
         assert_eq!(recorder.buffered_rows(), 5);
         assert!(
@@ -981,7 +1059,7 @@ mod tests {
 
         for i in 0..25 {
             recorder
-                .push_row(i64::from(i), &[i as f64, i as f64 * 2.0])
+                .push_row(i64::from(i), &[i as f64, i as f64 * 2.0], &[true, true])
                 .unwrap();
         }
         // 25 rows with chunk_size=10 → 2 flushes triggered by push_row.
@@ -1001,7 +1079,11 @@ mod tests {
 
         for i in 0..total_rows {
             recorder
-                .push_row(i64::try_from(i).expect("row index"), &[i as f64, 0.0])
+                .push_row(
+                    i64::try_from(i).expect("row index"),
+                    &[i as f64, 0.0],
+                    &[true, true],
+                )
                 .unwrap();
         }
         // A file destination streams: flushed batches are written and
@@ -1051,7 +1133,7 @@ mod tests {
             },
         )
         .unwrap();
-        recorder.push_row(0, &[1.0, 2.0]).unwrap();
+        recorder.push_row(0, &[1.0, 2.0], &[true, true]).unwrap();
         recorder.finish().unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
@@ -1098,8 +1180,8 @@ mod tests {
             },
         )
         .unwrap();
-        recorder.push_row(0, &[1.0, 2.0]).unwrap();
-        recorder.push_row(1, &[3.0, 4.0]).unwrap();
+        recorder.push_row(0, &[1.0, 2.0], &[true, true]).unwrap();
+        recorder.push_row(1, &[3.0, 4.0], &[true, true]).unwrap();
         // The chunk flushed: the partial file exists mid-run.
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
         let partial_is_hidden = std::fs::read_dir(tmp.path())
@@ -1123,7 +1205,7 @@ mod tests {
 
         let schema = test_schema();
         let mut recorder = recorder_at(schema, &path, 1);
-        recorder.push_row(0, &[1.0, 2.0]).unwrap();
+        recorder.push_row(0, &[1.0, 2.0], &[true, true]).unwrap();
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
 
         recorder.discard_partial();
@@ -1141,7 +1223,7 @@ mod tests {
 
         let schema = test_schema();
         let mut recorder = recorder_at(schema, &path, 100);
-        recorder.push_row(0, &[1.0, 2.0]).unwrap();
+        recorder.push_row(0, &[1.0, 2.0], &[true, true]).unwrap();
         recorder.flush_and_close().unwrap();
         recorder.flush_and_close().unwrap();
         assert!(path.exists());
@@ -1273,7 +1355,11 @@ mod tests {
         let mut original = memory_recorder(&schema, 4);
         for i in 0..9_i64 {
             original
-                .push_row(1_000 * i, &[i as f64 * 1.5, i as f64 * -0.25])
+                .push_row(
+                    1_000 * i,
+                    &[i as f64 * 1.5, i as f64 * -0.25],
+                    &[true, true],
+                )
                 .unwrap();
         }
         // 9 rows at chunk 4: two full flushes, one buffered row.
@@ -1302,8 +1388,12 @@ mod tests {
 
         // And the restored recorder keeps recording exactly as the
         // original: the next flush builds the third batch.
-        original.push_row(9_000, &[13.5, -2.25]).unwrap();
-        restored.push_row(9_000, &[13.5, -2.25]).unwrap();
+        original
+            .push_row(9_000, &[13.5, -2.25], &[true, true])
+            .unwrap();
+        restored
+            .push_row(9_000, &[13.5, -2.25], &[true, true])
+            .unwrap();
         assert_eq!(
             original.flushed_batches().len(),
             restored.flushed_batches().len()
@@ -1322,7 +1412,11 @@ mod tests {
         let mut original = memory_recorder(&schema, 4);
         for i in 0..9_i64 {
             original
-                .push_row(1_000 * i, &[i as f64 * 1.5, i as f64 * -0.25])
+                .push_row(
+                    1_000 * i,
+                    &[i as f64 * 1.5, i as f64 * -0.25],
+                    &[true, true],
+                )
                 .unwrap();
         }
         let snapshot = original.rows_snapshot();
@@ -1348,7 +1442,9 @@ mod tests {
         let schema = test_schema();
         let mut original = memory_recorder(&schema, 100);
         for i in 0..100_i64 {
-            original.push_row(1_000 * i, &[i as f64, 0.0]).unwrap();
+            original
+                .push_row(1_000 * i, &[i as f64, 0.0], &[true, true])
+                .unwrap();
         }
         assert_eq!(original.batches_built(), 1);
         let snapshot = original.rows_snapshot();
@@ -1392,7 +1488,9 @@ mod tests {
             Box::new(Counting(std::sync::Arc::clone(&seen))),
         ));
         for i in 0..9_i64 {
-            original.push_row(1_000 * i, &[i as f64, 0.0]).unwrap();
+            original
+                .push_row(1_000 * i, &[i as f64, 0.0], &[true, true])
+                .unwrap();
         }
         // Two deliveries: indices 0 and 1.
         assert_eq!(seen.load(Ordering::SeqCst), 1);
@@ -1406,7 +1504,9 @@ mod tests {
             Box::new(Counting(std::sync::Arc::clone(&seen))),
         ));
         // The next flush delivers with the continued index 2.
-        restored.push_row(9_000, &[9.0, 0.0]).unwrap();
+        restored
+            .push_row(9_000, &[9.0, 0.0], &[true, true])
+            .unwrap();
         restored.flush().unwrap();
         assert_eq!(
             seen.load(Ordering::SeqCst),

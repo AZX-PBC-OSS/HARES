@@ -1042,7 +1042,7 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             tk::PART_LOAD_FACTOR,
             "Part-load factor: cycling efficiency correction (PLF_MIN ≤ PLF ≤ 1.0)",
         ),
-        TelemetryField::ratio(tk::RUNTIME_FRACTION, "Runtime fraction: PLR / PLF"),
+        TelemetryField::ratio(tk::RUNTIME_FRACTION, "Runtime fraction: PLR / PLF").not_nullable(),
         TelemetryField::power_w(
             tk::PARASITIC_ELECTRIC_W,
             "Actual off-cycle parasitic electric draw (standby electronics, controls, crankcase heater); scaled by the off-cycle fraction and zero during grid outage",

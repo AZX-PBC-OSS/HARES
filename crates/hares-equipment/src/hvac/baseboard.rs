@@ -447,7 +447,8 @@ fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField::ratio(
             tk::RUNTIME_FRACTION,
             "Fraction of the step the element runs (equals the part-load ratio)",
-        ),
+        )
+        .not_nullable(),
         TelemetryField::ratio(
             tk::PART_LOAD_RATIO,
             "Delivered capacity as a fraction of rated",

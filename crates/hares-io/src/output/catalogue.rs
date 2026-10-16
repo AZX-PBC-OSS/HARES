@@ -626,7 +626,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         if is_reserved_output_column_name(&member) {
             continue;
         }
-        push(
+        push_traced(
             &mut defs,
             &mut tags,
             variable_for(CORE_OUTPUT_VARIABLES[0].1.clone(), &member, eq.id),
@@ -634,7 +634,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
             false,
         )?;
         if families.has_gas {
-            push(
+            push_traced(
                 &mut defs,
                 &mut tags,
                 variable_for(
@@ -662,7 +662,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         );
         if seen_end_uses.insert(end_use.display_name().to_string()) {
             let name = end_use_electric_power_column(&end_use);
-            push(
+            push_traced(
                 &mut defs,
                 &mut tags,
                 variable_for(END_USE_AGGREGATE_VARIABLE.clone(), &name, eq.id),
@@ -675,7 +675,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
     // ── Block: verbosity 2 — per-zone temperatures, unmet load, ground ─────
     for (zone_id, label) in &input.zones {
         if label != "Indoor" {
-            push(
+            push_traced(
                 &mut defs,
                 &mut tags,
                 zone_variable(&ZONE_TEMP_TEMPLATE, *zone_id, label),
@@ -698,7 +698,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         if is_reserved_output_column_name(&member) {
             continue;
         }
-        push(
+        push_traced(
             &mut defs,
             &mut tags,
             variable_for(
@@ -710,7 +710,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
             false,
         )?;
         if families.is_hvac {
-            push(
+            push_traced(
                 &mut defs,
                 &mut tags,
                 variable_for(
@@ -723,7 +723,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
             )?;
         }
         if families.has_soc {
-            push(
+            push_traced(
                 &mut defs,
                 &mut tags,
                 variable_for(
@@ -743,7 +743,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         if is_reserved_output_column_name(&member) {
             continue;
         }
-        push(
+        push_traced(
             &mut defs,
             &mut tags,
             variable_for(
@@ -763,7 +763,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         if is_reserved_output_column_name(&member) {
             continue;
         }
-        push(
+        push_traced(
             &mut defs,
             &mut tags,
             variable_for(
@@ -774,7 +774,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
             5,
             false,
         )?;
-        push(
+        push_traced(
             &mut defs,
             &mut tags,
             variable_for(
@@ -792,14 +792,14 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
     push_statics(&mut defs, &mut tags, 6)?;
     for (zone_id, label) in &input.zones {
         if label != "Indoor" {
-            push(
+            push_traced(
                 &mut defs,
                 &mut tags,
                 zone_variable(&INFILTRATION_TEMPLATE, *zone_id, label),
                 6,
                 false,
             )?;
-            push(
+            push_traced(
                 &mut defs,
                 &mut tags,
                 zone_variable(&LWR_TEMPLATE, *zone_id, label),
@@ -809,14 +809,14 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         }
     }
     for (zone_id, label) in &input.zones {
-        push(
+        push_traced(
             &mut defs,
             &mut tags,
             zone_variable(&HEATING_DELIVERED_TEMPLATE, *zone_id, label),
             6,
             false,
         )?;
-        push(
+        push_traced(
             &mut defs,
             &mut tags,
             zone_variable(&COOLING_DELIVERED_TEMPLATE, *zone_id, label),
@@ -837,7 +837,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         if is_reserved_output_column_name(&member) {
             continue;
         }
-        push(
+        push_traced(
             &mut defs,
             &mut tags,
             variable_for(
@@ -850,7 +850,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         )?;
         if families.is_hp_heater {
             for t in HP_HEATER_V7_COLUMNS {
-                push(
+                push_traced(
                     &mut defs,
                     &mut tags,
                     telemetry_variable(t, name, eq, &declared, &mut telemetry_keys)?,
@@ -862,7 +862,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         if families.is_hvac {
             if families.is_cooling {
                 for t in COOLING_V7_COLUMNS {
-                    push(
+                    push_traced(
                         &mut defs,
                         &mut tags,
                         telemetry_variable(t, name, eq, &declared, &mut telemetry_keys)?,
@@ -922,7 +922,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
                 continue;
             }
             for t in table.iter() {
-                push(
+                push_traced(
                     &mut defs,
                     &mut tags,
                     telemetry_variable(t, name, eq, &declared, &mut telemetry_keys)?,
@@ -938,7 +938,7 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         let mut keys: Vec<&TelemetryField> = actor.output_variables.iter().collect();
         keys.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
         for field in keys {
-            push(
+            push_traced(
                 &mut defs,
                 &mut tags,
                 VariableDef {
@@ -1034,6 +1034,23 @@ struct VarTag {
     min_verbosity: u8,
     observe_only: bool,
     diagnostics: bool,
+}
+
+/// Emits the variable's nullability at catalogue build, at `debug` (B-6):
+/// the catalogue decides, per variable, what a missing value means.
+fn push_traced(
+    defs: &mut Vec<VariableDef>,
+    tags: &mut Vec<VarTag>,
+    def: VariableDef,
+    min_v: u8,
+    observe_only: bool,
+) -> Result<(), CatalogueError> {
+    tracing::debug!(
+        variable = %def.name,
+        nullability = if def.nullable { "nullable" } else { "not nullable" },
+        "output variable nullability"
+    );
+    push(defs, tags, def, min_v, observe_only)
 }
 
 /// The field-metadata marker a diagnostics column carries in the Arrow
@@ -1232,7 +1249,7 @@ static CORE_OUTPUT_VARIABLES: &[(&str, VariableDef)] = &[
             kind: VariableKind::Power,
             aggregation: Aggregation::Mean,
             sampling: Sampling::IntervalMean,
-            nullable: true,
+            nullable: false,
             source: VariableSource::Dwelling,
             description: Cow::Borrowed("Net electric power (consumption positive)"),
         },
@@ -1245,7 +1262,7 @@ static CORE_OUTPUT_VARIABLES: &[(&str, VariableDef)] = &[
             kind: VariableKind::Power,
             aggregation: Aggregation::Mean,
             sampling: Sampling::IntervalMean,
-            nullable: true,
+            nullable: false,
             source: VariableSource::Dwelling,
             description: Cow::Borrowed(
                 "Fuel input as gas power (combustion fuels; historical name)",
@@ -1301,7 +1318,7 @@ static CORE_OUTPUT_VARIABLES: &[(&str, VariableDef)] = &[
             kind: VariableKind::Energy,
             aggregation: Aggregation::Sum,
             sampling: Sampling::IntervalMean,
-            nullable: true,
+            nullable: false,
             source: VariableSource::Dwelling,
             description: Cow::Borrowed(
                 "The energy of the step (net electric power times the step)",
@@ -1316,7 +1333,7 @@ static CORE_OUTPUT_VARIABLES: &[(&str, VariableDef)] = &[
             kind: VariableKind::Power,
             aggregation: Aggregation::Mean,
             sampling: Sampling::IntervalMean,
-            nullable: true,
+            nullable: false,
             source: VariableSource::Dwelling,
             description: Cow::Borrowed("Reactive power (positive = inductive/lagging)"),
         },
@@ -1342,7 +1359,7 @@ static CORE_OUTPUT_VARIABLES: &[(&str, VariableDef)] = &[
             kind: VariableKind::State,
             aggregation: Aggregation::Mean,
             sampling: Sampling::InstantAtEnd,
-            nullable: true,
+            nullable: false,
             source: VariableSource::Dwelling,
             description: Cow::Borrowed(
                 "1 when the equipment is scheduled on (mode other than Off)",
@@ -1372,7 +1389,7 @@ static CORE_OUTPUT_VARIABLES: &[(&str, VariableDef)] = &[
             kind: VariableKind::Power,
             aggregation: Aggregation::Mean,
             sampling: Sampling::IntervalMean,
-            nullable: true,
+            nullable: false,
             source: VariableSource::Dwelling,
             description: Cow::Borrowed("Total input power minus fan power (OCHRE HVAC.py:575)"),
         },
@@ -1385,7 +1402,7 @@ static CORE_OUTPUT_VARIABLES: &[(&str, VariableDef)] = &[
             kind: VariableKind::Power,
             aggregation: Aggregation::Mean,
             sampling: Sampling::IntervalMean,
-            nullable: true,
+            nullable: false,
             source: VariableSource::Dwelling,
             description: Cow::Borrowed("Delivered capacity magnitude (positive)"),
         },
@@ -1409,14 +1426,17 @@ static CORE_OUTPUT_VARIABLES: &[(&str, VariableDef)] = &[
 /// Capacity, COP.
 const HVAC_V7_CORE_COLUMNS_START: usize = 9;
 
-/// The end-use aggregate electric power column's declaration.
+/// The end-use aggregate electric power column's declaration. The column
+/// exists only for an end use with at least one contributing equipment
+/// (the catalogue emits no other), so the zeroed accumulator is the value
+/// in every step and the cell is never null.
 static END_USE_AGGREGATE_VARIABLE: VariableDef = VariableDef {
     name: Cow::Borrowed(""),
     unit: Unit::Kilowatt,
     kind: VariableKind::Power,
     aggregation: Aggregation::Mean,
     sampling: Sampling::IntervalMean,
-    nullable: true,
+    nullable: false,
     source: VariableSource::Dwelling,
     description: Cow::Borrowed("End-use aggregate electric power"),
 };
@@ -1713,6 +1733,25 @@ macro_rules! telemetry_column {
             },
         }
     };
+    // The not-nullable form: a quantity that is physically zero when its
+    // component is inactive, so the producer substitutes 0.0 for an absent
+    // channel and a missing value is a wiring defect, never a null.
+    ($key:literal, $suffix:literal, $unit:expr, $kind:expr, $agg:expr, $sampling:expr, $desc:literal, not_nullable) => {
+        TelemetryColumn {
+            key: $key,
+            suffix: $suffix,
+            def: VariableDef {
+                name: Cow::Borrowed($suffix),
+                unit: $unit,
+                kind: $kind,
+                aggregation: $agg,
+                sampling: $sampling,
+                nullable: false,
+                source: VariableSource::Dwelling,
+                description: Cow::Borrowed($desc),
+            },
+        }
+    };
 }
 
 /// Verbosity 7: heat-pump-heater telemetry columns (defrost, ER power).
@@ -1733,7 +1772,8 @@ static HP_HEATER_V7_COLUMNS: &[TelemetryColumn] = &[
         VariableKind::Power,
         Aggregation::Mean,
         Sampling::IntervalMean,
-        "Backup electric resistance power during ER-only or HP+ER modes"
+        "Backup electric resistance power during ER-only or HP+ER modes",
+        not_nullable
     ),
 ];
 
@@ -1755,7 +1795,8 @@ static COOLING_V7_COLUMNS: &[TelemetryColumn] = &[
         VariableKind::Power,
         Aggregation::Mean,
         Sampling::IntervalMean,
-        "Pre-DSE gross latent cooling scaled by space fraction"
+        "Pre-DSE gross latent cooling scaled by space fraction",
+        not_nullable
     ),
 ];
 
@@ -1769,7 +1810,8 @@ static HVAC_V7_TELEMETRY_COLUMNS: &[TelemetryColumn] = &[
         VariableKind::Power,
         Aggregation::Mean,
         Sampling::IntervalMean,
-        "Fan electric power"
+        "Fan electric power",
+        not_nullable
     ),
     telemetry_column!(
         "runtime_fraction",
@@ -1778,7 +1820,8 @@ static HVAC_V7_TELEMETRY_COLUMNS: &[TelemetryColumn] = &[
         VariableKind::Ratio,
         Aggregation::Mean,
         Sampling::InstantAtEnd,
-        "Runtime fraction (PLR/PLF)"
+        "Runtime fraction (PLR/PLF)",
+        not_nullable
     ),
 ];
 
@@ -1968,7 +2011,7 @@ static DWELLING_VARIABLES: &[(&str, VariableDef, u8, bool)] = &[
             kind: VariableKind::Power,
             aggregation: Aggregation::Mean,
             sampling: Sampling::IntervalMean,
-            nullable: true,
+            nullable: false,
             source: VariableSource::Dwelling,
             description: Cow::Borrowed("Net electric power for the whole dwelling"),
         },
@@ -1983,7 +2026,7 @@ static DWELLING_VARIABLES: &[(&str, VariableDef, u8, bool)] = &[
             kind: VariableKind::Power,
             aggregation: Aggregation::Mean,
             sampling: Sampling::IntervalMean,
-            nullable: true,
+            nullable: false,
             source: VariableSource::Dwelling,
             description: Cow::Borrowed("Gas power for the whole dwelling"),
         },
@@ -1998,7 +2041,7 @@ static DWELLING_VARIABLES: &[(&str, VariableDef, u8, bool)] = &[
             kind: VariableKind::Power,
             aggregation: Aggregation::Mean,
             sampling: Sampling::IntervalMean,
-            nullable: true,
+            nullable: false,
             source: VariableSource::Dwelling,
             description: Cow::Borrowed("Net reactive power for the whole dwelling"),
         },

@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 /// both maps hold the same key set (the steady state: every key is
 /// registered at init) and falls back to `HashMap::clone_from`
 /// otherwise.
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Telemetry(
     pub HashMap<String, f64>,
     Option<(String, f64)>,
@@ -194,18 +194,41 @@ impl Telemetry {
         }
     }
 
+    /// Withdraws a channel's value for the current step: `get` reports
+    /// `None` until the next write. The key stays registered: the slot
+    /// holds a NaN payload only `remove` can store (every write rejects
+    /// non-finite values and stores nothing it rejects), so the next `set`
+    /// takes the value back without latching, and the map's key set never
+    /// changes (the snapshot's in-place copy keeps its fast path). This is
+    /// how a producer publishes the absence of a quantity it owns (an
+    /// actor key it did not emit this step): the output cell reads null,
+    /// never a substituted sentinel. A key never registered is logged and
+    /// ignored.
+    pub fn remove(&mut self, key: &str) {
+        if let Some(slot) = self.0.get_mut(key) {
+            *slot = f64::NAN;
+        } else {
+            tracing::debug!(key = %key, "Telemetry::remove of an unregistered key");
+        }
+    }
+
     #[inline]
     #[must_use]
     pub fn get(&self, key: &str) -> Option<f64> {
-        let value = self.0.get(key).copied();
-        #[cfg(debug_assertions)]
-        if let Some(v) = value {
-            assert!(
-                v.is_finite(),
-                "Telemetry::get found non-finite value {v} for key '{key}'"
-            );
+        match self.0.get(key).copied() {
+            // The withdrawn marker: the channel's value is absent this
+            // step.
+            Some(value) if value.is_nan() => None,
+            Some(value) => {
+                #[cfg(debug_assertions)]
+                assert!(
+                    value.is_finite(),
+                    "Telemetry::get found non-finite value {value} for key '{key}'"
+                );
+                Some(value)
+            }
+            None => None,
         }
-        value
     }
 
     #[must_use]
@@ -249,7 +272,37 @@ impl Telemetry {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &f64)> {
-        self.0.iter()
+        self.0.iter().filter(|(_, value)| !value.is_nan())
+    }
+}
+
+/// The latched `(key, value)` pair's equality: the latched value may be
+/// the non-finite write itself, and NaN is not `==` NaN, so the pair
+/// compares by the key and by both-values-NaN or exact equality.
+fn latch_eq(a: &Option<(String, f64)>, b: &Option<(String, f64)>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some((key_a, value_a)), Some((key_b, value_b))) => {
+            key_a == key_b && (value_a == value_b || (value_a.is_nan() && value_b.is_nan()))
+        }
+        _ => false,
+    }
+}
+
+/// Equality reads through the withdrawn marker: two maps agree when their
+/// key sets agree and every channel's value agrees, a withdrawn channel
+/// (the NaN payload) equal to another withdrawn one.
+impl PartialEq for Telemetry {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().all(|(key, value)| {
+                other.0.get(key).is_some_and(|other_value| {
+                    *value == *other_value || (value.is_nan() && other_value.is_nan())
+                })
+            })
+            && latch_eq(&self.1, &other.1)
+            && self.2 == other.2
+            && self.3 == other.3
     }
 }
 

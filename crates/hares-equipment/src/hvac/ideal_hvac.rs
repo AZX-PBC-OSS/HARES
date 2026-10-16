@@ -1086,7 +1086,7 @@ fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
             "1.0 if capacity is degraded (fallback after consecutive solver failures)",
         ),
         TelemetryField::temp_c(tk::CURRENT_TARGET_C, "Current setpoint target temperature"),
-        TelemetryField::power_kw(tk::FAN_KW, "Fan electrical consumption"),
+        TelemetryField::power_kw(tk::FAN_KW, "Fan electrical consumption").not_nullable(),
         TelemetryField::power_kvar(
             tk::REACTIVE_POWER_KVAR,
             "Reactive power (positive = inductive/lagging); Ideal HVAC is unity pf",

@@ -78,7 +78,7 @@ use serde::{Deserialize, Serialize};
 /// is resolution-free, and two distinct resolutions can size the rolling
 /// peak's ring identically). Checkpoints written by v16 builds are
 /// rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 17;
+pub const CHECKPOINT_VERSION: u32 = 18;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -474,6 +474,7 @@ mod tests {
                 rows: hares_io::ReportRowsSnapshot {
                     timestamps: vec![1_000, 2_000, 3_000, 4_000],
                     values: vec![1.5, -0.25, 2.5, -0.5, 3.5, 0.75, 4.5, -1.0],
+                    valid: vec![true, true, true, true, true, false, true, false],
                     buffered_rows: 1,
                     batches_built: 3,
                     chunk_size: 4,
@@ -530,9 +531,9 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 17;
+    const PINNED_VERSION: u32 = 18;
     const PINNED_SCHEMA_SHA256: &str =
-        "0a3c663b628492ca03cc9104e777e245b59537df817159b0d655196670fd842e";
+        "e8403cff44bd93fcc8b5312f54a5d4a492c711974e5a4ae09f0eae1f26ea4aff";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the

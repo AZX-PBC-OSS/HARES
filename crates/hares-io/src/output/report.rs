@@ -288,15 +288,19 @@ pub enum RowPlanError {
 /// holds its projection (the slot indices of its variables, in selection
 /// order). The producers write the union row through the plan; nothing on
 /// the write path sees a column name or a hash map.
+///
+/// A slot the producers do not write in a step stays invalid and reads as
+/// null downstream: a not-applicable value is null, never a substituted
+/// 0.0. A declared-not-nullable variable a producer claims and did not
+/// write is a wiring defect the step reports (the producer bindings carry
+/// that gate's slots).
 #[derive(Debug, Default)]
 pub struct RowPlan {
     slots: usize,
     /// The reused union row: one slot per producer slot, zeroed per step.
     row: Vec<f64>,
-    /// Per-slot validity over the row, cleared with it each step. The
-    /// nullability that sets it arrives with the catalogue's typed
-    /// declarations and the batch builders; until then every produced
-    /// slot is written and the bitset stays clear.
+    /// Per-slot validity over the row, cleared with it each step: a clear
+    /// bit reads as null in every batch the step flushes.
     validity: Vec<u64>,
     /// The current row's timestamp as UTC epoch seconds, stamped per step.
     /// Not a local-epoch stamp: the offset the run's row timestamps carry
@@ -420,6 +424,17 @@ impl RowPlan {
         self.validity[slot / usize::BITS as usize] & (1 << (slot % usize::BITS as usize)) != 0
     }
 
+    /// The row and its validity as one writer: the producers' index-write
+    /// surface for the step. Every `write` marks the slot produced; a slot
+    /// never written stays invalid and reads as null downstream.
+    #[must_use]
+    pub fn writer(&mut self) -> RowWriter<'_> {
+        RowWriter {
+            row: &mut self.row,
+            validity: &mut self.validity,
+        }
+    }
+
     /// Freezes a row plan from per-report projections already resolved
     /// against the union surface: the destinations entry's freeze resolves
     /// every report's selection against the catalogue first, the union of
@@ -441,6 +456,55 @@ impl RowPlan {
     #[must_use]
     pub fn projections(&self) -> &[Vec<usize>] {
         &self.projections
+    }
+}
+
+/// The step's index-write surface over one row plan's row and validity: the
+/// writers' `write` marks the slot produced, an unwritten slot stays
+/// invalid and reads as null downstream.
+pub struct RowWriter<'a> {
+    row: &'a mut [f64],
+    validity: &'a mut [u64],
+}
+
+impl RowWriter<'_> {
+    /// Writes a produced value and marks the slot valid.
+    pub fn write(&mut self, slot: usize, value: f64) {
+        self.row[slot] = value;
+        self.mark_valid(slot);
+    }
+
+    /// Writes a value the producer has, or leaves the slot invalid when it
+    /// has none: the not-applicable cell is null, never a substituted 0.0.
+    pub fn write_opt(&mut self, slot: usize, value: Option<f64>) {
+        if let Some(value) = value {
+            self.write(slot, value);
+        }
+    }
+
+    /// Accumulates into a summed cell and marks the slot valid (the
+    /// zeroed accumulator is the value).
+    pub fn add(&mut self, slot: usize, value: f64) {
+        self.row[slot] += value;
+        self.mark_valid(slot);
+    }
+
+    /// Marks a slot produced without writing it: the summed cells' zeroed
+    /// accumulator is the value.
+    pub fn mark_valid(&mut self, slot: usize) {
+        self.validity[slot / usize::BITS as usize] |= 1 << (slot % usize::BITS as usize);
+    }
+
+    /// Whether a slot was marked produced.
+    #[must_use]
+    pub fn valid(&self, slot: usize) -> bool {
+        self.validity[slot / usize::BITS as usize] & (1 << (slot % usize::BITS as usize)) != 0
+    }
+
+    /// The row as written, for the readers that follow the producers.
+    #[must_use]
+    pub fn row(&self) -> &[f64] {
+        self.row
     }
 }
 

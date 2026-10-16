@@ -374,6 +374,17 @@ impl TelemetryField {
         Self::power(name, Unit::Watt, description)
     }
 
+    /// The channel declared not nullable: the quantity is physically zero
+    /// when its component is inactive, so an absent channel is a wiring
+    /// defect, never a null cell. The equipment declarations must agree
+    /// with the catalogue's static per-capability columns for the same key
+    /// (the assembly's contradiction check reads both).
+    #[must_use]
+    pub const fn not_nullable(mut self) -> Self {
+        self.nullable = false;
+        self
+    }
+
     /// A power channel with an explicit power unit: `Power`, `Mean`,
     /// `IntervalMean`.
     #[must_use]

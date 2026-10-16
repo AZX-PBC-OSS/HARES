@@ -611,7 +611,7 @@ fn csv_writer_finish_flushes_all_data() {
     // Write fewer rows than chunk_size to ensure finish() triggers flush.
     for i in 0..5 {
         recorder
-            .push_row(i64::from(i) * 60_000, &[i as f64])
+            .push_row(i64::from(i) * 60_000, &[i as f64], &[true])
             .unwrap();
     }
     assert_eq!(recorder.buffered_rows(), 5);
@@ -663,7 +663,7 @@ fn csv_writer_finish_on_read_only_path_propagates_io_error() {
         },
     )
     .unwrap();
-    recorder.push_row(0, &[1.0]).unwrap();
+    recorder.push_row(0, &[1.0], &[true]).unwrap();
 
     // finish() should succeed here -- the main path works.
     let summary = recorder.finish().unwrap();

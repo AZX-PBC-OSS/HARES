@@ -276,12 +276,18 @@ fn assert_core_output_contract(desc: &EquipmentDescriptor, co: &CoreOutput) {
         "setpoint_c core output presence must match capabilities for '{}'",
         desc.name
     );
-    assert_eq!(
-        co.performance.cop.is_some(),
-        caps.contains(CoreCapabilities::HAS_COP),
-        "cop core output presence must match capabilities for '{}'",
-        desc.name
-    );
+    // COP is None whenever the step had no compressor input (the cell
+    // null, B-6), so presence no longer mirrors the HAS_COP capability:
+    // the capability's rule is one-directional (undeclared never
+    // populated, enforced by the core contract) plus the value's
+    // plausibility when present.
+    if co.performance.cop.is_some() {
+        assert!(
+            caps.contains(CoreCapabilities::HAS_COP),
+            "cop populated without the HAS_COP capability for '{}'",
+            desc.name
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -29,7 +29,10 @@ pub(super) fn default_telemetry() -> Telemetry {
     telemetry.insert(tk::COIL_LATENT_COOLING_W, 0.0);
     telemetry.insert(tk::LATENT_GAINS_W, 0.0);
     telemetry.insert(tk::FAN_HEAT_W, 0.0);
-    telemetry.insert(tk::SHR, 1.0);
+    // No SHR insert: the sensible heat ratio is undefined while the unit is
+    // not cooling. The step writes it only when the step's sensible cooling
+    // is above 0, so a never-cooled unit's SHR output cell is null, not a
+    // 1.0 sentinel.
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::SPEED_INDEX, 0.0);
     telemetry.insert(tk::COP, 0.0);
@@ -99,7 +102,8 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField::power_w(
             tk::LATENT_GAINS_W,
             "Pre-DSE gross latent cooling scaled by space_fraction; matches OCHRE HVAC.py:595 Latent Gains column",
-        ),
+        )
+        .not_nullable(),
         TelemetryField::power_w(
             tk::FAN_HEAT_W,
             "Supply fan waste heat added to the zone (positive); per E+ I/O Ref: fan motor heat in the supply air stream",
@@ -131,7 +135,8 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
             "Active compressor speed stage index (0-based)",
         ),
         TelemetryField::ratio(tk::COP, "Coefficient of performance (AHRI: excludes fan)"),
-        TelemetryField::ratio(tk::RUNTIME_FRACTION, "Runtime fraction (PLR/PLF) [0..1]"),
+        TelemetryField::ratio(tk::RUNTIME_FRACTION, "Runtime fraction (PLR/PLF) [0..1]")
+        .not_nullable(),
         TelemetryField::power_kw(
             tk::COMPRESSOR_KW,
             "Compressor-only electric power (space_fraction-scaled)",
@@ -139,7 +144,8 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField::power_kw(
             tk::FAN_KW,
             "Supply fan electric power (space_fraction-scaled)",
-        ),
+        )
+        .not_nullable(),
         TelemetryField::power_kw(
             tk::CRANKCASE_KW,
             "Crankcase heater electric power (space_fraction-scaled, resistive Q=0)",

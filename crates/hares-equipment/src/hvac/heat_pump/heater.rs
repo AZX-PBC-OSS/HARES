@@ -1481,25 +1481,32 @@ impl HeatPumpHeaterCore {
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         // Gross thermal output (pre-DSE) over compressor-only electric input.
         // DSE losses are a distribution inefficiency, not a reduction in equipment COP.
+        // The COP of a step with no compressor input is undefined, not zero:
+        // None (the cell null) when the compressor did not run.
         let compressor_only_w = power_kw_to_w(step.compressor_kw);
         let cop = if compressor_only_w > 1e-6 {
-            step.thermal_output_w / compressor_only_w
+            Some(
+                (step.thermal_output_w / compressor_only_w)
+                    // AHRI 210/240-2023: ASHP heating COP ~1.5–5.0; clamp to [0.0, 10.0]
+                    // to exclude physically impossible values from telemetry. Non-finite
+                    // input survives the clamp: a NaN COP reaching telemetry is a typed
+                    // error in every build.
+                    .clamp(0.0, 10.0),
+            )
         } else {
-            0.0
-        }
-        // AHRI 210/240-2023: ASHP heating COP ~1.5–5.0; clamp to [0.0, 10.0]
-        // to exclude physically impossible values from telemetry. Non-finite
-        // input survives the clamp: a NaN COP reaching telemetry is a typed
-        // error in every build.
-        .clamp(0.0, 10.0);
-        if !cop.is_finite() {
+            None
+        };
+        if cop.is_some_and(|cop| !cop.is_finite()) {
             return Err(HaresError::InvariantViolation {
                 check_name: "ashp_heater_cop_finite".to_string(),
-                value: cop,
+                value: cop.unwrap_or(f64::NAN),
                 tolerance: 0.0,
             });
         }
-        self.telemetry.set(tk::COP, cop);
+        // The telemetry channel keeps the 0.0 of a step with no compressor
+        // input (it feeds no output column); the output cell's presence is
+        // the core output's `cop: None` (null), never a 0.0 sentinel.
+        self.telemetry.set(tk::COP, cop.unwrap_or(0.0));
         // Runtime fraction = PLR / PLF (EnergyPlus DXCoils.cc:9859): the
         // compressor runs that fraction of the step at full draw, which the
         // PLF-penalised power above already prices in.
@@ -1656,7 +1663,7 @@ impl HeatPumpHeaterCore {
                 setpoint_c: Some(active_setpoint_c),
             },
             performance: CorePerformance {
-                cop: Some(cop),
+                cop,
                 main_power_kw: Some(main_power_kw),
             },
         };
@@ -2713,9 +2720,11 @@ impl HeatPumpHeaterCore {
         // restored `last_speed_index`, setpoint from the restored
         // thermostat state (mode-keyed with the restored DR offset, as
         // the step keys it). COP and main power are not checkpointed:
-        // COP publishes as 0.0 (the guard-allowed not-yet-recomputed
-        // value, recomputed on the next step). `CoreOutput::default()`
-        // (all fields `None`) violates the presence rules for every
+        // COP publishes as None while the restored mode is idle (the
+        // output cell null, recomputed on the next step) and as the
+        // guard-allowed 0.0 while it is active; main power stays None.
+        // `CoreOutput::default()` (all fields `None`) violates the
+        // presence rules for every
         // declared capability
         // (ELECTRIC/HAS_MODE/THERMAL/HAS_SPEED/HAS_SETPOINT/HAS_COP/
         // REACTIVE) — the restore contract is that a checkpoint restores
@@ -2748,7 +2757,11 @@ impl HeatPumpHeaterCore {
                 setpoint_c: Some(active_setpoint_c),
             },
             performance: CorePerformance {
-                cop: Some(0.0),
+                // The restore instant's COP: None while the restored mode is
+                // idle (the next step recomputes it), the guard-allowed 0.0
+                // while it is active, so the restored output stays one
+                // `validate_core_contract` accepts.
+                cop: decoded.operating_mode.is_active().then_some(0.0),
                 main_power_kw: None,
             },
         };
@@ -5977,8 +5990,12 @@ mod tests {
     }
 
     #[test]
-    fn cop_is_zero_when_heater_is_off() {
-        // When the heater is off (no update_control call), compressor_kw=0 → COP must be 0.
+    fn cop_is_null_when_heater_is_off() {
+        // When the heater is off (no update_control call), compressor_kw=0 →
+        // the COP is undefined: the core output's COP is None (the output
+        // cell null, never a 0.0 sentinel). The telemetry channel keeps the
+        // historical 0.0 of a step with no compressor input; it feeds no
+        // output column.
         let cfg = heater_config();
         let e = env(18.0, 5.0, 0.003);
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -5990,8 +6007,15 @@ mod tests {
         // Skip update_control so heater stays Off.
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let cop = eq.telemetry().get(tk::COP).unwrap_or(-1.0);
-        assert_eq!(cop, 0.0, "heater off must give COP=0, got {cop}");
+        assert!(
+            eq.core_output().performance.cop.is_none(),
+            "heater off must give no COP, the cell null"
+        );
+        assert_eq!(
+            eq.telemetry().get(tk::COP),
+            Some(0.0),
+            "the telemetry channel's historical zero"
+        );
     }
 
     #[test]
