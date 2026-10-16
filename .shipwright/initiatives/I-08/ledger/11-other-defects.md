@@ -3712,3 +3712,27 @@ landed shape; the two sites take ONE policy).
 **Dependencies:** OD-49's shape (the silent-default sweep).
 
 
+
+## OD-65: a Pattern selection resolves through the observe gate blind to it, a latent roster-plan panic
+
+**Kind:** found defect (row 88's B-11 work; recorded in its entry's State
+and in `02-measurement.md`).
+
+**Problem:** a `Selection::Pattern("*")` resolves against the schema the
+observe gate honours, while the pattern's resolution path is blind to
+the gate: on an observe-gated variable the roster plan's freeze can hit
+an unplaceable expected column, the freeze-time `InvariantViolation`, a
+panic class the row 37 surface reserves for real wiring defects. Row
+88's acceptance reconciled its own `Pattern("*")` run to a verbosity-3
+selection to dodge it; the pattern path itself is unfixed.
+
+**Change:** the pattern's resolution applies the same observe-gate
+filtering the schema builder applies (or the gate is passed to the
+resolver and enforced), with the test: a Pattern selection naming an
+observe-gated variable resolves (or refuses) identically under the gate
+and without it, no panic.
+
+**Acceptance test:** the freeze survives a Pattern over the observe-gated
+columns in every feature profile.
+
+**Dependencies:** none; the next output-surface pass.
