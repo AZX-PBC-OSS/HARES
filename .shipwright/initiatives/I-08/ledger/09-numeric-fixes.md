@@ -1401,6 +1401,70 @@ rollup and the re-captured goldens.
 multi-instance or ambiguously named equipment, recorded as measured), and
 the end-use rollup of the two HPXML fixtures above before and after.
 
+**State:** committed `f6f001b8` (branch `row/r86-b5`, worktree
+`r86-b5`, based on `b5858446`, one commit; the tree carried the work
+recovered from the stashed earlier attempt, judged coherent and
+completed here). In brief: the end-use machinery moved to the typed
+declarations — `EndUse` gained `is_hvac_or_water_heating`,
+`is_cooling_family`, `display_name` and `from_display`
+(`hares-types/src/equipment.rs`, the display round trip and the two
+family predicates unit-pinned); `hares_equipment` gained
+`ClassDeclaredSurface` and `class_declared_surface(class)`, the end
+use, core capabilities and declared telemetry the class's own
+constructor declares, read once per process from the registry's
+construction of the class at its default configuration (the two
+tankless classes at the gas configuration their canonical resolvers
+write), pinned equal to the constructed descriptors for every
+registered class; `CatalogueEquipment` carries `end_use` and
+`core_capabilities`, `Catalogue` carries
+`equipment_end_uses()` (the instance-qualified names paired with
+their typed end uses), `EquipmentColumnFamilies::of_descriptor`/
+`of_input` replace the name classifiers (the heat-pump-heater family
+is the pan heater power declaration within the HVAC heating end use,
+the SOC family the HAS_SOC capability), the metrics plan takes the
+catalogue's typed table for the equipment-for-end-use gate and the
+per-end-use equipment counts, the blueprint's
+`remove_equipment_by_end_use` and the dwelling's aggregate-index
+build and first-HVAC position read the declarations, and
+`build_schema_for_specs` reads the class's declared surface. Every
+name classifier is deleted
+(`equipment_name_to_end_use`, `end_use_display_name`,
+`display_name_to_end_use_key`, `parse_end_use_electric_power_column`,
+`is_hvac_or_wh`, `has_soc`, `is_heat_pump_heater`,
+`is_cooling_equipment`, `is_pv`, `is_ev`, `is_compressor_equipment`),
+the classifier grep over crates returns nothing, and `tracing` at
+debug names each equipment's end use at catalogue build. RED first
+(the three acceptance tests run and recorded at the parent; the
+results are in the commit body): the instance-qualified PV rollup
+FAILED at the parent (no PV aggregate existed; the two systems'
+power rolled into Other, so the defect was observed, not latent),
+the pool and spa heater test FAILED at the parent (the "heater"
+substring put them in the HVAC family), and the catalogue unit test
+was a compile RED. The pinned name-string tests migrated or retired
+with the reason (the classifier unit tests travel with their
+functions, the EV v8 pin reads the typed end use, the all-classes
+EV code-column count restated 10 to 6, the mid-run HVAC add pin and
+the five stub poses re-posed by declaration). The movement: all nine
+goldens re-captured twice byte-identical (the `Cooking Range`'s
+power from `cooking` to `other` and the resstock homes' `TV` from
+`other` to `plug_loads` re-bucket every fixture's per-end-use
+metrics, totals conserved; the full per-golden deltas and the two
+HPXML fixtures' before/after rollup sums in the measurement log),
+the schema pins re-captured twice byte-identical with every moved
+column attributed (the phantom EV columns gone, the pool and spa
+heaters out of the HVAC family, the ideal load, the `HPWH` alias
+and the indirect tank into it, the ground-source and water-loop
+heat pump heaters' defrost and ER columns in). The re-capture
+generator's output format now matches the pins' pretty form (a
+re-capture that moves nothing diffs to nothing). Gates at
+`f6f001b8`: fmt clean, clippy `--workspace --all-targets
+--all-features -D warnings` clean, nextest `--workspace
+--all-features -j 2` 8108/8108 (7 skipped), `pytest -m ''` 1764
+passed + 6 xfailed, 0 failed, 0 errors, pyright 0, the goldens
+bitwise after re-capture (compare-all 8 + dst 1), the schema pins
+equal, `docs/python.md`'s Numeric changes line carries the rollup
+and the re-captured goldens.
+
 ## B-6: null for not-applicable values, never 0.0
 
 **Kind:** numeric fix. Fixes V14.

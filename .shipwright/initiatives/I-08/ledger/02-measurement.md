@@ -3294,3 +3294,91 @@ the routes). After the change both routes book the boundary step to the
 period it opens; the pin
 `a_tariff_attached_at_a_period_boundary_books_the_boundary_step_to_the_new_period`
 was restated from the asymmetry to the agreement.
+
+### The typed end-use rollup row, 2026-10-16 (the worktree `r86-b5`)
+
+The golden deltas, recorded as measured (the entry expected none; the
+expectation was wrong: every golden carries a cooking range whose
+descriptor declares `other` and the resstock homes carry a `TV` whose
+descriptor declares `plug_loads`, so the rollup re-buckets in all of
+them; no number moves that is not that re-bucketing).
+
+The per-end-use metrics deltas, per golden (every one the same two
+causes, the `Cooking Range`'s power from `cooking` to `other` and the
+`TV`'s from `other` to `plug_loads`; the aggregate column order
+follows the equipment's first-encounter order under the typed
+classification):
+
+- `full_year_hourly`, `month_boundary_billing_3600s` (the cz2a home):
+  the `cooking` bucket is gone from `peak_power_kw.per_end_use` and
+  `total_energy_kwh.per_end_use` (the range's 12.416503494827793 kWh
+  and 0.7601316557361266 kW peak now in `other`), `other`
+  57.591771350939354 to 44.46726066701062 kWh (the range in, the TV
+  out), `plug_loads` 44.9851411019389 to 70.52615528069546 kWh (the TV
+  in); every other per-end-use bucket and every product bitwise.
+- `full_year_900s_dst`, `leap_year_february_900s`, `weather_wrap_900s`
+  (the cz4a home): the same shape (the range's 4.943797448258921 kWh
+  and 0.49287948497904466 kW peak into `other`, `other` 10.580524188911019
+  to 7.036155551000382 kWh, `plug_loads` 14.950124784027626 to
+  23.438290870197193 kWh).
+- `consumer_shape_900s`, `fleet_mixed_offset`, `fleet_same_offset_300s`,
+  `resstock_2025_fleet` (the resstock homes): the same two causes per
+  home plus the `cooking` bucket's removal from the fleet products'
+  schemas; the `aggregate` and `covered_weight` products' schemas
+  re-ordered accordingly.
+
+The totals are conserved across the re-bucketing (the rollup changes
+which aggregate column each equipment's own power feeds, nothing
+else): the per-fixture sums of the end-use aggregates are bitwise the
+same set of equipment contributions before and after. Parity homes'
+per-equipment columns are unchanged: every registered class the
+fixtures resolve has a declared end use that agrees with the old name
+mapping except the range and the TV, which have no per-equipment
+column movement (their power columns stay; only the aggregate bucket
+changed).
+
+The two HPXML fixtures' end-use rollups, before and after (the sum of
+each end-use aggregate column over the acceptance run, the fixtures'
+only 48 h at 3600 s; the after column that does not exist before is
+marked new):
+
+- `base-pv.xml`: before, no PV aggregate existed and the two systems'
+  power sat in `other` with everything else unclassified (other
+  -23.75208103912645, cooking 2.1395205338916705, plug loads
+  13.454351479350198); after: `PV` -28.39957228899651 (new; the two
+  systems' -22.51061713374031 and -5.888955155256206 exactly),
+  `other` 3.389023733380829 (the range and the fixture's TV moved as
+  above), the remaining buckets bitwise (hvac heating 5.562059173933972,
+  hvac cooling 2.3999999999999995, water heating 16.78328294188367,
+  refrigeration 2.978443851365222, lighting 9.259208140430788).
+- `base-misc-loads-large-uncommon.xml`: the pool and spa heaters'
+  rollups do not move (pool heater 92.7282568893422, spa heater
+  6.559918911885161, both bitwise before and after; the pool/spa
+  defect was the HVAC column family, not the rollup); the
+  refrigerator's power leaves `other` for the `refrigeration`
+  aggregate (new, 13.059330732909059), the range's leaves `cooking`
+  for `other` (cooking 6.54459411034136 to 4.40507357644969, the gas
+  grill's own `cooking` power remaining), the TV's leaves `other` for
+  `plug loads` (16.818890382031096 to 20.695904332219598), `other`
+  36.58455659238225 to 16.594950057373204, the remaining buckets
+  bitwise (hvac heating 4.882350651723648, hvac cooling
+  2.3999999999999995, water heating 16.780562518290658, lighting
+  13.650796626149587, ev 56.50070307968867, pool pump 17.085702691883775,
+  spa pump 4.58222130979265).
+
+The all-classes catalogue pins (`tests/fixtures/schema/v0..v8.json`,
+`kinds.json`) re-captured with the cause read column by column: the
+phantom EV code columns of the event-based load and the television
+pin are gone (the v8 count 10 to 6), the pool and spa heaters leave
+the HVAC family (setpoint, capacity, COP, speed, main, fan, runtime,
+schedule, compressor, supply/return air), the ideal load, the `HPWH`
+alias and the indirect tank gain the HVAC family their declarations
+carry, the ground-source and water-loop heat pump heaters gain the
+defrost and ER columns their pan heater declaration carries (the old
+name matcher missed them), and the end-use aggregate columns
+re-ordered by first encounter.
+
+The re-captures are byte-identical twice (all nine goldens, each
+captured twice on the staged state and compared byte for byte), the
+default build's compare-all 8 manifests identical and
+`full_year_900s_dst` identical on the dst build after them.
