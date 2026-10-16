@@ -2173,6 +2173,54 @@ warm start regresses on outdoor temperature).
 IN-2 (`validate()`), IN-4 (`resample_weather`, Python binding included);
 CN-1.
 
+**State:** committed `c7b56ddb` (consumer, branch `row/cn14-weather`, cut
+from the landed main `78f20657`); the engine side is the row's surface fix
+on branch `row/r82-cn14`, `b7b2159e` (the ledger record names it). Landed:
+`ENGINE_ROW_OFFSET`, `to_engine_rows`, the `align` kwarg and
+`OAT_HOUR_CENTRE_OFFSET_H` deleted; `Weather.read()` returns file order,
+which the engine's record-of-the-hour-ending convention makes engine row
+order at 3600 s; `oat_steps` returns the engine's own resampled outdoor
+dry bulb, from `hares.resample_weather` (the site the weather file's own
+header carries through `ParsedWeather`: the site moves the solar and
+mains channels, never the dry bulb; and the window the file's start on a
+non-leap year, so a typical-year read maps day-of-year in file order);
+the row-count check of `Runner.run` compares the frame with the engine's
+reported simulated step count (the resolved clock, read through the
+dwelling's resolved-model read-back the engine fix added; `validate()`
+carries the same form) and `Grid.n_steps` stays the request; the
+contract's `SimulationConfig` set gains `first_hour_interpolation` and
+`weather_year`, the accepted-keyword classification gains the two weather
+fields and `warmup` (the census engine carries the warm-up row already,
+whose contract movement is the next consumer rows' range; classified here
+because the gate reads the published schema), and the accepted list no
+longer holds the removed warm-up keyword. RED first: the two acceptance
+cases failed at the base on the row engine (the bitwise dry-bulb
+comparison at 3600 s and 900 s; `expected 120 rows for 5d at 3600s, got
+96`), and the coverage suite named the three unclassified kwargs and the
+removed key the accepted list still held (the binding refuses the
+keyword; the stub advertised it: the engine fix's RED is the read-back
+clock pin failing on `KeyError: 'clock'`). The der-inject alignment case
+states the new rule and its raw-order converse case is deleted (raw file
+order is engine order now; the discrimination probe carries the
+could-have-failed half); the network dry-bulb case asserts the engine
+series' shape and skips loudly without the engine. Gates: run_all
+378 passed / 2 failed / 7 skipped (the base seven) on the staged change
+and again on the commit; the two failures fail byte-identically at the
+base consumer on this engine and are owned by the weather and warm-up
+rows' declared movement (their bands were measured on the pre-initiative
+engine; the re-measure is the re-baseline row's), the row-73 rule. ruff
+clean; `contract.txt` PASS on the row engine (3 NEW items informational).
+The B0 production set captured three times (twice on the staged change,
+once on the commit) `identical`; the compare against the shipped B0: 272
+differing paths raw, 268 under the recorded declared-counts rule: the
+recorded 260 divergent-audit-line paths plus 8 new (premises 2 and 3's
+fitted parameters, scores and bound flags), attributed to the weather and
+warm-up rows' declared engine movement, not this row: the fit path calls
+none of the changed code and the capture is bitwise stable across the
+three runs. The bundle ran on the staged change (every registry file
+present, no untracked files, contract PASS, NOT GREEN on the same two
+owned failures).
+
 ## CN-15: advance the engine pin
 
 **Kind:** initiative work (consumer `AGENTS.md` rule 5).
