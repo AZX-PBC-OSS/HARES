@@ -721,3 +721,19 @@ golden fixtures re-captured.
   the consumer's fit absorbs it. No golden was re-captured: the golden
   manifests run through the Rust adapter, which this change does not
   touch.
+
+- 2026-10-15: the billing month boundary: a step's energy bills to the
+  billing period whose span holds it (the dwelling passes the tariff
+  evaluator the step's end time, so the period closes on the fold of the
+  step its boundary ends), and the monthly cycle's period ends keep the
+  first period's start day of month as their anchor, clamped to each
+  month's length, so a clamped boundary (a February end among them) no
+  longer drifts the chain. The boundary step's energy, cost and peak
+  move from the closing period's summary to the opening one's in every
+  tariffed run that spans a cycle boundary; the totals across the
+  periods are unchanged, every kWh billed exactly once. A tariff
+  attached exactly at a boundary and a from-start run now book the
+  boundary step to the same period. The Python billing summaries move
+  the same way. No golden was re-captured: the one tariffed golden
+  closes no billing boundary inside its run, and all nine are bitwise
+  (compare-all 8 + dst 1).

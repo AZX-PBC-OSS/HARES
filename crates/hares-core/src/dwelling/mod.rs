@@ -7917,7 +7917,13 @@ impl Dwelling {
             let net_kw = self.electrical_solver.net_active_kw();
             let dt_secs = self.latest_env.time_step_secs();
             let tz = evaluator.simulation_start().timezone();
-            let current_tz = self.latest_env.current_time.with_timezone(&tz);
+            // The evaluator's contract: step() receives the step's end
+            // time, so the period closes on the fold of the step its
+            // boundary ends, and the boundary step books to the period it
+            // opens.
+            let step_end =
+                self.latest_env.current_time + Duration::milliseconds((dt_secs * 1000.0) as i64);
+            let current_tz = step_end.with_timezone(&tz);
             if let Some(summary) = evaluator.step(net_kw, 0.0, dt_secs, current_tz) {
                 self.billing_summaries.push(summary);
             }
@@ -19386,8 +19392,8 @@ latent_gain_fraction = 0.08
             .set_tariff(flat_tariff(), tz)
             .expect("attach the tariff mid-run");
 
-        // Run both dwellings past the February and March closes (the first
-        // step whose start reaches a period end closes it).
+        // Run both dwellings past the February and March closes (the
+        // first step whose end reaches a period end closes it).
         const TOTAL_STEPS: usize = 2300;
         net_power_kw(&mut attached_mid_run, TOTAL_STEPS - ATTACH_STEP);
         net_power_kw(&mut from_start, TOTAL_STEPS);
@@ -19436,10 +19442,10 @@ latent_gain_fraction = 0.08
     }
 
     /// A tariff attached exactly at a period boundary opens the new
-    /// period, and the boundary step's energy books to it; a from-start
-    /// run folds that step into the old period (its close fires on the
-    /// fold whose time reaches the boundary, after the fold books). One
-    /// step's attribution differs by design; every kWh is billed exactly
+    /// period, and the boundary step's energy books to it. The from-start
+    /// run books the boundary step to the new period too: its close fires
+    /// on the fold whose end reaches the boundary, before the boundary
+    /// step's own fold. Both routes agree; every kWh is billed exactly
     /// once.
     #[test]
     fn a_tariff_attached_at_a_period_boundary_books_the_boundary_step_to_the_new_period() {
@@ -19450,10 +19456,10 @@ latent_gain_fraction = 0.08
             .expect("attach the tariff from the start");
 
         // Hourly steps: the boundary is Feb 1 00:00, the start of step
-        // 744, so the 745th fold is the boundary step.
+        // 744, so the 745th fold is the boundary step. The first 744
+        // powers are January's own steps.
         const BOUNDARY_STEP: usize = 744;
-        let mut powers = net_power_kw(&mut from_start, BOUNDARY_STEP + 1);
-        let boundary_step_kwh = powers.pop().expect("the boundary step's power").max(0.0);
+        let powers = net_power_kw(&mut from_start, BOUNDARY_STEP + 1);
 
         let mut at_boundary = bestest_dwelling();
         net_power_kw(&mut at_boundary, BOUNDARY_STEP);
@@ -19461,7 +19467,7 @@ latent_gain_fraction = 0.08
             .set_tariff(flat_tariff(), tz)
             .expect("attach exactly at the boundary");
 
-        // Past the February close (step 1416) on both runs.
+        // Past the February close (step 1415) on both runs.
         net_power_kw(&mut from_start, 1500 - BOUNDARY_STEP - 1);
         net_power_kw(&mut at_boundary, 1500 - BOUNDARY_STEP);
 
@@ -19481,18 +19487,32 @@ latent_gain_fraction = 0.08
         let from_start_february = summary_starting_at(from_start_bills, february_start)
             .expect("the from-start run closes February");
 
-        // The boundary step's energy books to the attached run's February,
-        // not to the from-start run's.
-        assert!(
-            (attached_february.total_import_kwh
-                - from_start_february.total_import_kwh
-                - boundary_step_kwh)
-                .abs()
-                < 1e-9,
-            "the boundary step's energy books to the new period: {} - {} must be {}",
+        // The from-start run's January holds its own steps only: the
+        // boundary step is not among them. The sum is computed as the
+        // evaluator's update computes it (the positive part of each
+        // step's net electric power in kW times one hour), in step order.
+        let from_start_january = summary_starting_at(from_start_bills, january_start)
+            .expect("the from-start run closed January");
+        let mut january_sum = 0.0f64;
+        for power in &powers[..BOUNDARY_STEP] {
+            january_sum += power.max(0.0) * 3600.0 / 3600.0;
+        }
+        assert_eq!(
+            from_start_january.total_import_kwh.to_bits(),
+            january_sum.to_bits(),
+            "January's total is its own steps' import, on bits: the boundary step books elsewhere"
+        );
+
+        // The boundary step's energy books to the new period on both
+        // runs: the attached run's February can hold nothing before the
+        // attach, so bitwise-equal totals place the boundary step in the
+        // from-start run's February too.
+        assert_eq!(
+            attached_february.total_import_kwh.to_bits(),
+            from_start_february.total_import_kwh.to_bits(),
+            "the boundary step's energy books to the new period on both runs: {} vs {}",
             attached_february.total_import_kwh,
-            from_start_february.total_import_kwh,
-            boundary_step_kwh
+            from_start_february.total_import_kwh
         );
 
         // February is a period opened at its own boundary on both runs: no

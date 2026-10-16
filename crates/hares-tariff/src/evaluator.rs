@@ -597,6 +597,12 @@ impl TariffEvaluator {
         });
 
         let result = if current_time >= self.billing_state.period_end {
+            tracing::debug!(
+                target: "billing",
+                close_time = %self.billing_state.period_end,
+                step_end = %current_time,
+                "billing period closes: the step end reached the period end"
+            );
             Some(self.close_period(self.billing_state.period_end))
         } else {
             None
@@ -681,11 +687,12 @@ impl TariffEvaluator {
     /// time before the attach: no summary exists for it, and the containing
     /// period's charges cover only the active span.
     ///
-    /// The convention at an exact period boundary: the attach opens the new
-    /// period, and the boundary step's energy books to it; a from-start run
-    /// folds that step into the old period (its close fires on the fold
-    /// whose time reaches the boundary, after the fold books). One step's
-    /// attribution differs by design; every kWh is billed exactly once.
+    /// The convention at an exact period boundary: the attach opens the
+    /// new period, and the boundary step's energy books to it. A
+    /// from-start run books the boundary step to the new period too: its
+    /// close fires on the fold whose end reaches the boundary, before the
+    /// boundary step's own fold. Both routes agree; every kWh is billed
+    /// exactly once.
     pub fn activate_at(&mut self, attach_time: DateTime<Tz>) {
         let cycle = self.tariff.billing_cycle;
         let period_start = containing_period_start(self.simulation_start, attach_time, cycle);
@@ -697,6 +704,11 @@ impl TariffEvaluator {
             self.max_ratchet_lookback(),
             self.period_name_table.len(),
         );
+        // The containing period's start sits on the walk's anchored chain,
+        // whose anchor is the simulation start's day: a clamped boundary
+        // on that chain (a February end among them) must not re-anchor the
+        // state to the clamped start's day.
+        self.billing_state.anchor_day = self.simulation_start.day();
         self.billing_state.active_since = attach_time;
     }
 

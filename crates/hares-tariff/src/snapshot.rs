@@ -29,7 +29,11 @@ use crate::types::ElectricTariff;
 /// wall clock plus the zone's offset at that time, in place of the RFC
 /// 3339 strings), and [`SnapshotError`] replaced the opaque string errors
 /// on the restore path.
-pub const TARIFF_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+///
+/// v3: the open billing period carries its cycle's anniversary anchor day
+/// (`BillingStateSnapshot::anchor_day`), so a resumed run's period ends
+/// keep the anchor chain instead of drifting from a clamped boundary.
+pub const TARIFF_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 /// Why a tariff snapshot failed to restore. Every variant names its
 /// values: the zone that cannot be parsed, the zone a summary was written
@@ -158,6 +162,10 @@ pub struct DemandWindowSnapshot {
 pub struct BillingStateSnapshot {
     pub period_start: LocalInstant,
     pub period_end: LocalInstant,
+    /// The anniversary anchor: the first period's start day of month, so a
+    /// resumed run's later closes keep the anchor chain instead of
+    /// restarting from the open period's (possibly clamped) start day.
+    pub anchor_day: u32,
     /// When the tariff became active within the open period: the period
     /// start, or the attach or switch instant for a period a tariff joined
     /// mid-way.

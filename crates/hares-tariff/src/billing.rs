@@ -129,6 +129,12 @@ pub struct BillingStep {
 pub struct BillingState {
     pub(crate) period_start: DateTime<Tz>,
     pub(crate) period_end: DateTime<Tz>,
+    /// The anniversary anchor: the first period's start day of month,
+    /// carried unchanged across the closes, so every period end is the
+    /// anchor day clamped to its month's length and a clamped boundary
+    /// never drifts the chain. A mid-run attach keeps the run's own
+    /// anchor: the containing-period walk starts from it.
+    pub(crate) anchor_day: u32,
     /// When the tariff became active within the open period: the period
     /// start for a period opened at its own boundary, or the attach or
     /// switch instant for the containing period a tariff joins mid-way. A
@@ -177,6 +183,21 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 }
 
 fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> DateTime<Tz> {
+    period_end_from_anchor(start, start.day(), cycle)
+}
+
+/// The period end for the period starting at `start` whose cycle's
+/// anniversary anchor is `anchor_day`: the anchor day of the month after
+/// `start`'s, clamped to that month's length, at midnight in the start's
+/// zone. The anchor is the first period's start day, carried unchanged
+/// across the closes, so a clamped boundary never drifts the chain: a
+/// December 31 start closes January 31, February 29, March 31, April 30.
+/// A custom cycle adds its days.
+fn period_end_from_anchor(
+    start: DateTime<Tz>,
+    anchor_day: u32,
+    cycle: BillingCycle,
+) -> DateTime<Tz> {
     match cycle {
         BillingCycle::Monthly => {
             let (year, month) = if start.month() == 12 {
@@ -185,7 +206,7 @@ fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> DateTime<Tz> 
                 (start.year(), start.month() + 1)
             };
             let max_day = days_in_month(year, month);
-            let day = start.day().min(max_day);
+            let day = anchor_day.min(max_day);
             start
                 .timezone()
                 .with_ymd_and_hms(year, month, day, 0, 0, 0)
@@ -199,20 +220,23 @@ fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> DateTime<Tz> 
 /// The start of the billing period containing `t`, walking the cycle's
 /// boundaries from `anchor`.
 ///
-/// The walk follows the same [`compute_period_end`] chain the stepping
-/// evaluator closes on: for an attach strictly inside a period, the period
-/// a mid-run tariff joins is the one a from-start run holds open at `t`.
-/// At an exact boundary the walk opens the new period, while a from-start
-/// run folds the boundary step into the old one; one step's attribution
-/// differs by design, every kWh billed exactly once.
+/// The walk follows the same anchored [`compute_period_end`] chain the
+/// stepping evaluator closes on: for an attach strictly inside a period,
+/// the period a mid-run tariff joins is the one a from-start run holds
+/// open at `t`. At an exact boundary the walk opens the new period, and a
+/// from-start run books the boundary step to that new period too: its
+/// close fires on the fold whose end reaches the boundary, before the
+/// boundary step's own fold. Both routes agree; every kWh is billed
+/// exactly once.
 pub(crate) fn containing_period_start(
     anchor: DateTime<Tz>,
     t: DateTime<Tz>,
     cycle: BillingCycle,
 ) -> DateTime<Tz> {
+    let anchor_day = anchor.day();
     let mut start = anchor;
     loop {
-        let end = compute_period_end(start, cycle);
+        let end = period_end_from_anchor(start, anchor_day, cycle);
         // A degenerate cycle whose period end does not advance would loop
         // forever; treat such a period as its own container.
         if end <= start || end > t {
@@ -237,6 +261,7 @@ impl BillingState {
             1
         };
         let capacity = capacity.max(1);
+        let anchor_day = period_start.day();
         let period_end = compute_period_end(period_start, billing_cycle);
         let max_prior_periods = if max_lookback_months == 0 {
             0
@@ -252,6 +277,7 @@ impl BillingState {
         Self {
             period_start,
             period_end,
+            anchor_day,
             active_since: period_start,
             cumulative_import_kwh: 0.0,
             cumulative_export_kwh: 0.0,
@@ -439,7 +465,8 @@ impl BillingState {
             }
         }
         self.period_start = new_period_start;
-        self.period_end = compute_period_end(new_period_start, self.billing_cycle);
+        self.period_end =
+            period_end_from_anchor(new_period_start, self.anchor_day, self.billing_cycle);
         self.active_since = new_period_start;
         self.cumulative_import_kwh = 0.0;
         self.cumulative_export_kwh = 0.0;
@@ -458,6 +485,7 @@ impl BillingState {
         BillingStateSnapshot {
             period_start: LocalInstant::new(&self.period_start),
             period_end: LocalInstant::new(&self.period_end),
+            anchor_day: self.anchor_day,
             active_since: LocalInstant::new(&self.active_since),
             cumulative_import_kwh: self.cumulative_import_kwh,
             cumulative_export_kwh: self.cumulative_export_kwh,
@@ -508,6 +536,7 @@ impl BillingState {
         Ok(Self {
             period_start,
             period_end,
+            anchor_day: snapshot.anchor_day,
             active_since,
             cumulative_import_kwh: snapshot.cumulative_import_kwh,
             cumulative_export_kwh: snapshot.cumulative_export_kwh,
@@ -977,6 +1006,100 @@ mod tests {
         let end = compute_period_end(start, BillingCycle::Monthly);
         assert_eq!(end.month(), 3);
         assert_eq!(end.day(), 29);
+    }
+
+    // The anniversary anchor does not drift: each period end is the anchor
+    // day clamped to the month's length, carried across the closes, so a
+    // leap year whose billing starts on the 29th, 30th or 31st keeps its
+    // anchor after every clamped boundary.
+    #[test]
+    fn period_ends_keep_the_anchor_day_across_the_leap_year() {
+        for (start_day, expected) in [
+            (
+                29u32,
+                [
+                    (2024, 1u32, 29u32),
+                    (2024, 2, 29),
+                    (2024, 3, 29),
+                    (2024, 4, 29),
+                ],
+            ),
+            (
+                30,
+                [(2024, 1, 30), (2024, 2, 29), (2024, 3, 30), (2024, 4, 30)],
+            ),
+            (
+                31,
+                [(2024, 1, 31), (2024, 2, 29), (2024, 3, 31), (2024, 4, 30)],
+            ),
+        ] {
+            let mut state = BillingState::new(
+                New_York
+                    .with_ymd_and_hms(2023, 12, start_day, 0, 0, 0)
+                    .unwrap(),
+                BillingCycle::Monthly,
+                15,
+                3600,
+                0,
+                0,
+            );
+            for (year, month, day) in expected {
+                let expected_end = New_York
+                    .with_ymd_and_hms(year, month, day, 0, 0, 0)
+                    .unwrap();
+                assert_eq!(
+                    state.period_end, expected_end,
+                    "a December {start_day} start's chain closes on the anchor day clamped \
+                     to the month's length: expected {expected_end}, got {}",
+                    state.period_end
+                );
+                state.reset(state.period_end);
+            }
+        }
+    }
+
+    // The containing-period walk follows the anchored chain the closes
+    // follow: the anchor day is carried through the clamped boundaries, so
+    // a mid-run tariff joins the period a from-start run holds open.
+    #[test]
+    fn containing_period_walk_keeps_the_anchor_day() {
+        let anchor = New_York.with_ymd_and_hms(2023, 12, 31, 0, 0, 0).unwrap();
+        // Inside the second period, whose start is the clamped boundary.
+        assert_eq!(
+            containing_period_start(
+                anchor,
+                New_York.with_ymd_and_hms(2024, 3, 15, 0, 0, 0).unwrap(),
+                BillingCycle::Monthly
+            ),
+            New_York.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap()
+        );
+        // Inside the third: the anchor returned to the 31st after February.
+        assert_eq!(
+            containing_period_start(
+                anchor,
+                New_York.with_ymd_and_hms(2024, 4, 15, 0, 0, 0).unwrap(),
+                BillingCycle::Monthly
+            ),
+            New_York.with_ymd_and_hms(2024, 3, 31, 0, 0, 0).unwrap()
+        );
+    }
+
+    // The anchor travels the checkpoint: a state standing on a clamped
+    // boundary restores with its anchor day, and its next close keeps the
+    // anchor instead of restarting from the clamped start's day.
+    #[test]
+    fn billing_state_snapshot_carries_the_anchor_day() {
+        let mut state =
+            BillingState::new(make_dt(2025, 1, 31), BillingCycle::Monthly, 15, 3600, 0, 0);
+        assert_eq!(state.period_end, make_dt(2025, 2, 28));
+        state.reset(state.period_end);
+
+        let snapshot = state.snapshot();
+        let mut restored =
+            BillingState::from_snapshot(snapshot, New_York, 0).expect("the billing state restores");
+        assert_eq!(restored.period_end, make_dt(2025, 3, 31));
+        restored.reset(restored.period_end);
+        assert_eq!(restored.period_end, make_dt(2025, 4, 30));
     }
 
     // The containing-period walk follows the same boundary chain the closes

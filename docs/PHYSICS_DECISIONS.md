@@ -454,3 +454,36 @@ condition feeds every record; a HARES-OCHRE comparison's first
 simulated window inherits whatever each side's initialization
 produced, so the days-run delta above is a difference between the two
 initializations, not a defect of either.
+
+## The billing month closes on the start's day-of-month anniversary
+
+The monthly billing cycle's periods are anniversary-based: the run's
+first period opens at the run's start and closes at the start's day of
+month in the following month, midnight in the tariff's zone
+(`compute_period_end` in `crates/hares-tariff/src/billing.rs`), so a
+January 25 start bills January 25 through February 24 into one period.
+The anchor day is the first period's start day, carried unchanged across
+the closes: each period end is the anchor day clamped to that month's
+length, so the chain never drifts. A December 31 start closes January
+31, February 29, March 31, April 30 and keeps returning to the 31st;
+computing each end from the previous end instead would close February 28
+and stay on the 28th forever. A mid-run tariff attach joins the period
+the anchored chain holds open at the attach instant.
+
+A step's energy bills to the period whose span holds it: the dwelling
+hands the tariff evaluator the step's end time, and the evaluator folds
+the step in, then closes its period when that time has reached the
+period end. The step ending at a period boundary is the closing period's
+last step; the step starting there books to the period it opens. A
+tariff attached exactly at a boundary opens the new period, and the
+boundary step books to it on a mid-run attach and on a from-start run
+alike: both routes agree, and every kWh is billed exactly once. A period
+closed before its own end bills its fixed and demand charges prorated to
+the span the tariff served, per the replacement and finalize rules.
+
+The vendored OCHRE computes no utility bills, so this number has no
+OCHRE comparison. Direction of the delta: no golden fixture's numbers
+move (the one tariffed golden closes no billing boundary inside its run);
+a run that spans a cycle boundary moves the boundary step's energy, cost
+and peak from the closing period's summary to the opening one's, with
+the totals across the periods unchanged.
