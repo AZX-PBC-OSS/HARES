@@ -3382,3 +3382,33 @@ The re-captures are byte-identical twice (all nine goldens, each
 captured twice on the staged state and compared byte for byte), the
 default build's compare-all 8 manifests identical and
 `full_year_900s_dst` identical on the dst build after them.
+### The null-for-not-applicable row, 2026-10-16 (the worktree `r87-b6`)
+
+The measurement the entry asks for, read off the frame diff between the
+parent commit's materialized frames (`frame_golden materialize-all` on
+`0e897801`, plus the dst manifest under `-F dst`, kept aside in
+`target/golden-base/`) and the fix tree's captures: the cells that
+change from 0.0 to null are `Unmet HVAC Load (C)`'s alone: the column
+no producer claims in any dwelling (declared at verbosity 2, never
+written; the cell read the row's zero every step). Per golden, the
+cells 0.0-to-null: `consumer_shape_900s` 35040 of 35040 rows,
+`full_year_900s_dst` 35040, `full_year_hourly` 8760 of 8760,
+`leap_year_february_900s` 384, `month_boundary_billing_3600s` 288,
+`weather_wrap_900s` 384, `fleet_mixed_offset` aggregate 165 of 165,
+`fleet_same_offset_300s` aggregate 192 of 192, `resstock_2025_fleet`
+aggregate 48 of 48. In the fleet folds the column's covered-weight
+cells move from the homes' weights (the zero cells counted as
+contributions) to the fold's zero weight behind the now-null aggregate.
+The other movement class is declarative only: the schema's per-field
+`nullable` flags (the not-nullable classes flipped in every product and
+schema pin; the values and digests of those columns bitwise unchanged).
+No metric, health or billing figure moved in any golden. The deeper
+nulls the row introduces (COP, SHR, mode, setpoint, SOC, speed,
+defrost, the v8 pass-throughs, the setpoint chain, the duct losses)
+live at verbosity 3 and above, which no golden fixture's schema
+reaches; they are pinned by the acceptance tests over the
+`cz4a_ashp_hpwh` fixture at verbosity 7 and 8: the ASHP Cooler's SHR
+null in all 192 steps, the ASHP Heater's COP null in its 8 Off steps
+and non-null in the heating steps, the appliance mode cells and the
+HPWH setpoint null, the never-emitted v8 keys null, and the
+never-produced dwelling columns null in a no-HVAC dwelling.

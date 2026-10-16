@@ -1561,6 +1561,83 @@ rule).
 **Measurement:** per golden, the number of cells that change from 0.0 to
 null per variable, and any metric that changes.
 
+**State:** committed `81e843f7` (branch `row/r87-b6`, worktree
+`r87-b6`, based on `0e897801`). The substitution sites on the record path
+(`crates/hares-core/src/dwelling/mod.rs` `record_step`): the state
+columns (mode, setpoint, SOC, speed, defrost), the v8 pass-through reads
+and the actor keys now write through the row plan's writer
+(`RowPlan::writer`/`RowWriter`), which marks every written slot in the
+row 37 validity bitset and leaves an unwritten slot invalid, so the cell
+is null; the power factor writes null at zero apparent power (the 1.0
+sentinel gone); the four setpoint-chain columns write the telemetry
+value or nothing (the pre-reconcile 0.0 sentinel gone); the not-nullable
+quantities keep their 0.0 substitutions (the physically-zero-when-
+inactive reading) and the failed-step branch writes the not-nullable
+cells' zeros explicitly, so a rolled-back step records the same zeros as
+today with its nullable cells (COP, SHR, power factor, the v8 flows)
+null. The summed cells: the bindings' builder computes the slots whose
+value is the row's zero every step (the duct-losses slot when the
+dwelling has HVAC; every bound end-use aggregate; a not-nullable column a
+mid-run roster change orphaned against the frozen schema, which keeps
+today's zero rather than inventing a tombstone null) and the step marks
+them valid. The producers: the ASHP heater and the air conditioner (the
+ASHP/MSHP/GSHP/WSHP coolers are its class) publish COP `None` when the
+step's compressor input is 0 (the acceptance's runtime-0/Off rule; the
+telemetry channel keeps its historical 0.0, it feeds no output column)
+and the air conditioner writes SHR only when the step's sensible cooling
+is above 0, the init insert of 1.0 removed; the restore instants publish
+COP `None` when the restored mode is idle. The core contract's HAS_COP
+presence rule is relaxed to the one-directional form (undeclared never
+populated; a COP published when absent stays a defect) with the
+plausibility bounds unchanged. The catalogue declares every variable's
+nullability per the entry's table (the not-nullable classes flipped from
+the all-true placeholder; the telemetry-sourced not-nullable columns and
+their equipment-side `TelemetryField` declarations flipped together, the
+assembly's contradiction check demands it), each variable's nullability
+logged at catalogue build at `debug`; `Telemetry::remove` publishes a
+channel's per-step absence (a NaN payload only `remove` can store, the
+key set stable, so the snapshot's in-place copy keeps its fast path;
+equality reads through the marker). `StreamingRecorder::push_row` takes
+the row's validity and the batches carry Arrow nulls; the checkpoint's
+`ReportRowsSnapshot` carries the rows' validity (`CHECKPOINT_VERSION` 17
+to 18, re-pinned). The reducer (row 39) and the fleet fold (row 50)
+needed no change: `push_batch` reads the columns' validity and the fold
+skips a home's null cells; the fleet tests' period builder made
+null-aware (the reducer's own sum/valid-count rule). The Python surface
+is unchanged code: the batches go to polars through pyo3-arrow and the
+nulls arrive as None (verified: the unmet column all null, the zone
+temperature and the total power never null). The metrics are untouched
+(their input slots are all not-nullable produced slots) and B-7's
+verbosity independence is not this row's. Acceptance tests (all RED
+first: `lacking_equipment_class_columns_are_null`'s probe failed at the
+base on `'Scheduled Heating Setpoint (C)' row 0` reading the row's
+zero): `undefined_quantities_are_null`,
+`inactive_power_is_zero_not_null`,
+`missing_non_nullable_value_fails_the_run` (the wiring-defect error is
+the core contract's OR-5 failure naming the equipment and the missing
+channel), `absent_actor_key_is_null`,
+`mean_excludes_nulls_and_reports_valid_count` (in `reduce.rs`), and
+`lacking_equipment_class_columns_are_null` (the prompt's RED test). The
+goldens re-captured TWICE BYTE-IDENTICAL (compare-all 8 + dst 1): the
+movement is exactly two classes, read off the frame diff against the
+parent's materialized frames: the schema's nullable flags (the not-
+nullable classes' declaration flips) and the `Unmet HVAC Load (C)`
+column (no producer claims it in any dwelling: its cells read the
+row's zero at the parent and null after; the cells 0.0-to-null per
+golden: `consumer_shape_900s` 35040, `full_year_900s_dst` 35040,
+`full_year_hourly` 8760, `leap_year_february_900s` 384,
+`month_boundary_billing_3600s` 288, `weather_wrap_900s` 384,
+`fleet_mixed_offset` aggregate 165, `fleet_same_offset_300s` aggregate
+192, `resstock_2025_fleet` aggregate 48), whose covered-weight cells
+move to the fold's honest zero. The metrics, the health and the billing
+products are unchanged in every golden; the deeper v3+ nulls (COP, SHR,
+mode, setpoint, SOC, speed, defrost, the v8 pass-throughs, the
+setpoint chain, the duct losses) are pinned by the acceptance tests and
+do not reach the v2 fixtures. Gates: fmt clean; clippy `--workspace
+--all-targets --all-features -D warnings` clean; nextest `--workspace
+--all-features -j 2` 8111/8111 (7 skipped), run once;
+`pytest -m ''` 1764 passed, 6 xfailed, 0 failed, 0 errors; pyright 0.
+
 ## B-7: metrics independent of verbosity
 
 **Kind:** numeric fix. OR-8 moves metrics onto the catalogue and row plan
