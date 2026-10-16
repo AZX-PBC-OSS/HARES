@@ -1773,6 +1773,47 @@ verification step). No new test: the removed arm had no reachable input.
 
 **Measurement:** none beyond the golden record (every golden unchanged).
 
+**State:** committed `4a47661e` (branch `row/r90-b8`, worktree
+`r90-b8`, based on `247d2a5b`, one commit). In brief: the
+flow-resolution block returns the pump node, its resolved flow and
+the resolved node flows as one typed triple,
+`Option<(FluidNodeId, f64, HashMap<FluidNodeId, f64>)>`; the
+plumbing-node set takes the pump node from the resolution, and the
+pump's resolved flow carried out of the resolution is the loop's
+total flow, with no second search for the pump, no lookup and no
+fallback. The evidence's line numbers had drifted from `21d90588`;
+at the row's base the sites sat at `fluid_solver.rs:506` (the
+pump's flow inserted into the resolved map), `:535` (the block's
+only `Some`, returned inside `if let Some(pump) = pump_node`),
+`:750-768` (the second pump search) and `:789-791` (the lookup and
+its hash-order fallback). Reachability, checked before the edit:
+the map the fallback summed is `Some` only when the pump was found,
+the pump's own flow is inserted before that return and never
+overwritten afterwards (the non-splitter fill skips the pump's
+node), and the deleted second search recomputed the same
+Source-role zero-parent predicate on the unchanged topology (the
+only write between the resolution and the aggregation is a splitter
+branch's requested-flow snapshot, which touches neither the node
+roles nor the edges), so the lookup always hit and no input, test
+or process, could reach the fallback arm. That absence of any
+reachable input is why no red test was written and the entry's
+stated proof form ran instead: the existing 32 `fluid_solver` tests
+pass unchanged, and `git grep -n -F 'resolved.values().sum()'`
+over `crates` prints nothing. No number can move: the carried value
+is the same f64 the lookup returned, bit for bit, read from the
+same map through the same borrow; the aggregation's plumbing set
+gains the same pump node the deleted `Option` carried; the
+post-resolution invariant and the effective flows read the map
+unchanged; and the `None` arm (no topology, no splitters, no pump)
+is untouched. Gates at `4a47661e`: fmt clean, clippy
+`--workspace --all-targets --all-features -D warnings` clean,
+nextest `--workspace --all-features -j 2` 8122/8122 (7 skipped; the
+first run's one failure was the fresh worktree's uninitialised
+OCHRE submodule, populated with `git submodule update --init` and
+the suite re-run whole), `pytest -m ''` 1764 passed + 6 xfailed,
+0 failed, 0 errors, pyright 0, the goldens bitwise (compare-all 8
+identical + the dst set 1 identical).
+
 ## B-9a: `Fleet::from_resstock` builds fleets that can run
 
 **Kind:** defect fix (found while giving B-9 a fixture;
