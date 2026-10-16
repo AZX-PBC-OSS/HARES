@@ -2693,6 +2693,20 @@ fn resolved_model_to_py(py: Python<'_>, model: &hares_core::ResolvedModel) -> Py
     site.set_item("utc_offset_h", model.site.utc_offset_h)?;
     dict.set_item("site", site)?;
 
+    // The run's clock: the first step's local wall clock, the site offset,
+    // the step and the simulated step count of the configured horizon - the
+    // number a caller checks a report's row count against. The same
+    // read-back `DwellingBlueprint.validate()` carries.
+    let clock = PyDict::new(py);
+    clock.set_item(
+        "start",
+        model.clock.start.format("%Y-%m-%dT%H:%M:%S").to_string(),
+    )?;
+    clock.set_item("utc_offset_s", model.clock.utc_offset_s)?;
+    clock.set_item("time_res_s", model.clock.time_res_s)?;
+    clock.set_item("steps", model.clock.steps)?;
+    dict.set_item("clock", clock)?;
+
     Ok(dict.into_any().unbind())
 }
 

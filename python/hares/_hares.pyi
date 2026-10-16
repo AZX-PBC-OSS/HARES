@@ -2545,7 +2545,6 @@ class DwellingConfig:
         config: SimulationConfig,
         *,
         bldg_id: int = ...,
-        initialization_duration: int | None = ...,
         defaults: str | ParsedDefaults | None = ...,
         overrides: dict[str, Any] | None = ...,
         **unexpected: object,
@@ -2562,8 +2561,6 @@ class DwellingConfig:
     def defaults(self) -> str | None: ...
     @property
     def bldg_id(self) -> int: ...
-    @property
-    def initialization_duration(self) -> int | None: ...
     @property
     def overrides(self) -> dict[str, Any] | None: ...
     def __repr__(self) -> str: ...
@@ -3138,7 +3135,6 @@ class DwellingBlueprint:
         config: SimulationConfig,
         *,
         bldg_id: int = ...,
-        initialization_duration: int | None = ...,
         defaults: str | ParsedDefaults | None = ...,
         overrides: dict[str, Any] | None = ...,
         **unexpected: object,
@@ -3181,7 +3177,6 @@ class Dwelling:
         config: SimulationConfig,
         *,
         bldg_id: int = ...,
-        initialization_duration: int | None = ...,
         defaults: str | ParsedDefaults | None = ...,
         overrides: dict[str, Any] | None = ...,
         **unexpected: object,
@@ -3198,7 +3193,9 @@ class Dwelling:
         ``parameters`` as ``name``/``value``/``unit`` dicts and the active
         ``heating_setpoint``/``cooling_setpoint`` provenance labels),
         ``boundaries`` (the RC network's effective R, films, C and layers),
-        ``windows``, ``infiltration`` and ``site``."""
+        ``windows``, ``infiltration``, ``site`` and ``clock`` (the run's
+        first step's local wall clock, the site offset, the step and the
+        simulated step count of the configured horizon)."""
     def simulate(self) -> RunResult: ...
     def finish(self) -> RunResult: ...
     def health(self) -> RunHealth: ...

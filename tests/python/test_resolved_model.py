@@ -90,3 +90,17 @@ def test_resolved_model_reads_identical_twice():
     first = dwelling.resolved_model()
     second = dwelling.resolved_model()
     assert first == second, "the read-back's dict builds identically on every read"
+
+
+def test_resolved_model_carries_the_run_clock():
+    """The dwelling's read-back carries the run's clock: the first step's
+    local wall clock, the site offset, the step and the simulated step
+    count of the configured horizon - the number a caller checks a
+    report's row count against (`validate()` carries the same read-back;
+    the built dwelling's must carry it too)."""
+    model = read_back()
+    clock = model["clock"]
+    assert clock["steps"] == 5
+    assert clock["time_res_s"] == 60
+    assert clock["start"] == "2019-01-01T00:00:00"
+    assert clock["utc_offset_s"] == -25200
