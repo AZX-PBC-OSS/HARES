@@ -368,7 +368,14 @@ impl DomainSolver for FluidSolver {
             // distribute remaining to passive branches proportional to
             // max-avail, allocate to bypass, and distribute excess when flow
             // is insufficient by requested fraction.
-            let resolved_node_flows: Option<HashMap<FluidNodeId, f64>> = {
+            // The resolution returns the pump node and its resolved flow
+            // alongside the resolved node flows: the pump's flow is the
+            // total loop flow, so the aggregation below reads the carried
+            // value instead of searching for the pump again and summing
+            // the map when a lookup missed. A sum over a HashMap's values
+            // iterates in hash order, and floating-point addition is not
+            // associative, so such a fallback is a determinism hazard.
+            let resolved_node_flows: Option<(FluidNodeId, f64, HashMap<FluidNodeId, f64>)> = {
                 let topology_opt = self.config.loop_topologies.get(&loop_id);
                 if let Some(topology) = topology_opt {
                     if !topology.splitters.is_empty() {
@@ -532,7 +539,10 @@ impl DomainSolver for FluidSolver {
                                 }
                             }
 
-                            Some(resolved)
+                            // The pump node, its resolved flow and the
+                            // resolved node flows, carried out of the
+                            // resolution.
+                            Some((pump.node_id, pump_resolved, resolved))
                         } else {
                             None
                         }
@@ -560,7 +570,7 @@ impl DomainSolver for FluidSolver {
             // Build effective flows: resolved values override raw accumulator
             // flows. Used for both conservation checking and aggregation.
             let effective_flows: HashMap<FluidNodeId, f64> =
-                if let Some(ref resolved) = resolved_node_flows {
+                if let Some((_, _, resolved)) = &resolved_node_flows {
                     let mut eff = node_flows.clone();
                     for (nid, flow) in resolved {
                         eff.insert(*nid, *flow);
@@ -737,43 +747,24 @@ impl DomainSolver for FluidSolver {
                 cooling_power_w,
                 mut mean_supply_temp_c,
                 mut mean_return_temp_c,
-            ) = if let Some(ref resolved) = resolved_node_flows {
-                // Use resolved flows per node for weighted aggregation.
+            ) = if let Some((pump_node, pump_total, resolved)) = &resolved_node_flows {
+                // The pump node and the total loop flow come from the
+                // resolution: the pump's resolved flow is carried out of
+                // it as the loop's total, with no second search for the
+                // pump, no lookup and no fallback. Use resolved flows per
+                // node for weighted aggregation.
                 let mut sum_supply = 0.0_f64;
                 let mut sum_return = 0.0_f64;
                 let mut net_heating = 0.0_f64;
                 let mut net_cooling = 0.0_f64;
                 let mut total_resolved = 0.0_f64;
 
-                // Identify pump node for exclusion from temperature
-                // averaging (pump is plumbing, not a thermal component).
-                let pump_node_id: Option<FluidNodeId> = {
-                    let topology = self.config.loop_topologies.get(&loop_id);
-                    topology.and_then(|topo| {
-                        let parent_count: HashMap<FluidNodeId, usize> = {
-                            let mut map = HashMap::new();
-                            for (_, to) in &topo.edges {
-                                *map.entry(*to).or_default() += 1;
-                            }
-                            map
-                        };
-                        topo.nodes
-                            .iter()
-                            .find(|n| {
-                                n.role == FluidNodeRole::Source
-                                    && parent_count.get(&n.node_id).copied().unwrap_or(0) == 0
-                            })
-                            .map(|pump| pump.node_id)
-                    })
-                };
-
-                // Collect splitter/mixer node_ids for exclusion from
-                // temperature averaging.
+                // Collect the pump, splitter and mixer node_ids for
+                // exclusion from temperature averaging: these nodes are
+                // plumbing, not thermal components.
                 let plumbing_nodes: std::collections::HashSet<FluidNodeId> = {
                     let mut set = std::collections::HashSet::new();
-                    if let Some(nid) = pump_node_id {
-                        set.insert(nid);
-                    }
+                    set.insert(*pump_node);
                     if let Some(topo) = self.config.loop_topologies.get(&loop_id) {
                         for s in &topo.splitters {
                             set.insert(s.node_id);
@@ -784,11 +775,6 @@ impl DomainSolver for FluidSolver {
                     }
                     set
                 };
-
-                // Use the pump's flow as the total loop flow.
-                let pump_total: f64 = pump_node_id
-                    .and_then(|nid| resolved.get(&nid).copied())
-                    .unwrap_or_else(|| resolved.values().sum());
 
                 for acc in &entries {
                     // Skip plumbing nodes (pump, splitter, mixer) in
@@ -838,7 +824,7 @@ impl DomainSolver for FluidSolver {
                         .unwrap_or((0.0, 0.0))
                 };
 
-                (pump_total, net_heating, net_cooling, supply_c, return_c)
+                (*pump_total, net_heating, net_cooling, supply_c, return_c)
             } else {
                 // No flow-splitting: use accumulator flows directly.
                 let tf: f64 = entries.iter().map(|e| e.total_flow_kg_s).sum();
@@ -948,7 +934,7 @@ impl DomainSolver for FluidSolver {
             // allocations. The pump node and the splitter branch nodes are
             // precomputed at construction, so the per-step cost is a lookup
             // and a sum, never a topology rescan.
-            if let Some(ref resolved) = resolved_node_flows
+            if let Some((_, _, resolved)) = &resolved_node_flows
                 && let Some(check) = self.pump_flow_checks.get(&loop_id)
             {
                 let pump_flow = resolved.get(&check.pump_node).copied().unwrap_or(0.0);
