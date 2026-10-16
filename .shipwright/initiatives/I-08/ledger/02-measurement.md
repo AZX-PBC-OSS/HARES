@@ -3256,3 +3256,41 @@ first 48 h draws less gas: the warmed initial condition's heating
 demand is the smaller one, and a Python evaluation that never passes
 the keyword (the calibration consumer's own case) inherits it from
 this row on.
+
+### The billing month boundary row, 2026-10-15 (the worktree `r85-b4`, the fix commit `45cd54e4`)
+
+The entry's acceptance restated against the anniversary semantics (the
+row 32 record's landed behavior, the notes' reconciliation): the monthly
+cycle's period ends stay anniversary-based, the anchor day carried
+across the closes so no clamped boundary drifts the chain, and the
+dwelling passes the step's end time, so the step ending at a boundary is
+the closing period's last step. The goldens are bitwise: compare-all 8
+manifests identical on the default build and `full_year_900s_dst`
+identical on the dst build. The one tariffed golden,
+`month_boundary_billing_3600s`, closes no billing boundary inside its
+12-day run (the January 25 anniversary boundary is February 25, outside
+January 25 to February 6), and its billing product is bitwise unchanged:
+one period, the run's single period, its totals the same bits.
+
+The movement lives on runs that span a cycle boundary. The acceptance
+test's run (the `month_boundary_billing_3600s` inputs held 35 days at
+3600 s, January 25 to March 1, crossing the February 25 00:00 MST
+boundary): at the parent commit the first period's summary held the
+February 25 00:00 step's energy and closed with a total import of
+941.51821526152 kWh; after the change it closes on its own 744 steps at
+941.0620277257223 kWh, and the second period (February 25 to the
+March 1 finalize) holds 112.319426955769 kWh with the boundary step's
+0.4562 kWh among them. The two periods' combined metered energy is
+unchanged: every kWh is billed exactly once, the boundary step only
+changed periods. The fixed charges do not move on this run: the first
+period closed at its own boundary (no proration) and the finalize bills
+the open period's full monthly charge.
+
+The mid-run boundary-attach convention changed with it: at the parent, a
+from-start run's close fired one step late, so the boundary step's
+energy sat in the closing period while a tariff attached exactly at the
+boundary put it in the new one (one step's attribution differed between
+the routes). After the change both routes book the boundary step to the
+period it opens; the pin
+`a_tariff_attached_at_a_period_boundary_books_the_boundary_step_to_the_new_period`
+was restated from the asymmetry to the agreement.

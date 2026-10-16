@@ -1239,6 +1239,77 @@ re-captured goldens.
 consumer's `calibration/ami2/tariff.py` bills move by this change; recorded
 in B1's attribution.
 
+**State:** committed `45cd54e4` (branch `row/r85-b4`, worktree `r85-b4`,
+on B-3's `3935e940`). The reconciliation the two notes asked for, read
+against the row 32 record (the monthly cycle closes on the start's
+day-of-month anniversary, so a 7-day run crosses no boundary): the
+anniversary semantics stand, and the civil-month boundary is not taken
+here; the acceptance is restated against the anniversary semantics
+rather than the entry's original civil-month split, so the entry's
+original verification line about re-captured billing goldens does not
+apply. The rule as landed:
+
+- The step-end convention: the dwelling's post-solver fold passes the
+  step's end time, `current_time + dt`, converted to the evaluator's
+  zone; `evaluator.rs`'s contract and tests stand unchanged. The period
+  closes on the fold of the step its boundary ends, so a step's energy
+  bills to the period whose span holds it; `tracing` at `debug` names
+  the close time and the triggering step end.
+- The anchored anniversary (the 2026-10-04 note's fix): `BillingState`
+  carries the cycle's anchor day, the first period's start day of month,
+  unchanged across the closes; each period end is the anchor day clamped
+  to that month's length. The containing-period walk follows the same
+  anchored chain, and the checkpoint carries the anchor
+  (`BillingStateSnapshot.anchor_day`; the tariff snapshot schema version
+  2 to 3). A December 31 start closes January 31, February 29, March 31,
+  April 30 and keeps returning to the 31st.
+- The mid-run convention becomes the from-start run's: a tariff attached
+  exactly at a period boundary and a from-start run both book the
+  boundary step to the period it opens (the close fires on the fold
+  whose end reaches the boundary, before the boundary step's own fold).
+  The landed pin
+  `a_tariff_attached_at_a_period_boundary_books_the_boundary_step_to_the_new_period`
+  was restated from the one-step asymmetry to the agreement, its
+  February totals now bitwise equal, with January's total pinned to its
+  own steps' sum; the attach-at-boundary full-charge pin stands.
+
+The acceptance test `dwelling_billing_boundary_step_belongs_to_its_own_month`
+runs the `month_boundary_billing_3600s` inputs held 35 days at 3600 s
+(January 25 to March 1), spanning the February 25 00:00 MST anniversary
+boundary: the first period's `total_import_kwh` is, on bits, the
+step-order sum of its own 744 steps' import energy (the positive part of
+each step's net electric power in kW times one hour, computed as the
+evaluator's update computes it), the second period's its own 96, the
+bounds January 25 to February 25 and February 25 to the March 1
+finalize, and both fixed charges the full monthly charge (the boundary
+close at its own end, no proration; the finalize's full monthly charge
+plus the daily charge for the four days elapsed, zero here). RED at the
+parent on the totals: the first period held the boundary step
+(941.51821526152 against the fixed 941.0620277257223, the 0.4562 kWh
+step among them) and the second lacked it. The anchor tests: 
+`period_ends_keep_the_anchor_day_across_the_leap_year` (December 2023
+starts on the 29th, 30th and 31st walked through the leap February by
+the close chain; RED at the parent on the 30th's and 31st's chains),
+`containing_period_walk_keeps_the_anchor_day` (the walk past a clamped
+boundary returns February 29, March 31; RED at the parent), and
+`billing_state_snapshot_carries_the_anchor_day` (a state standing on a
+clamped boundary restores with its anchor; RED at the parent). The
+measurement is in `02-measurement.md` (the boundary-crossing run's
+per-period totals; the boundary-attach convention's change). The
+`docs/PHYSICS_DECISIONS.md` section "The billing month closes on the
+start's day-of-month anniversary" and the `docs/python.md` Numeric
+changes line of 2026-10-15 carry the rule and the direction of the
+delta: no golden fixture's numbers move (the one tariffed golden closes
+no billing boundary inside its 12-day run; all nine bitwise, compare-all
+8 + dst 1), a run spanning a cycle boundary moves the boundary step's
+energy, cost and peak from the closing period's summary to the opening
+one's, the totals across the periods unchanged, every kWh billed exactly
+once. Gates at the tip: fmt clean, clippy `--workspace --all-targets
+--all-features -D warnings` clean, nextest `--workspace --all-features
+-j 2` 8105/8105 (6 skipped), `pytest -m ''` 1764 passed + 6 xfailed,
+0 failed, 0 errors, pyright 0, the goldens bitwise (compare-all 8 +
+dst 1).
+
 ## B-5: end-use rollup by typed kind, not by name string
 
 **Kind:** numeric fix. OR-1 builds the catalogue with end use still taken
