@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "765968ed228e688af5b76082193e38a05ddf2e37",
+  "git_head": "b5858446c4326b486dae12041d2d6ea1ba1e4537",
   "git_dirty": true,
   "metrics": [
     {
@@ -43,10 +43,6 @@
       "metrics_reliability": "Reliable",
       "nan_step_count": 0,
       "peak_power_kw.per_end_use": {
-        "cooking": {
-          "bits": "0x3fe852ff9f414fd4",
-          "value": 0.7601316557361266
-        },
         "hvac_cooling": {
           "bits": "0x3fa999999999999a",
           "value": 0.05
@@ -60,12 +56,12 @@
           "value": 0.4047831309326259
         },
         "other": {
-          "bits": "0x400824b5b9c735b1",
-          "value": 3.0179247392577158
+          "bits": "0x400a6d4de4a9975d",
+          "value": 3.303371225762858
         },
         "plug_loads": {
-          "bits": "0x3fc99056f725591e",
-          "value": 0.19971739833517516
+          "bits": "0x3fd409fec75c1ab8",
+          "value": 0.3131100603936079
         },
         "refrigeration": {
           "bits": "0x3fa96e0287804064",
@@ -121,10 +117,6 @@
         "value": 357.7809248471344
       },
       "total_energy_kwh.per_end_use": {
-        "cooking": {
-          "bits": "0x4028d53ff231e900",
-          "value": 12.416503494827793
-        },
         "hvac_cooling": {
           "bits": "0x402cccccccccccf4",
           "value": 14.40000000000007
@@ -138,12 +130,12 @@
           "value": 44.36442577445861
         },
         "other": {
-          "bits": "0x404ccbbf29e37f44",
-          "value": 57.591771350939354
+          "bits": "0x40463bcf3291c246",
+          "value": 44.46726066701062
         },
         "plug_loads": {
-          "bits": "0x40467e191a8762f1",
-          "value": 44.9851411019389
+          "bits": "0x4051a1ac8732cd1a",
+          "value": 70.52615528069546
         },
         "refrigeration": {
           "bits": "0x4027d727a8fd6251",
@@ -421,11 +413,6 @@
           "nullable": true
         },
         {
-          "name": "Cooking End Use Electric Power (kW)",
-          "arrow_type": "Float64",
-          "nullable": true
-        },
-        {
           "name": "Lighting End Use Electric Power (kW)",
           "arrow_type": "Float64",
           "nullable": true
@@ -666,11 +653,11 @@
         },
         {
           "name": "Other End Use Electric Power (kW)",
-          "digest": "100f78f5bf24c521fff165d1a3d4013ba2b280abc6ae4850e33005b305f90537",
+          "digest": "270d0be5fd85fd28066a5d4b3d1d1e616e2b8caca70b62c9eb1f9a38e48fae47",
           "blocks": [
-            "c70cc48a28765860bdafb8446577d364d74bbbd68b00d31bd5779761df7b34b7",
-            "96ca1327b3e13ed7fdad5dadc65857804773372e66ff4db10cecd7f3ece4664e",
-            "565a1ef24270f3f3f41916838d59ad5bf6b520a437db0cee13315c9f81724eee"
+            "7fee71dff8d99b9f21ef800c171e5394b82994914705bab1d89240071e7aa016",
+            "4787bc5b5783f055d9c4b4d892c03b70c90ce8f449aba7ccf6d90731c54402a4",
+            "cf7b766e8986423f50f9a365f4158196b191a76e48072e8a92442610844b6ea6"
           ]
         },
         {
@@ -680,15 +667,6 @@
             "3596fddb00af2a7e95064741acfdc415490ca8bd3944c6292dca63803dee8c2b",
             "d82295da4a9da1dcde1b6a075ad29d8a8a3cb2f9819321317a7b39601ba203d3",
             "b1e544ac5b836a5dead5433c8e21dcaaef80e7ff27c5b208b077bc62c0258d9f"
-          ]
-        },
-        {
-          "name": "Cooking End Use Electric Power (kW)",
-          "digest": "bdf8e3d345af5fefbb0a1d7da8d2d20b7cc5fb422c6de3142da8370ff98cfd34",
-          "blocks": [
-            "b114b5656d74ccb6f05468f5aba855bd2b4cafda62f7274bfe30735fb335d704",
-            "6221329dc216ead7567747cb86071e0cceba7a3d378c797ea0f517e701e31656",
-            "291e7e2a17c4e6a09964ab03a1e1152953fa5db95ade0d9568cbb65751ed16c1"
           ]
         },
         {
@@ -702,11 +680,11 @@
         },
         {
           "name": "Plug Loads End Use Electric Power (kW)",
-          "digest": "9bfe8071350ae413493c9940f0815dafdce6e40727babaf4aa4b63898c5fa9b0",
+          "digest": "129e0ebefec969190f1390c954807732832bf90264f062cf3b9c30907ba2e03d",
           "blocks": [
-            "c233d5e97fda53cd2ac7bde32ce5c55482eb14dad6051d81ebc4bb0e7e7cc6c1",
-            "5e86abab5996f458a81ae3181adb20c14262bf55ca974dc5e4c7a27a34f0505d",
-            "a58495d6ea98192a60ed846a6837155ac1937c340d3e31ca3e7042f1a70ed9ed"
+            "c4d9bf0e74d56d6b6e4f560fb0bf0b806989dee5c984ab59e831440f3ba7d281",
+            "81171569a9711eec1a6ce076f4fb11b171068ff5b1efd0dd971d2f308b49f238",
+            "3ee2d3069f174ea595850ff697348ae07ea14279d66f9e8721842d1a8629368d"
           ]
         },
         {

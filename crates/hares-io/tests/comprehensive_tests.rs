@@ -98,10 +98,28 @@ fn build_batch(columns: Vec<(&str, Vec<f64>)>) -> RecordBatch {
     RecordBatch::try_new(schema, arrays).expect("record batch")
 }
 
+/// The typed equipment end-use table of the specs a test schema was built
+/// from: the class's declared surface, the same source
+/// `build_schema_for_specs` reads.
+fn spec_end_uses(specs: &[hares_io::EquipmentSpec]) -> Vec<(String, hares_types::EndUse)> {
+    specs
+        .iter()
+        .filter_map(|s| {
+            hares_equipment::class_declared_surface(&s.name)
+                .map(|surface| (s.name.clone(), surface.end_use))
+        })
+        .collect()
+}
+
 /// The metrics input plan for a test schema: the schema's value-column
 /// names in order (a leading `Time` column skipped, the union-schema
-/// convention).
-fn plan_for(schema: &Schema, config: &SimulationConfig) -> MetricsInputPlan {
+/// convention), with the specs' typed end-use table for the equipment
+/// gate.
+fn plan_for(
+    schema: &Schema,
+    config: &SimulationConfig,
+    equipment_end_uses: &[(String, hares_types::EndUse)],
+) -> MetricsInputPlan {
     let names: Vec<String> = schema
         .fields()
         .iter()
@@ -110,13 +128,22 @@ fn plan_for(schema: &Schema, config: &SimulationConfig) -> MetricsInputPlan {
         ))
         .map(|f| f.name().clone())
         .collect();
-    MetricsInputPlan::build(&names, config).expect("metrics plan builds")
+    MetricsInputPlan::build(&names, config, equipment_end_uses).expect("metrics plan builds")
 }
 
 /// The calculator for a test schema.
-fn calc_for(schema: &Schema, time_res_secs: u32, config: &SimulationConfig) -> MetricsCalculator {
-    MetricsCalculator::new(plan_for(schema, config), time_res_secs, config)
-        .expect("calculator builds")
+fn calc_for(
+    schema: &Schema,
+    time_res_secs: u32,
+    config: &SimulationConfig,
+    equipment_end_uses: &[(String, hares_types::EndUse)],
+) -> MetricsCalculator {
+    MetricsCalculator::new(
+        plan_for(schema, config, equipment_end_uses),
+        time_res_secs,
+        config,
+    )
+    .expect("calculator builds")
 }
 
 /// Feeds every row of the batch, in order: the same values the producer
@@ -161,7 +188,7 @@ fn build_schema_output_accepted_by_metrics_calculator_verbosity_0() {
         .skip(1)
         .map(|f| f.name().clone())
         .collect();
-    let result = MetricsInputPlan::build(&names, &test_config(None));
+    let result = MetricsInputPlan::build(&names, &test_config(None), &[]);
     assert!(
         result.is_ok(),
         "MetricsInputPlan::build must accept build_schema([], 0, &[]) output: {:?}",
@@ -182,7 +209,7 @@ fn build_schema_output_accepted_by_metrics_calculator_verbosity_1() {
         .skip(1)
         .map(|f| f.name().clone())
         .collect();
-    let result = MetricsInputPlan::build(&names, &test_config(None));
+    let result = MetricsInputPlan::build(&names, &test_config(None), &spec_end_uses(&specs));
     assert!(
         result.is_ok(),
         "MetricsInputPlan::build must accept build_schema(specs, 1, &[]) output: {:?}",
@@ -205,7 +232,7 @@ fn build_schema_output_accepted_by_metrics_calculator_all_verbosity_levels() {
             .skip(1)
             .map(|f| f.name().clone())
             .collect();
-        let result = MetricsInputPlan::build(&names, &test_config(None));
+        let result = MetricsInputPlan::build(&names, &test_config(None), &spec_end_uses(&specs));
         assert!(
             result.is_ok(),
             "MetricsInputPlan::build must accept build_schema output at verbosity {v}: {:?}",
@@ -386,7 +413,7 @@ fn verbosity_8_includes_capacity_and_cop_columns() {
 fn gas_annual_energy_therms_is_non_none_with_gas_column() {
     let schema =
         schema_from_columns(&["Total Electric Power (kW)", "Total Gas Power (therms/hour)"]);
-    let mut calc = calc_for(&schema, 3600, &test_config(None));
+    let mut calc = calc_for(&schema, 3600, &test_config(None), &[]);
     accumulate(
         &mut calc,
         &build_batch(vec![
@@ -412,7 +439,7 @@ fn gas_annual_energy_therms_is_non_none_with_gas_column() {
 fn total_energy_includes_both_electric_and_gas() {
     let schema =
         schema_from_columns(&["Total Electric Power (kW)", "Total Gas Power (therms/hour)"]);
-    let mut calc = calc_for(&schema, 3600, &test_config(None));
+    let mut calc = calc_for(&schema, 3600, &test_config(None), &[]);
     accumulate(
         &mut calc,
         &build_batch(vec![

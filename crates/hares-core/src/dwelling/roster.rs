@@ -1193,9 +1193,9 @@ impl Dwelling {
     }
 
     /// The catalogue input for a prospective roster: every equipment's
-    /// base name, instance override, id, fuel and typed telemetry
-    /// declarations; the zone display names; every actor's registered name
-    /// and typed declarations.
+    /// base name, instance override, id, typed end use and capabilities,
+    /// fuel and typed telemetry declarations; the zone display names;
+    /// every actor's registered name and typed declarations.
     fn catalogue_input(
         equipment: &[&dyn Equipment],
         actors: &[&dyn Actor],
@@ -1210,6 +1210,8 @@ impl Dwelling {
                     instance_name: None,
                     id: desc.id,
                     fuel: desc.fuel,
+                    end_use: desc.end_use.clone(),
+                    core_capabilities: desc.core_capabilities,
                     telemetry: desc.telemetry_fields.clone(),
                 }
             })
@@ -1560,25 +1562,29 @@ impl Dwelling {
             let time_res_secs = self.sim_config.time_res_secs_u32().map_err(|err| {
                 HaresError::InvalidState(format!("metrics calculator time resolution: {err}"))
             })?;
-            let plan =
-                hares_io::MetricsInputPlan::build(&available, &self.sim_config).map_err(|err| {
-                    // A missing required column names the remedy: the
-                    // metrics are computed from the union of the reports'
-                    // selections, so some report must carry the column.
-                    let mut message = format!("metrics calculator init failed: {err}");
-                    if matches!(
-                        err,
-                        hares_io::output::metrics::MetricsError::MissingRequiredColumn(_)
-                    ) {
-                        message.push_str(
-                            "; the run requested metrics, and the metrics are computed from \
+            let plan = hares_io::MetricsInputPlan::build(
+                &available,
+                &self.sim_config,
+                catalogue.equipment_end_uses(),
+            )
+            .map_err(|err| {
+                // A missing required column names the remedy: the
+                // metrics are computed from the union of the reports'
+                // selections, so some report must carry the column.
+                let mut message = format!("metrics calculator init failed: {err}");
+                if matches!(
+                    err,
+                    hares_io::output::metrics::MetricsError::MissingRequiredColumn(_)
+                ) {
+                    message.push_str(
+                        "; the run requested metrics, and the metrics are computed from \
                              the union of the reports' selections: include the power column \
                              in a report's selection (a Verbosity selection at tier 2 or \
                              deeper carries it, or name it)",
-                        );
-                    }
-                    HaresError::InvalidState(message)
-                })?;
+                    );
+                }
+                HaresError::InvalidState(message)
+            })?;
             Some(
                 MetricsCalculator::new(plan, time_res_secs, &self.sim_config).map_err(|err| {
                     HaresError::InvalidState(format!("metrics calculator init failed: {err}"))

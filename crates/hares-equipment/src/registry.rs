@@ -1,13 +1,128 @@
 //! Equipment registry for dynamic dispatch.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
-use hares_types::HaresError;
+use hares_types::{CoreCapabilities, EndUse, HaresError, TelemetryField};
 
+use crate::water_heater::wh_config::TanklessWaterHeaterConfig;
 use crate::{Equipment, EquipmentConfig};
 
 pub type EquipmentFactory =
     Box<dyn Fn(EquipmentConfig) -> Box<dyn Equipment> + Send + Sync + 'static>;
+
+/// The typed surface a registered class declares: its end use, its
+/// core-output capabilities and its declared telemetry.
+///
+/// Read by callers that hold a class name but no constructed equipment
+/// (the blueprint's end-use removal and the spec-shaped catalogue path);
+/// the live path reads the same values off the constructed descriptor.
+/// The capabilities are recorded at each class's default construction:
+/// only the fuel-independent bits (`HAS_SOC`, the setpoint, capacity,
+/// COP and speed flags) gate any column family, and the fuel bit itself
+/// comes from the spec's own fuel where it is consumed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassDeclaredSurface {
+    /// The class's declared end use.
+    pub end_use: EndUse,
+    /// The class's declared core-output capabilities.
+    pub core_capabilities: CoreCapabilities,
+    /// The class's declared telemetry fields (the heat-pump-heater
+    /// column family's gate is the pan heater power declaration).
+    pub telemetry: Vec<TelemetryField>,
+}
+
+/// The registered class's declared surface, read from the class's own
+/// constructor at its default configuration: the end use and the
+/// core-output capabilities the constructed descriptor carries. `None`
+/// for a name that is not a registered class.
+///
+/// There is no second table to drift: the declaration is the
+/// constructor's, and the surface is read from it (once per process,
+/// then cached). The two tankless classes require a typed fuel to
+/// construct and are read at the gas configuration their canonical
+/// resolvers write.
+pub fn class_declared_surface(class: &str) -> Option<ClassDeclaredSurface> {
+    static SURFACES: OnceLock<HashMap<String, ClassDeclaredSurface>> = OnceLock::new();
+    let surfaces = SURFACES.get_or_init(|| {
+        let registry = crate::EquipmentRegistry::new();
+        registry
+            .known_names()
+            .into_iter()
+            .filter_map(|class| {
+                let config = default_construction_config(class);
+                // An unconstructable class (the typed-error
+                // registrations) declares no surface.
+                registry.create(class, config).ok().map(|eq| {
+                    let d = eq.descriptor();
+                    (
+                        class.to_string(),
+                        ClassDeclaredSurface {
+                            end_use: d.end_use.clone(),
+                            core_capabilities: d.core_capabilities,
+                            telemetry: d.telemetry_fields.clone(),
+                        },
+                    )
+                })
+            })
+            .collect()
+    });
+    surfaces.get(class).cloned()
+}
+
+/// The default configuration a class constructs from: the raw default
+/// payload, except the two tankless classes, whose constructor requires
+/// a typed fuel (their canonical resolvers write gas).
+fn default_construction_config(class: &str) -> EquipmentConfig {
+    use crate::water_heater::wh_config::TanklessWaterHeaterConfig;
+    match class {
+        "Tankless Water Heater" | "Gas Tankless Water Heater" => {
+            let mut config = EquipmentConfig::from_typed(
+                class.to_string(),
+                "Tankless Water Heater".to_string(),
+                TanklessWaterHeaterConfig {
+                    fuel_type: hares_types::FuelType::Gas,
+                    ..tankless_field_defaults()
+                },
+            )
+            .expect("the tankless default config converts");
+            config.ochre_class = class.to_string();
+            config
+        }
+        _ => EquipmentConfig::with_payload(
+            class.to_string(),
+            class.to_string(),
+            crate::ConfigPayload::default(),
+        ),
+    }
+}
+
+/// The tankless config's fields are all `Option`s but the struct has no
+/// `Default` (its fuel is required); this is the all-`None` form whose
+/// quantities the constructor resolves.
+fn tankless_field_defaults() -> TanklessWaterHeaterConfig {
+    TanklessWaterHeaterConfig {
+        equipment_id: None,
+        zone_id: None,
+        loop_id: None,
+        fuel_type: hares_types::FuelType::Gas,
+        energy_factor: None,
+        uniform_energy_factor: None,
+        heating_capacity_w: None,
+        setpoint_c: None,
+        parasitic_power_w: None,
+        performance_adjustment: None,
+        inlet_temp_c: None,
+        draw_flow_rate_kg_s: None,
+        draw_flow_rate_source: None,
+        mains_temp_c_source: None,
+        appliance_draw_flow_rate_source: None,
+        avg_water_draw_l_per_day: None,
+        min_flow_gpm: None,
+        min_flow_kg_s: None,
+        zone_type: None,
+    }
+}
 
 /// Every built-in equipment type name registered by `EquipmentRegistry::new`.
 ///
@@ -392,4 +507,37 @@ mod tests {
             "fuel_type must be Gas after typed init with fuel_type='Gas'"
         );
     }
+}
+
+/// The declared surface is the constructor's declaration: for every
+/// registered class, `class_declared_surface` reads the same end use,
+/// core capabilities and telemetry the constructed descriptor carries.
+/// There is no second table to drift.
+#[test]
+fn class_declared_surface_matches_the_constructed_descriptors() {
+    let registry = EquipmentRegistry::new();
+    for class in registry.known_names() {
+        let surface = class_declared_surface(class)
+            .unwrap_or_else(|| panic!("'{class}' declares no surface"));
+        let config = default_construction_config(class);
+        let eq = registry
+            .create(class, config)
+            .unwrap_or_else(|e| panic!("create failed for '{class}': {e}"));
+        let d = eq.descriptor();
+        assert_eq!(
+            surface.end_use, d.end_use,
+            "'{class}' declared end use must match the constructed descriptor"
+        );
+        assert_eq!(
+            surface.core_capabilities, d.core_capabilities,
+            "'{class}' declared capabilities must match the constructed descriptor"
+        );
+        assert_eq!(
+            surface.telemetry, d.telemetry_fields,
+            "'{class}' declared telemetry must match the constructed descriptor"
+        );
+    }
+    // An unknown class declares nothing.
+    assert_eq!(class_declared_surface("Television"), None);
+    assert_eq!(class_declared_surface("Water Heating"), None);
 }

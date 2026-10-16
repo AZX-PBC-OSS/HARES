@@ -90,7 +90,10 @@ pub use protocol_bridge::{
 };
 pub use pv::{PvConfig, PvOrientation};
 pub use raw_params::{IndexCount, ParamForm, ParamKind, RawParam, RawParams, raw_params_for_class};
-pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistry};
+pub use registry::{
+    CANONICAL_EQUIPMENT_NAMES, ClassDeclaredSurface, EquipmentFactory, EquipmentRegistry,
+    class_declared_surface,
+};
 pub use ventilation::VentilationConfig;
 pub use water_heater::DHW_DEMAND_LOOP;
 pub use water_heater::wh_config::{

@@ -18,12 +18,11 @@
 //! The static tables are corrected to the declarations where they disagree
 //! (the declarations are the authority; the tables mirror them).
 //!
-//! The per-equipment column set stays bug-compatible with the pre-catalogue
-//! classifier surface: the same name-classifier functions
-//! (`equipment_name_to_end_use`, `is_hvac_or_wh`, `is_ev`, and kin) are
-//! called from one function here — the catalogue builder's per-equipment
-//! expansion — until the descriptors' `end_use` replaces them and the
-//! classifiers are deleted.
+//! The per-equipment column set is decided by the typed declarations:
+//! the descriptors' `end_use` (the rollup and the column families) and
+//! the declared telemetry and capabilities, through
+//! [`EquipmentColumnFamilies`]. No name classifier runs anywhere in the
+//! builder.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -33,16 +32,14 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use serde::{Deserialize, Serialize};
 
 use hares_types::{
-    AcrossHomes, Aggregation, EndUse, EquipmentId, FuelType, Sampling, TelemetryField, Unit,
-    VariableKind, ZoneId,
+    AcrossHomes, Aggregation, CoreCapabilities, EndUse, EquipmentId, FuelType, Sampling,
+    TelemetryField, Unit, VariableKind, ZoneId,
 };
 
 use crate::hpxml::EquipmentSpec;
 use crate::hpxml::equipment::canonical_instance_namer;
 use crate::output::columns::{
-    end_use_display_name, end_use_electric_power_column, equipment_name_to_end_use,
-    fuel_reports_gas_power_column, has_soc, is_cooling_equipment, is_ev, is_heat_pump_heater,
-    is_hvac_or_wh, is_pv, is_reserved_output_column_name,
+    end_use_electric_power_column, fuel_reports_gas_power_column, is_reserved_output_column_name,
 };
 
 /// An error raised while building a [`Catalogue`].
@@ -193,51 +190,83 @@ impl VariableDef {
     }
 }
 
-/// The per-equipment column families, decided once per instance by the ONE
-/// classifier function the catalogue builder is allowed to call. Carries
-/// today's outcomes (which families exist for which name) so the
-/// catalogue-derived schema is bug-compatible with the pre-catalogue one.
+/// The per-equipment column families, decided once per instance from the
+/// typed declarations: the descriptor's end use, its core-output
+/// capabilities and its declared telemetry, never the equipment's name
+/// string. Carries the families the catalogue builder and the dwelling's
+/// row plan both read, so the schema's emission and the record path's
+/// resolution cannot drift.
 #[derive(Debug, Clone)]
 pub struct EquipmentColumnFamilies {
     /// Whether the equipment burns a fuel that reports a gas power column.
     pub has_gas: bool,
-    /// Whether the name classifies as HVAC or water heating.
+    /// Whether the typed end use carries the HVAC-or-water-heating column
+    /// family (setpoint, capacity, COP, speed, fan, main power, runtime
+    /// fraction, the HVAC telemetry blocks). A pool or spa heater's end
+    /// use is not in the family; an `Ideal HVAC`'s is.
     pub is_hvac: bool,
-    /// Whether the name classifies as cooling equipment (SHR, latent gains).
+    /// Whether the typed end use carries the cooling column family (SHR,
+    /// latent gains).
     pub is_cooling: bool,
-    /// Whether the name classifies as a heat pump heater (defrost, ER).
+    /// Whether the equipment declares the heat-pump-heater family's
+    /// defining channel (the pan heater power) within the HVAC heating
+    /// end use.
     pub is_hp_heater: bool,
-    /// Whether the name classifies as storage (SOC column).
+    /// Whether the equipment declares a state of charge.
     pub has_soc: bool,
-    /// Whether the name classifies as PV.
+    /// Whether the typed end use is PV.
     pub is_pv: bool,
-    /// Whether the name classifies as an EV.
+    /// Whether the typed end use is EV.
     pub is_ev: bool,
-    /// The end use the name resolves to.
+    /// The typed end use the rollup groups by.
     pub end_use: EndUse,
 }
 
+/// The telemetry key whose declaration defines the heat-pump-heater
+/// column family: every heat pump heater declares the pan heater power,
+/// and no other heating equipment does.
+const HP_HEATER_FAMILY_KEY: &str = "pan_heater_kw";
+
 impl EquipmentColumnFamilies {
-    /// Classifies one equipment name. The single home of the classifier
-    /// calls inside the catalogue builder.
+    /// The families of one typed descriptor: the end use, capabilities
+    /// and declared telemetry the equipment declares.
     #[must_use]
-    pub fn of(name: &str, fuel: FuelType) -> Self {
+    pub fn of_descriptor(descriptor: &hares_types::EquipmentDescriptor) -> Self {
+        Self::of_input(
+            &descriptor.end_use,
+            descriptor.fuel,
+            &descriptor.telemetry_fields,
+            descriptor.core_capabilities,
+        )
+    }
+
+    /// The families of one catalogue input entry.
+    #[must_use]
+    pub fn of_input(
+        end_use: &EndUse,
+        fuel: FuelType,
+        telemetry: &[TelemetryField],
+        core_capabilities: hares_types::CoreCapabilities,
+    ) -> Self {
         Self {
             has_gas: fuel_reports_gas_power_column(fuel),
-            is_hvac: is_hvac_or_wh(name),
-            is_cooling: is_cooling_equipment(name),
-            is_hp_heater: is_heat_pump_heater(name),
-            has_soc: has_soc(name),
-            is_pv: is_pv(name),
-            is_ev: is_ev(name),
-            end_use: equipment_name_to_end_use(name),
+            is_hvac: end_use.is_hvac_or_water_heating(),
+            is_cooling: end_use.is_cooling_family(),
+            is_hp_heater: *end_use == EndUse::HVAC_HEATING
+                && telemetry
+                    .iter()
+                    .any(|field| field.name.as_ref() == HP_HEATER_FAMILY_KEY),
+            has_soc: core_capabilities.contains(hares_types::CoreCapabilities::HAS_SOC),
+            is_pv: *end_use == EndUse::PV,
+            is_ev: *end_use == EndUse::EV,
+            end_use: end_use.clone(),
         }
     }
 }
 
 /// One equipment's catalogue input: its base name (the descriptor's name,
-/// numbered into an instance name when it repeats), fuel, id and typed
-/// telemetry declarations.
+/// numbered into an instance name when it repeats), its typed end use and
+/// capabilities, fuel, id and typed telemetry declarations.
 #[derive(Debug, Clone)]
 pub struct CatalogueEquipment {
     /// The equipment's base name (`"Battery"`; the builder numbers
@@ -250,6 +279,12 @@ pub struct CatalogueEquipment {
     pub id: EquipmentId,
     /// The equipment's fuel.
     pub fuel: FuelType,
+    /// The equipment's typed end use: what the rollup groups by and what
+    /// decides the column families. The descriptor's own `end_use`.
+    pub end_use: EndUse,
+    /// The equipment's declared core-output capabilities (the SOC
+    /// column's family gate).
+    pub core_capabilities: CoreCapabilities,
     /// The equipment's typed telemetry declarations
     /// (`descriptor().telemetry_fields`).
     pub telemetry: Vec<TelemetryField>,
@@ -293,6 +328,11 @@ pub struct Catalogue {
     /// in order; the schema metadata derivation (the lighting-created
     /// flags) reads them.
     equipment_names: Vec<String>,
+    /// The instance-qualified equipment names paired with their typed end
+    /// uses, in the same order. The metrics' end-use equipment gate and
+    /// per-end-use equipment counts read this, so no column name is ever
+    /// classified by its own string.
+    equipment_end_uses: Vec<(String, EndUse)>,
 }
 
 impl Catalogue {
@@ -320,6 +360,15 @@ impl Catalogue {
     #[must_use]
     pub fn equipment_names(&self) -> &[String] {
         &self.equipment_names
+    }
+
+    /// The instance-qualified equipment names paired with their typed end
+    /// uses, in roster order. The metrics' end-use equipment gate and
+    /// per-end-use counts read this: the classification is the
+    /// declaration's, never the column name's.
+    #[must_use]
+    pub fn equipment_end_uses(&self) -> &[(String, EndUse)] {
+        &self.equipment_end_uses
     }
 
     /// Builds a catalogue from explicit variable definitions, in order:
@@ -364,6 +413,7 @@ impl Catalogue {
             index,
             telemetry_keys: HashMap::new(),
             equipment_names: Vec::new(),
+            equipment_end_uses: Vec::new(),
         })
     }
 
@@ -566,7 +616,12 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
 
     // ── Block: verbosity 1 — per-equipment power ───────────────────────────
     for (eq, name) in &instances {
-        let families = EquipmentColumnFamilies::of(name, eq.fuel);
+        let families = EquipmentColumnFamilies::of_input(
+            &eq.end_use,
+            eq.fuel,
+            &eq.telemetry,
+            eq.core_capabilities,
+        );
         let member = format!("{name} {ELECTRIC_SUFFIX}");
         if is_reserved_output_column_name(&member) {
             continue;
@@ -593,12 +648,19 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
         }
     }
 
-    // Per-end-use aggregates: one column per end use that has at least one
-    // equipment, keyed on the spec's base name, in spec order.
+    // Per-end-use aggregates: one column per typed end use that has at
+    // least one equipment, keyed on the declared end use, in equipment
+    // order. The rollup groups by the descriptor's end use, never the
+    // name string.
     let mut seen_end_uses: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for eq in &input.equipment {
-        let end_use = equipment_name_to_end_use(&eq.name);
-        if seen_end_uses.insert(end_use_display_name(&end_use).to_string()) {
+        let end_use = eq.end_use.clone();
+        tracing::debug!(
+            equipment = %eq.name,
+            end_use = %end_use.as_str(),
+            "equipment end use at catalogue build"
+        );
+        if seen_end_uses.insert(end_use.display_name().to_string()) {
             let name = end_use_electric_power_column(&end_use);
             push(
                 &mut defs,
@@ -626,7 +688,12 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
 
     // ── Block: verbosity 3 — per-equipment state ───────────────────────────
     for (eq, name) in &instances {
-        let families = EquipmentColumnFamilies::of(name, eq.fuel);
+        let families = EquipmentColumnFamilies::of_input(
+            &eq.end_use,
+            eq.fuel,
+            &eq.telemetry,
+            eq.core_capabilities,
+        );
         let member = format!("{name} {ELECTRIC_SUFFIX}");
         if is_reserved_output_column_name(&member) {
             continue;
@@ -760,7 +827,12 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
 
     // ── Block: verbosity 7 — schedule, defrost/ER, HVAC performance ────────
     for (eq, name) in &instances {
-        let families = EquipmentColumnFamilies::of(name, eq.fuel);
+        let families = EquipmentColumnFamilies::of_input(
+            &eq.end_use,
+            eq.fuel,
+            &eq.telemetry,
+            eq.core_capabilities,
+        );
         let member = format!("{name} {ELECTRIC_SUFFIX}");
         if is_reserved_output_column_name(&member) {
             continue;
@@ -830,7 +902,12 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
 
     // ── Block: verbosity 8 — per-equipment telemetry diagnostics ───────────
     for (eq, name) in &instances {
-        let families = EquipmentColumnFamilies::of(name, eq.fuel);
+        let families = EquipmentColumnFamilies::of_input(
+            &eq.end_use,
+            eq.fuel,
+            &eq.telemetry,
+            eq.core_capabilities,
+        );
         let member = format!("{name} {ELECTRIC_SUFFIX}");
         if is_reserved_output_column_name(&member) {
             continue;
@@ -932,12 +1009,17 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
     }
 
     let equipment_names = instances.iter().map(|(_, name)| name.clone()).collect();
+    let equipment_end_uses = instances
+        .iter()
+        .map(|(eq, name)| (name.clone(), eq.end_use.clone()))
+        .collect();
     Ok(Catalogue {
         defs,
         tags,
         index,
         telemetry_keys,
         equipment_names,
+        equipment_end_uses,
     })
 }
 
@@ -2618,6 +2700,13 @@ pub fn build_schema_for_columns(catalogue: &Catalogue, names: &[String]) -> Sche
 /// Builds a catalogue from spec-shaped inputs (no live descriptors) and
 /// derives the schema from it: the compatibility path the spec-based
 /// callers and tests use. Equipment ids are positional.
+///
+/// The typed declarations come from the class's own declared surface
+/// (`hares_equipment::class_declared_surface`): the end use, the core
+/// capabilities and the declared telemetry the class's constructor
+/// declares. A spec whose name is not a registered class declares no
+/// surface and rolls up under `EndUse::OTHER` with no capabilities and
+/// no declarations.
 #[must_use]
 pub fn build_schema_for_specs(
     equipment_list: &[EquipmentSpec],
@@ -2628,12 +2717,25 @@ pub fn build_schema_for_specs(
         equipment: equipment_list
             .iter()
             .enumerate()
-            .map(|(i, spec)| CatalogueEquipment {
-                name: spec.name.clone(),
-                instance_name: spec.instance_name.clone(),
-                id: EquipmentId(u32::try_from(i + 1).expect("equipment count")),
-                fuel: spec.fuel_type,
-                telemetry: Vec::new(),
+            .map(|(i, spec)| {
+                let (end_use, core_capabilities, telemetry) =
+                    match hares_equipment::class_declared_surface(&spec.name) {
+                        Some(surface) => (
+                            surface.end_use,
+                            surface.core_capabilities,
+                            surface.telemetry,
+                        ),
+                        None => (EndUse::OTHER, CoreCapabilities::default(), Vec::new()),
+                    };
+                CatalogueEquipment {
+                    name: spec.name.clone(),
+                    instance_name: spec.instance_name.clone(),
+                    id: EquipmentId(u32::try_from(i + 1).expect("equipment count")),
+                    fuel: spec.fuel_type,
+                    end_use,
+                    core_capabilities,
+                    telemetry,
+                }
             })
             .collect(),
         zones: zone_names.to_vec(),
@@ -2642,8 +2744,8 @@ pub fn build_schema_for_specs(
     match build_catalogue(&input) {
         Ok(catalogue) => build_schema(&catalogue, verbosity, false),
         // The spec path cannot produce duplicates the live path could not
-        // (same classifiers, same names); a panic here is a bug in the
-        // static tables, not an input error.
+        // (the same declared surfaces, the same names); a panic here is a
+        // bug in the static tables, not an input error.
         Err(err) => panic!("catalogue build failed from specs: {err}"),
     }
 }
@@ -2700,6 +2802,7 @@ mod digest_tests {
             index,
             telemetry_keys: HashMap::new(),
             equipment_names: Vec::new(),
+            equipment_end_uses: Vec::new(),
         }
     }
 

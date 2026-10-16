@@ -1304,11 +1304,13 @@ fn midrun_equipment_add_with_recording_at_high_verbosity_does_not_panic() {
     dwelling.simulate().expect("day-2 simulate");
 }
 
-/// The same mid-run add, but the added equipment's NAME matches an HVAC
-/// column predicate ("... Baseboard" satisfies `is_hvac_or_wh`), so
+/// The same mid-run add, but the added equipment's TYPED END USE matches
+/// the HVAC column family (`with_end_use(HVAC_HEATING)`, the descriptor's
+/// declaration, the retired name-string classifier's replacement), so
 /// record_step's type-gated verbosity-7 debug invariants (`fan_power`,
-/// `runtime_fraction`, and for heat-pump/cooling names `defrost_state`,
-/// `er_power`, `shr`, `latent_gains`) apply to it. Those columns resolve
+/// `runtime_fraction`, and for the heat-pump-heater and cooling families
+/// `defrost_state`, `er_power`, `shr`, `latent_gains`) apply to it. Those
+/// columns resolve
 /// through the `in_schema` gate — a mid-run add after the schema froze is
 /// schema-unknown, so its map is empty by design — and the invariants must
 /// not demand per-equipment columns the schema never emitted: the
@@ -1317,7 +1319,7 @@ fn midrun_equipment_add_with_recording_at_high_verbosity_does_not_panic() {
 /// the one column such equipment still resolves (it accumulates every
 /// equipment's contribution), pinned by the sibling test above.
 #[test]
-fn midrun_add_of_hvac_named_equipment_at_high_verbosity_does_not_panic() {
+fn midrun_add_of_hvac_end_use_equipment_at_high_verbosity_does_not_panic() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
     let csv_path = tmp.path().join("midrun_add_hvac_v7.csv");
@@ -1333,10 +1335,10 @@ fn midrun_add_of_hvac_named_equipment_at_high_verbosity_does_not_panic() {
         dwelling.step().expect("day-1 step");
     }
     dwelling
-        .add_equipment(Box::new(IdentityProbeEquipment::new(
-            "ProbeLate Baseboard",
-            0,
-        )))
+        .add_equipment(Box::new(
+            IdentityProbeEquipment::new("ProbeLate", 0)
+                .with_end_use(hares_types::EndUse::HVAC_HEATING),
+        ))
         .expect("mid-run add with recording active must succeed");
     dwelling.simulate().expect("day-2 simulate");
 }
@@ -1367,22 +1369,22 @@ fn end_use_aggregates_match_per_equipment_columns_after_midrun_remove() {
     // Pick the remove victim so the shift crosses at least one end-use
     // boundary: the first equipment whose successor belongs to a different
     // end-use. Removing it shifts every later equipment one slot down, into
-    // end-use aggregate slots that are not theirs.
+    // end-use aggregate slots that are not theirs. The end uses are the
+    // descriptors' typed declarations.
     let names: Vec<String> = dwelling
         .equipment()
         .iter()
         .map(|eq| eq.descriptor().name.clone())
         .collect();
-    let victim = names
+    let end_uses: Vec<hares_types::EndUse> = dwelling
+        .equipment()
         .iter()
-        .enumerate()
-        .find(|(i, name)| {
-            names.get(i + 1).is_some_and(|next| {
-                hares_io::equipment_name_to_end_use(name)
-                    != hares_io::equipment_name_to_end_use(next)
-            })
-        })
-        .map(|(_, name)| name.clone())
+        .map(|eq| eq.descriptor().end_use.clone())
+        .collect();
+    let victim = end_uses
+        .windows(2)
+        .position(|pair| pair[0] != pair[1])
+        .map(|i| names[i].clone())
         .expect("fixture must contain two adjacent equipment of different end-uses");
 
     // Day 1 with the full set (rows get recorded; the schema freezes).
@@ -1421,12 +1423,9 @@ fn end_use_aggregates_match_per_equipment_columns_after_midrun_remove() {
     };
     use std::collections::HashMap;
     let mut by_end_use: HashMap<hares_types::EndUse, Vec<&str>> = HashMap::new();
-    for name in &names {
+    for (name, end_use) in names.iter().zip(&end_uses) {
         if name != &victim {
-            by_end_use
-                .entry(hares_io::equipment_name_to_end_use(name))
-                .or_default()
-                .push(name);
+            by_end_use.entry(end_use.clone()).or_default().push(name);
         }
     }
     for (end_use, members) in &by_end_use {
@@ -1480,8 +1479,8 @@ fn midrun_added_equipment_contributes_to_its_end_use_aggregate() {
     let other_members: Vec<String> = dwelling
         .equipment()
         .iter()
+        .filter(|eq| eq.descriptor().end_use == hares_types::EndUse::OTHER)
         .map(|eq| eq.descriptor().name.clone())
-        .filter(|name| hares_io::equipment_name_to_end_use(name) == hares_types::EndUse::OTHER)
         .collect();
     assert!(
         !other_members.is_empty(),

@@ -158,6 +158,96 @@ impl EndUse {
                 | "other"
         )
     }
+
+    /// The end uses whose equipment carries the HVAC-or-water-heating
+    /// column family: the setpoint, capacity, COP, speed, fan, main-power
+    /// and runtime-fraction columns and the HVAC telemetry blocks.
+    ///
+    /// This is the typed replacement for the retired
+    /// `is_hvac_or_wh` name classifier: the family follows the declared
+    /// end use, so a name that merely contains "heater" (a pool or spa
+    /// heater, whose end use is `POOL_HEATER` or `SPA_HEATER`) is not in
+    /// it, and an `Ideal HVAC` (whose name carries no classifier word)
+    /// is.
+    #[must_use]
+    pub fn is_hvac_or_water_heating(&self) -> bool {
+        matches!(
+            self.0.as_ref(),
+            "hvac_heating" | "hvac_cooling" | "dehumidifier" | "water_heating"
+        )
+    }
+
+    /// The end uses whose equipment carries the cooling column family
+    /// (the SHR and latent-gains columns at verbosity 7).
+    #[must_use]
+    pub fn is_cooling_family(&self) -> bool {
+        matches!(self.0.as_ref(), "hvac_cooling" | "dehumidifier")
+    }
+
+    /// The column-heading display name for this end use
+    /// (`"HVAC Heating"` for `EndUse::HVAC_HEATING`). Custom end uses
+    /// return their `as_str()` value unmodified.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        match self.0.as_ref() {
+            "hvac_heating" => "HVAC Heating",
+            "hvac_cooling" => "HVAC Cooling",
+            "water_heating" => "Water Heating",
+            "lighting" => "Lighting",
+            "plug_loads" => "Plug Loads",
+            "refrigeration" => "Refrigeration",
+            "ventilation" => "Ventilation",
+            "battery" => "Battery",
+            "pv" => "PV",
+            "ev" => "EV",
+            "generator" => "Generator",
+            "cooking" => "Cooking",
+            "laundry" => "Laundry",
+            "dishwasher" => "Dishwasher",
+            "pool_pump" => "Pool Pump",
+            "pool_heater" => "Pool Heater",
+            "spa_pump" => "Spa Pump",
+            "spa_heater" => "Spa Heater",
+            "ceiling_fan" => "Ceiling Fan",
+            "dehumidifier" => "Dehumidifier",
+            "other" => "Other",
+            // Custom end uses display as their own key.
+            other => other,
+        }
+    }
+
+    /// The standard end use whose display name is `name`, the reverse of
+    /// [`EndUse::display_name`]. `None` for every name that is not a
+    /// standard end use's display name (custom end uses have no display
+    /// round trip: their display is their own key, and no standard
+    /// display maps to them).
+    #[must_use]
+    pub fn from_display(name: &str) -> Option<Self> {
+        match name {
+            "HVAC Heating" => Some(Self::HVAC_HEATING),
+            "HVAC Cooling" => Some(Self::HVAC_COOLING),
+            "Water Heating" => Some(Self::WATER_HEATING),
+            "Lighting" => Some(Self::LIGHTING),
+            "Plug Loads" => Some(Self::PLUG_LOADS),
+            "Refrigeration" => Some(Self::REFRIGERATION),
+            "Ventilation" => Some(Self::VENTILATION),
+            "Battery" => Some(Self::BATTERY),
+            "PV" => Some(Self::PV),
+            "EV" => Some(Self::EV),
+            "Generator" => Some(Self::GENERATOR),
+            "Cooking" => Some(Self::COOKING),
+            "Laundry" => Some(Self::LAUNDRY),
+            "Dishwasher" => Some(Self::DISHWASHER),
+            "Pool Pump" => Some(Self::POOL_PUMP),
+            "Pool Heater" => Some(Self::POOL_HEATER),
+            "Spa Pump" => Some(Self::SPA_PUMP),
+            "Spa Heater" => Some(Self::SPA_HEATER),
+            "Ceiling Fan" => Some(Self::CEILING_FAN),
+            "Dehumidifier" => Some(Self::DEHUMIDIFIER),
+            "Other" => Some(Self::OTHER),
+            _ => None,
+        }
+    }
 }
 
 impl From<&'static str> for EndUse {
@@ -1972,6 +2062,87 @@ mod tests {
         assert_eq!(EndUse::CEILING_FAN.as_str(), "ceiling_fan");
         assert_eq!(EndUse::DEHUMIDIFIER.as_str(), "dehumidifier");
         assert_eq!(EndUse::OTHER.as_str(), "other");
+    }
+
+    /// Every standard end use's display name round-trips through
+    /// `from_display`, and its key is `as_str`. This is the aggregate
+    /// column naming scheme's typed home: the column heading spellings
+    /// and their reverse are properties of the type, not a name
+    /// classifier.
+    #[test]
+    fn end_use_display_name_round_trips_all_standard_variants() {
+        let standard: [&EndUse; 21] = [
+            &EndUse::HVAC_HEATING,
+            &EndUse::HVAC_COOLING,
+            &EndUse::WATER_HEATING,
+            &EndUse::LIGHTING,
+            &EndUse::PLUG_LOADS,
+            &EndUse::REFRIGERATION,
+            &EndUse::VENTILATION,
+            &EndUse::BATTERY,
+            &EndUse::PV,
+            &EndUse::EV,
+            &EndUse::GENERATOR,
+            &EndUse::COOKING,
+            &EndUse::LAUNDRY,
+            &EndUse::DISHWASHER,
+            &EndUse::POOL_PUMP,
+            &EndUse::POOL_HEATER,
+            &EndUse::SPA_PUMP,
+            &EndUse::SPA_HEATER,
+            &EndUse::CEILING_FAN,
+            &EndUse::DEHUMIDIFIER,
+            &EndUse::OTHER,
+        ];
+        for end_use in standard {
+            let display = end_use.display_name();
+            let round = EndUse::from_display(display)
+                .unwrap_or_else(|| panic!("'{display}' must reverse to its end use"));
+            assert_eq!(round, *end_use, "'{display}' round-trips");
+            assert!(
+                round.is_standard(),
+                "the reverse of a standard display is standard"
+            );
+        }
+        // A non-display name reverses to nothing: an equipment class
+        // name is not an end-use display name.
+        assert_eq!(EndUse::from_display("ASHP Heater"), None);
+        assert_eq!(EndUse::from_display("Total"), None);
+        assert_eq!(EndUse::from_display(""), None);
+        // A custom end use displays as its own key and does not round
+        // trip through `from_display`.
+        let custom = EndUse::custom("ice_storage");
+        assert_eq!(custom.display_name(), "ice_storage");
+        assert_eq!(EndUse::from_display("ice_storage"), None);
+    }
+
+    /// The HVAC-or-water-heating family predicate: the end uses whose
+    /// equipment carries the HVAC column family. The pool and spa
+    /// heaters' end uses are not in it (the retired name classifier's
+    /// "heater" substring put them in), and the water heating end use is
+    /// (the family's columns serve the tanks' setpoints too).
+    #[test]
+    fn hvac_or_water_heating_family_members() {
+        assert!(EndUse::HVAC_HEATING.is_hvac_or_water_heating());
+        assert!(EndUse::HVAC_COOLING.is_hvac_or_water_heating());
+        assert!(EndUse::DEHUMIDIFIER.is_hvac_or_water_heating());
+        assert!(EndUse::WATER_HEATING.is_hvac_or_water_heating());
+        assert!(!EndUse::POOL_HEATER.is_hvac_or_water_heating());
+        assert!(!EndUse::SPA_HEATER.is_hvac_or_water_heating());
+        assert!(!EndUse::BATTERY.is_hvac_or_water_heating());
+        assert!(!EndUse::OTHER.is_hvac_or_water_heating());
+        assert!(!EndUse::custom("ice_storage").is_hvac_or_water_heating());
+    }
+
+    /// The cooling family predicate: the SHR and latent-gains columns
+    /// follow the cooling and dehumidification end uses.
+    #[test]
+    fn cooling_family_members() {
+        assert!(EndUse::HVAC_COOLING.is_cooling_family());
+        assert!(EndUse::DEHUMIDIFIER.is_cooling_family());
+        assert!(!EndUse::HVAC_HEATING.is_cooling_family());
+        assert!(!EndUse::POOL_HEATER.is_cooling_family());
+        assert!(!EndUse::WATER_HEATING.is_cooling_family());
     }
 
     #[test]

@@ -411,7 +411,7 @@
   },
   {
     "arrow_type": "Float64",
-    "name": "Other End Use Electric Power (kW)",
+    "name": "Lighting End Use Electric Power (kW)",
     "nullable": true
   },
   {
@@ -426,7 +426,7 @@
   },
   {
     "arrow_type": "Float64",
-    "name": "Cooking End Use Electric Power (kW)",
+    "name": "Other End Use Electric Power (kW)",
     "nullable": true
   },
   {
@@ -451,17 +451,17 @@
   },
   {
     "arrow_type": "Float64",
-    "name": "Lighting End Use Electric Power (kW)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
     "name": "Refrigeration End Use Electric Power (kW)",
     "nullable": true
   },
   {
     "arrow_type": "Float64",
     "name": "Generator End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Cooking End Use Electric Power (kW)",
     "nullable": true
   },
   {
@@ -771,6 +771,11 @@
   },
   {
     "arrow_type": "Float64",
+    "name": "HPWH Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
     "name": "HRV Mode (-)",
     "nullable": true
   },
@@ -801,7 +806,17 @@
   },
   {
     "arrow_type": "Float64",
+    "name": "Ideal HVAC Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
     "name": "Indirect Tank Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Setpoint (C)",
     "nullable": true
   },
   {
@@ -866,11 +881,6 @@
   },
   {
     "arrow_type": "Float64",
-    "name": "Pool Heater #1 Setpoint (C)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
     "name": "Pool Pump Mode (-)",
     "nullable": true
   },
@@ -912,11 +922,6 @@
   {
     "arrow_type": "Float64",
     "name": "Spa Heater Mode (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Spa Heater Setpoint (C)",
     "nullable": true
   },
   {
@@ -977,11 +982,6 @@
   {
     "arrow_type": "Float64",
     "name": "Pool Heater #2 Mode (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #2 Setpoint (C)",
     "nullable": true
   },
   {

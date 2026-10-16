@@ -121,186 +121,6 @@ pub const EV_CHARGING_LEVEL_SUFFIX: &str = "Charging Level (-)";
 pub const MIN_ON_TIME_SUFFIX: &str = "Min On Time (s)";
 pub const MIN_OFF_TIME_SUFFIX: &str = "Min Off Time (s)";
 
-/// Maps an equipment spec name to its `EndUse` category based on the canonical
-/// equipment naming conventions used by the HPXML resolver and registry.
-///
-/// The mapping mirrors the `end_use` assignments hardcoded in each equipment
-/// constructor (furnace.rs, baseboard.rs, etc.) and the registry bindings in
-/// `EquipmentRegistry::new()`. When an equipment name is not recognised, it
-/// falls back to `EndUse::OTHER`.
-pub fn equipment_name_to_end_use(name: &str) -> EndUse {
-    match name {
-        // HVAC Heating
-        "Gas Furnace" | "Electric Furnace" | "Electric Baseboard" | "Gas Boiler"
-        | "Electric Boiler" | "ASHP Heater" | "MSHP Heater" | "GSHP Heater" | "WSHP Heater"
-        | "Heat Pump Heater" | "Ideal HVAC" => EndUse::HVAC_HEATING,
-
-        // HVAC Cooling
-        "Air Conditioner" | "Room AC" | "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler"
-        | "WSHP Cooler" => EndUse::HVAC_COOLING,
-
-        // Dehumidifier
-        "Dehumidifier" => EndUse::DEHUMIDIFIER,
-
-        // Water Heating
-        "Gas Water Heater"
-        | "Gas Tankless Water Heater"
-        | "Electric Resistance Water Heater"
-        | "Resistance Water Heater"
-        | "Heat Pump Water Heater"
-        | "Tankless Water Heater"
-        | "Indirect Tank"
-        | "Gas WH"
-        | "Resistance WH"
-        | "Heat Pump WH"
-        | "Tankless WH"
-        | "Indirect WH" => EndUse::WATER_HEATING,
-
-        // Battery
-        "Battery" => EndUse::BATTERY,
-
-        // PV
-        "PV" => EndUse::PV,
-
-        // EV
-        "EV" | "Electric Vehicle" | "Scheduled EV" => EndUse::EV,
-
-        // Generator
-        "Gas Generator" | "Gas Fuel Cell" => EndUse::GENERATOR,
-
-        // Lighting: every LightingLoad name OCHRE's Equipment/__init__.py
-        // registers under its "Lighting" end use, including "Exterior
-        // Lighting", so the aggregate holds indoor plus exterior.
-        "Lighting" | "Indoor Lighting" | "Outdoor Lighting" | "Garage Lighting"
-        | "Exterior Lighting" => EndUse::LIGHTING,
-
-        // Plug Loads
-        "Plug Loads" | "MELs" => EndUse::PLUG_LOADS,
-
-        // Refrigeration
-        "Refrigerator" | "Freezer" => EndUse::REFRIGERATION,
-
-        // Ventilation
-        "Ventilation Fan" | "HRV" | "ERV" => EndUse::VENTILATION,
-
-        // Ceiling Fan (separate from whole-house ventilation per HPXML 4.2)
-        "Ceiling Fan" => EndUse::CEILING_FAN,
-
-        // Cooking
-        "Gas Grill" | "Cooking Range" => EndUse::COOKING,
-
-        // Pool / Spa
-        "Pool Pump" => EndUse::POOL_PUMP,
-        "Pool Heater" => EndUse::POOL_HEATER,
-        "Spa Pump" => EndUse::SPA_PUMP,
-        "Spa Heater" => EndUse::SPA_HEATER,
-
-        // Everything else (event loads, protocol bridge, etc.)
-        _ => EndUse::OTHER,
-    }
-}
-
-/// Returns the display name for an `EndUse` category, suitable for column
-/// headings (e.g. `"HVAC Heating"` for `EndUse::HVAC_HEATING`).
-///
-/// Custom end-uses return their `as_str()` value unmodified.
-pub fn end_use_display_name(end_use: &EndUse) -> &str {
-    if *end_use == EndUse::HVAC_HEATING {
-        return "HVAC Heating";
-    }
-    if *end_use == EndUse::HVAC_COOLING {
-        return "HVAC Cooling";
-    }
-    if *end_use == EndUse::WATER_HEATING {
-        return "Water Heating";
-    }
-    if *end_use == EndUse::LIGHTING {
-        return "Lighting";
-    }
-    if *end_use == EndUse::PLUG_LOADS {
-        return "Plug Loads";
-    }
-    if *end_use == EndUse::REFRIGERATION {
-        return "Refrigeration";
-    }
-    if *end_use == EndUse::VENTILATION {
-        return "Ventilation";
-    }
-    if *end_use == EndUse::BATTERY {
-        return "Battery";
-    }
-    if *end_use == EndUse::PV {
-        return "PV";
-    }
-    if *end_use == EndUse::EV {
-        return "EV";
-    }
-    if *end_use == EndUse::GENERATOR {
-        return "Generator";
-    }
-    if *end_use == EndUse::COOKING {
-        return "Cooking";
-    }
-    if *end_use == EndUse::LAUNDRY {
-        return "Laundry";
-    }
-    if *end_use == EndUse::DISHWASHER {
-        return "Dishwasher";
-    }
-    if *end_use == EndUse::POOL_PUMP {
-        return "Pool Pump";
-    }
-    if *end_use == EndUse::POOL_HEATER {
-        return "Pool Heater";
-    }
-    if *end_use == EndUse::SPA_PUMP {
-        return "Spa Pump";
-    }
-    if *end_use == EndUse::SPA_HEATER {
-        return "Spa Heater";
-    }
-    if *end_use == EndUse::CEILING_FAN {
-        return "Ceiling Fan";
-    }
-    if *end_use == EndUse::DEHUMIDIFIER {
-        return "Dehumidifier";
-    }
-    if *end_use == EndUse::OTHER {
-        return "Other";
-    }
-    end_use.as_str()
-}
-
-/// Reverse mapping: given a display name string from a column heading, returns
-/// the corresponding `EndUse` key string if the display name is a recognised
-/// standard end-use.
-pub fn display_name_to_end_use_key(display_name: &str) -> Option<String> {
-    match display_name {
-        "HVAC Heating" => Some("hvac_heating".to_string()),
-        "HVAC Cooling" => Some("hvac_cooling".to_string()),
-        "Water Heating" => Some("water_heating".to_string()),
-        "Lighting" => Some("lighting".to_string()),
-        "Plug Loads" => Some("plug_loads".to_string()),
-        "Refrigeration" => Some("refrigeration".to_string()),
-        "Ventilation" => Some("ventilation".to_string()),
-        "Battery" => Some("battery".to_string()),
-        "PV" => Some("pv".to_string()),
-        "EV" => Some("ev".to_string()),
-        "Generator" => Some("generator".to_string()),
-        "Cooking" => Some("cooking".to_string()),
-        "Laundry" => Some("laundry".to_string()),
-        "Dishwasher" => Some("dishwasher".to_string()),
-        "Pool Pump" => Some("pool_pump".to_string()),
-        "Pool Heater" => Some("pool_heater".to_string()),
-        "Spa Pump" => Some("spa_pump".to_string()),
-        "Spa Heater" => Some("spa_heater".to_string()),
-        "Ceiling Fan" => Some("ceiling_fan".to_string()),
-        "Dehumidifier" => Some("dehumidifier".to_string()),
-        "Other" => Some("other".to_string()),
-        _ => None,
-    }
-}
-
 /// Suffix for end-use aggregate electric power column names.
 /// Aggregate columns use the form `"{DisplayName} End Use Electric Power (kW)"`
 /// to avoid collisions with per-equipment columns.
@@ -316,56 +136,21 @@ const END_USE_AGGREGATE_SUFFIX: &str = " End Use Electric Power (kW)";
 /// - `end_use_electric_power_column(&EndUse::HVAC_HEATING)` → `"HVAC Heating End Use Electric Power (kW)"`
 /// - `end_use_electric_power_column(&EndUse::CEILING_FAN)` → `"Ceiling Fan End Use Electric Power (kW)"`
 pub fn end_use_electric_power_column(end_use: &EndUse) -> String {
-    format!(
-        "{} End Use Electric Power (kW)",
-        end_use_display_name(end_use)
-    )
+    format!("{} End Use Electric Power (kW)", end_use.display_name())
 }
 
 /// If `name` is an end-use aggregate electric power column, returns the
-/// `EndUse` variant it represents. Returns `None` for per-equipment columns,
-/// totals, and other column types.
+/// canonical EndUse key string (e.g. `"hvac_heating"`) it represents.
+/// Returns `None` for per-equipment columns, totals, and other column
+/// types.
 ///
-/// Recognised format: `"{DisplayName} End Use Electric Power (kW)"`.
-pub fn parse_end_use_electric_power_column(name: &str) -> Option<EndUse> {
-    let key = parse_end_use_electric_power_column_key(name)?;
-    end_use_from_key(&key)
-}
-
-/// Like [`parse_end_use_electric_power_column`] but returns the canonical
-/// EndUse key string (e.g. `"hvac_heating"`) directly, avoiding a round-trip
-/// through display name and EndUse variant.
+/// Recognised format: `"{DisplayName} End Use Electric Power (kW)"`, where
+/// the display name is the typed end use's own
+/// [`EndUse::display_name`]; the naming scheme is the aggregate's, not a
+/// classifier.
 pub fn parse_end_use_electric_power_column_key(name: &str) -> Option<String> {
     let display = name.strip_suffix(END_USE_AGGREGATE_SUFFIX)?;
-    display_name_to_end_use_key(display)
-}
-
-/// Maps an EndUse key string (e.g. `"hvac_heating"`) back to its EndUse variant.
-fn end_use_from_key(key: &str) -> Option<EndUse> {
-    match key {
-        "hvac_heating" => Some(EndUse::HVAC_HEATING),
-        "hvac_cooling" => Some(EndUse::HVAC_COOLING),
-        "water_heating" => Some(EndUse::WATER_HEATING),
-        "lighting" => Some(EndUse::LIGHTING),
-        "plug_loads" => Some(EndUse::PLUG_LOADS),
-        "refrigeration" => Some(EndUse::REFRIGERATION),
-        "ventilation" => Some(EndUse::VENTILATION),
-        "battery" => Some(EndUse::BATTERY),
-        "pv" => Some(EndUse::PV),
-        "ev" => Some(EndUse::EV),
-        "generator" => Some(EndUse::GENERATOR),
-        "cooking" => Some(EndUse::COOKING),
-        "laundry" => Some(EndUse::LAUNDRY),
-        "dishwasher" => Some(EndUse::DISHWASHER),
-        "pool_pump" => Some(EndUse::POOL_PUMP),
-        "pool_heater" => Some(EndUse::POOL_HEATER),
-        "spa_pump" => Some(EndUse::SPA_PUMP),
-        "spa_heater" => Some(EndUse::SPA_HEATER),
-        "ceiling_fan" => Some(EndUse::CEILING_FAN),
-        "dehumidifier" => Some(EndUse::DEHUMIDIFIER),
-        "other" => Some(EndUse::OTHER),
-        _ => None,
-    }
+    EndUse::from_display(display).map(|end_use| end_use.as_str().to_string())
 }
 
 /// Whether `name` is a **reserved** output column — one the schema emits
@@ -392,7 +177,7 @@ fn end_use_from_key(key: &str) -> Option<EndUse> {
 /// outputs those columns are computed from.
 #[must_use]
 pub fn is_reserved_output_column_name(name: &str) -> bool {
-    LEVEL_0_COLUMNS.contains(&name) || parse_end_use_electric_power_column(name).is_some()
+    LEVEL_0_COLUMNS.contains(&name) || parse_end_use_electric_power_column_key(name).is_some()
 }
 
 /// Returns column names that should be present at a given verbosity level
@@ -470,74 +255,6 @@ mod mode_ordinals_tests {
             );
         }
     }
-}
-
-pub fn is_hvac_or_wh(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("heater")
-        || lower.contains("cooler")
-        || lower.contains("furnace")
-        || lower.contains("boiler")
-        || lower.contains("baseboard")
-        || lower.contains("heat pump")
-        || lower.contains("air conditioner")
-        || lower.contains("room ac")
-        || lower.contains("ashp")
-        || lower.contains("mshp")
-        || lower.contains("water heat")
-        || lower.contains("dehumidifier")
-}
-
-pub fn has_soc(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("battery")
-        || lower.contains("electric vehicle")
-        || lower == "ev"
-        || lower.starts_with("ev ")
-        || lower.starts_with("ev#")
-}
-
-pub fn is_heat_pump_heater(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("ashp heater")
-        || lower.contains("mshp heater")
-        || lower.contains("heat pump heater")
-}
-
-/// Returns true if the equipment name indicates cooling-only equipment
-/// that should emit SHR and Latent Gains columns at v7.
-/// Heat-pump heaters that also cool are excluded here — the cooler
-/// companion emits those columns under its own name.
-pub fn is_cooling_equipment(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("air conditioner")
-        || lower.contains("room ac")
-        || lower.contains("cooler")
-        || lower.contains("dehumidifier")
-}
-
-/// Returns true if the equipment name indicates PV/solar equipment.
-pub fn is_pv(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("pv")
-}
-
-/// Returns true if the equipment name indicates EV/vehicle equipment.
-pub fn is_ev(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("ev") || lower.contains("electric vehicle")
-}
-
-/// Returns true if the equipment name indicates equipment with a compressor
-/// (heat pumps, air conditioners) that should emit compressor power columns at v8.
-pub fn is_compressor_equipment(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("heat pump")
-        || lower.contains("ashp")
-        || lower.contains("mshp")
-        || lower.contains("air conditioner")
-        || lower.contains("room ac")
-        || lower.contains("cooler")
 }
 
 #[cfg(test)]
@@ -1105,226 +822,6 @@ mod tests {
         assert!(names.contains(&"PV End Use Electric Power (kW)"));
     }
 
-    /// `equipment_name_to_end_use` maps canonical equipment names to the
-    /// correct EndUse category.
-    #[test]
-    fn equipment_name_to_end_use_maps_correctly() {
-        use hares_types::EndUse;
-        assert_eq!(
-            equipment_name_to_end_use("ASHP Heater"),
-            EndUse::HVAC_HEATING
-        );
-        assert_eq!(
-            equipment_name_to_end_use("Gas Furnace"),
-            EndUse::HVAC_HEATING
-        );
-        assert_eq!(
-            equipment_name_to_end_use("Air Conditioner"),
-            EndUse::HVAC_COOLING
-        );
-        // Every LightingLoad name OCHRE's Equipment/__init__.py registers maps
-        // to LIGHTING, so the aggregate holds indoor plus exterior.
-        assert_eq!(equipment_name_to_end_use("Lighting"), EndUse::LIGHTING);
-        assert_eq!(
-            equipment_name_to_end_use("Indoor Lighting"),
-            EndUse::LIGHTING
-        );
-        assert_eq!(
-            equipment_name_to_end_use("Exterior Lighting"),
-            EndUse::LIGHTING
-        );
-        assert_eq!(
-            equipment_name_to_end_use("Outdoor Lighting"),
-            EndUse::LIGHTING
-        );
-        assert_eq!(
-            equipment_name_to_end_use("Garage Lighting"),
-            EndUse::LIGHTING
-        );
-        assert_eq!(
-            equipment_name_to_end_use("Dehumidifier"),
-            EndUse::DEHUMIDIFIER
-        );
-        assert_eq!(equipment_name_to_end_use("Battery"), EndUse::BATTERY);
-        assert_eq!(equipment_name_to_end_use("PV"), EndUse::PV);
-        assert_eq!(
-            equipment_name_to_end_use("Gas Water Heater"),
-            EndUse::WATER_HEATING
-        );
-        assert_eq!(
-            equipment_name_to_end_use("Ceiling Fan"),
-            EndUse::CEILING_FAN
-        );
-        assert_eq!(equipment_name_to_end_use("Gas Grill"), EndUse::COOKING);
-        assert_eq!(equipment_name_to_end_use("Pool Pump"), EndUse::POOL_PUMP);
-        assert_eq!(
-            equipment_name_to_end_use("Pool Heater"),
-            EndUse::POOL_HEATER
-        );
-        assert_eq!(equipment_name_to_end_use("Clothes Washer"), EndUse::OTHER);
-    }
-
-    /// `display_name_to_end_use_key` maps every standard EndUse display name
-    /// to its canonical key string, and returns `None` for unknown names.
-    #[test]
-    fn display_name_to_end_use_key_maps_all_standard_end_uses() {
-        assert_eq!(
-            display_name_to_end_use_key("HVAC Heating"),
-            Some("hvac_heating".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("HVAC Cooling"),
-            Some("hvac_cooling".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Water Heating"),
-            Some("water_heating".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Lighting"),
-            Some("lighting".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Plug Loads"),
-            Some("plug_loads".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Refrigeration"),
-            Some("refrigeration".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Ventilation"),
-            Some("ventilation".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Battery"),
-            Some("battery".to_string())
-        );
-        assert_eq!(display_name_to_end_use_key("PV"), Some("pv".to_string()));
-        assert_eq!(display_name_to_end_use_key("EV"), Some("ev".to_string()));
-        assert_eq!(
-            display_name_to_end_use_key("Generator"),
-            Some("generator".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Cooking"),
-            Some("cooking".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Laundry"),
-            Some("laundry".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Dishwasher"),
-            Some("dishwasher".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Pool Pump"),
-            Some("pool_pump".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Pool Heater"),
-            Some("pool_heater".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Spa Pump"),
-            Some("spa_pump".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Spa Heater"),
-            Some("spa_heater".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Ceiling Fan"),
-            Some("ceiling_fan".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Dehumidifier"),
-            Some("dehumidifier".to_string())
-        );
-        assert_eq!(
-            display_name_to_end_use_key("Other"),
-            Some("other".to_string())
-        );
-        // Unknown display names return None.
-        assert_eq!(display_name_to_end_use_key("ASHP Heater"), None);
-        assert_eq!(display_name_to_end_use_key("Total"), None);
-    }
-
-    /// `end_use_display_name` maps every standard EndUse to a display
-    /// name that round-trips through `display_name_to_end_use_key` and
-    /// matches `EndUse::as_str()` converted to key form.
-    #[test]
-    fn end_use_display_name_round_trips_all_standard_variants() {
-        let standard = &[
-            (
-                &hares_types::EndUse::HVAC_HEATING,
-                "HVAC Heating",
-                "hvac_heating",
-            ),
-            (
-                &hares_types::EndUse::HVAC_COOLING,
-                "HVAC Cooling",
-                "hvac_cooling",
-            ),
-            (
-                &hares_types::EndUse::WATER_HEATING,
-                "Water Heating",
-                "water_heating",
-            ),
-            (&hares_types::EndUse::LIGHTING, "Lighting", "lighting"),
-            (&hares_types::EndUse::PLUG_LOADS, "Plug Loads", "plug_loads"),
-            (
-                &hares_types::EndUse::REFRIGERATION,
-                "Refrigeration",
-                "refrigeration",
-            ),
-            (
-                &hares_types::EndUse::VENTILATION,
-                "Ventilation",
-                "ventilation",
-            ),
-            (&hares_types::EndUse::BATTERY, "Battery", "battery"),
-            (&hares_types::EndUse::PV, "PV", "pv"),
-            (&hares_types::EndUse::EV, "EV", "ev"),
-            (&hares_types::EndUse::GENERATOR, "Generator", "generator"),
-            (&hares_types::EndUse::COOKING, "Cooking", "cooking"),
-            (&hares_types::EndUse::LAUNDRY, "Laundry", "laundry"),
-            (&hares_types::EndUse::DISHWASHER, "Dishwasher", "dishwasher"),
-            (&hares_types::EndUse::POOL_PUMP, "Pool Pump", "pool_pump"),
-            (
-                &hares_types::EndUse::POOL_HEATER,
-                "Pool Heater",
-                "pool_heater",
-            ),
-            (&hares_types::EndUse::SPA_PUMP, "Spa Pump", "spa_pump"),
-            (&hares_types::EndUse::SPA_HEATER, "Spa Heater", "spa_heater"),
-            (
-                &hares_types::EndUse::CEILING_FAN,
-                "Ceiling Fan",
-                "ceiling_fan",
-            ),
-            (
-                &hares_types::EndUse::DEHUMIDIFIER,
-                "Dehumidifier",
-                "dehumidifier",
-            ),
-            (&hares_types::EndUse::OTHER, "Other", "other"),
-        ];
-        for (end_use, expected_display, expected_key) in standard {
-            let display = end_use_display_name(end_use);
-            assert_eq!(
-                display, *expected_display,
-                "end_use_display_name({expected_key}) = '{display}', expected '{expected_display}'"
-            );
-            assert_eq!(
-                display_name_to_end_use_key(display),
-                Some(expected_key.to_string()),
-                "display_name_to_end_use_key('{display}') round-trip failed for {expected_key}"
-            );
-        }
-    }
-
     /// `is_reserved_output_column_name` flags exactly the schema's
     /// non-per-equipment columns that occupy the per-equipment
     /// `{name} {suffix}` namespace: the level-0 aggregate totals and the
@@ -1491,8 +988,9 @@ mod tests {
         }
     }
 
-    /// `parse_end_use_electric_power_column` round-trips correctly for all
-    /// standard end-uses and rejects per-equipment and total columns.
+    /// `parse_end_use_electric_power_column_key` round-trips every
+    /// standard end use's aggregate column and rejects per-equipment and
+    /// total columns.
     #[test]
     fn parse_end_use_electric_power_column_round_trip() {
         use hares_types::EndUse;
@@ -1509,24 +1007,24 @@ mod tests {
         ];
         for end_use in end_uses {
             let col = end_use_electric_power_column(end_use);
-            let parsed = parse_end_use_electric_power_column(&col);
+            let parsed = parse_end_use_electric_power_column_key(&col);
             assert_eq!(
-                parsed,
-                Some(end_use.clone()),
+                parsed.as_deref(),
+                Some(end_use.as_str()),
                 "round-trip failed for {end_use:?}: column='{col}', parsed={parsed:?}"
             );
         }
         // Per-equipment columns should not parse as end-use aggregate.
         assert_eq!(
-            parse_end_use_electric_power_column("Battery Electric Power (kW)"),
+            parse_end_use_electric_power_column_key("Battery Electric Power (kW)"),
             None
         );
         assert_eq!(
-            parse_end_use_electric_power_column("ASHP Heater Electric Power (kW)"),
+            parse_end_use_electric_power_column_key("ASHP Heater Electric Power (kW)"),
             None
         );
         assert_eq!(
-            parse_end_use_electric_power_column("Total Electric Power (kW)"),
+            parse_end_use_electric_power_column_key("Total Electric Power (kW)"),
             None
         );
     }
@@ -1562,16 +1060,6 @@ mod tests {
         assert!(names.contains(&"PV Irradiance (W/m2)"));
     }
 
-    /// EV equipment gets diagnostic columns at v8.
-    #[test]
-    fn ev_equipment_gets_v8_telemetry_columns() {
-        let specs = vec![make_spec("EV", FuelType::Electric)];
-        let schema = build_schema_for_specs(&specs, 8, &[]);
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(names.contains(&"EV Connection State (-)"));
-        assert!(names.contains(&"EV Charging Level (-)"));
-    }
-
     /// Non-HVAC/PV/EV equipment does NOT get v8 telemetry columns.
     #[test]
     fn non_diagnostic_equipment_has_no_v8_telemetry_columns() {
@@ -1588,21 +1076,15 @@ mod tests {
         assert_eq!(s8.fields().len(), s7.fields().len());
     }
 
-    /// is_pv / is_ev / is_compressor_equipment correctly classify equipment names.
+    /// EV equipment gets diagnostic columns at v8.
     #[test]
-    fn equipment_classification_functions() {
-        assert!(is_pv("PV"));
-        assert!(!is_pv("Battery"));
-        assert!(is_ev("EV"));
-        assert!(is_ev("Electric Vehicle"));
-        assert!(!is_ev("PV"));
-        assert!(is_compressor_equipment("ASHP Heater"));
-        assert!(is_compressor_equipment("Air Conditioner"));
-        assert!(is_compressor_equipment("MSHP Cooler"));
-        assert!(!is_compressor_equipment("Gas Furnace"));
-        assert!(!is_compressor_equipment("Battery"));
+    fn ev_equipment_gets_v8_telemetry_columns() {
+        let specs = vec![make_spec("EV", FuelType::Electric)];
+        let schema = build_schema_for_specs(&specs, 8, &[]);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"EV Connection State (-)"));
+        assert!(names.contains(&"EV Charging Level (-)"));
     }
-
     /// Output schema columns carry unit metadata on their Arrow fields, verified
     /// against independent hand-written expected units rather than recomputing
     /// the expected value from the same extraction function. The metadata

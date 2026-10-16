@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "765968ed228e688af5b76082193e38a05ddf2e37",
+  "git_head": "b5858446c4326b486dae12041d2d6ea1ba1e4537",
   "git_dirty": true,
   "metrics": [
     {
@@ -47,10 +47,6 @@
           "bits": "0x3f95aa3b35e211e7",
           "value": 0.021157193340075067
         },
-        "cooking": {
-          "bits": "0x3ffe59438674b2eb",
-          "value": 1.8967929126912917
-        },
         "hvac_cooling": {
           "bits": "0x0000000000000000",
           "value": 0.0
@@ -64,12 +60,12 @@
           "value": 0.21023260784810133
         },
         "other": {
-          "bits": "0x400e00713db2601f",
-          "value": 3.7502159900723337
+          "bits": "0x4011616d98ed7e53",
+          "value": 4.345144643302393
         },
         "plug_loads": {
-          "bits": "0x3fc9c8c2c8da2cca",
-          "value": 0.20143923575628825
+          "bits": "0x3fe4c8a5d7a26d6a",
+          "value": 0.6494931422816255
         },
         "refrigeration": {
           "bits": "0x3fabf8bf95066490",
@@ -125,10 +121,6 @@
           "bits": "0x40042784f5416a96",
           "value": 2.519296566065644
         },
-        "cooking": {
-          "bits": "0x402ba71d74640922",
-          "value": 13.826396596156489
-        },
         "hvac_cooling": {
           "bits": "0x0000000000000000",
           "value": 0.0
@@ -142,12 +134,12 @@
           "value": 8.970730699660024
         },
         "other": {
-          "bits": "0x40389090972c8717",
-          "value": 24.564706276293773
+          "bits": "0x403b452d1335f47d",
+          "value": 27.270219040558448
         },
         "plug_loads": {
-          "bits": "0x40375e53041eaea9",
-          "value": 23.36845422505454
+          "bits": "0x40413ea2a123a2e7",
+          "value": 34.48933805694633
         },
         "refrigeration": {
           "bits": "0x401e9fe68d706633",
@@ -204,10 +196,6 @@
           "bits": "0x3f95548246f60d8c",
           "value": 0.02083018835174992
         },
-        "cooking": {
-          "bits": "0x4000d29b735b3ca1",
-          "value": 2.102835561010196
-        },
         "hvac_cooling": {
           "bits": "0x3fa999999999999a",
           "value": 0.05
@@ -221,12 +209,12 @@
           "value": 0.6903491458249731
         },
         "other": {
-          "bits": "0x3feaf417defe45e0",
-          "value": 0.842296538861941
+          "bits": "0x4004db9dd1571e9e",
+          "value": 2.6072346071922103
         },
         "plug_loads": {
-          "bits": "0x3fc637345f6ba1a9",
-          "value": 0.17355971011353447
+          "bits": "0x3fdb0137d8ee8d0c",
+          "value": 0.42194935021162006
         },
         "refrigeration": {
           "bits": "0x3fabf8bf95066490",
@@ -282,10 +270,6 @@
           "bits": "0x4003688b139ff8f7",
           "value": 2.4260465176768053
         },
-        "cooking": {
-          "bits": "0x4032d2c0b4744d58",
-          "value": 18.823252943414758
-        },
         "hvac_cooling": {
           "bits": "0x401dffffffffffeb",
           "value": 7.499999999999981
@@ -299,12 +283,12 @@
           "value": 28.04077313992225
         },
         "other": {
-          "bits": "0x402109932643e761",
-          "value": 8.51870078638939
+          "bits": "0x40341ecac40b198a",
+          "value": 20.120281460485366
         },
         "plug_loads": {
-          "bits": "0x40336fb39b52b969",
-          "value": 19.43633433122287
+          "bits": "0x403aa8731edde0f3",
+          "value": 26.658006600541693
         },
         "refrigeration": {
           "bits": "0x401e9fe68d706633",
@@ -357,10 +341,6 @@
       "metrics_reliability": "Reliable",
       "nan_step_count": 0,
       "peak_power_kw.per_end_use": {
-        "cooking": {
-          "bits": "0x3feed8f04db4d83e",
-          "value": 0.9639817731574636
-        },
         "hvac_cooling": {
           "bits": "0x3fa999999999999a",
           "value": 0.05
@@ -374,16 +354,20 @@
           "value": 0.43111610426386765
         },
         "other": {
-          "bits": "0x3ff39955e72fb460",
-          "value": 1.2249354391781466
+          "bits": "0x3ff0f37967357caf",
+          "value": 1.0594419509505248
         },
         "plug_loads": {
-          "bits": "0x3fe24a03dac4608b",
-          "value": 0.5715350411219488
+          "bits": "0x3ff2c63a8dc204ef",
+          "value": 1.1733956849496356
         },
         "pv": {
           "bits": "0x0000000000000000",
           "value": 0.0
+        },
+        "refrigeration": {
+          "bits": "0x3fcc21008698c13f",
+          "value": 0.21975714275459698
         },
         "water_heating": {
           "bits": "0x0000000000000000",
@@ -431,10 +415,6 @@
         "value": 110.81601087817613
       },
       "total_energy_kwh.per_end_use": {
-        "cooking": {
-          "bits": "0x40328de15661392e",
-          "value": 18.55421962617509
-        },
         "hvac_cooling": {
           "bits": "0x401699999999998c",
           "value": 5.649999999999988
@@ -448,16 +428,20 @@
           "value": 20.371585871126474
         },
         "other": {
-          "bits": "0x404da1d201dd5763",
-          "value": 59.26422141368564
+          "bits": "0x4038f3bee66ab27e",
+          "value": 24.95213165383256
         },
         "plug_loads": {
-          "bits": "0x405081b677b27b85",
-          "value": 66.02676193647319
+          "bits": "0x40560629dddc12f0",
+          "value": 88.09630533687209
         },
         "pv": {
           "bits": "0xc04fe4535dc7df9a",
           "value": -63.78379413852163
+        },
+        "refrigeration": {
+          "bits": "0x403ecbf8db0ad7a0",
+          "value": 30.796765985629122
         },
         "water_heating": {
           "bits": "0x0000000000000000",
@@ -596,11 +580,6 @@
         },
         {
           "name": "Refrigeration End Use Electric Power (kW)",
-          "arrow_type": "Float64",
-          "nullable": true
-        },
-        {
-          "name": "Cooking End Use Electric Power (kW)",
           "arrow_type": "Float64",
           "nullable": true
         },
@@ -892,26 +871,18 @@
         },
         {
           "name": "Other End Use Electric Power (kW)",
-          "digest": "95182f33f6c69bb49144b7072f12fff1ac92d8fd9f66a423606a1afa8e9938cb",
+          "digest": "026cb57970b933053c8d7e070dc468fe45dce5173c99f67f95a54a27bc4eab42",
           "blocks": [
-            "2d30994c8aa62ea00188f6f743d3d24224e30e5848f5129c1e15e224b210ba08",
-            "fcf545268bcf2f6b9ae8d457d41755071a98349f27fcb68fa41dfcbb8996dff0"
+            "90d64bff7695044bf1bc1806b418b45b26b1f9ce78fdb197877bbaa1377d666b",
+            "2471d1e17a87a7eee53b34d41c09dd209f05da4cd51dd3c2598401bfd12c33de"
           ]
         },
         {
           "name": "Refrigeration End Use Electric Power (kW)",
-          "digest": "52423a8ba75e67cb417e7a6a6a88207f1e3d4a1866a0ff4397a86bad05951482",
+          "digest": "f81a299cbb2fe2262463fcceff09e350d78ad66e81e5a0c2e72d820c930b45c8",
           "blocks": [
-            "8a526ab2f0a25ffa3aff069490e40044be58ed08a7fcb3fcf40135274f337819",
-            "3ef5fff6b1b776f7b633c80372b023560ff5a2b816f5b66815f82111a587dac8"
-          ]
-        },
-        {
-          "name": "Cooking End Use Electric Power (kW)",
-          "digest": "b1bc7e3a7a4a759758473f08a659e59a99d0a24d2c775a4fdce7f2f4fbeee23b",
-          "blocks": [
-            "d70cddd37d9800a99297a20c189dab16aa421b16e5fb8d807bfd28837b269d8a",
-            "c6984b534914b91e582d493989b6487243b4c8ff6968f40ec3db706e35d8c8d1"
+            "fa291e42d0d4b274e1bfebb6bbd966e7d8cdecb38891655c2960cd9b9fa7be2e",
+            "4cf145efab3a01311ea4f6cb53d1bb80d1b3585421458ad7486740bae1ac213d"
           ]
         },
         {
@@ -932,10 +903,10 @@
         },
         {
           "name": "Plug Loads End Use Electric Power (kW)",
-          "digest": "5d49fbe6ab10862610b724bc8c57acd685adda9e52243c00ac949db0af2215b5",
+          "digest": "8f1332fcc7ef485561c510f98a7fca60436436f517b514a72f8788201f9edd3f",
           "blocks": [
-            "1f15d98cf10a2fc451889ba474abe5ad1aa4fe82c9bd3db38099ce350ff925c0",
-            "ad47f833cb33abc2c4a502cc4fb53976daaa3e48d6cf679f7c4ee28ed4cd0de8"
+            "1e1ac80d2e0423e21c6e37c82b90a599d16a834295cf06b15242523ea65c2aca",
+            "5553d35120cf0d233e2f8137390767a70b8367d76824e7ea2c7fe44db4583e80"
           ]
         },
         {
@@ -1201,11 +1172,6 @@
         },
         {
           "name": "Refrigeration End Use Electric Power (kW)",
-          "arrow_type": "Float64",
-          "nullable": true
-        },
-        {
-          "name": "Cooking End Use Electric Power (kW)",
           "arrow_type": "Float64",
           "nullable": true
         },
@@ -1505,14 +1471,6 @@
         },
         {
           "name": "Refrigeration End Use Electric Power (kW)",
-          "digest": "8cb8b97a3f890632b2fad7b85aebf76f84710783c18871ae8114061ebbb2e195",
-          "blocks": [
-            "ff705172bbff391f52d4ba586c52446fd0ce4cc14b4d06671de2f485efa8e5cd",
-            "7d49ab7dc24f81b88fe63e4bfb9ab919ef504169ebb02aedb15507db34c8257a"
-          ]
-        },
-        {
-          "name": "Cooking End Use Electric Power (kW)",
           "digest": "f5fb7946ee1d64ced1518a962d8c379803c40330d979839c95d593b2be2daf8c",
           "blocks": [
             "5978803b433b6f446fc025814eb9a8c70db04372b9ce9c382204b7349b998663",

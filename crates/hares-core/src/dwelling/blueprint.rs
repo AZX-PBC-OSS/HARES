@@ -390,13 +390,18 @@ impl DwellingBlueprintBuilder {
         Ok(self.equipment_specs.remove(pos))
     }
 
-    /// Remove equipment whose end use matches any of the given end uses.
-    /// Returns the count of removed equipment specs.
+    /// Remove equipment whose declared end use matches any of the given
+    /// end uses. The match reads the class's typed declaration
+    /// (`hares_equipment::class_declared_surface`), never the name
+    /// string: a spec whose name is not a registered class declares no
+    /// end use and no end-use removal addresses it. Returns the count of
+    /// removed equipment specs.
     pub fn remove_equipment_by_end_use(&mut self, end_uses: &[EndUse]) -> usize {
         let before = self.equipment_specs.len();
         self.equipment_specs.retain(|s| {
             s.name == "Occupancy"
-                || !end_uses.contains(&hares_io::equipment_name_to_end_use(&s.name))
+                || !hares_equipment::class_declared_surface(&s.name)
+                    .is_some_and(|surface| end_uses.contains(&surface.end_use))
         });
         if self.equipment_specs.len() != before {
             self.blueprint_edited = true;

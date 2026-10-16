@@ -737,3 +737,29 @@ golden fixtures re-captured.
   the same way. No golden was re-captured: the one tariffed golden
   closes no billing boundary inside its run, and all nine are bitwise
   (compare-all 8 + dst 1).
+
+- 2026-10-16: the end-use rollup classifies equipment by its typed
+  end use (the descriptor's declared end use through the catalogue),
+  never by its name string; the name classifiers
+  (`equipment_name_to_end_use`, `is_hvac_or_wh`, `is_ev`, `has_soc`,
+  `is_heat_pump_heater`, `is_cooling_equipment`, `is_pv`,
+  `is_compressor_equipment`, `display_name_to_end_use_key`) are
+  deleted. Every golden re-captured: in the resstock homes the
+  `TV` plug load's power moves from the `other` end use to
+  `plug_loads` (the class declares `plug_loads`; the name string fell
+  to `other`), and in every fixture the `Cooking Range`'s power moves
+  from `cooking` to `other` (the range is an event-based load whose
+  descriptor declares `other`; the name string claimed `cooking`), so
+  the `cooking` end-use aggregate column disappears from every golden
+  schema and the per-end-use peaks and energies re-bucket. The parity
+  homes' per-equipment columns are otherwise unchanged (their
+  classes' declared end uses agree with the old name mapping), and the
+  per-end-use totals across the aggregates are unchanged: the rollup
+  re-buckets, it does not move energy between equipment. The all-classes
+  catalogue pins (`tests/fixtures/schema/`) re-captured with the same
+  cause (the phantom EV columns of the event-based load and the
+  television pin are gone; the pool and spa heaters leave the HVAC
+  family; the ideal load, the `HPWH` alias and the indirect tank gain
+  the HVAC family their declarations carry; the ground-source and
+  water-loop heat pump heaters gain the defrost and ER columns their
+  pan heater declaration carries and the old name matcher missed).

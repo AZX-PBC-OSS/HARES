@@ -411,7 +411,7 @@
   },
   {
     "arrow_type": "Float64",
-    "name": "Other End Use Electric Power (kW)",
+    "name": "Lighting End Use Electric Power (kW)",
     "nullable": true
   },
   {
@@ -426,7 +426,7 @@
   },
   {
     "arrow_type": "Float64",
-    "name": "Cooking End Use Electric Power (kW)",
+    "name": "Other End Use Electric Power (kW)",
     "nullable": true
   },
   {
@@ -451,17 +451,17 @@
   },
   {
     "arrow_type": "Float64",
-    "name": "Lighting End Use Electric Power (kW)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
     "name": "Refrigeration End Use Electric Power (kW)",
     "nullable": true
   },
   {
     "arrow_type": "Float64",
     "name": "Generator End Use Electric Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Cooking End Use Electric Power (kW)",
     "nullable": true
   },
   {
@@ -771,6 +771,11 @@
   },
   {
     "arrow_type": "Float64",
+    "name": "HPWH Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
     "name": "HRV Mode (-)",
     "nullable": true
   },
@@ -801,7 +806,17 @@
   },
   {
     "arrow_type": "Float64",
+    "name": "Ideal HVAC Setpoint (C)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
     "name": "Indirect Tank Mode (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Setpoint (C)",
     "nullable": true
   },
   {
@@ -866,11 +881,6 @@
   },
   {
     "arrow_type": "Float64",
-    "name": "Pool Heater #1 Setpoint (C)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
     "name": "Pool Pump Mode (-)",
     "nullable": true
   },
@@ -912,11 +922,6 @@
   {
     "arrow_type": "Float64",
     "name": "Spa Heater Mode (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Spa Heater Setpoint (C)",
     "nullable": true
   },
   {
@@ -977,11 +982,6 @@
   {
     "arrow_type": "Float64",
     "name": "Pool Heater #2 Mode (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #2 Setpoint (C)",
     "nullable": true
   },
   {
@@ -2546,6 +2546,16 @@
   },
   {
     "arrow_type": "Float64",
+    "name": "GSHP Heater Defrost State (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "GSHP Heater ER Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
     "name": "GSHP Heater Speed (-)",
     "nullable": true
   },
@@ -2751,6 +2761,36 @@
   },
   {
     "arrow_type": "Float64",
+    "name": "HPWH Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HPWH Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HPWH Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HPWH Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HPWH Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "HPWH COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
     "name": "HRV Schedule (-)",
     "nullable": true
   },
@@ -2841,7 +2881,67 @@
   },
   {
     "arrow_type": "Float64",
+    "name": "Ideal HVAC Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ideal HVAC Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ideal HVAC Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ideal HVAC Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ideal HVAC Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Ideal HVAC COP (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
     "name": "Indirect Tank Schedule (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Speed (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Main Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Fan Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Runtime Fraction (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank Capacity (W)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "Indirect Tank COP (-)",
     "nullable": true
   },
   {
@@ -2976,36 +3076,6 @@
   },
   {
     "arrow_type": "Float64",
-    "name": "Pool Heater #1 Speed (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #1 Main Power (kW)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #1 Fan Power (kW)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #1 Runtime Fraction (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #1 Capacity (W)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #1 COP (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
     "name": "Pool Pump Schedule (-)",
     "nullable": true
   },
@@ -3111,36 +3181,6 @@
   },
   {
     "arrow_type": "Float64",
-    "name": "Spa Heater Speed (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Spa Heater Main Power (kW)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Spa Heater Fan Power (kW)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Spa Heater Runtime Fraction (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Spa Heater Capacity (W)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Spa Heater COP (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
     "name": "Spa Pump Schedule (-)",
     "nullable": true
   },
@@ -3241,6 +3281,16 @@
   },
   {
     "arrow_type": "Float64",
+    "name": "WSHP Heater Defrost State (-)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
+    "name": "WSHP Heater ER Power (kW)",
+    "nullable": true
+  },
+  {
+    "arrow_type": "Float64",
     "name": "WSHP Heater Speed (-)",
     "nullable": true
   },
@@ -3282,36 +3332,6 @@
   {
     "arrow_type": "Float64",
     "name": "Pool Heater #2 Schedule (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #2 Speed (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #2 Main Power (kW)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #2 Fan Power (kW)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #2 Runtime Fraction (-)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #2 Capacity (W)",
-    "nullable": true
-  },
-  {
-    "arrow_type": "Float64",
-    "name": "Pool Heater #2 COP (-)",
     "nullable": true
   },
   {

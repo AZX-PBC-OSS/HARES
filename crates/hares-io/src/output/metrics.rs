@@ -29,11 +29,11 @@ use thiserror::Error;
 
 use hares_physics::constants::HOURS_PER_YEAR;
 use hares_physics::units::energy_therms_to_kwh;
+use hares_types::EndUse;
 use hares_types::telemetry_keys as tk;
 
 use crate::SimulationConfig;
 use crate::output::catalogue::{Catalogue, time_field, variable_field};
-#[cfg(feature = "observe")]
 use crate::output::columns::ELECTRIC_POWER_SUFFIX;
 
 const TOTAL_ELECTRIC_POWER_KW: &str = "Total Electric Power (kW)";
@@ -482,7 +482,8 @@ pub struct MetricsInputPlan {
 
 impl MetricsInputPlan {
     /// Builds the plan from the producer surface's variable names, in
-    /// producer-slot order, and the simulation config.
+    /// producer-slot order, the simulation config, and the catalogue's
+    /// typed equipment end-use table.
     ///
     /// # Errors
     ///
@@ -491,14 +492,21 @@ impl MetricsInputPlan {
     /// when an HVAC aggregate column is missing while per-equipment columns
     /// for that end use exist (schema drift: the aggregate metric would
     /// silently read zero).
-    pub fn build(available: &[String], config: &SimulationConfig) -> Result<Self, MetricsError> {
-        Self::build_from_names(available, config.setpoint_deadband_c)
+    pub fn build(
+        available: &[String],
+        config: &SimulationConfig,
+        equipment_end_uses: &[(String, EndUse)],
+    ) -> Result<Self, MetricsError> {
+        Self::build_from_names(available, config.setpoint_deadband_c, equipment_end_uses)
     }
 
     /// Builds the plan from column names, with the thermostat deadband
     /// given directly: the table feed's constructor, carrying the config
     /// field's value the caller read (`None` leaves the deadband column
-    /// the one source, as in-run).
+    /// the one source, as-in-run). The equipment end-use table is the
+    /// catalogue's (`Catalogue::equipment_end_uses`): the classification
+    /// of the per-equipment columns into end uses is the declaration's,
+    /// never the column name's.
     ///
     /// # Errors
     ///
@@ -506,6 +514,7 @@ impl MetricsInputPlan {
     pub fn build_from_names(
         available: &[String],
         setpoint_deadband_c: Option<f64>,
+        equipment_end_uses: &[(String, EndUse)],
     ) -> Result<Self, MetricsError> {
         let total_electric_power_slot = required_slot(available, TOTAL_ELECTRIC_POWER_KW)?;
         let total_gas_power_slot = optional_slot(available, &[TOTAL_GAS_POWER_THERMS])?;
@@ -552,12 +561,19 @@ impl MetricsInputPlan {
 
         // A missing HVAC aggregate column while per-equipment columns for
         // that end use exist is schema drift: the aggregate metric would
-        // silently read zero.
+        // silently read zero. The equipment-for-end-use test reads the
+        // catalogue's typed end-use table, never the column names.
         {
-            let has_hvac_heating_equipment =
-                names_have_equipment_for(available, &hares_types::EndUse::HVAC_HEATING);
-            let has_hvac_cooling_equipment =
-                names_have_equipment_for(available, &hares_types::EndUse::HVAC_COOLING);
+            let has_hvac_heating_equipment = equipment_end_uses_have(
+                equipment_end_uses,
+                available,
+                &hares_types::EndUse::HVAC_HEATING,
+            );
+            let has_hvac_cooling_equipment = equipment_end_uses_have(
+                equipment_end_uses,
+                available,
+                &hares_types::EndUse::HVAC_COOLING,
+            );
 
             if hvac_heating_kw_slot.is_none() && has_hvac_heating_equipment {
                 return Err(MetricsError::MissingRequiredColumn(
@@ -595,7 +611,7 @@ impl MetricsInputPlan {
             hvac_cooling_kw_slot,
             battery_kw_slot,
             #[cfg(feature = "observe")]
-            end_use_equipment_counts: compute_equipment_counts_from_names(available),
+            end_use_equipment_counts: compute_equipment_counts(equipment_end_uses, available),
         })
     }
 
@@ -1800,7 +1816,11 @@ pub fn metrics_from_table(
         .iter()
         .map(|&index| schema.field(index).name().clone())
         .collect();
-    let plan = MetricsInputPlan::build_from_names(&names, setpoint_deadband_c)?;
+    let plan = MetricsInputPlan::build_from_names(
+        &names,
+        setpoint_deadband_c,
+        catalogue.equipment_end_uses(),
+    )?;
     let mut calculator = MetricsCalculator::for_coverage_year(plan, time_res_secs, coverage_year)?;
 
     // Every row, in table order, through the accumulator the run feeds
@@ -1860,56 +1880,39 @@ fn discover_end_use_slots(
     Ok(columns)
 }
 
-/// Returns true if the producer surface carries at least one per-equipment
-/// electric power name that maps to the given `EndUse` category.
+/// Returns true if the catalogue's typed equipment end-use table pairs at
+/// least one equipment whose per-equipment electric power column the
+/// producer surface carries with the given `EndUse`.
 ///
 /// Used to gate the missing-aggregate-column error on the actual presence of
 /// equipment for that end-use category.
 #[cfg_attr(not(feature = "observe"), allow(dead_code))]
-pub(crate) fn names_have_equipment_for(available: &[String], target: &hares_types::EndUse) -> bool {
-    for name in available {
-        if let Some(name) = name.as_str().strip_suffix(" Electric Power (kW)") {
-            let prefix = name.trim();
-            // Strip instance qualifier suffix (" #N") for multi-instance
-            // equipment columns (e.g. "ASHP Heater #1" -> "ASHP Heater").
-            let base = match prefix.rfind(" #") {
-                Some(pos) => &prefix[..pos],
-                None => prefix,
-            };
-            if crate::output::columns::equipment_name_to_end_use(base) == *target {
-                return true;
-            }
-        }
-    }
-    false
+pub(crate) fn equipment_end_uses_have(
+    equipment_end_uses: &[(String, EndUse)],
+    available: &[String],
+    target: &EndUse,
+) -> bool {
+    equipment_end_uses.iter().any(|(name, end_use)| {
+        end_use == target
+            && available
+                .iter()
+                .any(|column| column == &format!("{name} {ELECTRIC_POWER_SUFFIX}"))
+    })
 }
 
-/// Derives per-end-use equipment counts from the producer surface's names.
-///
-/// Counts each per-equipment electric power column whose name maps to a
-/// recognised EndUse category, skipping aggregate columns (whose prefix is
-/// an EndUse display name rather than an equipment instance name).
+/// Derives per-end-use equipment counts from the catalogue's typed
+/// equipment end-use table, counting every equipment whose per-equipment
+/// electric power column the producer surface carries.
 #[cfg(feature = "observe")]
-fn compute_equipment_counts_from_names(available: &[String]) -> BTreeMap<String, usize> {
+fn compute_equipment_counts(
+    equipment_end_uses: &[(String, EndUse)],
+    available: &[String],
+) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
-    for name in available {
-        let Some(prefix) = name.strip_suffix(ELECTRIC_POWER_SUFFIX) else {
-            continue;
-        };
-        let prefix = prefix.trim();
-        let base = match prefix.rfind(" #") {
-            Some(pos) => &prefix[..pos],
-            None => prefix,
-        };
-        let end_use = crate::output::columns::equipment_name_to_end_use(base);
-        // Only count columns that represent real equipment instances:
-        // aggregate columns (e.g. "HVAC Heating") do not match
-        // equipment_name_to_end_use and return EndUse::OTHER.
-        if end_use != hares_types::EndUse::OTHER {
-            let display = crate::output::columns::end_use_display_name(&end_use);
-            if let Some(key) = crate::output::columns::display_name_to_end_use_key(display) {
-                *counts.entry(key).or_insert(0) += 1;
-            }
+    for (name, end_use) in equipment_end_uses {
+        let column = format!("{name} {ELECTRIC_POWER_SUFFIX}");
+        if available.iter().any(|candidate| candidate == &column) {
+            *counts.entry(end_use.as_str().to_string()).or_insert(0) += 1;
         }
     }
     counts
@@ -2060,6 +2063,16 @@ mod tests {
     }
 
     fn plan_for(schema: &Schema, config: &SimulationConfig) -> MetricsInputPlan {
+        plan_for_with_equipment(schema, config, &[])
+    }
+
+    /// The plan builder over stated equipment end-use pairs (the
+    /// catalogue's typed table).
+    fn plan_for_with_equipment(
+        schema: &Schema,
+        config: &SimulationConfig,
+        equipment_end_uses: &[(String, hares_types::EndUse)],
+    ) -> MetricsInputPlan {
         let names: Vec<String> = schema
             .fields()
             .iter()
@@ -2068,7 +2081,7 @@ mod tests {
             ))
             .map(|f| f.name().clone())
             .collect();
-        MetricsInputPlan::build(&names, config).expect("metrics plan builds")
+        MetricsInputPlan::build(&names, config, equipment_end_uses).expect("metrics plan builds")
     }
 
     /// Feeds every row of the batch, in order: the same values the
@@ -2492,7 +2505,7 @@ mod tests {
     fn constructor_requires_total_electric_power_column() {
         let schema = schema_from_columns(&["HVAC Heating End Use Electric Power (kW)"]);
         let names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
-        let err = MetricsInputPlan::build(&names, &test_config(None)).unwrap_err();
+        let err = MetricsInputPlan::build(&names, &test_config(None), &[]).unwrap_err();
         assert_eq!(
             err,
             MetricsError::MissingRequiredColumn(TOTAL_ELECTRIC_POWER_KW.to_string())
@@ -2993,17 +3006,19 @@ mod tests {
         schema.fields().iter().map(|f| f.name().clone()).collect()
     }
 
-    /// `names_have_equipment_for` detects HVAC equipment columns in the
-    /// producer surface and correctly returns false when none are present.
+    /// `equipment_end_uses_have` detects HVAC equipment in the catalogue's
+    /// typed end-use table whose power column the producer surface
+    /// carries, and returns false when none is present.
     #[test]
-    fn names_have_equipment_for_detects_hvac_columns() {
+    fn equipment_end_uses_have_detects_hvac_columns() {
         let hvac_names = names_of(&schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "ASHP Heater Electric Power (kW)",
             "HVAC Heating End Use Electric Power (kW)",
         ]));
+        let hvac_table = vec![("ASHP Heater".to_string(), hares_types::EndUse::HVAC_HEATING)];
         assert!(
-            names_have_equipment_for(&hvac_names, &hares_types::EndUse::HVAC_HEATING),
+            equipment_end_uses_have(&hvac_table, &hvac_names, &hares_types::EndUse::HVAC_HEATING),
             "must detect ASHP Heater as HVAC_HEATING equipment"
         );
 
@@ -3012,49 +3027,78 @@ mod tests {
             TOTAL_ELECTRIC_POWER_KW,
             "Battery End Use Electric Power (kW)",
         ]));
+        let battery_table = vec![("Battery".to_string(), hares_types::EndUse::BATTERY)];
         assert!(
-            !names_have_equipment_for(&battery_names, &hares_types::EndUse::HVAC_HEATING),
+            !equipment_end_uses_have(
+                &battery_table,
+                &battery_names,
+                &hares_types::EndUse::HVAC_HEATING
+            ),
             "must NOT detect Battery as HVAC_HEATING equipment"
         );
         assert!(
-            !names_have_equipment_for(&battery_names, &hares_types::EndUse::HVAC_COOLING),
+            !equipment_end_uses_have(
+                &battery_table,
+                &battery_names,
+                &hares_types::EndUse::HVAC_COOLING
+            ),
             "must NOT detect Battery as HVAC_COOLING equipment"
         );
 
-        // A surface with no equipment has none.
-        let empty = names_of(&schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]));
+        // An empty table has no equipment for any end use.
+        let empty: Vec<(String, hares_types::EndUse)> = Vec::new();
         assert!(
-            !names_have_equipment_for(&empty, &hares_types::EndUse::HVAC_HEATING),
-            "an equipment-free surface must not report HVAC equipment"
+            !equipment_end_uses_have(&empty, &hvac_names, &hares_types::EndUse::HVAC_HEATING),
+            "an equipment-free table must not report HVAC equipment"
+        );
+
+        // A table entry whose power column the surface does not carry
+        // (the equipment did not reach the union schema) is not detected.
+        let absent_names = names_of(&schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]));
+        assert!(
+            !equipment_end_uses_have(
+                &hvac_table,
+                &absent_names,
+                &hares_types::EndUse::HVAC_HEATING
+            ),
+            "equipment whose power column the surface omits is not detected"
         );
     }
 
-    /// `names_have_equipment_for` strips instance qualifiers (" #N") from
-    /// multi-instance equipment column names.
+    /// The typed table carries instance-qualified names as they are: the
+    /// instance-qualified columns are the equipment's own, with no name
+    /// prefix or qualifier ever parsed.
     #[test]
-    fn names_have_equipment_for_strips_instance_qualifiers() {
+    fn equipment_end_uses_have_detects_instance_qualified_equipment() {
         let names = names_of(&schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "ASHP Heater #1 Electric Power (kW)",
             "ASHP Heater #2 Electric Power (kW)",
             "HVAC Heating End Use Electric Power (kW)",
         ]));
+        let table = vec![
+            (
+                "ASHP Heater #1".to_string(),
+                hares_types::EndUse::HVAC_HEATING,
+            ),
+            (
+                "ASHP Heater #2".to_string(),
+                hares_types::EndUse::HVAC_HEATING,
+            ),
+        ];
         assert!(
-            names_have_equipment_for(&names, &hares_types::EndUse::HVAC_HEATING),
-            "must detect instance-qualified ASHP Heater columns as HVAC_HEATING"
+            equipment_end_uses_have(&table, &names, &hares_types::EndUse::HVAC_HEATING),
+            "must detect the instance-qualified ASHP Heater columns as HVAC_HEATING equipment"
         );
     }
 
-    /// `compute_equipment_counts_from_names` counts per-equipment columns
-    /// grouped by EndUse category, skipping aggregate columns.
+    /// `compute_equipment_counts` counts the typed table's equipment whose
+    /// power column the producer surface carries, grouped by the declared
+    /// end use; the aggregate columns are nobody's equipment and nothing
+    /// is counted by a name string.
     #[test]
     #[cfg(feature = "observe")]
-    fn compute_equipment_counts_counts_equipment_excluding_aggregates() {
-        // Names with 2 HVAC_HEATING equipment, 1 BATTERY equipment, and
-        // end-use aggregate columns ("{Display} End Use Electric Power (kW)").
-        // "Battery" is both an equipment name and an EndUse display name, so
-        // the battery aggregate exercises the case where an aggregate prefix
-        // could be mistaken for an equipment instance.
+    fn compute_equipment_counts_counts_declared_equipment() {
         let names = names_of(&schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "ASHP Heater Electric Power (kW)",
@@ -3063,7 +3107,12 @@ mod tests {
             "HVAC Heating End Use Electric Power (kW)",
             "Battery End Use Electric Power (kW)",
         ]));
-        let counts = compute_equipment_counts_from_names(&names);
+        let table = vec![
+            ("ASHP Heater".to_string(), hares_types::EndUse::HVAC_HEATING),
+            ("Gas Furnace".to_string(), hares_types::EndUse::HVAC_HEATING),
+            ("Battery".to_string(), hares_types::EndUse::BATTERY),
+        ];
+        let counts = compute_equipment_counts(&table, &names);
         assert_eq!(
             counts.get("hvac_heating"),
             Some(&2),
@@ -3072,19 +3121,21 @@ mod tests {
         assert_eq!(
             counts.get("battery"),
             Some(&1),
-            "must count 1 Battery equipment; the Battery aggregate column must not be counted"
+            "must count 1 Battery equipment; the Battery aggregate column is nobody's equipment"
         );
-        // Aggregate columns (e.g. "HVAC Heating") must not be counted.
+        // Nothing is counted by its name string: the aggregate columns
+        // ("HVAC Heating", "Battery" prefixes) contribute no counts, and
+        // no OTHER bucket appears.
         assert!(
             !counts.contains_key("other"),
-            "aggregate columns must not be counted as OTHER: got keys {:?}",
+            "no name string may classify into OTHER: got keys {:?}",
             counts.keys().collect::<Vec<_>>()
         );
     }
 
     /// `MetricsInputPlan::build` populates `end_use_equipment_counts` from
-    /// the producer surface so observer diagnostics report non-zero
-    /// equipment counts.
+    /// the typed table so observer diagnostics report non-zero equipment
+    /// counts.
     #[test]
     #[cfg(feature = "observe")]
     fn metrics_plan_build_populates_equipment_counts() {
@@ -3093,10 +3144,11 @@ mod tests {
             "ASHP Heater Electric Power (kW)",
             "HVAC Heating End Use Electric Power (kW)",
         ]);
-        let plan = plan_for(&schema, &test_config(None));
+        let table = vec![("ASHP Heater".to_string(), hares_types::EndUse::HVAC_HEATING)];
+        let plan = plan_for_with_equipment(&schema, &test_config(None), &table);
         assert!(
             !plan.end_use_equipment_counts.is_empty(),
-            "end_use_equipment_counts must be populated from the producer surface"
+            "end_use_equipment_counts must be populated from the typed table"
         );
         assert_eq!(
             plan.end_use_equipment_counts.get("hvac_heating"),

@@ -64,8 +64,7 @@ use hares_io::{
     SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
     SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, SetpointSource,
     SimulationConfig, StreamingRecorder, WeatherInput, end_use_electric_power_column,
-    equipment_name_to_end_use, has_soc, is_cooling_equipment, is_ev, is_heat_pump_heater,
-    is_hvac_or_wh, is_pv, is_reserved_output_column_name,
+    is_reserved_output_column_name,
 };
 
 use hares_physics::constants::{
@@ -833,11 +832,12 @@ fn plan_equipment_columns(
             // "{name} Gas Power (therms/hour)" column iff this returns true,
             // so resolving with the same predicate guarantees every emitted
             // column is populated.
-            let has_gas = hares_io::fuel_reports_gas_power_column(desc.fuel);
-            let is_hvac = is_hvac_or_wh(&desc.name);
-            let is_cooling = is_cooling_equipment(&desc.name);
-            let is_hp_heater = is_heat_pump_heater(&desc.name);
-            let has_soc = has_soc(&desc.name);
+            let families = hares_io::EquipmentColumnFamilies::of_descriptor(desc);
+            let has_gas = families.has_gas;
+            let is_hvac = families.is_hvac;
+            let is_cooling = families.is_cooling;
+            let is_hp_heater = families.is_hp_heater;
+            let has_soc = families.has_soc;
 
             let electric_power = resolve(&format!("{name} {ELECTRIC_POWER_SUFFIX}"))?;
             let gas_power = if has_gas {
@@ -941,8 +941,8 @@ fn plan_equipment_columns(
                 column_index,
                 is_hvac,
                 is_hp_heater,
-                is_pv(&desc.name),
-                is_ev(&desc.name),
+                families.is_pv,
+                families.is_ev,
             );
 
             Ok(EquipmentColumns {
@@ -973,50 +973,25 @@ fn plan_equipment_columns(
         .collect()
 }
 
-/// Derive output `EquipmentSpec`s from live equipment descriptors — the
-/// spec-shaped view the schema-facing column helpers consume. Positional:
-/// one spec per equipment, in vector order.
-fn equipment_descriptor_specs(equipment: &[&dyn Equipment]) -> Vec<hares_io::EquipmentSpec> {
-    equipment
-        .iter()
-        .map(|eq| {
-            let d = eq.descriptor();
-            hares_io::EquipmentSpec {
-                instance_name: None,
-                name: d.name.clone(),
-                fuel_type: d.fuel,
-                parameters: Map::new(),
-                zip_params: None,
-                typed_overrides: serde_json::Map::new(),
-                typed_config: None,
-                system_id: None,
-                related_hvac_idref: None,
-                primary_role: None,
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
-            }
-        })
-        .collect()
-}
-
-/// Resolve each spec's EndUse aggregate electric-power column index —
-/// positional, one entry per spec in vector order (`record_step` zips it
-/// against the equipment vector, accumulating every member's power into
-/// its end-use's single column). The positional contract is why the map
+/// Resolve each equipment's EndUse aggregate electric-power column index:
+/// positional, one entry per equipment in vector order (`record_step` zips
+/// it against the equipment vector, accumulating every member's power into
+/// its end-use's single column). The column is the equipment's TYPED end
+/// use's aggregate: the rollup groups by the descriptor's declared end
+/// use, never by the name string. The positional contract is why the map
 /// must be re-derived whenever the equipment vector changes mid-run: a
 /// remove that shifts the vector would otherwise leave every survivor
 /// writing into its departed neighbour's end-use aggregate. Shared by
 /// assembly, the fresh-schema rebuild, and the frozen-schema
 /// re-derivation so the three cannot drift.
 fn build_end_use_aggregate_indices(
-    specs: &[hares_io::EquipmentSpec],
+    equipment: &[&dyn Equipment],
     column_index: &HashMap<String, usize>,
 ) -> Vec<Option<usize>> {
-    specs
+    equipment
         .iter()
-        .map(|spec| {
-            let end_use = equipment_name_to_end_use(&spec.name);
-            let col_name = end_use_electric_power_column(&end_use);
+        .map(|eq| {
+            let col_name = end_use_electric_power_column(&eq.descriptor().end_use);
             column_index.get(&col_name).copied()
         })
         .collect()
@@ -1398,14 +1373,11 @@ fn build_output_row_bindings(
     let column_index = build_output_column_index(schema);
     let first_hvac = equipment
         .iter()
-        .position(|eq| is_hvac_or_wh(&eq.descriptor().name));
+        .position(|eq| eq.descriptor().end_use.is_hvac_or_water_heating());
     Ok(OutputRowBindings {
         dwelling: build_dwelling_columns(&column_index, first_hvac),
         equipment: plan_equipment_columns(equipment, &column_index, expected)?,
-        end_use_aggregates: build_end_use_aggregate_indices(
-            &equipment_descriptor_specs(equipment),
-            &column_index,
-        ),
+        end_use_aggregates: build_end_use_aggregate_indices(equipment, &column_index),
         actors: build_actor_column_map(actors, &column_index),
         diagnostics: build_diagnostics_bindings(schema),
     })
@@ -16553,6 +16525,10 @@ occupancy = 0.0
         outcomes: std::collections::VecDeque<bool>,
         ports: Vec<PortDeclaration>,
         heats_zone: bool,
+        /// Book and claim the power as generation (the PV pose): the port
+        /// receives a negative active power and the core output claims
+        /// `ElectricPower::Generation`.
+        generation: bool,
         /// Telemetry a successful step writes (key, value).
         step_telemetry: Vec<(&'static str, f64)>,
     }
@@ -16583,6 +16559,7 @@ occupancy = 0.0
                 outcomes: outcomes.iter().copied().collect(),
                 ports: vec![PortDeclaration::electrical()],
                 heats_zone: false,
+                generation: false,
                 step_telemetry: Vec::new(),
             }
         }
@@ -16593,12 +16570,20 @@ occupancy = 0.0
         }
 
         /// An electric heater: it also delivers `power_w` of HVAC heating to
-        /// zone 1 and reports it as `thermal_output_w`.
+        /// zone 1 and reports it as `thermal_output_w`. It declares the
+        /// pan heater power, the heat-pump-heater family's defining
+        /// telemetry declaration (the defrost/ER columns' typed gate).
         fn heating_zone(mut self) -> Self {
             self.descriptor.end_use = EndUse::HVAC_HEATING;
             self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC
                 | CoreCapabilities::THERMAL
                 | CoreCapabilities::HAS_SPEED;
+            self.descriptor
+                .telemetry_fields
+                .push(TelemetryField::power_kw(
+                    tk::PAN_HEATER_KW,
+                    "Minisplit pan/crankcase heater power",
+                ));
             self.core_output.state.speed_index = Some(0);
             let compressor_kw = self.power_w / 1000.0;
             self.ports.push(PortDeclaration::thermal(ZoneId(1)));
@@ -16630,6 +16615,36 @@ occupancy = 0.0
                 CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_SOC;
             self.core_output.state.soc =
                 Some(hares_types::Soc::try_from(0.5).expect("valid state of charge"));
+            self
+        }
+
+        /// An EV: the EV end use (the EV column family's gate) with the
+        /// storage capability, a published state of charge and the four
+        /// static EV telemetry keys the `ev_capacity_degraded` gate reads
+        /// (fade 0, pack at the derate model's reference 25 °C, so the
+        /// usable capacity is rated · 1.001), like the real EV's.
+        fn ev(mut self) -> Self {
+            self.descriptor.end_use = EndUse::EV;
+            self.descriptor.core_capabilities =
+                CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_SOC;
+            self.core_output.state.soc =
+                Some(hares_types::Soc::try_from(0.5).expect("valid state of charge"));
+            self.writes_telemetry(&[
+                (tk::CAPACITY_KWH, 60.06),
+                (tk::CAPACITY_KWH_RATED, 60.0),
+                (tk::CAPACITY_FADE_PCT, 0.0),
+                (tk::BATTERY_TEMP_C, 25.0),
+            ])
+        }
+
+        /// A PV system: the PV end use (the PV column family's gate) and
+        /// the generation pose the end use carries (the electrical
+        /// summary's PV observation rejects PV equipment drawing power),
+        /// so the probe books its power as generation.
+        fn pv(mut self) -> Self {
+            self.descriptor.end_use = EndUse::PV;
+            self.power_w = -self.power_w;
+            self.generation = true;
             self
         }
 
@@ -16699,9 +16714,15 @@ occupancy = 0.0
             if !self.outcomes.pop_front().unwrap_or(false) {
                 return Err(HaresError::Equipment("simulated step failure".to_string()));
             }
-            self.core_output.flows.electric_kw = Some(hares_types::ElectricPower::consumption(
-                self.power_w / 1000.0,
-            )?);
+            self.core_output.flows.electric_kw = if self.generation {
+                Some(hares_types::ElectricPower::generation(
+                    -self.power_w / 1000.0,
+                )?)
+            } else {
+                Some(hares_types::ElectricPower::consumption(
+                    self.power_w / 1000.0,
+                )?)
+            };
             if self.heats_zone {
                 self.core_output.flows.thermal_output_w = Some(self.power_w);
                 self.core_output.state.speed_index = Some(2);
@@ -16875,7 +16896,7 @@ occupancy = 0.0
             .add_equipment(Box::new(
                 FlakyPortEquipment::new("EV", 300.0, &[true])
                     .with_id(1004)
-                    .battery()
+                    .ev()
                     .writes_telemetry(&[(tk::CONNECTION_STATE, 1.0), (tk::CHARGING_LEVEL, 2.0)]),
             ))
             .expect("register the EV");
@@ -16883,6 +16904,7 @@ occupancy = 0.0
             .add_equipment(Box::new(
                 FlakyPortEquipment::new("PV", 200.0, &[true])
                     .with_id(1005)
+                    .pv()
                     .writes_telemetry(&[(tk::IRRADIANCE_W_M2, 640.0), (tk::DC_POWER_KW, 0.2)]),
             ))
             .expect("register the PV");
@@ -18341,6 +18363,10 @@ destination = "memory"
         let mut dwelling = bestest_dwelling();
         let mut battery = TestEquipment::new("Battery", ControlCapabilities::empty());
         battery.descriptor.end_use = EndUse::BATTERY;
+        // The storage capability the SOC column's typed gate reads: the
+        // verbosity-3 tier demands the SOC column of equipment that
+        // declares it (the real Battery class does).
+        battery.descriptor.core_capabilities |= CoreCapabilities::HAS_SOC;
         replace_equipment_for_test(&mut dwelling, vec![Box::new(battery)]);
 
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -22364,11 +22390,14 @@ occupancy = 0.0
         let mut eq = TestEquipment::new("Battery", ControlCapabilities::empty());
         eq.descriptor.end_use = EndUse::BATTERY;
         eq.descriptor.fuel = FuelType::Electric;
+        // The storage capability the SOC column's typed gate reads.
+        eq.descriptor.core_capabilities |= CoreCapabilities::HAS_SOC;
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
         // A schema-known equipment: the schema carries its membership column
         // (Electric Power, emitted unconditionally at verbosity ≥ 1) and its
-        // Mode column, but not the SOC column its name class demands at
-        // verbosity 3 — drift for a known equipment must stay loud.
+        // Mode column, but not the SOC column its declared storage
+        // capability demands at verbosity 3. Drift for a known equipment
+        // must stay loud.
         let schema = arrow::datatypes::Schema::new(vec![
             arrow::datatypes::Field::new("Time", arrow::datatypes::DataType::Utf8, false),
             arrow::datatypes::Field::new(
@@ -22665,6 +22694,10 @@ occupancy = 0.0
         heater
             .init(&EquipmentConfig::default(), &dwelling.latest_env)
             .expect("init heater stub");
+        // The setpoint chain's first-HVAC position follows the TYPED end
+        // use: the stub poses as HVAC heating, as the real equipment's
+        // descriptor declares it.
+        heater.descriptor.end_use = EndUse::HVAC_HEATING;
         replace_equipment_for_test(&mut dwelling, vec![Box::new(load), Box::new(heater)]);
         assert_eq!(
             dwelling.roster.bindings.dwelling.first_hvac,
@@ -22819,9 +22852,19 @@ occupancy = 0.0
         let mut eq1 = TestEquipment::new("ASHP Heater", ControlCapabilities::empty());
         eq1.descriptor.end_use = EndUse::HVAC_HEATING;
         eq1.descriptor.fuel = FuelType::Electric;
+        // The heat-pump-heater family's defining declaration (the
+        // defrost/ER columns' typed gate), as the real class declares it.
+        eq1.descriptor
+            .telemetry_fields
+            .push(TelemetryField::power_kw(
+                tk::PAN_HEATER_KW,
+                "Minisplit pan/crankcase heater power",
+            ));
         let mut eq2 = TestEquipment::new("Battery", ControlCapabilities::empty());
         eq2.descriptor.end_use = EndUse::BATTERY;
         eq2.descriptor.fuel = FuelType::Electric;
+        // The storage capability the SOC column family's typed gate reads.
+        eq2.descriptor.core_capabilities |= CoreCapabilities::HAS_SOC;
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
         let col_map = plan_equipment_columns(
             &equipment_refs(&equipment),
@@ -23262,6 +23305,8 @@ occupancy = 0.0
                         instance_name: None,
                         id: d.id,
                         fuel: d.fuel,
+                        end_use: d.end_use.clone(),
+                        core_capabilities: d.core_capabilities,
                         telemetry: d.telemetry_fields.clone(),
                     }
                 })
@@ -23360,6 +23405,12 @@ occupancy = 0.0
                     instance_name: None,
                     id: EquipmentId(u32::try_from(i + 1).expect("equipment count")),
                     fuel: s.fuel_type,
+                    end_use: hares_equipment::class_declared_surface(&s.name)
+                        .map_or(hares_types::EndUse::OTHER, |surface| surface.end_use),
+                    core_capabilities: hares_equipment::class_declared_surface(&s.name)
+                        .map_or(hares_types::CoreCapabilities::default(), |surface| {
+                            surface.core_capabilities
+                        }),
                     telemetry: Vec::new(),
                 })
                 .collect(),

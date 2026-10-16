@@ -18,8 +18,9 @@ use hares_core::{ChaCha8Rng, Dwelling};
 use hares_io::output::build_catalogue;
 use hares_io::{CatalogueActor, CatalogueEquipment, CatalogueInput, EquipmentSpec};
 use hares_types::{
-    AcrossHomes, Aggregation, BmsMode, ChargingStrategy, EquipmentId, FuelType, GridExportRule,
-    PlugInPolicy, Sampling, ScheduleSource, Telemetry, TelemetryField, Unit, VariableKind, ZoneId,
+    AcrossHomes, Aggregation, BmsMode, ChargingStrategy, CoreCapabilities, EndUse, EquipmentId,
+    FuelType, GridExportRule, PlugInPolicy, Sampling, ScheduleSource, Telemetry, TelemetryField,
+    Unit, VariableKind, ZoneId,
 };
 use rand::SeedableRng;
 use serde_json::Value;
@@ -118,17 +119,39 @@ fn built_in_actors() -> Vec<Box<dyn Actor>> {
     ]
 }
 
+/// The typed declarations the all-classes catalogue input carries: the
+/// class's own declared surface (`hares_equipment::class_declared_surface`,
+/// the same source `build_schema_for_specs` reads) or, for a name that
+/// is not a registered class, the pin's `"Television"`: no declaration at
+/// all (end use OTHER, no capabilities, no telemetry).
+fn constructed_class_surface(spec_name: &str) -> (EndUse, CoreCapabilities, Vec<TelemetryField>) {
+    hares_equipment::class_declared_surface(spec_name).map_or(
+        (EndUse::OTHER, CoreCapabilities::default(), Vec::new()),
+        |surface| {
+            (
+                surface.end_use,
+                surface.core_capabilities,
+                surface.telemetry,
+            )
+        },
+    )
+}
 fn all_classes_catalogue() -> hares_io::Catalogue {
     let input = CatalogueInput {
         equipment: all_classes_specs()
             .iter()
             .enumerate()
-            .map(|(i, s)| CatalogueEquipment {
-                name: s.name.clone(),
-                instance_name: s.instance_name.clone(),
-                id: EquipmentId(u32::try_from(i + 1).expect("equipment count")),
-                fuel: s.fuel_type,
-                telemetry: Vec::new(),
+            .map(|(i, s)| {
+                let (end_use, core_capabilities, telemetry) = constructed_class_surface(&s.name);
+                CatalogueEquipment {
+                    name: s.name.clone(),
+                    instance_name: s.instance_name.clone(),
+                    id: EquipmentId(u32::try_from(i + 1).expect("equipment count")),
+                    fuel: s.fuel_type,
+                    end_use,
+                    core_capabilities,
+                    telemetry,
+                }
             })
             .collect(),
         zones: vec![
@@ -534,6 +557,35 @@ fn write_kinds_pin() {
     .expect("write kinds pin");
 }
 
+/// Writes the schema pins (`tests/fixtures/schema/v{0..8}.json`) from the
+/// all-classes catalogue's catalogue-derived schemas. Run once per
+/// schema-shape change (the column families move); the output is then
+/// reviewed with the diff. The pretty form the pins already carry: a
+/// re-capture that moves nothing diffs to nothing.
+#[test]
+#[ignore = "schema pin generator: run once per schema-shape change, review the diff"]
+fn write_schema_pins() {
+    let catalogue = all_classes_catalogue();
+    for verbosity in 0..=8u8 {
+        let schema = hares_io::build_schema(&catalogue, verbosity, false);
+        let fields: Vec<Value> = schema
+            .fields()
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "name": f.name(),
+                    "arrow_type": format!("{:?}", f.data_type()),
+                    "nullable": f.is_nullable(),
+                })
+            })
+            .collect();
+        let body = serde_json::to_string_pretty(&fields).expect("the pin serialises");
+        let path = format!("tests/fixtures/schema/v{verbosity}.json");
+        std::fs::write(&path, format!("{body}\n"))
+            .unwrap_or_else(|err| panic!("write {path}: {err}"));
+    }
+}
+
 /// The EV columns' enum labels cover every published code from 0.
 #[test]
 fn enum_labels_cover_every_published_code() {
@@ -641,8 +693,11 @@ fn ev_code_columns_carry_the_declared_code_unit_end_to_end() {
         }
     }
     assert_eq!(
-        column_count, 10,
-        "the all-classes fixture's five EV-family classes carry two code columns each"
+        column_count, 6,
+        "the all-classes fixture's three EV-end-use classes carry two code \
+         columns each (the name-string classifier's phantom EV columns are \
+         gone: an event load and a television are not EV equipment by their \
+         typed end use)"
     );
 
     // The schema field metadata carries the same symbol at the verbosity
@@ -671,6 +726,8 @@ fn contradicting_equipment_declarations_fail_assembly() {
                 instance_name: None,
                 id: EquipmentId(1),
                 fuel: FuelType::Electric,
+                end_use: EndUse::EV,
+                core_capabilities: CoreCapabilities::default(),
                 telemetry: vec![TelemetryField::code_code(
                     "connection_state",
                     hares_types::EV_CONNECTION_STATE_LABELS,
@@ -682,6 +739,8 @@ fn contradicting_equipment_declarations_fail_assembly() {
                 instance_name: None,
                 id: EquipmentId(2),
                 fuel: FuelType::Electric,
+                end_use: EndUse::EV,
+                core_capabilities: CoreCapabilities::default(),
                 telemetry: vec![TelemetryField::ratio(
                     "connection_state",
                     "the same key, declared dimensionless",
@@ -712,6 +771,8 @@ fn static_column_contradicting_a_declared_channel_fails_assembly() {
             instance_name: None,
             id: EquipmentId(1),
             fuel: FuelType::Electric,
+            end_use: EndUse::EV,
+            core_capabilities: CoreCapabilities::default(),
             telemetry: vec![TelemetryField::ratio(
                 "connection_state",
                 "the equipment drifts from the static table's declaration",
