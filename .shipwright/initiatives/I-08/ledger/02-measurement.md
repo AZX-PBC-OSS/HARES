@@ -3412,3 +3412,57 @@ null in all 192 steps, the ASHP Heater's COP null in its 8 Off steps
 and non-null in the heating steps, the appliance mode cells and the
 HPWH setpoint null, the never-emitted v8 keys null, and the
 never-produced dwelling columns null in a no-HVAC dwelling.
+### The fleet Mode aggregation row, 2026-10-16 (the worktree `r88-b11`)
+The golden record, recorded as measured: every golden unchanged. The
+fleet goldens (`fleet_mixed_offset`, `fleet_same_offset_300s`,
+`resstock_2025_fleet`) select the verbosity-2 tier, which holds no
+`Enum` column (the mode columns start at verbosity 3), and no dwelling
+golden has a fleet fold: `frame_golden compare-all` on the default
+build reports 8/8 identical and on the dst build 1/1 identical. The
+`Enum` column fields' schema metadata gained the `enum_labels` label
+count; the goldens' schema digest holds name, type and nullability and
+their values are untouched, so no golden moves.
+The acceptance tests' before and after values (before, run at the
+parent `1f64ff8b`; after, at `19332c1f`):
+- `fleet_mode_uses_summed_weight`: the cell 1.2 to 2.0 (the weighted
+  mean of codes 0, 0 and 2 at weights 1, 1 and 3, to the weighted
+  Mode), the covered weight 5.0 both ways.
+- `fleet_mode_ties_break_to_the_lowest_code`: the cell 1.5 to 1.0 (the
+  two homes' codes 2 and 1 mean to a non-code; the tie breaks to the
+  lowest code), the covered weight 2.0 both ways.
+- `home_mode_over_time_is_the_most_frequent_code`: the reduced period
+  1.3333333333333333 to 2.0 (the probe's codes 0, 2 and 2 mean to a
+  non-code over time; the most frequent code wins after).
+- `fleet_enum_cells_follow_mode`: `Air Conditioner Mode (-)` period 39
+  read 4.5 at the parent where the declared weighted Mode is 0.0; after
+  the fix, every `Enum` column's every period cell equals the code with
+  the greatest summed weight of the homes' own period codes, each the
+  most frequent code of that home's own steps by the declared rules,
+  compared on bits, and every covered-weight cell equals the voting
+  homes' weight.
+- `fleet_binary_state_is_weighted_duty_fraction` and
+  `fleet_mode_ignores_null_homes`: 0.25 and the null rule at the parent
+  and after (pins, unchanged).
+The run's `Enum` columns and their delta: the verbosity-3 selection of
+the `fleet_same_offset_300s` homes holds 15 `Enum` columns, the
+per-equipment operating modes (`Air Conditioner`, `Clothes Dryer`,
+`Clothes Washer`, `Cooking Range`, `Dishwasher`, `Exterior Lighting`,
+`Garage Lighting`, `Gas Furnace`, `Gas Water Heater`, `Indoor Lighting`,
+`MELs`, `PV`, `Refrigerator #1`, `Refrigerator #2`, `TV`, each
+`{name} Mode (-)` with 13 labels), 192 periods each. Every period's
+cell moves from the two-stage weighted mean of mode codes to the
+weighted Mode: the cells that differed from the declared mode at the
+parent are exactly the periods whose homes' period codes disagree in a
+way a mean misrepresents (a mean can be a non-code, or a code no home
+reported); the cells the mean and the Mode agree on are the periods
+every voting home reported one code. The first moved period in column
+order is `Air Conditioner Mode (-)` period 39 (4.5 to 0.0, above). The
+covered-weight columns do not move: the voting homes' weight is the
+same before and after, the validity of a mode cell is unchanged by the
+rule switch.
+The EV code columns and the compressor speed column (`Connection State
+(-)`, `Charging Level (-)`, `Speed (-)`) fold by the same rule where a
+selection holds them (verbosity 8 and the compressor tier); the
+verbosity-3 run above carries none, so their movement is the unit
+tests'. Binary state columns (`Schedule (-)`, `Defrost State (-)`) do
+not move: the duty fraction is pinned.

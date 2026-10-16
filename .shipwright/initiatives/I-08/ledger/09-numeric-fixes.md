@@ -2099,6 +2099,62 @@ measured), the before and after values of the unit tests above, and the
 delta of every `Enum` column of `fleet_enum_cells_follow_mode`'s
 `Pattern("*")` run, recorded in `02-measurement.md`.
 
+**State:** committed `19332c1f` (branch `row/r88-b11`, worktree
+`r88-b11`, based on `1f64ff8b`, one commit). In brief: both fleet
+stages fold an `Enum` column by the declared rule, the row 39
+reducer's own Mode, never by a mean over codes. The enum's label count
+reaches the fold as schema metadata: `variable_field` writes an
+`enum_labels` entry beside the unit on an `Enum` variable's field (the
+schema builders are the one surface that renders the declared kind
+into the report schema; no unit string identifies a mode column, the
+mode columns' unit is the dimensionless `-`), and
+`hares-fleet`'s `field_fleet_rules` reads it: over time the rule is
+`Aggregation::Mode` with `enum_codes` set, the row 45
+`Timestamp`-fed reducer counts per code and emits the winner; across
+homes the fold's per-column label count switches the cell from the
+`v*w, w` sums to per-code summed weights, and the closed cell is the
+code with the greatest summed weight. The winner is one shared
+function, `mode_winner` (`hares-io` `output::reduce`, generic over
+the count type): the reducer's per-period count and the fold's
+per-code weighted counts take the same strict maximum, so the tie
+breaks to the lowest code in both stages by one rule. A home whose
+mode cell is null does not vote (the fold's existing null rule, B-6's
+rule where it lands); a cell no home voted on is null; a value that
+is no declared code votes nothing, by the reducer's own in-range
+rule. Binary state columns keep the weighted mean (the duty
+fraction). `tracing` at debug names each column's over-time rule at
+the reducer's setup and each column's across-homes rule at the
+fold's. The entry's `Pattern("*")` run reconciled to the
+verbosity-3 selection: the catalogue's pattern resolution is blind
+to the observe gate while the schema builder honours it, so a
+pattern selection over the full catalogue panics the roster plan
+when the observe feature is off (latent, its own row); verbosity-3
+is the tier that holds the per-equipment mode columns either way.
+`fleet_binary_state_is_weighted_duty_fraction` and
+`fleet_mode_ignores_null_homes` are stated over State-shaped and
+null-shaped cells on the landed kinds (the entry's "EV connection
+state" example predates the catalogue's declaring it a three-label
+`Enum`, which now folds by Mode). RED first (the acceptance tests
+run at the parent `1f64ff8b`; the values are in the commit body):
+the summed-weight test's cell read 1.2 (the weighted mean of codes
+0, 0, 2 at weights 1, 1, 3), the two-home tie test's cell read 1.5
+(the mean of codes 2 and 1), the probe's period read
+1.3333333333333333 (the mean of codes 0, 2, 2), and the run's `Air
+Conditioner Mode (-)` period 39 read 4.5 where the weighted Mode is
+0.0, all of them non-codes; the two pins (the duty fraction 0.25,
+the ignored nulls) passed at the parent. After: every `Enum`
+column's every period cell equals the declared weighted Mode on
+bits. The movement: no golden moves (the fleet goldens'
+verbosity-2 selection holds no `Enum` column, no dwelling golden
+has a fleet fold; compare-all 8 identical, the dst set identical),
+recorded in the measurement log with the run's per-column record.
+Gates at `19332c1f`: fmt clean, clippy `--workspace --all-targets
+--all-features -D warnings` clean, nextest `--workspace
+--all-features -j 2` 8115/8115 (7 skipped), `pytest -m ''` 1764
+passed + 6 xfailed, 0 failed, 0 errors, pyright 0, the goldens
+bitwise, `docs/python.md`'s Numeric changes line carries the
+weighted Mode and states that no golden was re-captured.
+
 ## B-12: fleet local time labels
 
 **Kind:** numeric fix (`numeric_fixes`: fleet local time labels;
