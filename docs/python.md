@@ -780,3 +780,17 @@ golden fixtures re-captured.
   8 + dst 1, twice byte-identical): the unmet column's cells 0.0 to
   null and the schema's nullable flags; no metric, health or billing
   figure moved.
+
+- 2026-10-16: the fleet's `Enum` columns (the per-equipment operating
+  modes and compressor speed, the EV connection state and charging
+  level, an actor's declared enum channel) fold by the weighted Mode in
+  both fleet stages, replacing the mean of mode codes the unit-keyed
+  rules took: each home's period reduction takes the most frequent code
+  (ties to the lowest code, the reporting reducer's own Mode rule, fed
+  the enum's label count from the schema field's new `enum_labels`
+  metadata) and the across-homes fold takes the code with the greatest
+  summed home weight. A mean over mode codes is no code and is never
+  taken; binary state columns keep the weighted mean (the duty
+  fraction). No golden re-captured: the fleet goldens' verbosity-2
+  selection holds no `Enum` column, and every golden compares bitwise
+  (compare-all 8 identical, the dst set identical).

@@ -2654,16 +2654,26 @@ pub fn time_field() -> arrow::datatypes::FieldRef {
 
 /// One variable's Arrow field: the column name, `Float64`, the
 /// declaration's nullability, and the unit metadata (no metadata for
-/// [`Unit::None`]).
+/// [`Unit::None`]). An [`VariableKind::Enum`] variable's field carries
+/// its label count beside the unit: the mode columns' unit is the
+/// dimensionless `-`, so no unit string identifies an Enum column, and
+/// the fleet's rule resolver reads the label count to fold the column by
+/// Mode in both stages.
 #[must_use]
 pub fn variable_field(var: &VariableDef) -> arrow::datatypes::FieldRef {
-    let mut field = Field::new(var.name.as_ref(), DataType::Float64, var.nullable);
+    let mut metadata = std::collections::HashMap::new();
     if var.unit != Unit::None {
-        let mut metadata = std::collections::HashMap::new();
         metadata.insert("unit".to_string(), var.unit.symbol().to_string());
-        field = field.with_metadata(metadata);
     }
-    std::sync::Arc::new(field)
+    if let VariableKind::Enum { labels } = &var.kind {
+        metadata.insert("enum_labels".to_string(), labels.len().to_string());
+    }
+    let field = Field::new(var.name.as_ref(), DataType::Float64, var.nullable);
+    std::sync::Arc::new(if metadata.is_empty() {
+        field
+    } else {
+        field.with_metadata(metadata)
+    })
 }
 
 /// One diagnostics block's Arrow field: the column name, `Float64`, the

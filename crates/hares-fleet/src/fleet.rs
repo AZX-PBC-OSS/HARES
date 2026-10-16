@@ -2118,9 +2118,15 @@ mod fixture_start;
 mod tests {
     use super::*;
     use chrono::DateTime;
-    use hares_core::{Provenance, RunHealth};
+    use hares_control::DispatchRequest;
+    use hares_core::{Actor, Provenance, RunHealth};
+    use hares_types::{
+        Aggregation, EnumLabels, EnvironmentState, Sampling, Telemetry, TelemetryField, Unit,
+        VariableKind,
+    };
     use std::collections::HashSet;
     use std::fs;
+    use std::num::NonZeroU32;
     use std::path::PathBuf;
     use std::sync::Mutex;
     use std::thread;
@@ -5211,12 +5217,15 @@ mod tests {
                 rows_in_bucket += 1;
                 if rows_in_bucket == 4 {
                     for (slot, column) in columns.iter_mut().enumerate() {
-                        // The fleet's over-time rules are Sum and Mean
-                        // only; the reducer's Mode and Last never arise
-                        // from the fleet's rule resolver.
+                        // This helper's periods carry Sum and Mean rules
+                        // only: a Mode column reaches the fleet's fold
+                        // through the reducer's own mode rule upstream,
+                        // not through this helper.
                         let reduced = match over_time[slot] {
                             hares_types::Aggregation::Sum if counts[slot] > 0 => Some(sums[slot]),
-                            _ if counts[slot] > 0 => Some(sums[slot] / f64::from(counts[slot])),
+                            hares_types::Aggregation::Mean if counts[slot] > 0 => {
+                                Some(sums[slot] / f64::from(counts[slot]))
+                            }
                             _ => None,
                         };
                         column.push(reduced);
@@ -6058,5 +6067,376 @@ mod tests {
             1,
             "the three homes share one HPXML file: one parse, not one per home"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // The fleet's Enum columns fold by Mode in both stages: the
+    // acceptance.
+    // -------------------------------------------------------------------
+
+    /// One of the `fleet_same_offset_300s` manifest's homes as a config:
+    /// the manifest's inputs and sim config (2 days at 300 s from local
+    /// midnight 2018-01-01 -08:00, warm-up disabled, the manifest's
+    /// metrics request), the manifest's empty override map.
+    fn fleet_same_offset_config(bldg_id: i64, weather: &str) -> DwellingConfig {
+        let root = repo_root();
+        DwellingConfig {
+            hpxml: InputSource::Path(
+                root.join("tests/fixtures/resstock/2025.1/bldg0176227/home.xml"),
+            ),
+            schedule: Some(InputSource::Path(
+                root.join("tests/fixtures/resstock/2025.1/bldg0176227/in.schedules.csv"),
+            )),
+            weather: WeatherInput::Path(
+                root.join(format!("tests/fixtures/resstock/2025.1/weather/{weather}")),
+            ),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: chrono::DateTime::parse_from_rfc3339("2018-01-01T00:00:00-08:00")
+                        .expect("the manifest's start"),
+                    duration: Duration::seconds(172800),
+                    time_res: Duration::seconds(300),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: true,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: hares_io::FirstHour::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
+                },
+                Some(serde_json::json!({})),
+                bldg_id,
+                None,
+            ),
+        }
+    }
+
+    /// The mode probe: an actor declaring a three-label Enum variable and
+    /// publishing a scripted code each step. The first 15-minute
+    /// period's three 300 s steps report codes 0, 2 and 2, so the
+    /// period's declared reduction is 2, the most frequent code, never
+    /// the mean (4/3, which is no code).
+    struct ModeProbeActor {
+        steps: u64,
+        telemetry: Telemetry,
+    }
+
+    impl ModeProbeActor {
+        const NAME: &str = "mode_probe";
+        const COLUMN: &str = "actor:mode_probe:mode";
+
+        const OUTPUT_VARIABLES: &'static [TelemetryField] = &[TelemetryField::full(
+            "mode",
+            Unit::Code,
+            VariableKind::Enum {
+                labels: EnumLabels::Static(&["a", "b", "c"]),
+            },
+            Aggregation::Mode,
+            Sampling::InstantAtEnd,
+            "the mode probe's scripted code",
+        )];
+
+        fn code(steps: u64) -> f64 {
+            match steps {
+                1 => 0.0,
+                2 | 3 => 2.0,
+                _ => 0.0,
+            }
+        }
+    }
+
+    impl Actor for ModeProbeActor {
+        fn name(&self) -> &str {
+            Self::NAME
+        }
+
+        fn output_variables(&self) -> &[TelemetryField] {
+            Self::OUTPUT_VARIABLES
+        }
+
+        fn telemetry(&self) -> Option<&Telemetry> {
+            Some(&self.telemetry)
+        }
+
+        fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {
+            self.steps += 1;
+            self.telemetry.set("mode", Self::code(self.steps));
+        }
+    }
+
+    /// The per-home stage: the home's fleet reducer takes Mode over time
+    /// for an Enum variable, as its declaration says. The probe's first
+    /// period reports codes 0, 2 and 2 over its three steps; the reduced
+    /// period is 2, the most frequent code with the tie to the lowest,
+    /// never the mean 4/3.
+    #[test]
+    fn home_mode_over_time_is_the_most_frequent_code() {
+        let mut config = fleet_same_offset_config(1, "G0600770_2018.csv");
+        // Verbosity(0): the actor registers after construction, so the
+        // report cannot name the probe's column; the actor columns ride
+        // every verbosity tier, and the run resolves the tier after the
+        // actor is in the catalogue.
+        config
+            .settings
+            .sim_config
+            .reports
+            .push(hares_io::ReportSpec {
+                name: "fleet".to_string(),
+                selection: hares_io::Selection::Verbosity(0),
+                frequency: hares_io::Frequency::Timestep,
+                destination: hares_io::Destination::Callback,
+            });
+        let mut dwelling = Dwelling::from_config(config.clone()).expect("the home builds");
+        dwelling
+            .add_actor(Box::new(ModeProbeActor {
+                steps: 0,
+                telemetry: Telemetry::from_fields(ModeProbeActor::OUTPUT_VARIABLES),
+            }))
+            .expect("the probe actor registers");
+        let state = Arc::new(Mutex::new(HomeFoldState::new(&HomeFoldAlignment {
+            frequency: hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            step_ms: 300_000,
+            calendar: PeriodCalendar::home(),
+            key_offset_s: 0,
+            instant_aligned: false,
+        })));
+        dwelling
+            .attach_callback("fleet", Box::new(ReducerFeed::new(state.clone())))
+            .expect("the callback attaches");
+
+        let engine = SimulationEngine::new();
+        engine
+            .run_dwelling(&mut dwelling, &config.settings.sim_config)
+            .expect("the home runs");
+
+        let (table, fields) = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .finish();
+        let slot = fields
+            .iter()
+            .position(|field| field.name() == ModeProbeActor::COLUMN)
+            .expect("the probe column folds");
+        let (_, values) = table.iter().next().expect("periods reduced");
+        assert_eq!(
+            values[slot],
+            Some(2.0),
+            "the first period's value is the most frequent code of 0, 2, 2, \
+             not the mean 4/3"
+        );
+    }
+
+    /// The code with the greatest summed weight, ties to the lowest code:
+    /// the test's own weighted Mode, computed independently of the fold's.
+    fn weighted_mode(counts: &[f64]) -> usize {
+        let mut best = 0usize;
+        let mut best_count = counts.first().copied().unwrap_or(0.0);
+        for (code, &count) in counts.iter().enumerate().skip(1) {
+            if count > best_count {
+                best = code;
+                best_count = count;
+            }
+        }
+        best
+    }
+
+    /// The across-homes stage: the fleet's Enum columns fold to the code
+    /// with the greatest summed weight over the homes' period codes, each
+    /// home's code the most frequent code of its own steps in the period
+    /// by the declared rules, ties to the lowest code, nulls ignored. The
+    /// selection holds equipment Enum columns, and every Enum column's
+    /// every period folds to that combination on bits; at the mean the
+    /// cells read non-codes instead.
+    #[test]
+    fn fleet_enum_cells_follow_mode() {
+        let weathers = [
+            "G0600770_2018.csv",
+            "G0600650_2018.csv",
+            "G0600790_2018.csv",
+        ];
+        let weights = [1.0, 2.5, 0.5];
+        let configs: Vec<DwellingConfig> = weathers
+            .iter()
+            .enumerate()
+            .map(|(index, weather)| fleet_same_offset_config(index as i64 + 1, weather))
+            .collect();
+
+        // The Enum columns the verbosity-3 selection holds and their
+        // label counts, from a home's catalogue: the declared kinds the
+        // fold must follow.
+        let enum_labels: BTreeMap<String, usize> = {
+            let dwelling = Dwelling::from_config(configs[0].clone()).expect("the home builds");
+            let names = hares_io::resolve_selection(
+                &hares_io::Selection::Verbosity(3),
+                &dwelling.catalogue(),
+            )
+            .expect("the tier resolves");
+            names
+                .iter()
+                .filter_map(|name| match dwelling.catalogue().resolve(name) {
+                    Some(def) => match &def.kind {
+                        VariableKind::Enum { labels } => Some((def.name.to_string(), labels.len())),
+                        _ => None,
+                    },
+                    None => None,
+                })
+                .collect()
+        };
+        assert!(
+            !enum_labels.is_empty(),
+            "the selection holds at least one Enum variable: the equipment modes"
+        );
+
+        // Each home's own Timestep Memory run, reduced to period codes by
+        // the declared rules: the source of the expected cells.
+        let home_codes: Vec<BTreeMap<String, Vec<Option<f64>>>> = configs
+            .iter()
+            .map(|config| home_period_codes(config, &enum_labels))
+            .collect();
+
+        let fleet = Fleet::from_buildings(configs)
+            .expect("the homes carry no reserved report or shared destination")
+            .with_sample_weights(weights.to_vec())
+            .expect("the weights are finite and non-negative");
+        let report = crate::fold::FleetReport {
+            selection: hares_io::Selection::Verbosity(3),
+            frequency: hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let result = fleet
+            .simulate(&report, 1, chunk(64))
+            .expect("the fleet runs");
+        assert_eq!(result.aggregate.num_rows(), 192, "48 h at 15 minutes");
+
+        for (name, labels) in &enum_labels {
+            let cells = table_float_column(&result.aggregate, name);
+            let weight_cells = table_float_column(&result.covered_weight, name);
+            assert_eq!(cells.len(), 192, "{name}: one cell per period");
+            for period in 0..cells.len() {
+                let mut counts = vec![0.0; *labels];
+                let mut voted = 0.0;
+                for (home, codes) in home_codes.iter().enumerate() {
+                    if let Some(code) = codes[name][period] {
+                        counts[code as usize] += weights[home];
+                        voted += weights[home];
+                    }
+                }
+                let Some(cell) = cells[period] else {
+                    assert_eq!(
+                        voted, 0.0,
+                        "{name} period {period}: a null cell has no vote behind it"
+                    );
+                    continue;
+                };
+                let expected = weighted_mode(&counts) as f64;
+                assert_eq!(
+                    cell.to_bits(),
+                    expected.to_bits(),
+                    "{name} period {period}: the cell is the weighted Mode of the homes' \
+                     period codes, not their mean"
+                );
+                assert_eq!(
+                    weight_cells[period]
+                        .unwrap_or_else(|| panic!("{name} period {period}"))
+                        .to_bits(),
+                    voted.to_bits(),
+                    "{name} period {period}: the covered weight is the voting homes' weight"
+                );
+            }
+        }
+    }
+
+    /// One home's period codes per Enum column: the home run standalone
+    /// with a Timestep Memory report of every variable it declares, the
+    /// batches reduced onto the report frequency by the declared rules
+    /// (the reporting reducer), each Enum column's period value its most
+    /// frequent code, ties to the lowest, null where no step reported.
+    fn home_period_codes(
+        config: &DwellingConfig,
+        enum_labels: &BTreeMap<String, usize>,
+    ) -> BTreeMap<String, Vec<Option<f64>>> {
+        use hares_io::output::reduce::{PeriodReducer, TimeRule};
+
+        let mut run_config = config.clone();
+        run_config
+            .settings
+            .sim_config
+            .reports
+            .push(hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(3),
+                frequency: hares_io::Frequency::Timestep,
+                destination: hares_io::Destination::Memory,
+            });
+        let mut dwelling = Dwelling::from_config(run_config).expect("the home builds");
+        let catalogue = dwelling.catalogue().clone();
+        let engine = SimulationEngine::new();
+        let sim_config = dwelling.sim_config().clone();
+        let result = engine
+            .run_dwelling(&mut dwelling, &sim_config)
+            .expect("the home runs");
+        let batches: Vec<RecordBatch> = result
+            .reports
+            .iter()
+            .flat_map(|report| report.batches().to_vec())
+            .collect();
+        let schema = batches
+            .first()
+            .expect("the memory report recorded")
+            .schema_ref()
+            .clone();
+        let rules: Vec<TimeRule> = schema
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|field| {
+                let def = catalogue
+                    .resolve(field.name())
+                    .unwrap_or_else(|| panic!("{} is a catalogue variable", field.name()));
+                TimeRule::from_variable(def)
+            })
+            .collect();
+        let mut reducer = PeriodReducer::new(
+            hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            PeriodCalendar::home(),
+            rules,
+        )
+        .expect("the reducer builds");
+        let mut rows: Vec<(Vec<f64>, Vec<u32>)> = Vec::new();
+        for batch in &batches {
+            reducer
+                .push_batch(batch, &mut |row| {
+                    rows.push((row.values.to_vec(), row.valid_steps.to_vec()));
+                })
+                .expect("the batches reduce");
+        }
+        reducer.finish(&mut |row| {
+            rows.push((row.values.to_vec(), row.valid_steps.to_vec()));
+        });
+
+        let mut codes: BTreeMap<String, Vec<Option<f64>>> = enum_labels
+            .keys()
+            .map(|name| (name.clone(), Vec::new()))
+            .collect();
+        for name in enum_labels.keys() {
+            let slot = schema
+                .fields()
+                .iter()
+                .position(|field| field.name() == name)
+                .expect("the enum column is in the home's report");
+            let values = rows
+                .iter()
+                .map(|(row_values, valid)| (valid[slot - 1] > 0).then_some(row_values[slot - 1]))
+                .collect::<Vec<_>>();
+            codes.insert(name.clone(), values);
+        }
+        codes
     }
 }

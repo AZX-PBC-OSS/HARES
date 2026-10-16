@@ -19,7 +19,9 @@ use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, FixedOffset, SecondsFormat, TimeZone};
 use hares_io::Frequency;
 use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
-use hares_io::output::reduce::{PeriodCalendar, PeriodReducer, PeriodRow, ReduceError, TimeRule};
+use hares_io::output::reduce::{
+    PeriodCalendar, PeriodReducer, PeriodRow, ReduceError, TimeRule, mode_winner,
+};
 use hares_io::{Selection, classify_sample_weight};
 use hares_types::Aggregation;
 
@@ -81,6 +83,14 @@ pub struct Coverage {
     pub weight_degraded: f64,
     /// The `failed` homes' weight.
     pub weight_failed: f64,
+}
+
+/// The declared code a value carries, or `None` when it is no code in
+/// the label table: finite, integral, below the label count. The same
+/// in-range rule the reporting reducer's Mode applies to a step value.
+fn mode_code(value: f64, labels: usize) -> Option<usize> {
+    (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && (value as usize) < labels)
+        .then_some(value as usize)
 }
 
 /// One home's row of the fleet result: the identity, the run's status and
@@ -168,14 +178,38 @@ pub(crate) fn unit_keyed_fleet_rules(
     )
 }
 
-/// The fleet rules of a report schema field: the field's `unit` metadata
-/// first (the `Unit::symbol()` string the schema builders write). A field
-/// without the metadata, or with a symbol outside the table, parses the
-/// column name's parenthesised suffix, the parent commit's fallback; a
-/// name whose suffix is not recognised either averages over time and sums
+/// The fleet rules of a report schema field. An Enum-kind column (its
+/// label count in the field's metadata, which the schema builders write
+/// beside the unit) folds by Mode in both stages, whatever its unit
+/// string: the mode columns' unit is the dimensionless `-`, so no unit
+/// string identifies them. Over time the rule is the reporting reducer's
+/// own Mode (the most frequent code, ties to the lowest code), fed the
+/// enum's label count so it can count per code; across homes the fold
+/// reads the same label count and takes the code with the greatest
+/// summed weight. The across-homes rule returned for an Enum column is
+/// therefore inert (the fold reads the label count instead).
+///
+/// Every other field: the field's `unit` metadata first (the
+/// `Unit::symbol()` string the schema builders write). A field without
+/// the metadata, or with a symbol outside the table, parses the column
+/// name's parenthesised suffix, the parent commit's fallback; a name
+/// whose suffix is not recognised either averages over time and sums
 /// across homes. The recorder schemas always carry the metadata, so the
 /// engine's own path never reaches the suffix.
 pub(crate) fn field_fleet_rules(field: &Field) -> (TimeRule, hares_types::AcrossHomes) {
+    if let Some(labels) = field
+        .metadata()
+        .get("enum_labels")
+        .and_then(|count| count.parse::<usize>().ok())
+    {
+        return (
+            TimeRule {
+                aggregation: Aggregation::Mode,
+                enum_codes: Some(labels),
+            },
+            hares_types::AcrossHomes::Mean,
+        );
+    }
     if let Some(symbol) = field.metadata().get("unit")
         && let Some(unit) = unit_from_symbol(symbol)
     {
@@ -246,11 +280,16 @@ fn suffix_fleet_rules(name: &str) -> (TimeRule, hares_types::AcrossHomes) {
 }
 
 /// One cell's running sums: the weighted values and the covered weight,
-/// accumulated home by home in entry order.
-#[derive(Debug, Clone, Copy, Default)]
+/// accumulated home by home in entry order. An Enum column's cell carries
+/// the summed weight per code instead of a value sum: the folded cell is
+/// the code with the greatest summed weight, never a mean over codes.
+#[derive(Debug, Clone, Default)]
 struct Cell {
     sum_vw: f64,
     weight: f64,
+    /// The summed weight per code for an Enum column (empty for every
+    /// other kind), sized to the column's label count at the first vote.
+    counts: Vec<f64>,
 }
 
 /// The running aggregate the fold streams home results into.
@@ -263,6 +302,10 @@ pub(crate) struct FleetFold {
     columns: Vec<Field>,
     /// The across-homes rule per column.
     rules: Vec<hares_types::AcrossHomes>,
+    /// The label count per column for an Enum column (`None` for every
+    /// other kind): the across-homes fold of an Enum column takes the
+    /// code with the greatest summed weight, so it needs the code space.
+    enum_labels: Vec<Option<usize>>,
     /// Per bucket, per column, the running sums.
     cells: BTreeMap<i64, Vec<Cell>>,
     /// The buckets every folding home has a row for: the aggregate's rows.
@@ -285,6 +328,7 @@ impl FleetFold {
             rows,
             columns: Vec::new(),
             rules: Vec::new(),
+            enum_labels: Vec::new(),
             cells: BTreeMap::new(),
             intersection: BTreeSet::new(),
             folded: 0,
@@ -295,8 +339,9 @@ impl FleetFold {
     /// order. The columns are the union of the folding homes' variables in
     /// order of first appearance; a variable a home does not declare gets
     /// neither value nor weight from it. Each cell adds `v * w` and `w`
-    /// for the home: the operations and their order the
-    /// collect-then-aggregate fold performed.
+    /// for the home (an Enum column's cell the code's weight and `w`):
+    /// the operations and their order the collect-then-aggregate fold
+    /// performed.
     ///
     /// # Errors
     ///
@@ -339,8 +384,16 @@ impl FleetFold {
                 .iter()
                 .any(|column| column.name() == field.name())
             {
-                self.rules.push(field_fleet_rules(field).1);
+                let (over_time, across) = field_fleet_rules(field);
+                self.rules.push(across);
+                self.enum_labels.push(over_time.enum_codes);
                 self.columns.push(field.clone());
+                tracing::debug!(
+                    column = field.name().as_str(),
+                    across = ?across,
+                    enum_labels = ?over_time.enum_codes,
+                    "the fleet fold takes the column's across-homes rule"
+                );
             }
         }
         self.folded += 1;
@@ -363,8 +416,22 @@ impl FleetFold {
                     .position(|column| column.name() == field.name())
                     .expect("the column is unioned above");
                 let cell = &mut cells[slot];
-                cell.sum_vw += *value * weight;
-                cell.weight += weight;
+                if let Some(labels) = self.enum_labels[slot] {
+                    // An Enum column: the home's reduced code votes with
+                    // its weight, and a value that is no declared code
+                    // votes nothing (no count, no weight), by the same
+                    // rule the reducer applies to an out-of-range code.
+                    if let Some(code) = mode_code(*value, labels) {
+                        if cell.counts.is_empty() {
+                            cell.counts = vec![0.0; labels];
+                        }
+                        cell.counts[code] += weight;
+                        cell.weight += weight;
+                    }
+                } else {
+                    cell.sum_vw += *value * weight;
+                    cell.weight += weight;
+                }
             }
         }
         Ok(())
@@ -416,7 +483,7 @@ impl FleetFold {
             }
             let cells = self.cells.get(&bucket).map_or(&[][..], Vec::as_slice);
             for (slot, builder) in builders.iter_mut().enumerate() {
-                let Some(cell) = cells.get(slot).copied() else {
+                let Some(cell) = cells.get(slot) else {
                     builder.append_null();
                     continue;
                 };
@@ -426,11 +493,19 @@ impl FleetFold {
                 }
                 // A cell whose covered weight is zero is null, whatever
                 // its rule.
-                match (cell.weight > 0.0, self.rules[slot]) {
-                    (false, _) => builder.append_null(),
-                    (true, hares_types::AcrossHomes::Sum) => builder.append_value(cell.sum_vw),
-                    (true, hares_types::AcrossHomes::Mean) => {
-                        builder.append_value(cell.sum_vw / cell.weight);
+                if cell.weight <= 0.0 {
+                    builder.append_null();
+                } else if let Some(labels) = self.enum_labels[slot] {
+                    // An Enum column folds to the code with the greatest
+                    // summed weight, ties to the lowest code: the
+                    // weighted Mode, never a mean over the codes.
+                    builder.append_value(mode_winner(&cell.counts[..labels]) as f64);
+                } else {
+                    match self.rules[slot] {
+                        hares_types::AcrossHomes::Sum => builder.append_value(cell.sum_vw),
+                        hares_types::AcrossHomes::Mean => {
+                            builder.append_value(cell.sum_vw / cell.weight);
+                        }
                     }
                 }
             }
@@ -672,6 +747,20 @@ impl BatchCallback for ReducerFeed {
                 .iter()
                 .map(|field| field_fleet_rules(field).0)
                 .collect();
+            for (field, rule) in state
+                .fields
+                .as_ref()
+                .expect("fields set above")
+                .iter()
+                .zip(&rules)
+            {
+                tracing::debug!(
+                    column = field.name().as_str(),
+                    over_time = ?rule.aggregation,
+                    enum_labels = ?rule.enum_codes,
+                    "the home's fleet reducer takes the column's over-time rule"
+                );
+            }
             let calendar = state.calendar;
             let reducer = PeriodReducer::new(state.frequency, calendar, rules.clone())
                 .map_err(|err| CallbackError::new(err.to_string()))?;
@@ -819,7 +908,11 @@ mod tests {
         // Every unit of the census maps to the parent commit's two-stage
         // rule: over time, kWh sums and everything else means; across
         // homes, the intensive units take the weighted mean and every
-        // other unit the weighted sum.
+        // other unit the weighted sum. The table is the parent's: an
+        // Enum-kind column's field carries its label count in the
+        // metadata and folds by Mode before any unit table is
+        // consulted, so the `enum` row below describes the table, not
+        // what an Enum column folds by.
         let means_across = [
             ("C", Unit::Celsius),
             ("\u{b0}C", Unit::Celsius),
@@ -1248,6 +1341,177 @@ mod tests {
         assert!(
             matches!(err, FleetError::InvalidAggregationWeight { index: 7, .. }),
             "got: {err:?}"
+        );
+    }
+
+    /// An Enum-kind column's field: the unit and the label count in the
+    /// field's metadata, the shape the schema builders write. The mode
+    /// columns' unit is the dimensionless `-`, so no unit string
+    /// identifies an Enum column: the label count does.
+    fn enum_field(name: &str, labels: usize) -> Field {
+        Field::new(name, DataType::Float64, true).with_metadata(
+            [
+                ("unit".to_string(), "-".to_string()),
+                ("enum_labels".to_string(), labels.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    /// An Enum column's field resolves to the Mode rule with the
+    /// metadata's label count over time, whatever its unit string; the
+    /// across-homes fold reads the label count, not the across rule. A
+    /// field without the label metadata keeps the unit-keyed rules.
+    #[test]
+    fn enum_field_rules_are_mode_with_the_label_count() {
+        let (over_time, across) = field_fleet_rules(&enum_field("Mode (-)", 7));
+        assert!(
+            matches!(over_time.aggregation, Aggregation::Mode),
+            "an Enum column folds by Mode over time"
+        );
+        assert_eq!(
+            over_time.enum_codes,
+            Some(7),
+            "the label count feeds the rule"
+        );
+        assert!(
+            matches!(across, hares_types::AcrossHomes::Mean),
+            "the across rule of an Enum column is inert: the fold reads the label count"
+        );
+
+        let (over_time, across) = field_fleet_rules(&field("Schedule (-)", "-"));
+        assert!(matches!(over_time.aggregation, Aggregation::Mean));
+        assert_eq!(over_time.enum_codes, None, "no label count, no Mode rule");
+        assert!(matches!(across, hares_types::AcrossHomes::Mean));
+    }
+
+    /// The fleet's Enum column folds to the code with the greatest summed
+    /// weight: homes with weights 1, 1 and 3 reporting modes 0, 0 and 2
+    /// in one period fold to 2, the weighted Mode, never the weighted
+    /// mean (1.2, which is no code).
+    #[test]
+    fn fleet_mode_uses_summed_weight() {
+        let fields = vec![enum_field("Mode (-)", 3)];
+        let key = 0_i64;
+        let homes: [(f64, Option<f64>); 3] = [(1.0, Some(0.0)), (1.0, Some(0.0)), (3.0, Some(2.0))];
+
+        let mut fold = default_fold();
+        for (index, (weight, code)) in homes.iter().enumerate() {
+            let mut table = BTreeMap::new();
+            table.insert(key, vec![*code]);
+            fold.fold_home(index, *weight, &fields, &table)
+                .expect("valid weight");
+        }
+        let (aggregate, covered_weight, _) = fold.finish();
+
+        assert_eq!(
+            column(&aggregate, 1)[0].unwrap().to_bits(),
+            2.0_f64.to_bits(),
+            "the weighted Mode, not the weighted mean 1.2"
+        );
+        assert_eq!(
+            column(&covered_weight, 1)[0].unwrap().to_bits(),
+            5.0_f64.to_bits(),
+            "every home's weight voted"
+        );
+    }
+
+    /// Two homes whose modes disagree: the fold is the weighted Mode with
+    /// the tie to the lowest code, never the mean of the codes. Weights 1
+    /// and 1 reporting codes 2 and 1 tie on summed weight, so the lowest
+    /// code wins; their mean, 1.5, is no code at all.
+    #[test]
+    fn fleet_mode_ties_break_to_the_lowest_code() {
+        let fields = vec![enum_field("Mode (-)", 3)];
+        let key = 0_i64;
+
+        let mut fold = default_fold();
+        for (index, (weight, code)) in [(1.0, 2.0), (1.0, 1.0)].iter().enumerate() {
+            let mut table = BTreeMap::new();
+            table.insert(key, vec![Some(*code)]);
+            fold.fold_home(index, *weight, &fields, &table)
+                .expect("valid weight");
+        }
+        let (aggregate, covered_weight, _) = fold.finish();
+
+        assert_eq!(
+            column(&aggregate, 1)[0].unwrap().to_bits(),
+            1.0_f64.to_bits(),
+            "the tie breaks to the lowest code, not the mean 1.5"
+        );
+        assert_eq!(
+            column(&covered_weight, 1)[0].unwrap().to_bits(),
+            2.0_f64.to_bits()
+        );
+    }
+
+    /// A home whose mode cell is null does not vote; a cell every home
+    /// left null is null.
+    #[test]
+    fn fleet_mode_ignores_null_homes() {
+        let fields = vec![enum_field("Mode (-)", 3)];
+        let key = 0_i64;
+
+        let mut fold = default_fold();
+        for (index, (weight, code)) in [(2.0, None), (1.0, Some(2.0))].iter().enumerate() {
+            let mut table = BTreeMap::new();
+            table.insert(key, vec![*code]);
+            fold.fold_home(index, *weight, &fields, &table)
+                .expect("valid weight");
+        }
+        let (aggregate, covered_weight, _) = fold.finish();
+        assert_eq!(
+            column(&aggregate, 1)[0].unwrap().to_bits(),
+            2.0_f64.to_bits(),
+            "the null home does not vote"
+        );
+        assert_eq!(
+            column(&covered_weight, 1)[0].unwrap().to_bits(),
+            1.0_f64.to_bits(),
+            "only the voting home's weight"
+        );
+
+        let mut fold = default_fold();
+        for index in 0..2 {
+            let mut table = BTreeMap::new();
+            table.insert(key, vec![None]);
+            fold.fold_home(index, 1.0, &fields, &table)
+                .expect("valid weight");
+        }
+        let (aggregate, covered_weight, _) = fold.finish();
+        assert!(column(&aggregate, 1)[0].is_none(), "no vote is null");
+        assert_eq!(
+            column(&covered_weight, 1)[0].unwrap().to_bits(),
+            0.0_f64.to_bits()
+        );
+    }
+
+    /// A binary State column keeps the weighted mean, which is the duty
+    /// fraction: homes with weights 1 and 3 reporting states 1 and 0 fold
+    /// to 0.25. The Mode fold never touches a State column.
+    #[test]
+    fn fleet_binary_state_is_weighted_duty_fraction() {
+        let fields = vec![field("Defrost State (-)", "-")];
+        let key = 0_i64;
+
+        let mut fold = default_fold();
+        for (index, (weight, state)) in [(1.0, 1.0), (3.0, 0.0)].iter().enumerate() {
+            let mut table = BTreeMap::new();
+            table.insert(key, vec![Some(*state)]);
+            fold.fold_home(index, *weight, &fields, &table)
+                .expect("valid weight");
+        }
+        let (aggregate, covered_weight, _) = fold.finish();
+
+        assert_eq!(
+            column(&aggregate, 1)[0].unwrap().to_bits(),
+            0.25_f64.to_bits(),
+            "the duty fraction"
+        );
+        assert_eq!(
+            column(&covered_weight, 1)[0].unwrap().to_bits(),
+            4.0_f64.to_bits()
         );
     }
 

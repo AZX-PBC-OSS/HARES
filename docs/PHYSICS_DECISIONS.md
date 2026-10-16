@@ -512,3 +512,38 @@ removed). Metrics and aggregation: a sum skips nulls; a mean divides by
 the count of non-null cells and the count is reported as the variable's
 companion valid-count variable; a period or fold with no non-null cell
 is null.
+## A fleet's Enum column folds to the weighted operating Mode
+
+A fleet's `Enum`-kind columns (the per-equipment operating modes, the
+compressor speed, the EV connection state and charging level, an actor's
+declared enum channel) fold by the weighted Mode in both fleet stages:
+each home's over-time reduction takes the period's most frequent code,
+ties to the lowest code, exactly the reporting reducer's Mode rule
+(`crates/hares-io/src/output/reduce.rs`), and the across-homes fold takes
+the code with the greatest summed home weight, ties to the lowest code.
+A mean over mode codes is never taken: the codes are labels of an
+enumeration, not quantities, and their mean is no code. A period whose
+steps visit codes 0, 0, 0 and 2 reduces to 0, not to the mean 0.5; a
+two-home fleet whose modes disagree folds to the code with the greater
+summed weight, never to the average of the two codes. A home whose mode
+cell is null does not vote, and a cell no home voted on is null.
+
+Before this rule the fleet's unit-keyed rules averaged the mode columns
+over time and across homes: the mode columns' unit is the dimensionless
+`-`, so they took the mean through the dimensionless entry, and the EV
+code columns fell through their name suffix to the mean as well. The
+`Enum` column's field now carries its label count in the schema metadata
+(`enum_labels`, written beside the unit by the schema builders), which is
+what feeds the Mode rule's per-code counting in both stages.
+
+Binary state columns (`VariableKind::State`: the on/off schedule column,
+the defrost cycle state) keep the weighted mean, which is the duty
+fraction, not the Mode.
+
+OCHRE has no fleet fold to compare with: the fleet aggregation is HARES's
+own surface, and this rule's only reference is the declared aggregation
+of the catalogue itself. Direction of the delta: no golden moves (the
+fleet goldens' verbosity-2 selection holds no `Enum` column, so every
+golden compares bitwise); a fleet run at a selection that holds mode
+columns moves those columns' cells from the mean of the mode codes to
+the weighted Mode, carried by the acceptance tests.

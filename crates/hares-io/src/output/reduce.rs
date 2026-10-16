@@ -222,23 +222,26 @@ impl RuleState {
                     0.0
                 }
             }
-            Aggregation::Mode => self.mode_winner() as f64,
+            Aggregation::Mode => mode_winner(&self.counts) as f64,
         }
     }
+}
 
-    /// The most frequent code, ties to the lowest code: a strict maximum
-    /// keeps the first (lowest) code on a tie.
-    fn mode_winner(&self) -> usize {
-        let mut best = 0_usize;
-        let mut best_count = self.counts.first().copied().unwrap_or(0);
-        for (code, &count) in self.counts.iter().enumerate().skip(1) {
-            if count > best_count {
-                best = code;
-                best_count = count;
-            }
+/// The Mode rule's winner over per-code counts in code order: the code
+/// with the greatest count, ties to the lowest code (a strict maximum
+/// keeps the first, lowest, code on a tie). The reporting reducer's
+/// per-period rule and the fleet's across-homes fold share it.
+#[must_use]
+pub fn mode_winner<T: Copy + Default + PartialOrd>(counts: &[T]) -> usize {
+    let mut best = 0_usize;
+    let mut best_count = counts.first().copied().unwrap_or_default();
+    for (code, &count) in counts.iter().enumerate().skip(1) {
+        if count > best_count {
+            best = code;
+            best_count = count;
         }
-        best
     }
+    best
 }
 
 /// Reduces the step stream of one report into calendar periods: minutes to

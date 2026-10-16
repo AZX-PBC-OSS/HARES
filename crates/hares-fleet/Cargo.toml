@@ -22,3 +22,4 @@ thiserror = { workspace = true }
 parquet = { workspace = true }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
+hares-control = { workspace = true }
