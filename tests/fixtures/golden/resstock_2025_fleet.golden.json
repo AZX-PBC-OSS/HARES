@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "b5858446c4326b486dae12041d2d6ea1ba1e4537",
+  "git_head": "5b792de9f1b64de922c4ecacae34ece7c304d84f",
   "git_dirty": true,
   "metrics": [],
   "products": {
@@ -18,17 +18,17 @@
         {
           "name": "Total Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Total Gas Power (therms/hour)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Total Reactive Power (kVAR)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Outdoor Dry Bulb (C)",
@@ -43,97 +43,97 @@
         {
           "name": "Electric Baseboard Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Room AC Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Heat Pump Water Heater Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Clothes Washer Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Clothes Dryer Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Dishwasher Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Refrigerator Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Cooking Range Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Exterior Lighting Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Indoor Lighting Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "TV Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "MELs Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "HVAC Heating End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "HVAC Cooling End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Water Heating End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Other End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Refrigeration End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Lighting End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Plug Loads End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Unmet HVAC Load (C)",
@@ -324,9 +324,9 @@
         },
         {
           "name": "Unmet HVAC Load (C)",
-          "digest": "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e",
+          "digest": "aa5d4a93a18a877fd1839669095f0f8b7946d0198a40e16b66c7f60c73dc7538",
           "blocks": [
-            "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e"
+            "aa5d4a93a18a877fd1839669095f0f8b7946d0198a40e16b66c7f60c73dc7538"
           ]
         },
         {
@@ -349,17 +349,17 @@
         {
           "name": "Total Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Total Gas Power (therms/hour)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Total Reactive Power (kVAR)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Outdoor Dry Bulb (C)",
@@ -374,97 +374,97 @@
         {
           "name": "Electric Baseboard Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Room AC Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Heat Pump Water Heater Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Clothes Washer Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Clothes Dryer Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Dishwasher Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Refrigerator Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Cooking Range Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Exterior Lighting Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Indoor Lighting Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "TV Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "MELs Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "HVAC Heating End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "HVAC Cooling End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Water Heating End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Other End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Refrigeration End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Lighting End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Plug Loads End Use Electric Power (kW)",
           "arrow_type": "Float64",
-          "nullable": true
+          "nullable": false
         },
         {
           "name": "Unmet HVAC Load (C)",
@@ -655,9 +655,9 @@
         },
         {
           "name": "Unmet HVAC Load (C)",
-          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "digest": "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e",
           "blocks": [
-            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+            "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e"
           ]
         },
         {

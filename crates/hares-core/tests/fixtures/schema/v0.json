@@ -7,17 +7,17 @@
   {
     "arrow_type": "Float64",
     "name": "Total Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Total Gas Power (therms/hour)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Total Reactive Power (kVAR)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",

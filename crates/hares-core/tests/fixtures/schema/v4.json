@@ -7,17 +7,17 @@
   {
     "arrow_type": "Float64",
     "name": "Total Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Total Gas Power (therms/hour)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Total Reactive Power (kVAR)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
@@ -32,467 +32,467 @@
   {
     "arrow_type": "Float64",
     "name": "ASHP Cooler Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "ASHP Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Air Conditioner Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Basement Lighting Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Battery Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Ceiling Fan Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Clothes Dryer Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Clothes Washer Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Cooking Range Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Dehumidifier Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Dishwasher Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "ERV Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "EV Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Electric Baseboard Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Electric Boiler Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Electric Furnace Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Electric Resistance Water Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Electric Vehicle Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "EventBasedLoad Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Exterior Lighting Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Freezer Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "GSHP Cooler Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "GSHP Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Garage Lighting Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Boiler Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Boiler Gas Power (therms/hour)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Fireplace Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Fireplace Gas Power (therms/hour)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Fuel Cell Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Fuel Cell Gas Power (therms/hour)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Furnace Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Furnace Gas Power (therms/hour)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Generator Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Generator Gas Power (therms/hour)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Grill Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Grill Gas Power (therms/hour)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Lighting Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Lighting Gas Power (therms/hour)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Tankless Water Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Tankless Water Heater Gas Power (therms/hour)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Water Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Water Heater Gas Power (therms/hour)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "HPWH Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "HRV Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Heat Pump Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Heat Pump Water Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Ideal HVAC Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Indirect Tank Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Indoor Lighting Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Lighting Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "MELs Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "MSHP Cooler Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "MSHP Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Microwave Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Other Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "PV #1 Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Plug Loads Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Pool Heater #1 Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Pool Pump Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Protocol Bridge Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Refrigerator Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Resistance Water Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Room AC Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Scheduled EV Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Spa Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Spa Pump Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "TV Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Tankless Water Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Ventilation Fan Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "WSHP Cooler Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "WSHP Heater Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Well Pump Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Television Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Pool Heater #2 Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "HVAC Cooling End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "HVAC Heating End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Lighting End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Battery End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Ceiling Fan End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Other End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Dehumidifier End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Ventilation End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "EV End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Water Heating End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Refrigeration End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Generator End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Cooking End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Plug Loads End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "PV End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Pool Heater End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Pool Pump End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Spa Heater End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Spa Pump End Use Electric Power (kW)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
@@ -987,327 +987,327 @@
   {
     "arrow_type": "Float64",
     "name": "ASHP Cooler Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "ASHP Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Air Conditioner Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Basement Lighting Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Battery Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Ceiling Fan Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Clothes Dryer Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Clothes Washer Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Cooking Range Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Dehumidifier Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Dishwasher Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "ERV Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "EV Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Electric Baseboard Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Electric Boiler Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Electric Furnace Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Electric Resistance Water Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Electric Vehicle Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "EventBasedLoad Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Exterior Lighting Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Freezer Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "GSHP Cooler Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "GSHP Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Garage Lighting Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Boiler Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Fireplace Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Fuel Cell Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Furnace Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Generator Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Grill Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Lighting Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Tankless Water Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Gas Water Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "HPWH Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "HRV Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Heat Pump Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Heat Pump Water Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Ideal HVAC Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Indirect Tank Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Indoor Lighting Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Lighting Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "MELs Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "MSHP Cooler Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "MSHP Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Microwave Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Other Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "PV #1 Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Plug Loads Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Pool Heater #1 Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Pool Pump Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Protocol Bridge Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Refrigerator Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Resistance Water Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Room AC Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Scheduled EV Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Spa Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Spa Pump Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "TV Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Tankless Water Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Ventilation Fan Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "WSHP Cooler Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "WSHP Heater Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Well Pump Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Television Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
     "name": "Pool Heater #2 Energy (kWh)",
-    "nullable": true
+    "nullable": false
   },
   {
     "arrow_type": "Float64",
