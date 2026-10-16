@@ -3466,3 +3466,58 @@ selection holds them (verbosity 8 and the compressor tier); the
 verbosity-3 run above carries none, so their movement is the unit
 tests'. Binary state columns (`Schedule (-)`, `Defrost State (-)`) do
 not move: the duty fraction is pinned.
+### The metrics-verbosity row, 2026-10-16 (the worktree `r89-b7`)
+The entry's measurement, per golden: the metrics delta at verbosity 0
+before and after, the after equal to the verbosity-8 values. Before
+(read at the parent commit `62763042`, the acceptance probe over the
+`cz2a_gas_furnace_ac_res_wh` inputs, 7 days at 3600 s, warm-up
+disabled, `metrics = true`): at verbosity 0 the metrics carry an empty
+`per_end_use` in both energy and peak (the end-use aggregates are
+verbosity-1 columns the Verbosity(0) union lacks), `envelope_loads_kwh`
+None (no verbosity-4 delivered column and no verbosity-6 gain column in
+the union), both HVAC COPs None (the delivered slots resolve None), and
+`renewable_energy_fraction` None without PV; at verbosity 8 the same
+run computes the full set (per_end_use 8 entries, the envelope map, the
+COPs Some). The totals, gas, rolling peaks and grid peaks are identical
+at 0 and 8 already: the defect is the components' availability, not
+their values.
+
+After the fix every verbosity and the no-report run are bitwise equal
+and equal the parent's verbosity-8 values on bits (net
+192.1459400473185, window solar 20.45049862961817, heating COP
+25.000046265309397, the same 8 end uses). The verbosity-8 metrics are
+unchanged by the row: the full producer surface is the verbosity-8
+union (all non-diagnostics catalogue variables in catalogue order), so
+the plan's slots and the producers' values are the same bits.
+
+The goldens' movement, read off `frame_golden compare-all` against the
+parent's committed goldens: every difference is a metrics field; every
+frame product and schema is bitwise. The moved fields are exactly
+three, all null to value: `envelope_loads_kwh` (null to the 11-entry
+component map), `efficiency.hvac_heating_cop`, and
+`efficiency.hvac_cooling_cop` (None where the home's end-use electric
+stayed at or under the epsilon, as fleet_mixed_offset home 0's cooling
+did). Per golden, differing metrics fields: `consumer_shape_900s` 3
+(heating 39.19207139825246, cooling 2.8496322866695993),
+`fleet_mixed_offset` 8 (home 0 heating 39.04530965758018, cooling None;
+home 1 heating 1.3936443044181308, cooling 0.0; home 2 heating
+39.192071398252764, cooling 0.0), `fleet_same_offset_300s` 9 (three
+homes, heating 39.19... family, cooling 0.0 each),
+`full_year_hourly` 3 (heating 25.000046265309333, cooling
+1.438338904146268), `leap_year_february_900s` 3 (heating
+1.4514610069063882, cooling 0.0), `month_boundary_billing_3600s` 3
+(heating 25.000046265309397, cooling 0.0), `weather_wrap_900s` 3
+(heating 1.206260996423724, cooling 0.0), `full_year_900s_dst` 3 (on
+the dst build; heating 1.3835810203963161, cooling 1.5616858307293597),
+`resstock_2025_fleet` identical (no metrics rows captured). The three
+`fleet_same_offset_300s` homes' heating COPs are 39.19207139825271,
+39.19207139825278 and 39.192071398252764, cooling 0.0 each. No
+`renewable_energy_fraction` and no `per_end_use` field moves anywhere:
+the verbosity-1 aggregates were already in every verbosity-2 manifest's
+union. The exposed COP magnitudes are the verbosity-8 values the parent
+always computed; the gas furnaces' ratios are delivered thermal over
+the end use's electric (the fan draw), as the formula documents.
+
+The goldens re-captured TWICE BYTE-IDENTICAL (compare-all 8 + dst 1),
+the two captures' sha256 equal per manifest; after the re-capture
+compare-all is green on both builds.

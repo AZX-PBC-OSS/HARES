@@ -1678,6 +1678,44 @@ commit).
 **Measurement:** per golden, the metrics delta at verbosity 0 before and
 after (after: equal to the verbosity-8 values).
 
+**State:** committed `d7cfb0b9` (branch `row/r89-b7`, worktree of
+`62763042`; the row also carries `4f970245`, the base commit's
+unformatted re-export list rustfmt'd, its own style commit). The
+fix is the union surface: when the run requests metrics, the row plan's
+declared surface is the full producer surface (every catalogue variable
+the producers can produce, the diagnostics block appended when
+requested), so the `MetricsInputPlan`'s optional slots resolve the same
+bits at every verbosity and with no report; the availability evaluation
+the decoupling entry kept (the union of the reports' variables, the
+`Verbosity(0)` preset for no reports) and with it the freeze-time
+refusal of a metrics request whose selection lacks the power column die
+here (the power column is a verbosity-0 catalogue variable, always on
+the producer surface; the refusal's pin became
+`narrow_first_report_with_the_metrics_request_returns_full_metrics`).
+`tracing` at `debug` names the metric groups computed at finish. The
+RED first: `metrics_equal_at_every_verbosity_and_with_no_report` failed
+at the parent on the cz2a probe (verbosity 0: per_end_use empty,
+`envelope_loads_kwh` None, both HVAC COPs None; verbosity 8: populated;
+the totals identical both ways, so the defect was the components'
+availability alone); GREEN after (all four runs bitwise equal and
+bitwise the parent's verbosity-8 values, measured on the probe's
+printed bits). The Python pins that masked the defect updated with it:
+`test_envelope_loads_none_at_low_verbosity` became
+`test_envelope_loads_equal_at_low_verbosity` (verbosity 0 equals
+verbosity 6 field-wise) and `test_metrics_after_simulate`'s COP band
+([1.0, 5.0], dead code at the parent: the COP was None at verbosity 1)
+became Some/finite/positive, the fixture's heating plant a gas furnace
+whose ratio is delivered thermal over the end use's fan electric, not a
+compressor COP. The goldens re-captured TWICE BYTE-IDENTICAL
+(compare-all 8 + dst 1): the movement is exactly the three metrics
+fields per home (`envelope_loads_kwh` and the two HVAC COPs, null to
+the verbosity-8 values), every frame product and schema bitwise; the
+per-golden values are in `02-measurement.md` and the "Numeric changes"
+line in `docs/python.md`. Gates: fmt clean; clippy `--workspace
+--all-targets --all-features -D warnings` clean; nextest `--workspace
+--all-features -j 2` 8122/8122 (7 skipped), run once;
+`pytest -m ''` 1764 passed, 6 xfailed, 0 failed, 0 errors; pyright 0.
+
 ## B-8: deterministic fluid-solver summation
 
 **Kind:** dead-code removal with zero delta, in the numeric block because
