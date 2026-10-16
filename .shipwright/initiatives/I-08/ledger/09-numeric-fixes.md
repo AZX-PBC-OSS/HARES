@@ -1405,7 +1405,7 @@ the end-use rollup of the two HPXML fixtures above before and after.
 `r86-b5`, based on `b5858446`, one commit; the tree carried the work
 recovered from the stashed earlier attempt, judged coherent and
 completed here). In brief: the end-use machinery moved to the typed
-declarations — `EndUse` gained `is_hvac_or_water_heating`,
+declarations: `EndUse` gained `is_hvac_or_water_heating`,
 `is_cooling_family`, `display_name` and `from_display`
 (`hares-types/src/equipment.rs`, the display round trip and the two
 family predicates unit-pinned); `hares_equipment` gained
