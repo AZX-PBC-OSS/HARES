@@ -88,11 +88,23 @@ class TestMetrics:
         assert math.isfinite(grid.peak_export_kw)
 
         eff = metrics.efficiency
-        if eff.hvac_heating_cop is not None:
-            assert 1.0 <= eff.hvac_heating_cop <= 5.0, (
-                f"ASHP heating COP should be in [1.0, 5.0], got {eff.hvac_heating_cop}"
-            )
-        assert eff.hvac_cooling_cop is None or eff.hvac_cooling_cop > 0
+        # The heating COP computes at every verbosity (its inputs resolve
+        # from the producer surface, not the reports' selected columns).
+        # The base fixture's heating plant is a gas furnace, so the COP is
+        # the delivered thermal over the heating end use's electric (the
+        # fan and controls draw), not a compressor COP: it sits far above
+        # an ASHP's band, and the old [1.0, 5.0] assertion never ran here
+        # before (the COP was None below verbosity 4).
+        assert eff.hvac_heating_cop is not None
+        assert math.isfinite(eff.hvac_heating_cop)
+        assert eff.hvac_heating_cop > 0.0
+        # A January window delivers no cooling: the COP's numerator is the
+        # zero thermal, the denominator the AC's standing draw, so the
+        # ratio reads 0.0 (Some now: both inputs resolve from the
+        # producer surface at every verbosity).
+        assert eff.hvac_cooling_cop is None or (
+            math.isfinite(eff.hvac_cooling_cop) and eff.hvac_cooling_cop >= 0.0
+        )
         assert eff.water_heater_cop is None or eff.water_heater_cop > 0
         assert (
             eff.battery_round_trip_efficiency is None
@@ -122,14 +134,31 @@ class TestMetrics:
         result = dw.simulate()
         assert result.metrics is None
 
-    def test_envelope_loads_none_at_low_verbosity(self):
-        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=_base_config(verbosity=0))
-        dw.initialize()
-        result = dw.simulate()
+    def test_envelope_loads_equal_at_low_verbosity(self):
+        """The envelope loads compute at every verbosity and equal the
+        high-verbosity values (the metrics' inputs resolve from the
+        producer surface, not the reports' selected columns)."""
+        dw_low = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=_base_config(master_seed=0, verbosity=0))
+        dw_low.initialize()
+        low = _run_metrics(dw_low.simulate()).envelope_loads_kwh
 
-        metrics = _run_metrics(result)
+        dw_high = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=_base_config(master_seed=0, verbosity=6))
+        dw_high.initialize()
+        high = _run_metrics(dw_high.simulate()).envelope_loads_kwh
 
-        assert metrics.envelope_loads_kwh is None
+        assert low is not None
+        assert high is not None
+        assert low.window_solar_kwh == high.window_solar_kwh
+        assert low.opaque_conduction_kwh == high.opaque_conduction_kwh
+        assert low.window_conduction_kwh == high.window_conduction_kwh
+        assert low.internal_mass_kwh == high.internal_mass_kwh
+        assert low.interior_lwr_kwh == high.interior_lwr_kwh
+        assert low.infiltration_kwh == high.infiltration_kwh
+        assert low.ventilation_kwh == high.ventilation_kwh
+        assert low.hvac_heating_kwh == high.hvac_heating_kwh
+        assert low.hvac_cooling_kwh == high.hvac_cooling_kwh
+        assert low.internal_gains_kwh == high.internal_gains_kwh
+        assert low.duct_loss_kwh == high.duct_loss_kwh
 
     def test_envelope_loads_present_at_high_verbosity(self, tmp_path):
         dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=_base_config(verbosity=6))

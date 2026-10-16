@@ -21,7 +21,12 @@ fn repo_root() -> PathBuf {
 /// The entry's fixture inputs: the HPXML, schedule and weather of the
 /// parity fixture, no warm-up, 900 s steps, over 24 h.
 fn dwelling_config(sim_toml: &str) -> DwellingConfig {
-    let home = repo_root().join("tests/fixtures/parity/cz4a_ashp_hpwh");
+    dwelling_config_from(sim_toml, "tests/fixtures/parity/cz4a_ashp_hpwh")
+}
+
+/// The same config shape over a stated fixture directory.
+fn dwelling_config_from(sim_toml: &str, fixture: &str) -> DwellingConfig {
+    let home = repo_root().join(fixture);
     DwellingConfig {
         hpxml: InputSource::Path(home.join("building.xml")),
         schedule: Some(InputSource::Path(home.join("schedule.csv"))),
@@ -76,8 +81,8 @@ fn metrics_absent_unless_requested() {
 }
 
 /// `metrics_present_without_any_report`: metrics are requested, no report
-/// is configured: the run still returns metrics, computed against the
-/// `Verbosity(0)` preset.
+/// is configured: the run still returns metrics, computed from the
+/// producer surface (the row plan's full declared surface).
 #[test]
 fn metrics_present_without_any_report() {
     let toml = sim_toml("", true);
@@ -95,8 +100,8 @@ fn metrics_present_without_any_report() {
     assert!(metrics.total_energy_kwh.net_energy_kwh.is_finite());
 }
 
-/// `metrics_independent_of_destination`: three runs whose selection union
-/// is the `Verbosity(0)` preset, one `Memory`, one `Parquet`, one with no
+/// `metrics_independent_of_destination`: three runs whose reports select
+/// the `Verbosity(0)` tier, one `Memory`, one `Parquet`, one with no
 /// report at all: the three metrics are bitwise equal.
 #[test]
 fn metrics_independent_of_destination() {
@@ -195,15 +200,24 @@ destination = {{ csv = {{ path = "{}", overwrite = true }} }}
     assert!(target.exists(), "the narrow report published its file");
 }
 
-/// The refusal stays on the request path: a run that requests metrics from
-/// a selection union without the power column is refused at freeze, naming
-/// the remedy.
+/// The refusal of the decoupling entry dies here: that entry refused a
+/// run that requested metrics from a selection union without the power
+/// column, because the metrics' inputs resolved from the reports'
+/// selections. They resolve from the producer surface now, so a narrow
+/// first report no longer starves them, and the same run's metrics equal
+/// a verbosity-8 run's.
 #[test]
-fn narrow_first_report_with_the_metrics_request_names_the_missing_column() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let target = tmp.path().join("lean.csv");
-    let toml = format!(
-        r#"
+fn narrow_first_report_with_the_metrics_request_returns_full_metrics() {
+    let engine = SimulationEngine::new();
+    let run = |toml: String| {
+        let result = engine.run(dwelling_config(&toml)).expect("run completes");
+        result
+            .metrics
+            .as_ref()
+            .expect("the run requested metrics")
+            .clone()
+    };
+    let narrow = r#"
 start_time = "2024-02-27T00:00:00-07:00"
 duration = 86400
 time_res = 900
@@ -211,25 +225,86 @@ metrics = true
 
 [[reports]]
 name = "lean"
-selection = {{ named = ["Outdoor Dry Bulb (C)"] }}
-destination = {{ csv = {{ path = "{}", overwrite = true }} }}
-"#,
-        target.display()
+selection = { named = ["Outdoor Dry Bulb (C)"] }
+destination = "memory"
+"#
+    .to_string();
+    let wide = r#"
+start_time = "2024-02-27T00:00:00-07:00"
+duration = 86400
+time_res = 900
+metrics = true
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 8 }
+destination = "memory"
+"#
+    .to_string();
+    assert_eq!(
+        run(narrow),
+        run(wide),
+        "a narrow report's metrics equal a verbosity-8 run's"
     );
-    let err = Dwelling::from_config(dwelling_config(&toml))
-        .err()
-        .expect("a metrics request without the power column is refused at freeze");
-    let message = err.to_string();
-    assert!(
-        message.contains("metrics calculator init failed"),
-        "the refusal is the metrics plan's, got: {message}"
+}
+
+/// `metrics_equal_at_every_verbosity_and_with_no_report`. The same
+/// dwelling, `metrics = true`, at verbosity 0, 4 and 8 and with no report
+/// at all: the four `RunMetrics` are equal. At the parent they are not:
+/// the envelope-component metrics compute only when the recorded schema
+/// carries the verbosity-4 delivered columns and the verbosity-6 envelope
+/// gain columns, and the per-end-use maps and the renewable fraction
+/// collapse at verbosity 0, where no aggregate column is selected. The
+/// fix resolves the metrics' inputs from the producer surface (the row
+/// plan's full declared surface), not from the reports' selected columns.
+#[test]
+fn metrics_equal_at_every_verbosity_and_with_no_report() {
+    let engine = SimulationEngine::new();
+    let run = |reports: &str| {
+        let toml = format!(
+            r#"
+start_time = "2023-01-01T00:00:00-07:00"
+duration = 604800
+time_res = 3600
+warmup = "disabled"
+master_seed = 0
+metrics = true
+{reports}
+"#
+        );
+        let result = engine
+            .run(dwelling_config_from(
+                &toml,
+                "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh",
+            ))
+            .expect("run completes");
+        result
+            .metrics
+            .as_ref()
+            .expect("the run requested metrics")
+            .clone()
+    };
+    let at = |verbosity: u8| {
+        run(&format!(
+            "\n[[reports]]\nname = \"frame\"\nselection = {{ verbosity = {verbosity} }}\ndestination = \"memory\"\n"
+        ))
+    };
+
+    let at_0 = at(0);
+    let at_4 = at(4);
+    let at_8 = at(8);
+    let none = run("");
+
+    assert_eq!(
+        at_0, at_8,
+        "the metrics are equal at verbosity 0 and verbosity 8"
     );
-    assert!(
-        message.contains("requested metrics"),
-        "the refusal states that the run requested metrics, got: {message}"
+    assert_eq!(
+        at_4, at_8,
+        "the metrics are equal at verbosity 4 and verbosity 8"
     );
-    assert!(
-        message.contains("include the power column"),
-        "the refusal names the remedy, got: {message}"
+    assert_eq!(
+        none, at_8,
+        "the metrics are equal with no report at all and at verbosity 8"
     );
 }

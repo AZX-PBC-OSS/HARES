@@ -1455,11 +1455,17 @@ impl Dwelling {
         // across the reports in `reports` order, each report's resolved
         // names in its own order inside its report. The producer bindings
         // bind against it; each report reads its own columns out of the
-        // union row through its projection. A run that requests metrics
-        // with no reports resolves the union to the `Verbosity(0)` preset,
-        // the minimum today's output always contained: the metrics'
-        // availability is evaluated against it and the accumulator is fed
-        // from its producer slots.
+        // union row through its projection.
+        //
+        // When the run requests metrics, the union is instead the row
+        // plan's full declared surface: every catalogue variable the
+        // producers can produce (the diagnostics block appended when the
+        // run requests it), whatever the reports select. The metrics'
+        // inputs resolve from that producer surface, so every metric
+        // computes identically at every verbosity and with no report at
+        // all; the reports project their own columns out of the full row
+        // unchanged, and a run that does not request metrics keeps the
+        // reports' union alone.
         let mut union: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for names in &resolved {
@@ -1469,9 +1475,15 @@ impl Dwelling {
                 }
             }
         }
-        if self.reports.is_empty() {
-            union = resolve_selection(&Selection::Verbosity(0), catalogue)
-                .map_err(|err| HaresError::Dwelling(err.to_string()))?;
+        if self.sim_config.metrics {
+            union = catalogue
+                .variables_at_verbosity(u8::MAX)
+                .into_iter()
+                .map(|def| def.name.to_string())
+                .collect();
+            if let Some(block) = &diagnostics_names {
+                union.extend(block.iter().cloned());
+            }
         }
         let union_schema = build_schema_for_columns(catalogue, &union);
         let union_schema = enrich_schema_with_telemetry_units(union_schema, equipment, catalogue);
@@ -1546,12 +1558,12 @@ impl Dwelling {
 
         // The run metrics' one path: when the run requests them, a fixed
         // metrics input plan resolves the metrics' columns against the
-        // producer surface (the catalogue-derived union, independent of the
-        // reports' destinations), and the accumulator is fed per step from
-        // the row plan's producer slots. A plan that cannot resolve fails
-        // the freeze (the run's numbers are either computed or the run is
-        // refused); a run without the request builds no plan and no
-        // accumulator and pays nothing.
+        // producer surface (the row plan's full declared surface, built
+        // above), and the accumulator is fed per step from the row plan's
+        // producer slots. A plan that cannot resolve fails the freeze
+        // (the run's numbers are either computed or the run is refused);
+        // a run without the request builds no plan and no accumulator and
+        // pays nothing.
         let metrics_calculator = if self.sim_config.metrics {
             let available: Vec<String> = union_schema
                 .fields()
@@ -1568,22 +1580,7 @@ impl Dwelling {
                 catalogue.equipment_end_uses(),
             )
             .map_err(|err| {
-                // A missing required column names the remedy: the
-                // metrics are computed from the union of the reports'
-                // selections, so some report must carry the column.
-                let mut message = format!("metrics calculator init failed: {err}");
-                if matches!(
-                    err,
-                    hares_io::output::metrics::MetricsError::MissingRequiredColumn(_)
-                ) {
-                    message.push_str(
-                        "; the run requested metrics, and the metrics are computed from \
-                             the union of the reports' selections: include the power column \
-                             in a report's selection (a Verbosity selection at tier 2 or \
-                             deeper carries it, or name it)",
-                    );
-                }
-                HaresError::InvalidState(message)
+                HaresError::InvalidState(format!("metrics calculator init failed: {err}"))
             })?;
             Some(
                 MetricsCalculator::new(plan, time_res_secs, &self.sim_config).map_err(|err| {

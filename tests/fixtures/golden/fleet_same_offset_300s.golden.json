@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "5b792de9f1b64de922c4ecacae34ece7c304d84f",
+  "git_head": "62763042d3dfe9710b2f36b5e5e588c42cd5cfba",
   "git_dirty": true,
   "metrics": [
     {
@@ -17,20 +17,62 @@
         "value": null
       },
       "efficiency.hvac_cooling_cop": {
-        "bits": null,
-        "value": null
+        "bits": "0x0000000000000000",
+        "value": 0.0
       },
       "efficiency.hvac_heating_cop": {
-        "bits": null,
-        "value": null
+        "bits": "0x40439895cbaaff06",
+        "value": 39.19207139825271
       },
       "efficiency.water_heater_cop": {
         "bits": null,
         "value": null
       },
       "envelope_loads_kwh": {
-        "bits": null,
-        "value": null
+        "duct_loss_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "hvac_cooling_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "hvac_heating_kwh": {
+          "bits": "0x40583a4234730f4b",
+          "value": 96.91029082523634
+        },
+        "infiltration_kwh": {
+          "bits": "0xc033c0957e9b8060",
+          "value": -19.75228110596106
+        },
+        "interior_lwr_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "internal_gains_kwh": {
+          "bits": "0x4048687f63039229",
+          "value": 48.81638753580439
+        },
+        "internal_mass_kwh": {
+          "bits": "0x3ff3f6413629b28d",
+          "value": 1.2476207843530205
+        },
+        "opaque_conduction_kwh": {
+          "bits": "0xc037b224449bcb36",
+          "value": -23.695865905795664
+        },
+        "ventilation_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "window_conduction_kwh": {
+          "bits": "0xc02b50c6b6114f0a",
+          "value": -13.657766046154865
+        },
+        "window_solar_kwh": {
+          "bits": "0x4028083508e3bfed",
+          "value": 12.016029622842291
+        }
       },
       "grid_interaction_metrics.peak_export_kw": {
         "bits": "0x3ff90940cb873ee3",
@@ -166,20 +208,62 @@
         "value": null
       },
       "efficiency.hvac_cooling_cop": {
-        "bits": null,
-        "value": null
+        "bits": "0x0000000000000000",
+        "value": 0.0
       },
       "efficiency.hvac_heating_cop": {
-        "bits": null,
-        "value": null
+        "bits": "0x40439895cbaaff10",
+        "value": 39.19207139825278
       },
       "efficiency.water_heater_cop": {
         "bits": null,
         "value": null
       },
       "envelope_loads_kwh": {
-        "bits": null,
-        "value": null
+        "duct_loss_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "hvac_cooling_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "hvac_heating_kwh": {
+          "bits": "0x404e4256399fcb96",
+          "value": 60.51825638105872
+        },
+        "infiltration_kwh": {
+          "bits": "0xc02e6d6dcaca5709",
+          "value": -15.213728272628503
+        },
+        "interior_lwr_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "internal_gains_kwh": {
+          "bits": "0x4048687f63039229",
+          "value": 48.81638753580439
+        },
+        "internal_mass_kwh": {
+          "bits": "0x3fe7fdee204c3bb0",
+          "value": 0.7497473364654663
+        },
+        "opaque_conduction_kwh": {
+          "bits": "0xc02ee4a1a1eb4160",
+          "value": -15.446545658080765
+        },
+        "ventilation_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "window_conduction_kwh": {
+          "bits": "0xc0226c97f4c3c35b",
+          "value": -9.212096833130706
+        },
+        "window_solar_kwh": {
+          "bits": "0x403481759f0de716",
+          "value": 20.5057010086958
+        }
       },
       "grid_interaction_metrics.peak_export_kw": {
         "bits": "0x4000fa1e41cfdd78",
@@ -315,20 +399,62 @@
         "value": null
       },
       "efficiency.hvac_cooling_cop": {
-        "bits": null,
-        "value": null
+        "bits": "0x0000000000000000",
+        "value": 0.0
       },
       "efficiency.hvac_heating_cop": {
-        "bits": null,
-        "value": null
+        "bits": "0x40439895cbaaff0e",
+        "value": 39.192071398252764
       },
       "efficiency.water_heater_cop": {
         "bits": null,
         "value": null
       },
       "envelope_loads_kwh": {
-        "bits": null,
-        "value": null
+        "duct_loss_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "hvac_cooling_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "hvac_heating_kwh": {
+          "bits": "0x405146ac40530789",
+          "value": 69.10426338299125
+        },
+        "infiltration_kwh": {
+          "bits": "0xc02dcb6da6550c4d",
+          "value": -14.897320936090319
+        },
+        "interior_lwr_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "internal_gains_kwh": {
+          "bits": "0x4048687f63039229",
+          "value": 48.81638753580439
+        },
+        "internal_mass_kwh": {
+          "bits": "0x3fee573779df9de7",
+          "value": 0.9481465702382906
+        },
+        "opaque_conduction_kwh": {
+          "bits": "0xc03987b3f818e28e",
+          "value": -25.530089860988078
+        },
+        "ventilation_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "window_conduction_kwh": {
+          "bits": "0xc025859a780bb4e6",
+          "value": -10.76094412939933
+        },
+        "window_solar_kwh": {
+          "bits": "0x402a44e98259d2b9",
+          "value": 13.13459403368448
+        }
       },
       "grid_interaction_metrics.peak_export_kw": {
         "bits": "0x3ffd74ec6b0724e6",

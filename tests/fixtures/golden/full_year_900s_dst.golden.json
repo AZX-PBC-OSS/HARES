@@ -5,7 +5,7 @@
   ],
   "defaults_dir": "defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "5b792de9f1b64de922c4ecacae34ece7c304d84f",
+  "git_head": "62763042d3dfe9710b2f36b5e5e588c42cd5cfba",
   "git_dirty": true,
   "metrics": [
     {
@@ -19,20 +19,62 @@
         "value": null
       },
       "efficiency.hvac_cooling_cop": {
-        "bits": null,
-        "value": null
+        "bits": "0x3ff8fcaa4819bf40",
+        "value": 1.5616858307293597
       },
       "efficiency.hvac_heating_cop": {
-        "bits": null,
-        "value": null
+        "bits": "0x3ff62325da1f7eec",
+        "value": 1.3835810203963161
       },
       "efficiency.water_heater_cop": {
         "bits": null,
         "value": null
       },
       "envelope_loads_kwh": {
-        "bits": null,
-        "value": null
+        "duct_loss_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "hvac_cooling_kwh": {
+          "bits": "0x4087b0ca245bbfcf",
+          "value": 758.098702160636
+        },
+        "hvac_heating_kwh": {
+          "bits": "0x40c31af72c27954f",
+          "value": 9781.931034992127
+        },
+        "infiltration_kwh": {
+          "bits": "0xc07329205ad837f5",
+          "value": -306.57039913616546
+        },
+        "interior_lwr_kwh": {
+          "bits": "0x0000000000000000",
+          "value": 0.0
+        },
+        "internal_gains_kwh": {
+          "bits": "0x40ac28155a89dac6",
+          "value": 3604.0417063788946
+        },
+        "internal_mass_kwh": {
+          "bits": "0x407d52545e09262e",
+          "value": 469.14559749196894
+        },
+        "opaque_conduction_kwh": {
+          "bits": "0xc0aa29304055b7cb",
+          "value": -3348.5942408358437
+        },
+        "ventilation_kwh": {
+          "bits": "0xc0a77830707acfb7",
+          "value": -3004.094608152252
+        },
+        "window_conduction_kwh": {
+          "bits": "0xc0a884c178ff5022",
+          "value": -3138.3778762612646
+        },
+        "window_solar_kwh": {
+          "bits": "0x409755136dae2a5b",
+          "value": 1493.2689730847694
+        }
       },
       "grid_interaction_metrics.peak_export_kw": {
         "bits": "0x0000000000000000",

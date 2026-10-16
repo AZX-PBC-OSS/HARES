@@ -443,10 +443,13 @@ impl RollingPeakBuffer {
 
 /// The metrics' fixed input plan: every column the metrics read, resolved
 /// once against the run's producer surface in producer-slot order. The
-/// surface is the union of the selected reports' variables (for a run with
-/// no reports, the `Verbosity(0)` preset, the minimum output always
-/// contained); each metric whose availability depends on a column being
-/// present keeps that dependence, evaluated against the same surface.
+/// run feed's surface is the row plan's full declared surface, every
+/// catalogue variable the producers can produce, whatever the reports
+/// select, so every metric computes identically at every verbosity and
+/// with no report at all. The table feed resolves against the table's own
+/// value columns instead. An input the surface carries no column for
+/// stays unresolvable (`None`): the metric that reads it reports its own
+/// absence, not a zero.
 #[derive(Debug, Clone)]
 pub struct MetricsInputPlan {
     total_electric_power_slot: usize,
@@ -1358,6 +1361,17 @@ impl MetricsCalculator {
     pub fn finish(self) -> Result<FullSimulationMetrics, MetricsError> {
         #[cfg(feature = "observe")]
         self.log_end_use_diagnostics();
+        tracing::debug!(
+            end_uses = self.energy_by_end_use.len(),
+            gas = self.plan.total_gas_power_slot.is_some(),
+            pv = self.plan.pv_power_slot.is_some(),
+            setpoints = self.plan.setpoints.is_some(),
+            envelope_loads = self.has_envelope_columns,
+            hvac_power = self.plan.hvac_heating_kw_slot.is_some()
+                || self.plan.hvac_cooling_kw_slot.is_some(),
+            battery = self.plan.battery_kw_slot.is_some(),
+            "metric groups computed at finish"
+        );
         let mut peak_by_end_use = self.peak_by_end_use;
         for value in peak_by_end_use.values_mut() {
             if *value == f64::NEG_INFINITY {

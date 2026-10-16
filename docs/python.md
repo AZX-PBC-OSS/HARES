@@ -794,3 +794,21 @@ golden fixtures re-captured.
   fraction). No golden re-captured: the fleet goldens' verbosity-2
   selection holds no `Enum` column, and every golden compares bitwise
   (compare-all 8 identical, the dst set identical).
+
+- 2026-10-16: the run metrics are independent of the reports' verbosity
+  and selection: when a run requests metrics, the metrics' inputs
+  resolve from the producer surface (the row plan's full declared
+  surface, every catalogue variable the dwelling's producers can
+  produce) instead of the union of the reports' selected columns, so
+  `RunResult.metrics` is identical at every verbosity and with no
+  report at all. Before, the envelope-component metrics computed only
+  where the selection carried the verbosity-4 delivered columns and the
+  verbosity-6 gain columns (`envelope_loads_kwh` None and the HVAC COPs
+  None below verbosity 4, the per-end-use maps empty at verbosity 0);
+  after, the same components compute at every verbosity, and the
+  verbosity-8 values are bitwise unchanged. Every golden re-captured:
+  in each the `envelope_loads_kwh` and the two HVAC COP fields move
+  from null to their verbosity-8 values and no frame product, schema or
+  other metrics field moves; the per-golden values are in the
+  measurement log. A run that does not request metrics is unchanged
+  (`None`, nothing computed).
