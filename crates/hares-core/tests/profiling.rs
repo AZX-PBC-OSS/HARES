@@ -54,7 +54,7 @@ fn load_cz2a_fixture() -> Dwelling {
         schedule: Some(InputSource::Path(root.join("schedule.csv"))),
         weather: WeatherInput::Path(root.join("weather.epw")),
         defaults: DefaultsSource::directory(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults"),
         ),
         settings: DwellingSettings::new(sim_config, None, bldg_id, None),
     };
@@ -102,7 +102,7 @@ fn load_cz2a_fixture_with_parquet(path: &std::path::Path) -> Dwelling {
         schedule: Some(InputSource::Path(root.join("schedule.csv"))),
         weather: WeatherInput::Path(root.join("weather.epw")),
         defaults: DefaultsSource::directory(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults"),
         ),
         settings: DwellingSettings::new(sim_config, None, bldg_id, None),
     };

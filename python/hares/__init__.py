@@ -37,6 +37,7 @@ from ._hares import Warning
 from ._hares import Catalogue
 from ._hares import Variable
 from ._hares import metrics_from_table
+from ._hares import defaults_dir
 
 from hares.simulation_plan import SimulationPlan, SimulationSegment
 
@@ -210,6 +211,8 @@ __all__ = [
     "Catalogue",
     "Variable",
     "metrics_from_table",
+    # The packaged defaults directory (the default defaults source)
+    "defaults_dir",
     "ControlSignal",
     "Telemetry",
     # Equipment

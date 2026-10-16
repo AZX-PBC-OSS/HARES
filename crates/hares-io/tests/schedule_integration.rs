@@ -558,7 +558,7 @@ fn repo_defaults_dir() -> std::path::PathBuf {
         .expect("crates dir")
         .parent()
         .expect("repo root")
-        .join("defaults")
+        .join("python/hares/defaults")
 }
 
 /// HVAC with no HPXML-derived setpoints and no schedule setpoint column, run

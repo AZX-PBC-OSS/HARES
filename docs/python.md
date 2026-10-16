@@ -122,7 +122,8 @@ dw = Dwelling.from_hpxml(
     config=SimulationConfig(
         reports=[ReportSpec("frame", Selection.verbosity(2), Destination.memory())],
     ),
-    defaults="path/to/HARES/defaults",
+    # No `defaults` keyword: the packaged defaults tree the installed
+    # package carries (hares.defaults_dir()). An explicit path overrides it.
 )
 dw.initialize()
 
@@ -139,13 +140,18 @@ result = dw.finish()
 ```
 
 `defaults` names the directory holding the default schedule profiles
-(`Default Schedule Parameters.csv`), normally the repository's `defaults/`.
-An equipment whose load has no column in the schedule file and no HPXML
-schedule fractions takes its default profile from there. Without
-`defaults` there are no default profiles, so such an equipment fails
-construction, naming itself and `defaults`; a schedule file that
-names every column the building's equipment needs builds without one. A
-schedule generated from the HPXML (`schedule=None`) always needs it.
+(`Default Schedule Parameters.csv`), normally the packaged defaults tree
+the installed package itself carries. Without it, `defaults=None` (the
+default), the tree is resolved from the installed package's own location:
+`hares.defaults_dir()` returns that path, and a dwelling built with no
+`defaults` keyword reads it. An explicit path overrides it, and a
+missing, unreadable or incomplete tree at the path it names (the
+packaged one included) is a construction error naming the file it
+missed: nothing depends on the working directory the process was started
+from. An equipment whose load has no column in the schedule file and no
+HPXML schedule fractions takes its default profile from the tree. A
+schedule generated from the HPXML (`schedule=None`) always reads the
+tree's profiles.
 
 ## Time
 
@@ -188,6 +194,7 @@ the day is otherwise not simulated.)
 ```python
 from datetime import datetime
 
+import hares
 from hares import Destination, Dwelling, ReportSpec, Selection, SimulationConfig
 
 dw = Dwelling.from_hpxml(
@@ -200,7 +207,7 @@ dw = Dwelling.from_hpxml(
         time_res=3600,
         reports=[ReportSpec("frame", Selection.verbosity(1), Destination.memory())],
     ),
-    defaults="defaults",
+    defaults=hares.defaults_dir(),
 )
 dw.initialize()
 
@@ -431,6 +438,18 @@ Every callable, class and keyword added to, changed in or removed from
 `hares._hares` since `ebdb1a17`, each removed or renamed one with its
 replacement.
 
+- Added: `defaults_dir()`: the packaged defaults directory, the
+  `defaults` tree the installed package carries, resolved from the
+  installed package's own location. `defaults=None` (the constructors'
+  signature default) reads it: a dwelling built with no `defaults`
+  keyword reads the packaged tree, an explicit `defaults` path
+  overrides it, and nothing depends on the working directory. A missing
+  or unreadable defaults tree at whatever path resolves is a
+  construction error naming the file it missed. `ParsedDefaults`'s
+  `base` is required, and the defaults loader's sub-tables (the HVAC
+  multispeed CSV, the water-heating CSV, the envelope LUT's three CSVs)
+  are required files: no warning degrades a store or a lookup any more.
+
 - Added: `ReportSpec`, `Selection` (with `verbosity`, `named`, `pattern`,
   `diagnostics`), `Frequency` (with `timestep`), `Destination` (with
   `memory`, `parquet`, `csv`, `callback`), `RunResult`, `ReportResult`,
@@ -628,8 +647,8 @@ replacement.
   `tariff.json` when it attached a tariff, and the inputs' content);
   `hares.replay(dir, defaults=...)` loads it, builds the dwelling and
   simulates, returning the replayed run's `RunResult`, its frames
-  bitwise the original's (the `defaults` directory is required until the
-  packaged defaults land). A run whose dwelling was changed in a way a
+  bitwise the original's (`defaults=None` reads the packaged defaults). A
+  run whose dwelling was changed in a way a
   replay cannot rebuild (an edited blueprint, equipment or LUT changes,
   a caller-registered actor, caller-supplied control inputs, a restored
   state) fails the export with `HaresConfigError` naming every such
@@ -831,3 +850,26 @@ golden fixtures re-captured.
   power and weather column is bitwise unchanged (the homes read the
   same records of the file: the same month, day and hour), and the
   `homes` and `fleet_report` products are bitwise unchanged.
+
+- 2026-10-16: a missing defaults directory is an error and Python uses the
+  packaged defaults. The defaults source's base directory is required
+  everywhere (no caller falls back to a working-directory `defaults`, so
+  the numbers a run produces no longer depend on where it was started),
+  and every sub-table the loader reads is a required file: the HVAC
+  multispeed CSV, the water-heating CSV, the EV vehicle mapping, the
+  generator efficiency curve and the envelope LUT's three CSVs - a
+  missing, unreadable or malformed one fails the load naming the file,
+  the envelope LUT's failure no longer warns into the lumped fallback-R
+  path, and the `HARES_STRICT_DEFAULTS` environment variable is gone
+  (the loader has one behaviour, the strict one). In Python,
+  `defaults=None` (the default) reads the packaged defaults tree the
+  installed package carries, resolved from the package's own location
+  (`hares.defaults_dir()`); an explicit path overrides it. The wheel
+  carries the tree at `hares/defaults/` with no top-level `defaults/`
+  entry (it moved from the repository root into `python/hares/defaults/`,
+  so `maturin develop` resolves the same packaged path). Every golden
+  re-captured: the products are bitwise identical, the recorded
+  movement is the manifests' `defaults_dir` provenance string
+  (`defaults` to `python/hares/defaults`) and the capture head; the
+  defaults digest is unchanged (the digest runs over tree-relative
+  paths and bytes).

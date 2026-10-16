@@ -182,7 +182,7 @@ mod tests {
             hpxml: InputSource::Path(hpxml_path),
             schedule: schedule_path.map(InputSource::Path),
             weather: WeatherInput::Path(weather_path),
-            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
                     start_time: denver_offset()
@@ -380,7 +380,7 @@ mod tests {
             hpxml: InputSource::Path(bldg_dir.join("home.xml")),
             schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
             weather: WeatherInput::Path(weather_path("2024.2", &bldg_dir)),
-            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
                     start_time: denver_offset()
@@ -490,7 +490,7 @@ mod tests {
             hpxml: InputSource::Path(bldg_dir.join("home.xml")),
             schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
             weather: WeatherInput::Path(weather_path(version, bldg_dir)),
-            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
                     start_time: denver_offset()

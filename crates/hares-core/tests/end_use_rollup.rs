@@ -47,7 +47,7 @@ fn run_fixture(hpxml_name: &str) -> Arc<RunResult> {
         weather: WeatherInput::Path(
             project_root().join("tests/fixtures/weather/test_location.epw"),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             hares_io::SimulationConfig::from_toml(
                 "start_time = \"2023-01-01T00:00:00-07:00\"\n\

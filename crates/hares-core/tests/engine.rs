@@ -121,7 +121,7 @@ fn fixture_hpxml_path() -> PathBuf {
 /// (no schedule column, no HPXML fractions) resolves its default profile
 /// there instead of erroring.
 fn repo_defaults_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults")
 }
 
 fn simulation_config(csv_path: PathBuf) -> SimulationConfig {
@@ -229,7 +229,7 @@ fn run_returns_err_for_missing_hpxml_path() {
         hpxml: InputSource::Path(scratch.path("does-not-exist.xml")),
         schedule: Some(InputSource::Path(scratch.schedule())),
         weather: WeatherInput::Path(scratch.weather()),
-        defaults: DefaultsSource::default(),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
         settings: DwellingSettings::new(
             simulation_config(scratch.path("output.csv")),
             None,
@@ -253,7 +253,7 @@ fn run_returns_err_for_missing_weather_path() {
         hpxml: InputSource::Path(fixture_hpxml_path()),
         schedule: Some(InputSource::Path(scratch.schedule())),
         weather: WeatherInput::Path(scratch.path("does-not-exist.epw")),
-        defaults: DefaultsSource::default(),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
         settings: DwellingSettings::new(
             simulation_config(scratch.path("output.csv")),
             None,

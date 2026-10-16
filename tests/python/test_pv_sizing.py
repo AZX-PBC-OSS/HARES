@@ -14,7 +14,7 @@ HPXML_PV = str(REPO / "tests" / "fixtures" / "hpxml" / "ochre_samples" / "base-p
 HPXML_ALL_NORTH = str(REPO / "tests" / "fixtures" / "hpxml" / "base-all-north.xml")
 SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")
 WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
-HARES_DEFAULTS = REPO / "defaults"
+HARES_DEFAULTS = REPO / "python" / "hares" / "defaults"
 
 
 @pytest.fixture

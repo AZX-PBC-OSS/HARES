@@ -37,7 +37,7 @@ fn base_xml_config() -> DwellingConfig {
         weather: WeatherInput::Path(
             project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             hares_io::SimulationConfig {
                 start_time: DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")

@@ -681,7 +681,8 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
     let config = parse_fixture_config(&config_contents).expect("fixture config.toml must parse");
     let sim_config =
         parse_simulation_config(&config_contents, &config).expect("simulation config must parse");
-    let defaults_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+    let defaults_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
 
     // The fixture configs carry no output settings, so the parsed config
     // defaults to writing to a working-directory-relative path; these tests

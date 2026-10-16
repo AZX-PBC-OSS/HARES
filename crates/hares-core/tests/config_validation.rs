@@ -41,7 +41,7 @@ fn dwelling_config(root: &Path, sim_config: SimulationConfig) -> DwellingConfig 
         weather: WeatherInput::Path(
             root.join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         ),
-        defaults: DefaultsSource::directory(root.join("defaults")),
+        defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
         settings: DwellingSettings::new(sim_config, None, 100, None),
     }
 }

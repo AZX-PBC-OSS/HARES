@@ -405,7 +405,7 @@ fn one_day_defaults_replacement_manifest(replacement: &std::path::Path) -> Strin
         r#"
 kind = "dwelling"
 features = [{features}]
-defaults = "defaults"
+defaults = "python/hares/defaults"
 
 [defaults_files]
 "zip_parameters.toml" = "{}"
@@ -450,7 +450,8 @@ fn captured_defaults_replacement(
     let root = frame_golden::manifest::repo_root(&manifest_path);
     let replacement = replacement_dir.path().join("zip_parameters.toml");
     std::fs::copy(
-        root.join("defaults").join("zip_parameters.toml"),
+        root.join("python/hares/defaults")
+            .join("zip_parameters.toml"),
         &replacement,
     )
     .unwrap();
@@ -543,7 +544,7 @@ fn compare_fails_on_defaults_digest_mismatch() {
             _ => None,
         })
         .expect("the report must carry the defaults-digest difference");
-    assert_eq!(defaults_dir, "defaults");
+    assert_eq!(defaults_dir, "python/hares/defaults");
     assert_eq!(expected, &doc.defaults_digest);
     assert_eq!(actual, &products.defaults_digest);
     assert_ne!(expected, actual, "the two digests must differ");

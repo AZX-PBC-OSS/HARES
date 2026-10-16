@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 
 FIXTURE = ROOT / "tests/fixtures/parity/cz4a_ashp_hpwh"
 HPXML = str(FIXTURE / "building.xml")
@@ -33,9 +33,11 @@ def replay_config() -> Any:
     )
 
 
-def build_replayable(tmp_path: Path) -> Any:
+def build_replayable(tmp_path: Path, defaults: object | None = None) -> Any:
     """The cz4a inputs copied into the temporary directory, the dwelling
-    built from the copies: the originals can be deleted before replay."""
+    built from the copies: the originals can be deleted before replay.
+    `defaults` overrides the defaults source; `None` reads the packaged
+    tree."""
     import hares
 
     for name in ("building.xml", "schedule.csv", "weather.epw"):
@@ -44,7 +46,7 @@ def build_replayable(tmp_path: Path) -> Any:
         str(tmp_path / "building.xml"),
         str(tmp_path / "schedule.csv"),
         str(tmp_path / "weather.epw"),
-        defaults=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS) if defaults is None else str(defaults),
         bldg_id=1,
         config=replay_config(),
     )
@@ -79,25 +81,26 @@ def test_replay_round_trip_in_python(tmp_path: Path) -> None:
     ), "the replay runs for the exported building id"
 
 
-def test_replay_requires_defaults(tmp_path: Path) -> None:
-    """``hares.replay`` with ``defaults=None`` names the required
-    argument: the packaged defaults have not landed yet."""
+def test_replay_defaults_to_the_packaged_tree(tmp_path: Path) -> None:
+    """``hares.replay`` with ``defaults=None`` reads the packaged defaults
+    tree: the replay of an export whose run read the packaged tree
+    succeeds with no explicit path."""
     import hares
 
     inputs = tmp_path / "inputs"
     inputs.mkdir()
-    original_dwelling = build_replayable(inputs)
+    original_dwelling = build_replayable(inputs, defaults=hares.defaults_dir())
     original = original_dwelling.simulate()
 
     export = tmp_path / "export"
     original.export_replay(str(export))
 
-    try:
-        hares.replay(str(export))
-    except Exception as err:  # noqa: BLE001
-        assert "defaults" in str(err), "the error names the defaults argument"
-    else:
-        raise AssertionError("replay without defaults must fail")
+    replayed = hares.replay(str(export))
+    assert replayed.provenance.inputs is not None
+    assert (
+        replayed.provenance.inputs["defaults_files_sha256"]
+        == original.provenance.inputs["defaults_files_sha256"]
+    ), "the packaged default's digest is the one the run recorded"
 
 
 def test_provenance_tariff_readable(tmp_path: Path) -> None:

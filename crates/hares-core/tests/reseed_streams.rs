@@ -19,7 +19,7 @@ fn cz5a_config(master_seed: u64, warmup: bool) -> DwellingConfig {
         hpxml: hares_io::InputSource::Path(fixture.join("building.xml")),
         schedule: Some(hares_io::InputSource::Path(fixture.join("schedule.csv"))),
         weather: hares_io::WeatherInput::Path(fixture.join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("defaults")),
+        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             hares_io::SimulationConfig {
                 start_time: DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")

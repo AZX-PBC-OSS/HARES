@@ -238,6 +238,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_gym::field_bounds_table_py, m)?)?;
     m.add_function(wrap_pyfunction!(py_catalogue::metrics_from_table, m)?)?;
     m.add_function(wrap_pyfunction!(py_result::build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(py_inputs::defaults_dir, m)?)?;
     m.add_function(wrap_pyfunction!(py_schema::input_schema, m)?)?;
     m.add_function(wrap_pyfunction!(py_report::_selection_from_state, m)?)?;
     m.add_function(wrap_pyfunction!(py_report::_frequency_from_state, m)?)?;

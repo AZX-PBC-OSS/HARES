@@ -3,6 +3,7 @@
 //! builds dwellings: construction reads the handle, never the file.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
@@ -198,11 +199,7 @@ pub struct PyParsedDefaults {
 impl PyParsedDefaults {
     #[new]
     #[pyo3(signature = (base, files = None))]
-    pub fn new(
-        py: Python<'_>,
-        base: Option<&str>,
-        files: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Self> {
+    pub fn new(py: Python<'_>, base: &str, files: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut replacements = BTreeMap::new();
         if let Some(files) = files {
             for (key, value) in files.iter() {
@@ -212,7 +209,7 @@ impl PyParsedDefaults {
             }
         }
         let source = DefaultsSource {
-            base: base.map(std::path::PathBuf::from),
+            base: std::path::PathBuf::from(base),
             files: replacements,
         };
         let inner =
@@ -309,16 +306,58 @@ pub(crate) fn weather_arg(obj: &Bound<'_, PyAny>) -> PyResult<WeatherArg> {
     Ok(WeatherArg::Source(WeatherInput::Path(path.into())))
 }
 
-/// The `defaults` argument: a path string or a `ParsedDefaults`.
+/// The `defaults` argument: a path string or a `ParsedDefaults`. `None`
+/// (the constructor's signature default, resolved by the callers before
+/// this helper runs) is the packaged tree: the binding's own resolution
+/// here covers an explicit `None` reaching the helper.
 pub(crate) fn defaults_arg(obj: &Bound<'_, PyAny>) -> PyResult<DefaultsArg> {
     if obj.is_none() {
-        return Ok(DefaultsArg::Source(DefaultsSource::default()));
+        return Ok(DefaultsArg::Source(DefaultsSource::directory(
+            packaged_defaults_dir(obj.py())?,
+        )));
     }
     if let Ok(handle) = obj.extract::<PyRef<'_, PyParsedDefaults>>() {
         return Ok(DefaultsArg::Parsed(Arc::clone(&handle.inner)));
     }
-    let path: String = obj
+    let path: PathBuf = obj
         .extract()
         .map_err(|_| PyValueError::new_err("defaults must be a path or a ParsedDefaults"))?;
     Ok(DefaultsArg::Source(DefaultsSource::directory(path)))
+}
+
+/// The packaged defaults directory: the `defaults` tree the installed
+/// `hares` package carries, resolved from the extension module's own
+/// location. The default defaults source: a caller without an explicit
+/// `defaults` path gets the packaged tree, never a working-directory
+/// guess and never a silent empty store.
+pub(crate) fn packaged_defaults_dir(py: Python<'_>) -> PyResult<PathBuf> {
+    let module = py.import("hares._hares")?;
+    let file: PathBuf = module
+        .getattr("__file__")?
+        .extract()
+        .map_err(|_| PyValueError::new_err("the extension module's __file__ is not a path"))?;
+    let dir = file
+        .parent()
+        .map(|parent| parent.join("defaults"))
+        .ok_or_else(|| {
+            PyValueError::new_err("the extension module has no parent directory to resolve the packaged defaults under")
+        })?;
+    tracing::debug!(
+        path = %dir.display(),
+        "the packaged defaults directory resolved"
+    );
+    Ok(dir)
+}
+
+/// The packaged defaults directory as a `pathlib.Path`: the resolution a
+/// dwelling built with no `defaults` keyword reads, exposed for callers
+/// that want the path itself.
+#[pyfunction]
+pub fn defaults_dir(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let dir = packaged_defaults_dir(py)?;
+    let path = py
+        .import("pathlib")?
+        .getattr("Path")?
+        .call1((dir.display().to_string(),))?;
+    Ok(path.into_any().unbind())
 }

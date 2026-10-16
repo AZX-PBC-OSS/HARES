@@ -358,7 +358,7 @@ fn run_resstock_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         None,
         None,
         Some(chrono::Duration::seconds(seconds)),
-        Some(defaults_tree.dir()),
+        defaults_tree.dir(),
     )
     .map_err(|err| FrameGoldenError::Engine(err.to_string()))?;
     let report = *fleet

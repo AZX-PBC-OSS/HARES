@@ -36,7 +36,7 @@ fn prepare_defaults_tree(manifest_path: &Path) -> std::io::Result<(PathBuf, temp
         })
         .unwrap_or_default();
 
-    let repo_defaults = project_root().join("defaults");
+    let repo_defaults = project_root().join("python/hares/defaults");
     let temp = tempfile::TempDir::new()?;
     copy_tree_symlinked(&repo_defaults, temp.path())?;
     for (relative, replacement) in &replacements {
@@ -324,7 +324,7 @@ fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
         weather: WeatherInput::Path(
             project_root().join("tests/fixtures/resstock/2025.1/weather/G3400270_2018.csv"),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(sim, None, 176_775, None),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds from bldg0176775");

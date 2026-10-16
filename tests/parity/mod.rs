@@ -514,7 +514,8 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
         None => return Err("parity fixture config carries no report".to_string()),
     };
 
-    let defaults_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+    let defaults_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
     let dwelling_config = DwellingConfig {
         hpxml: InputSource::Path(fixture.building_xml.clone()),
         schedule: Some(InputSource::Path(fixture.schedule_csv.clone())),

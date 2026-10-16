@@ -72,7 +72,7 @@ mod tests {
             hpxml: InputSource::Path(bldg_dir.join("home.xml")),
             schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
             weather: WeatherInput::Path(weather_for(&bldg_dir)),
-            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
                     start_time: FixedOffset::west_opt(5 * 3600)

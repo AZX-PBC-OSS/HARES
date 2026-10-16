@@ -15,7 +15,7 @@ import polars as pl
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 
 FIXTURE = ROOT / "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh"
 HPXML = str(FIXTURE / "building.xml")

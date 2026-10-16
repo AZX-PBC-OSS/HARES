@@ -518,7 +518,7 @@ fn resumable_dwelling_config(case: &ResumeCase) -> DwellingConfig {
             root.join("tests/fixtures/resstock/2025.1/weather")
                 .join(case.weather_file),
         ),
-        defaults: DefaultsSource::directory(root.join("defaults")),
+        defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
                 start_time: FixedOffset::west_opt(case.utc_offset_west_h * 3600)
@@ -811,7 +811,7 @@ fn the_boiler_fluid_publish_marker_survives_a_checkpoint_restore() {
         weather: WeatherInput::Path(
             repo_root().join("tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"),
         ),
-        defaults: DefaultsSource::directory(repo_root().join("defaults")),
+        defaults: DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
                 start_time: FixedOffset::west_opt(5 * 3600)

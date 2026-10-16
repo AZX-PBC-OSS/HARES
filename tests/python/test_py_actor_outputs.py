@@ -22,7 +22,7 @@ FIXTURE = ROOT / "tests/fixtures/parity/cz4a_ashp_hpwh"
 HPXML = str(FIXTURE / "building.xml")
 SCHEDULE = str(FIXTURE / "schedule.csv")
 WEATHER = str(FIXTURE / "weather.epw")
-DEFAULTS = str(ROOT / "defaults")
+DEFAULTS = str(ROOT / "python" / "hares" / "defaults")
 
 POWER_COLUMN = "actor:Probe:probe_power_w"
 MODE_COLUMN = "actor:Probe:probe_mode"

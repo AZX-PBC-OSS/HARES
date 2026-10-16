@@ -33,7 +33,7 @@ fn bldg0000007_config() -> DwellingConfig {
         weather: WeatherInput::Path(
             project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
                 start_time: FixedOffset::west_opt(10 * 3600)
@@ -202,7 +202,8 @@ fn hvac_and_water_heaters_without_a_zone_fail_init() {
         .latest_env()
         .clone();
     let registry = EquipmentRegistry::new();
-    let defaults = DefaultsStore::load(&project_root().join("defaults")).expect("defaults load");
+    let defaults =
+        DefaultsStore::load(&project_root().join("python/hares/defaults")).expect("defaults load");
     let mut classes = std::collections::BTreeSet::new();
     for sample in ZONE_SWEEP_SAMPLES {
         let path = project_root()
@@ -334,7 +335,7 @@ fn hvac_ebm_max_energy(clear_zone_ids: bool, multiplier: Option<f64>) -> Vec<(St
         let building =
             hares_io::parse_hpxml(config.hpxml.path().expect("the config's HPXML is a path"))
                 .expect("HPXML readable");
-        let defaults = hares_io::DefaultsStore::load(&project_root().join("defaults"))
+        let defaults = hares_io::DefaultsStore::load(&project_root().join("python/hares/defaults"))
             .expect("the defaults load");
         let mut warnings = Vec::new();
         let specs = hares_io::hpxml::equipment::resolve_equipment(

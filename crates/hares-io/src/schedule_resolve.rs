@@ -4329,7 +4329,8 @@ mod tests {
     #[test]
     fn load_default_profiles_occupants_has_distinct_weekend_fractions() {
         use std::path::Path;
-        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
         let profiles = super::load_default_profiles(&defaults_dir)
             .expect("the shipped defaults CSV must load");
 
@@ -4346,7 +4347,8 @@ mod tests {
     #[test]
     fn load_default_profiles_all_priority_schedules_have_distinct_weekend_fractions() {
         use std::path::Path;
-        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
         let profiles = super::load_default_profiles(&defaults_dir)
             .expect("the shipped defaults CSV must load");
 
@@ -4379,7 +4381,8 @@ mod tests {
     #[test]
     fn fixed_operation_schedules_keep_identical_fractions() {
         use std::path::Path;
-        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
         let profiles = super::load_default_profiles(&defaults_dir)
             .expect("the shipped defaults CSV must load");
 
@@ -4409,7 +4412,8 @@ mod tests {
     #[test]
     fn spa_heater_month_multipliers_match_spa_pump() {
         use std::path::Path;
-        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
         let profiles = super::load_default_profiles(&defaults_dir)
             .expect("the shipped defaults CSV must load");
 
@@ -5608,7 +5612,8 @@ mod tests {
             xml_paths.len()
         );
 
-        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
         let profiles = super::load_default_profiles(&defaults_dir)
             .expect("the shipped defaults CSV must load");
         let defaults = DefaultsStore::load(&defaults_dir).expect("the shipped defaults load");

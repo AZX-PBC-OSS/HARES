@@ -19,7 +19,7 @@ fn test_start() -> DateTime<FixedOffset> {
 }
 
 fn shipped_profiles() -> hares_io::DefaultProfiles {
-    load_default_profiles(&project_root().join("defaults"))
+    load_default_profiles(&project_root().join("python/hares/defaults"))
         .expect("the shipped defaults CSV must load")
 }
 
@@ -160,7 +160,7 @@ fn hvac_without_a_schedule_file_keeps_the_hpxml_hourly_setpoints() {
             1,
         );
     let building = parse_building(&xml).expect("parse");
-    let defaults_dir = project_root().join("defaults");
+    let defaults_dir = project_root().join("python/hares/defaults");
     let defaults = hares_io::defaults::DefaultsStore::load(&defaults_dir).expect("defaults load");
     let mut specs = hares_io::resolve_equipment(
         &building,

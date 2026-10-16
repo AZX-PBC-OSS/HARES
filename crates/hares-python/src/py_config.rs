@@ -847,7 +847,9 @@ impl PyDwellingConfig {
             weather: crate::py_inputs::weather_arg(weather)?,
             defaults: match defaults {
                 Some(path) => crate::py_inputs::defaults_arg(path)?,
-                None => crate::py_inputs::DefaultsArg::Source(hares_io::DefaultsSource::default()),
+                None => crate::py_inputs::DefaultsArg::Source(hares_io::DefaultsSource::directory(
+                    crate::py_inputs::packaged_defaults_dir(hpxml.py())?,
+                )),
             },
             config,
             bldg_id,
@@ -880,12 +882,8 @@ impl PyDwellingConfig {
     }
 
     #[getter]
-    pub fn defaults(&self) -> Option<String> {
-        self.0
-            .defaults
-            .base
-            .as_ref()
-            .map(|p| p.display().to_string())
+    pub fn defaults(&self) -> String {
+        self.0.defaults.base.display().to_string()
     }
 
     #[getter]

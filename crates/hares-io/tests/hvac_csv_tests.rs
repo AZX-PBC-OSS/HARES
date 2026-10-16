@@ -8,7 +8,7 @@ fn defaults_dir() -> std::path::PathBuf {
         .unwrap()
         .parent()
         .unwrap()
-        .join("defaults")
+        .join("python/hares/defaults")
 }
 
 // CSV filenames like "Air Conditioner.csv" normalize to
@@ -374,6 +374,35 @@ fn shipped_multispeed_rows_match_ochre_verbatim() {
     );
 }
 
+/// The required CSVs a loadable tree carries beside the files under test:
+/// the water-heating CSV and the envelope LUT's three CSVs, header-only.
+fn write_required_csvs(dir: &std::path::Path) {
+    let wh = dir.join("water_heating");
+    std::fs::create_dir_all(&wh).unwrap();
+    std::fs::write(
+        wh.join("default_paramters.csv"),
+        "Description,Name,Value,Units\n",
+    )
+    .unwrap();
+    let env = dir.join("envelope");
+    std::fs::create_dir_all(&env).unwrap();
+    std::fs::write(
+        env.join("Envelope Boundary Types.csv"),
+        "Boundary Name,Boundary Type,Finish Type,Construction Type,Insulation Details,Assembly R Value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        env.join("Envelope Materials.csv"),
+        "Boundary Name,Boundary Type,Resistance (m^2-K/W),Capacitance (kJ/m^2-K)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        env.join("Envelope Boundaries.csv"),
+        "Boundary Name,Exterior Zone Label,Interior Zone Label\n",
+    )
+    .unwrap();
+}
+
 #[test]
 fn efficiency_lookup_falls_back_to_closest_when_no_exact_match() {
     let dir = tempfile::tempdir().unwrap();
@@ -417,6 +446,7 @@ fn efficiency_lookup_falls_back_to_closest_when_no_exact_match() {
         ));
     }
     std::fs::write(ev_dir.join("vehicle_mapping.csv"), mapping).unwrap();
+    write_required_csvs(dir.path());
 
     let store = DefaultsStore::load(dir.path()).expect("load defaults");
 

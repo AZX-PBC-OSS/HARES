@@ -68,7 +68,7 @@ fn fleet_construction_1000_homes_wall_time() {
                 hpxml: InputSource::Path(home.join("home.xml")),
                 schedule: Some(InputSource::Path(home.join("in.schedules.csv"))),
                 weather: WeatherInput::Path(weather_path.clone()),
-                defaults: DefaultsSource::directory(project_root().join("defaults")),
+                defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
                 settings: DwellingSettings::new(sim_config.clone(), None, idx as i64, None),
             }
         })

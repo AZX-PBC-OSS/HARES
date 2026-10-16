@@ -54,9 +54,10 @@ fn cz2a_config(defaults: PathBuf) -> DwellingConfig {
 /// instead of falling back to its raw parameters.
 #[test]
 fn unreadable_ventilation_config_fails_the_build() {
-    let builder =
-        DwellingBlueprintBuilder::from_config(cz2a_config(project_root().join("defaults")))
-            .expect("blueprint");
+    let builder = DwellingBlueprintBuilder::from_config(cz2a_config(
+        project_root().join("python/hares/defaults"),
+    ))
+    .expect("blueprint");
     let mut builder = builder;
     builder.remove_equipment_by_end_use(&[EndUse::VENTILATION]);
     let typed = hares_equipment::EquipmentConfig::with_payload(
@@ -99,7 +100,7 @@ fn unreadable_ventilation_config_fails_the_build() {
 /// construction error naming the value; it never silently becomes UTC.
 #[test]
 fn an_out_of_range_utc_offset_is_a_construction_error() {
-    let mut config = cz2a_config(project_root().join("defaults"));
+    let mut config = cz2a_config(project_root().join("python/hares/defaults"));
     config.settings.sim_config.site_location.utc_offset_h = Some(30.0);
     let err = DwellingBlueprint::from_config(config)
         .err()
@@ -114,7 +115,7 @@ fn an_out_of_range_utc_offset_is_a_construction_error() {
 /// it never rounds to zero and silently becomes UTC.
 #[test]
 fn a_non_finite_utc_offset_is_a_construction_error() {
-    let mut config = cz2a_config(project_root().join("defaults"));
+    let mut config = cz2a_config(project_root().join("python/hares/defaults"));
     config.settings.sim_config.site_location.utc_offset_h = Some(f64::NAN);
     let err = DwellingBlueprint::from_config(config)
         .err()
@@ -131,7 +132,7 @@ fn a_non_finite_utc_offset_is_a_construction_error() {
 /// constructor and panics there.
 #[test]
 fn an_offset_that_rounds_to_24_hours_is_a_construction_error() {
-    let mut config = cz2a_config(project_root().join("defaults"));
+    let mut config = cz2a_config(project_root().join("python/hares/defaults"));
     // 23.9999 h is 86 399.64 s: inside the pre-rounding guard, and exactly
     // 86 400 s once rounded.
     config.settings.sim_config.site_location.utc_offset_h = Some(23.9999);

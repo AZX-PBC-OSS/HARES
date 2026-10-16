@@ -118,7 +118,7 @@ fn run_batches(config: &SimulationConfig) -> RecordBatch {
             fixture_dir().join("schedule.csv"),
         )),
         weather: hares_io::WeatherInput::Path(fixture_dir().join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("defaults")),
+        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(config.clone(), None, 1, None),
     })
     .expect("the dwelling builds");

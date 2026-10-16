@@ -20,7 +20,7 @@ fn project_root() -> PathBuf {
 }
 
 fn repo_defaults() -> DefaultsStore {
-    DefaultsStore::load(&project_root().join("defaults")).expect("load defaults")
+    DefaultsStore::load(&project_root().join("python/hares/defaults")).expect("load defaults")
 }
 
 fn fixture(relative: &str) -> PathBuf {
@@ -309,7 +309,7 @@ fn missing_appliance_power_column_is_an_error() {
         &mut specs,
         &mut schedule,
         Some(
-            &hares_io::load_default_profiles(&project_root().join("defaults"))
+            &hares_io::load_default_profiles(&project_root().join("python/hares/defaults"))
                 .expect("the profiles load"),
         ),
         &defaults,
@@ -361,7 +361,7 @@ fn appliance_hot_water_draw_rides_the_schedule_columns_with_the_peak_flow_rule()
         &mut specs,
         &mut schedule,
         Some(
-            &hares_io::load_default_profiles(&project_root().join("defaults"))
+            &hares_io::load_default_profiles(&project_root().join("python/hares/defaults"))
                 .expect("the profiles load"),
         ),
         &defaults,
@@ -497,7 +497,7 @@ fn combi_boiler_indirect_tank_receives_the_appliance_draw() {
         &mut specs,
         &mut schedule,
         Some(
-            &hares_io::load_default_profiles(&project_root().join("defaults"))
+            &hares_io::load_default_profiles(&project_root().join("python/hares/defaults"))
                 .expect("the profiles load"),
         ),
         &defaults,
@@ -589,7 +589,7 @@ fn generated_schedule_produces_appliance_hot_water_columns_for_a_home_without_a_
         &mut specs,
         &mut schedule,
         Some(
-            &hares_io::load_default_profiles(&project_root().join("defaults"))
+            &hares_io::load_default_profiles(&project_root().join("python/hares/defaults"))
                 .expect("the profiles load"),
         ),
         &defaults,
@@ -644,7 +644,7 @@ fn vacant_home_generated_appliance_hot_water_columns_are_zero() {
         &mut specs,
         &mut schedule,
         Some(
-            &hares_io::load_default_profiles(&project_root().join("defaults"))
+            &hares_io::load_default_profiles(&project_root().join("python/hares/defaults"))
                 .expect("the profiles load"),
         ),
         &defaults,
@@ -893,7 +893,7 @@ fn half_year_vacancy_removes_volume_instead_of_redistributing_it() {
         &mut baseline_specs,
         &mut baseline_schedule,
         Some(
-            &hares_io::load_default_profiles(&project_root().join("defaults"))
+            &hares_io::load_default_profiles(&project_root().join("python/hares/defaults"))
                 .expect("the profiles load"),
         ),
         &defaults,
@@ -909,7 +909,7 @@ fn half_year_vacancy_removes_volume_instead_of_redistributing_it() {
         &mut schedule,
         pre_period_columns.as_deref(),
         Some(
-            &hares_io::load_default_profiles(&project_root().join("defaults"))
+            &hares_io::load_default_profiles(&project_root().join("python/hares/defaults"))
                 .expect("the profiles load"),
         ),
         &defaults,
@@ -1014,7 +1014,7 @@ fn multi_water_heater_homes_apportion_the_wet_appliance_draw() {
         &mut specs,
         &mut schedule,
         Some(
-            &hares_io::load_default_profiles(&project_root().join("defaults"))
+            &hares_io::load_default_profiles(&project_root().join("python/hares/defaults"))
                 .expect("the profiles load"),
         ),
         &defaults,
@@ -1449,8 +1449,8 @@ fn multi_water_heater_fractions_sum_to_one_and_cannot_be_negative() {
 
 fn generated_schedule_7d() -> hares_io::ScheduleTimeSeries {
     let start = chrono::DateTime::parse_from_rfc3339("2018-01-01T00:00:00-05:00").expect("start");
-    let profiles =
-        hares_io::load_default_profiles(&project_root().join("defaults")).expect("profiles load");
+    let profiles = hares_io::load_default_profiles(&project_root().join("python/hares/defaults"))
+        .expect("profiles load");
     hares_io::hpxml_schedule::generate_default_schedule(
         start,
         chrono::Duration::seconds(86_400 * 7),

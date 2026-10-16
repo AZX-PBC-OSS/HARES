@@ -66,7 +66,7 @@ fn dwelling_config(
         hpxml: InputSource::Path(hpxml_path),
         schedule: Some(InputSource::Path(schedule_path)),
         weather: WeatherInput::Path(weather_path),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(sim, None, 100, None),
     }
 }

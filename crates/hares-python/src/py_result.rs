@@ -588,20 +588,18 @@ pub fn build_info() -> PyBuildInfo {
 
 /// Rebuilds a run from its replay export (`RunResult.export_replay`'s
 /// directory): `load`, the build, then `simulate()`, returning the
-/// replayed run's `RunResult`. The `defaults` directory is required until
-/// the packaged defaults land.
+/// replayed run's `RunResult`. The `defaults` directory is the packaged
+/// tree by default; an explicit path overrides it, and the export
+/// verifies the digest over the tree it reads.
 #[pyfunction]
 #[pyo3(signature = (dir, defaults=None))]
-pub fn replay(dir: &str, defaults: Option<&str>) -> PyResult<PyRunResult> {
-    let Some(defaults) = defaults else {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "replay requires defaults=<the defaults directory>: the packaged defaults \
-             have not landed yet",
-        ));
+pub fn replay(py: Python<'_>, dir: &str, defaults: Option<&str>) -> PyResult<PyRunResult> {
+    let defaults: std::path::PathBuf = match defaults {
+        Some(path) => std::path::PathBuf::from(path),
+        None => crate::py_inputs::packaged_defaults_dir(py)?,
     };
     let replay =
-        hares_core::replay::load(std::path::Path::new(dir), std::path::Path::new(defaults))
-            .map_err(to_py_err)?;
+        hares_core::replay::load(std::path::Path::new(dir), &defaults).map_err(to_py_err)?;
     let mut dwelling = replay.build().map_err(to_py_err)?;
     let result = dwelling.simulate().map_err(to_py_err)?;
     let catalogue = dwelling.catalogue();
@@ -1020,7 +1018,7 @@ mod tests {
         let hpxml = fixture.join("building.xml");
         let schedule = fixture.join("schedule.csv");
         let weather = fixture.join("weather.epw");
-        let defaults = root.join("../../defaults");
+        let defaults = root.join("../../python/hares/defaults");
 
         Python::attach(|py| {
             let cls = py.get_type::<crate::py_dwelling::PyDwelling>();
@@ -1081,7 +1079,7 @@ mod tests {
                 chrono::Duration::days(2),
                 None,
                 Vec::new(),
-                Some(defaults),
+                defaults,
             )
             .expect("the Rust convenience constructor builds");
             let rust_outcome = rust_dwelling.health().warmup.clone();

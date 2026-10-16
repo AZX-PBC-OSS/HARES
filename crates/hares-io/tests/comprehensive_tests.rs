@@ -698,6 +698,35 @@ fn write_complete_ev_mapping(dir: &std::path::Path) {
     std::fs::write(ev_dir.join("vehicle_mapping.csv"), csv_content).unwrap();
 }
 
+/// The required CSVs a loadable tree carries beside the files under test:
+/// the water-heating CSV and the envelope LUT's three CSVs, header-only.
+fn write_required_csvs(dir: &std::path::Path) {
+    let wh = dir.join("water_heating");
+    std::fs::create_dir_all(&wh).unwrap();
+    std::fs::write(
+        wh.join("default_paramters.csv"),
+        "Description,Name,Value,Units\n",
+    )
+    .unwrap();
+    let env = dir.join("envelope");
+    std::fs::create_dir_all(&env).unwrap();
+    std::fs::write(
+        env.join("Envelope Boundary Types.csv"),
+        "Boundary Name,Boundary Type,Finish Type,Construction Type,Insulation Details,Assembly R Value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        env.join("Envelope Materials.csv"),
+        "Boundary Name,Boundary Type,Resistance (m^2-K/W),Capacitance (kJ/m^2-K)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        env.join("Envelope Boundaries.csv"),
+        "Boundary Name,Exterior Zone Label,Interior Zone Label\n",
+    )
+    .unwrap();
+}
+
 #[test]
 fn hvac_cooling_and_heating_coefficients_return_independent_results() {
     let dir = tempfile::tempdir().unwrap();
@@ -778,6 +807,18 @@ tdb_bounds = [-20.0, 30.0]
          [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
     )
     .unwrap();
+    std::fs::write(
+        dir.path().join("HVAC Multispeed Parameters.csv"),
+        "HVAC Name,HVAC Efficiency,Number of Speeds,Capacity Ratio 1,Air Flow Ratio 1,COP 1,SHR 1\n",
+    )
+    .unwrap();
+    write_required_csvs(dir.path());
+    std::fs::write(
+        dir.path().join("HVAC Multispeed Parameters.csv"),
+        "HVAC Name,HVAC Efficiency,Number of Speeds,Capacity Ratio 1,Air Flow Ratio 1,COP 1,SHR 1\n",
+    )
+    .unwrap();
+    write_required_csvs(dir.path());
 
     let store = hares_io::DefaultsStore::load(dir.path()).expect("load defaults");
 
@@ -884,6 +925,12 @@ tdb_bounds = [-25.0, 25.0]
          [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
     )
     .unwrap();
+    std::fs::write(
+        dir.path().join("HVAC Multispeed Parameters.csv"),
+        "HVAC Name,HVAC Efficiency,Number of Speeds,Capacity Ratio 1,Air Flow Ratio 1,COP 1,SHR 1\n",
+    )
+    .unwrap();
+    write_required_csvs(dir.path());
 
     let store = hares_io::DefaultsStore::load(dir.path()).expect("load");
 

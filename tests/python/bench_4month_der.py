@@ -30,7 +30,7 @@ from ochre_units import register_removed_units
 ROOT = Path(__file__).resolve().parents[2]
 VENDOR_OCHRE = ROOT / "vendors" / "OCHRE"
 EXAMPLES = ROOT / "data" / "examples"
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 
 HPXML = str(EXAMPLES / "BEopt_example.xml")
 SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")

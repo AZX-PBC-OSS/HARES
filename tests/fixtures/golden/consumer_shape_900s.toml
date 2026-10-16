@@ -1,6 +1,6 @@
 kind = "dwelling"
 features = []
-defaults = "defaults"
+defaults = "python/hares/defaults"
 
 [defaults_files]
 "envelope/Envelope Materials.csv" = "tests/fixtures/golden/consumer_shape_envelope_materials.csv"

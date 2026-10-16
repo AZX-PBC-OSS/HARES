@@ -34,7 +34,7 @@ fn cz2a_config(
         hpxml: InputSource::Path(fixture.join("building.xml")),
         schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
         weather: WeatherInput::Path(fixture.join("weather.epw")),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
                 start_time: start,

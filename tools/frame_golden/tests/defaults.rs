@@ -13,10 +13,10 @@ fn replacement_manifest() -> String {
     r#"
 kind = "dwelling"
 features = []
-defaults = "defaults"
+defaults = "python/hares/defaults"
 
 [defaults_files]
-"pv/premium_470.toml" = "defaults/generator/efficiency_curve.toml"
+"pv/premium_470.toml" = "python/hares/defaults/generator/efficiency_curve.toml"
 
 [simulation]
 start_time = "2023-01-01T00:00:00-07:00"
@@ -49,8 +49,9 @@ fn defaults_replacement_leaves_the_repo_file_untouched() {
     .unwrap();
     let root = repo_root(std::path::Path::new("fixture.toml"));
 
-    let repo_file = root.join("defaults/pv/premium_470.toml");
-    let replacement = std::fs::read(root.join("defaults/generator/efficiency_curve.toml")).unwrap();
+    let repo_file = root.join("python/hares/defaults/pv/premium_470.toml");
+    let replacement =
+        std::fs::read(root.join("python/hares/defaults/generator/efficiency_curve.toml")).unwrap();
     let before = std::fs::read(&repo_file).unwrap();
     assert_ne!(
         before, replacement,

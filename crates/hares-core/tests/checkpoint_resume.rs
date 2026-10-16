@@ -72,7 +72,7 @@ fn dwelling() -> Dwelling {
         hpxml: InputSource::Path(home.join("building.xml")),
         schedule: Some(InputSource::Path(home.join("schedule.csv"))),
         weather: WeatherInput::Path(home.join("weather.epw")),
-        defaults: DefaultsSource::directory(root.join("defaults")),
+        defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
         settings: DwellingSettings::new(sim_config(), None, 1, None),
     })
     .expect("cz4a dwelling builds");

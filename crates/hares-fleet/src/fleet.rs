@@ -339,9 +339,9 @@ impl Fleet {
     /// `duration` overrides the default 24-hour simulation duration;
     /// when `None`, the default of 24 hours is used for backward compatibility.
     /// `defaults_path` becomes every dwelling's
-    /// [`DwellingConfig::defaults_path`], with the same meaning: `None` means
-    /// no default schedule profiles, so a building whose schedule lacks a
-    /// column an equipment maps to fails construction naming the setting.
+    /// [`DwellingConfig::defaults`], with the same meaning: the path is
+    /// required, and a missing or unreadable defaults tree is a
+    /// construction error naming it.
     // The flat keyword-shaped argument list is the point: it mirrors the
     // Python `Fleet.from_resstock` keyword surface name for name.
     #[allow(clippy::too_many_arguments)]
@@ -353,7 +353,7 @@ impl Fleet {
         typical_year: Option<i32>,
         filter: Option<HashMap<String, String>>,
         duration: Option<chrono::Duration>,
-        defaults_path: Option<&Path>,
+        defaults_path: &Path,
     ) -> Result<Self> {
         let version = resstock_version.unwrap_or(DEFAULT_RESSTOCK_VERSION);
         // The release's declared weather-year rule, and the start's year
@@ -491,9 +491,7 @@ impl Fleet {
                     hpxml: InputSource::Path(building.hpxml_path),
                     schedule: Some(InputSource::Path(building.schedule_path)),
                     weather: WeatherInput::Path(weather_path),
-                    defaults: defaults_path
-                        .map(DefaultsSource::directory)
-                        .unwrap_or_default(),
+                    defaults: DefaultsSource::directory(defaults_path),
                     settings: DwellingSettings::new(
                         resstock_sim_config(run_duration, start_time, weather_year),
                         None,
@@ -2380,7 +2378,7 @@ mod tests {
     /// missing (no schedule column, no HPXML fractions) resolves its default
     /// profile there instead of erroring.
     fn repo_defaults_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults")
     }
 
     fn simulation_config(csv_path: PathBuf) -> SimulationConfig {
@@ -2443,7 +2441,7 @@ mod tests {
                     Path::new(MISSING_ROOT).join("schedule.csv"),
                 )),
                 weather: WeatherInput::Path(Path::new(MISSING_ROOT).join("weather.epw")),
-                defaults: DefaultsSource::default(),
+                defaults: DefaultsSource::directory(repo_defaults_path()),
                 settings: DwellingSettings::new(
                     simulation_config(Path::new(MISSING_ROOT).join(format!("output-{idx}.csv"))),
                     None,
@@ -3621,7 +3619,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            &repo_defaults_path(),
         )
         .expect("fleet construction");
 
@@ -3645,7 +3643,7 @@ mod tests {
             hpxml: InputSource::Path(PathBuf::from("no.xml")),
             schedule: None,
             weather: WeatherInput::Path(PathBuf::from("no.epw")),
-            defaults: DefaultsSource::default(),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 resstock_sim_config(
                     Duration::hours(24),
@@ -3686,7 +3684,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            &repo_defaults_path(),
         )
         .expect("fleet construction");
 
@@ -3706,8 +3704,8 @@ mod tests {
     /// The ResStock constructor's `defaults_path` reaches every dwelling it
     /// configures, built through the public path: the committed fixture
     /// building's own HPXML, schedule and weather, with no swapped-in files.
-    /// The dwelling builds with the defaults directory and fails naming
-    /// `defaults_path` without one.
+    /// The constructor's defaults argument is required: the dwelling's
+    /// config records the directory given, and the dwelling builds on it.
     #[test]
     fn from_resstock_passes_the_defaults_directory_to_each_dwelling() {
         let tmp = tempdir().expect("tmp");
@@ -3716,6 +3714,7 @@ mod tests {
         // (G5300330) has a fixture weather file.
         write_resstock_parquet_v2025(&pq, 19_694);
         let fixtures = resstock_fixtures_root().join("2025.1");
+        let defaults = repo_defaults_path();
 
         let fleet = Fleet::from_resstock(
             &pq,
@@ -3725,34 +3724,19 @@ mod tests {
             None,
             None,
             None,
-            None,
+            &defaults,
         )
         .expect("fleet construction");
         assert_eq!(fleet.entries.len(), 1);
 
-        let defaults = repo_defaults_path();
         let with_defaults = fleet.entries[0].config.clone();
-        assert!(
-            with_defaults.defaults.base.is_none(),
-            "the constructor without a defaults_path must leave it unset"
+        assert_eq!(
+            with_defaults.defaults.base, defaults,
+            "the constructor passes its defaults directory to every dwelling"
         );
-        let with_defaults = DwellingConfig {
-            defaults: DefaultsSource::directory(defaults.clone()),
-            ..with_defaults
-        };
         if let Err(err) = Dwelling::from_config(with_defaults) {
             panic!("a dwelling given the defaults directory must build, got: {err}");
         }
-
-        let without_defaults = fleet.entries[0].config.clone();
-        let message = match Dwelling::from_config(without_defaults) {
-            Err(err) => err.to_string(),
-            Ok(_) => panic!("a config with no defaults directory must fail at the store load"),
-        };
-        assert!(
-            message.contains("defaults load failed"),
-            "the error must name the defaults load failure, got: {message}"
-        );
     }
 
     #[test]
@@ -3771,7 +3755,7 @@ mod tests {
             None,
             None,
             Some(Duration::days(365)),
-            None,
+            &repo_defaults_path(),
         )
         .expect("fleet construction");
 
@@ -3807,7 +3791,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            &repo_defaults_path(),
         )
         .expect("fleet construction");
         assert_eq!(fleet.entries.len(), 1);
@@ -3848,7 +3832,7 @@ mod tests {
             None,
             None,
             None,
-            Some(&repo_defaults_path()),
+            &repo_defaults_path(),
         )
         .expect("fleet construction");
         assert_eq!(fleet.entries.len(), 1);
@@ -3903,7 +3887,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            &repo_defaults_path(),
         )
         .expect_err("a zip archive is not the unpacked layout");
         let message = err.to_string();
@@ -3949,7 +3933,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            &repo_defaults_path(),
         )
         .expect("the fleet builds");
         assert_eq!(fleet.entries.len(), 3);
@@ -3987,7 +3971,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            &repo_defaults_path(),
         )
         .expect_err("a typical-year release without a year is an error");
         let message = err.to_string();
@@ -4030,7 +4014,7 @@ mod tests {
             Some(2023),
             None,
             None,
-            Some(&repo_defaults_path()),
+            &repo_defaults_path(),
         )
         .expect("the typical-year fleet builds with its declared year");
         assert_eq!(fleet.entries.len(), 1);
@@ -4136,7 +4120,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            &repo_defaults_path(),
         )
         .expect_err("unresolved weather is a construction error");
         let message = err.to_string();
@@ -4758,7 +4742,7 @@ mod tests {
             hpxml: InputSource::Path(fixture_hpxml_path()),
             schedule: None,
             weather: WeatherInput::Path(dir.path().join("weather.epw")),
-            defaults: DefaultsSource::default(),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
                     reports: vec![hares_io::ReportSpec {

@@ -1,6 +1,6 @@
 kind = "dwelling"
 features = []
-defaults = "defaults"
+defaults = "python/hares/defaults"
 
 [tariff]
 file = "tests/fixtures/golden/flat_tariff.json"

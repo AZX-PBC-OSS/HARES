@@ -136,7 +136,7 @@ fn dwelling_config(
         weather: WeatherInput::Path(
             project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(sim, overrides, 100, None),
     }
 }
@@ -310,7 +310,7 @@ fn fixture_dwelling_config(
             hpxml: InputSource::Path(hpxml_path),
             schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
             weather: WeatherInput::Path(weather_for(bldg_dir)),
-            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 sim_config(Duration::hours(1), None, 0),
                 overrides,
@@ -869,7 +869,7 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
         hpxml: InputSource::Path(hpxml),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather_for(&fixture_dir())),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             sim_config(Duration::days(2), Some(csv_path.clone()), 5),
             Some(overrides),
@@ -991,7 +991,7 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
             second_fixture_dir().join("in.schedules.csv"),
         )),
         weather: WeatherInput::Path(weather_for(&second_fixture_dir())),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             sim_config(Duration::days(45), Some(csv_path.clone()), 5),
             Some(overrides),
@@ -1822,7 +1822,7 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
         hpxml: InputSource::Path(hpxml),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather_for(&fixture_dir())),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             sim_config(Duration::days(2), Some(csv_path.clone()), 5),
             Some(overrides),
@@ -2189,7 +2189,7 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
         hpxml: InputSource::Path(hpxml),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather_for(&fixture_dir())),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             sim_config(Duration::days(2), Some(csv_path.clone()), 5),
             Some(overrides),
@@ -2405,7 +2405,7 @@ fn user_added_actor_resolves_its_equipment_binding_on_add() {
         hpxml: InputSource::Path(hpxml),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather_for(&fixture_dir())),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             sim_config(Duration::hours(6), None, 0),
             Some(serde_json::json!({ "Battery": { "bms_mode": "\"Manual\"" } })),

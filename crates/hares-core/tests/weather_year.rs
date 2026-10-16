@@ -377,7 +377,7 @@ fn start_on_skipped_feb29_is_a_validate_error() {
         hpxml: hares_io::InputSource::Path(home.join("building.xml")),
         schedule: Some(hares_io::InputSource::Path(home.join("schedule.csv"))),
         weather: hares_io::WeatherInput::Path(home.join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("defaults")),
+        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(cfg, None, 1, None),
     });
     let err = match result {

@@ -32,7 +32,7 @@ if str(PYTHON_SRC) not in sys.path:
 # the defect and its signal are pinned in test_helics_pyarrow_symbol_order.py.
 import pyarrow.parquet  # noqa: F401  (must precede any helics import)
 
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")

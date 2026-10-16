@@ -24,6 +24,7 @@ from hares import (
     Selection,
     SimulationConfig,
     SiteLocationOverride,
+    defaults_dir,
 )
 
 START = "2024-01-01T00:00:00Z"
@@ -357,7 +358,9 @@ class TestDwellingConfig:
         assert cfg.weather == "path/to/weather.epw"
         assert cfg.bldg_id == 0
         assert cfg.config.duration == 3600
-        assert cfg.defaults is None
+        assert cfg.defaults == str(defaults_dir()), (
+            "the defaults getter records the packaged tree the dwelling reads"
+        )
 
     def test_initialization_duration_names_the_warmup_field(self):
         """The removed `initialization_duration` keyword errors with the

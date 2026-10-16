@@ -49,7 +49,7 @@ mod tests {
                 // instead of asking the engine for an override.
                 project_root().join("tests/fixtures/ochre_hold/USA_CO_Denver_60s.epw"),
             ),
-            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
                     // Denver local noon (UTC-7).

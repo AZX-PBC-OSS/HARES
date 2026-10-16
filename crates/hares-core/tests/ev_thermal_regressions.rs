@@ -413,7 +413,7 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
         hpxml: InputSource::Path(hpxml_path),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(sim, Some(overrides), 100, None),
     };
     SimulationEngine::new()
@@ -495,7 +495,7 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
         hpxml: InputSource::Path(hpxml_path),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(sim, Some(overrides), 100, None),
     };
     let err = SimulationEngine::new()
@@ -630,7 +630,7 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
         hpxml: InputSource::Path(hpxml_path),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(sim, Some(overrides), 100, None),
     };
     let err = SimulationEngine::new()
@@ -702,7 +702,7 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
         hpxml: InputSource::Path(hpxml_path.clone()),
         schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
         weather: WeatherInput::Path(weather),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(sim, None, 100, None),
     };
 

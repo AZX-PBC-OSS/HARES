@@ -240,6 +240,10 @@ impl PyFleet {
             None => None,
         };
 
+        let defaults: std::path::PathBuf = match defaults_path.as_deref() {
+            Some(path) => std::path::PathBuf::from(path),
+            None => crate::py_inputs::packaged_defaults_dir(_cls.py()).map_err(to_py_err)?,
+        };
         let fleet = Fleet::from_resstock(
             Path::new(&metadata_path),
             Path::new(&buildings_dir),
@@ -248,7 +252,7 @@ impl PyFleet {
             typical_year,
             parsed_filter,
             duration,
-            defaults_path.as_deref().map(Path::new),
+            &defaults,
         )
         .map_err(to_py_err)?;
         let fleet = match alignment {

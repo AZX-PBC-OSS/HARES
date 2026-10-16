@@ -89,7 +89,7 @@ fn build(home: &Home) -> Dwelling {
                 .join("tests/fixtures/resstock/2025.1/weather")
                 .join(home.weather),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
                 start_time: FixedOffset::east_opt(home.utc_offset_h * 3600)

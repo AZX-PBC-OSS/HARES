@@ -15,12 +15,15 @@ use crate::dwelling::{DwellingConfig, DwellingSettings};
 /// lists), so a consumer that classifies its fields reads the schema
 /// instead of HARES source.
 ///
-/// The defaults files section is the read list of the defaults tree the
-/// working directory carries — the engine's own convention for
-/// `defaults_path: None`; its absence leaves the section empty.
+/// The defaults files section is the read list of the shipped defaults
+/// tree (the repository's `python/hares/defaults`, the packaged copy the
+/// Python surface resolves): a missing tree fails the schema instead of
+/// leaving the section silently empty.
 #[must_use]
 pub fn input_schema() -> InputSchema {
-    let defaults_files = hares_io::input_schema::defaults_file_schemas(None).unwrap_or_default();
+    let defaults_files =
+        hares_io::input_schema::defaults_file_schemas(&crate::dwelling::shipped_defaults_dir())
+            .expect("the shipped defaults tree reads");
     assemble(defaults_files)
 }
 

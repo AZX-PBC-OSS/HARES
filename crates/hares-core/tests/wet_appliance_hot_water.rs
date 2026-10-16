@@ -50,7 +50,7 @@ fn cz4a_config(
         hpxml: InputSource::Path(fixture.join("building.xml")),
         schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
         weather: WeatherInput::Path(fixture.join("weather.epw")),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(sim_config(start_time, duration, step_s), None, 1, None),
     }
 }
@@ -77,8 +77,8 @@ fn wet_appliance_hot_water_is_independent_of_the_step() {
 
     // The resolved daily volumes and the water heater's hot supply
     // temperature, read off the same inputs the run builds from.
-    let defaults =
-        hares_io::DefaultsStore::load(&project_root().join("defaults")).expect("defaults load");
+    let defaults = hares_io::DefaultsStore::load(&project_root().join("python/hares/defaults"))
+        .expect("defaults load");
     let building = hares_io::parse_hpxml(
         &project_root().join("tests/fixtures/parity/cz4a_ashp_hpwh/building.xml"),
     )
@@ -207,7 +207,7 @@ fn vacant_home_draws_no_appliance_hot_water() {
         weather: WeatherInput::Path(
             project_root().join("tests/fixtures/resstock/2025.1/weather/G5300330_2018.csv"),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             sim_config(start, Duration::seconds(86_400 * 365), 3600),
             None,

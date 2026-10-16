@@ -79,7 +79,7 @@ fn dwelling_with_schedule(schedule_path: PathBuf) -> Dwelling {
         hpxml: hares_io::InputSource::Path(fixture().join("building.xml")),
         schedule: Some(hares_io::InputSource::Path(schedule_path)),
         weather: hares_io::WeatherInput::Path(fixture().join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(repo_root().join("defaults")),
+        defaults: hares_io::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             hares_io::SimulationConfig::from_toml(&sim_toml()).expect("the config parses"),
             None,

@@ -3762,8 +3762,8 @@ mod tests {
 
     /// Build a minimal DefaultsStore for tests that need one.
     fn load_defaults_store() -> hares_io::DefaultsStore {
-        let defaults_path =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python/hares/defaults");
         hares_io::DefaultsStore::load(&defaults_path)
             .expect("DefaultsStore must be loadable from project defaults/ directory")
     }

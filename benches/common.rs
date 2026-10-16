@@ -33,7 +33,7 @@ pub fn fixture_hpxml_path() -> PathBuf {
 /// The shipped defaults directory: the benchmark schedule has no lighting or
 /// plug-load columns, so those loads take their default profiles from here.
 pub fn repo_defaults_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults")
 }
 
 pub fn write_schedule_csv(path: &PathBuf) {
@@ -119,16 +119,14 @@ pub fn build_dwelling_config(
     bldg_id: i64,
     schedule_path: PathBuf,
     weather_path: PathBuf,
-    defaults_path: Option<PathBuf>,
+    defaults_path: PathBuf,
     duration: Duration,
 ) -> DwellingConfig {
     DwellingConfig {
         hpxml: InputSource::Path(fixture_hpxml_path()),
         schedule: Some(InputSource::Path(schedule_path)),
         weather: WeatherInput::Path(weather_path),
-        defaults: defaults_path
-            .map(DefaultsSource::directory)
-            .unwrap_or_default(),
+        defaults: DefaultsSource::directory(defaults_path),
         settings: DwellingSettings::new(
             SimulationConfig {
                 start_time: fixture_start::fixture_start(),

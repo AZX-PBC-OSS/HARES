@@ -236,7 +236,7 @@ mod tests {
             weather: WeatherInput::Path(
                 examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             ),
-            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
                     // Match OCHRE smoke: May 5, 2019, 12:00 PM Denver (UTC-7)
@@ -473,7 +473,7 @@ mod tests {
             weather: WeatherInput::Path(
                 examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             ),
-            defaults: DefaultsSource::directory(project_root().join("defaults")),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
                     // Denver local noon (UTC-7) on May 5 2019 -- mild spring noon,

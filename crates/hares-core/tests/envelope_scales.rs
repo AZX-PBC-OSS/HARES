@@ -76,7 +76,7 @@ fn base_xml_config(duration_s: i64, scales: Option<(f64, f64)>) -> DwellingConfi
         weather: WeatherInput::Path(
             project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings {
             sim_config: sim_config(duration_s, 900),
             overrides,
@@ -340,7 +340,7 @@ fn config_for(
         hpxml: InputSource::Path(hpxml),
         schedule: Some(InputSource::Path(schedule)),
         weather: WeatherInput::Path(weather),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings {
             sim_config: sim_config(duration_s, step_s),
             overrides,

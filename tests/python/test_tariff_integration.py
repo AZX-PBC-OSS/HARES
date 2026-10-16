@@ -19,7 +19,7 @@ from hares import SimulationConfig
 HARES_ROOT = Path(__file__).resolve().parent.parent.parent
 EXAMPLES = HARES_ROOT / "data" / "examples"
 FIXTURES = HARES_ROOT / "tests" / "fixtures"
-DEFAULTS = HARES_ROOT / "defaults"
+DEFAULTS = HARES_ROOT / "python" / "hares" / "defaults"
 
 HPXML = EXAMPLES / "pv_battery_example.xml"
 SCHEDULE = EXAMPLES / "BEopt_example_schedule.csv"

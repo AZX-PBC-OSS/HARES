@@ -1,6 +1,6 @@
 kind = "fleet"
 features = []
-defaults = "defaults"
+defaults = "python/hares/defaults"
 
 [fleet]
 frequency = "hourly"

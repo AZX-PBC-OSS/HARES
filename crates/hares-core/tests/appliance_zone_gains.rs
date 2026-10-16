@@ -83,7 +83,7 @@ fn dwelling_config(run: &Run) -> DwellingConfig {
         hpxml: InputSource::Path(run.fixture.join(run.hpxml)),
         schedule: Some(InputSource::Path(run.fixture.join(run.schedule))),
         weather: WeatherInput::Path(run.weather.clone()),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
                 start_time: DateTime::<FixedOffset>::parse_from_rfc3339(run.start)
@@ -640,7 +640,7 @@ fn garage_dwelling_config(hpxml: &Path) -> DwellingConfig {
         weather: WeatherInput::Path(
             project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
                 start_time,

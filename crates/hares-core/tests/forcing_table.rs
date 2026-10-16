@@ -74,7 +74,7 @@ fn cz4a_config(
         hpxml: hares_io::InputSource::Path(cz4a().join("building.xml")),
         schedule: Some(hares_io::InputSource::Path(cz4a().join("schedule.csv"))),
         weather: hares_io::WeatherInput::Path(cz4a().join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(repo_root().join("defaults")),
+        defaults: hares_io::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings {
             // The warm-up rides the sim config's warmup field: on for the
             // callers that pass a day count, disabled for the rest.
@@ -190,7 +190,7 @@ impl SharedCz4a {
         );
         let defaults = Arc::new(
             hares_io::ParsedDefaults::parse(&hares_io::DefaultsSource::directory(
-                repo_root().join("defaults"),
+                repo_root().join("python/hares/defaults"),
             ))
             .expect("defaults load"),
         );
@@ -323,7 +323,7 @@ fn forcing_table_run_equals_uncached_run_consumer_shape() {
         weather: hares_io::WeatherInput::Path(
             repo_root().join("tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv"),
         ),
-        defaults: hares_io::DefaultsSource::directory(repo_root().join("defaults")),
+        defaults: hares_io::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings {
             sim_config: sim_config(start_at("2018-01-01T00:00:00-08:00"), 1, 900, None),
             overrides: Some(serde_json::json!({"Gas Water Heater": {"ua_w_per_k": 2.0}})),
@@ -543,7 +543,7 @@ fn blueprints_from_different_hpxml_share_forcing() {
     );
     let defaults = Arc::new(
         hares_io::ParsedDefaults::parse(&hares_io::DefaultsSource::directory(
-            repo_root().join("defaults"),
+            repo_root().join("python/hares/defaults"),
         ))
         .expect("defaults load"),
     );
@@ -616,7 +616,7 @@ fn azimuth_change_shares_the_table() {
     );
     let defaults = Arc::new(
         hares_io::ParsedDefaults::parse(&hares_io::DefaultsSource::directory(
-            repo_root().join("defaults"),
+            repo_root().join("python/hares/defaults"),
         ))
         .expect("defaults load"),
     );
@@ -718,7 +718,7 @@ fn base_config(hpxml_path: &Path, inputs: &SharedInputs) -> DwellingConfig {
             inputs.dir.path().join("schedule.csv"),
         )),
         weather: hares_io::WeatherInput::Path(inputs.dir.path().join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(repo_root().join("defaults")),
+        defaults: hares_io::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings {
             sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
             overrides: None,
@@ -842,7 +842,9 @@ fn dropped_dwellings_drop_their_forcing_tables() {
             ),
             schedule: Some(hares_io::InputSource::Path(dir.path().join("schedule.csv"))),
             weather: hares_io::WeatherInput::Path(weather_path.clone()),
-            defaults: hares_io::DefaultsSource::directory(repo_root().join("defaults")),
+            defaults: hares_io::DefaultsSource::directory(
+                repo_root().join("python/hares/defaults"),
+            ),
             settings: DwellingSettings {
                 sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
                 overrides: None,

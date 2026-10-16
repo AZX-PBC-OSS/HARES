@@ -60,7 +60,7 @@ fn cz4a_config(start: DateTime<FixedOffset>, duration_s: i64) -> DwellingConfig 
         hpxml: InputSource::Path(fixture.join("building.xml")),
         schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
         weather: WeatherInput::Path(fixture.join("weather.epw")),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings {
             sim_config: sim_config(start, duration_s, 900),
             overrides: None,
@@ -195,7 +195,7 @@ fn builds_share_parsed_inputs() {
 fn blueprints_from_different_hpxml_share_weather() {
     let weather_path = project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw");
     let schedule_path = project_root().join("data/examples/BEopt_example_schedule.csv");
-    let defaults_dir = project_root().join("defaults");
+    let defaults_dir = project_root().join("python/hares/defaults");
     let weather = Arc::new(
         ParsedWeather::parse(&WeatherInput::Path(weather_path.clone())).expect("weather parses"),
     );
@@ -311,7 +311,7 @@ fn content_source_run_equals_path_source_run() {
     // The path side: a copied defaults tree with the replacement file
     // edited on disk, the frame_golden tool's own recipe.
     let copied = tempfile::tempdir().expect("temp dir");
-    copy_tree(&project_root().join("defaults"), copied.path());
+    copy_tree(&project_root().join("python/hares/defaults"), copied.path());
     std::fs::copy(
         &materials_fixture,
         copied.path().join("envelope/Envelope Materials.csv"),
@@ -333,7 +333,7 @@ fn content_source_run_equals_path_source_run() {
             format: WeatherFormat::ResStockCsv,
         },
         defaults: DefaultsSource {
-            base: Some(project_root().join("defaults")),
+            base: project_root().join("python/hares/defaults"),
             files: [(
                 "envelope/Envelope Materials.csv".to_string(),
                 InputSource::Text(materials_text.clone().into()),
@@ -363,8 +363,10 @@ fn content_source_run_equals_path_source_run() {
 /// Replacing an unknown defaults file is an error naming the known files.
 #[test]
 fn unknown_defaults_file_is_an_error() {
-    let parsed = ParsedDefaults::parse(&DefaultsSource::directory(project_root().join("defaults")))
-        .expect("the repo defaults load");
+    let parsed = ParsedDefaults::parse(&DefaultsSource::directory(
+        project_root().join("python/hares/defaults"),
+    ))
+    .expect("the repo defaults load");
     let err = parsed
         .with_file(
             "no-such-directory/no-such-file.csv",
@@ -402,7 +404,7 @@ fn site_offset_reads_content_sources() {
                 .into(),
             format: WeatherFormat::Epw,
         },
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: path_config.settings.clone(),
     };
     let from_paths =

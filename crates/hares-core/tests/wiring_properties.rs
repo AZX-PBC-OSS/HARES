@@ -33,7 +33,7 @@ fn write_inputs() -> (TempDir, PathBuf, PathBuf) {
 /// (no schedule column, no HPXML fractions) resolves its default profile
 /// there instead of erroring.
 fn repo_defaults_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults")
 }
 
 fn build_schedule_csv() -> String {

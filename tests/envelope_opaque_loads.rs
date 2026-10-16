@@ -118,7 +118,7 @@ mod tests {
                     // override.
                     project_root().join("tests/fixtures/ochre_hold/USA_CO_Denver_60s.epw"),
                 ),
-                defaults: DefaultsSource::directory(project_root().join("defaults")),
+                defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
                 settings: DwellingSettings::new(
                     SimulationConfig {
                         start_time: denver.with_ymd_and_hms(2019, 7, 15, 0, 0, 0).unwrap(),

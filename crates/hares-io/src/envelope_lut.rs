@@ -228,9 +228,12 @@ pub struct EnvelopeLookup {
 impl EnvelopeLookup {
     /// Parse the envelope CSV files from `dir`.
     ///
-    /// `Envelope Boundary Types.csv` and `Envelope Materials.csv` are required.
-    /// `Envelope Boundaries.csv` is optional — when absent, boundary name
-    /// resolution falls back to the built-in hardcoded mapping.
+    /// All three files are required: `Envelope Boundary Types.csv`,
+    /// `Envelope Materials.csv` and `Envelope Boundaries.csv`. A missing
+    /// one is an [`EnvelopeLutError::MissingFile`] naming it: the
+    /// hardcoded boundary-name fallback would resolve constructions the
+    /// CSV table resolves differently, so the defaults load fails instead
+    /// of degrading.
     pub fn load(dir: &Path) -> Result<Self, EnvelopeLutError> {
         Self::load_with_swap_and_log(
             dir,
@@ -289,21 +292,16 @@ impl EnvelopeLookup {
         if !mat_path.exists() && !is_swapped(&mat_path) {
             return Err(EnvelopeLutError::MissingFile(mat_path));
         }
+        if !boundaries_path.exists() && !is_swapped(&boundaries_path) {
+            return Err(EnvelopeLutError::MissingFile(boundaries_path));
+        }
 
         crate::defaults::log_used(base, log, &bt_path, swap);
         let boundary_types = Self::load_boundary_types(&bt_path, swap)?;
         crate::defaults::log_used(base, log, &mat_path, swap);
         let materials = Self::load_materials(&mat_path, swap)?;
-        let boundary_names = if boundaries_path.exists() || is_swapped(&boundaries_path) {
-            crate::defaults::log_used(base, log, &boundaries_path, swap);
-            Self::load_boundaries(&boundaries_path, swap)?
-        } else {
-            tracing::warn!(
-                path = %boundaries_path.display(),
-                "Envelope Boundaries.csv not found; falling back to hardcoded boundary name mapping"
-            );
-            HashMap::new()
-        };
+        crate::defaults::log_used(base, log, &boundaries_path, swap);
+        let boundary_names = Self::load_boundaries(&boundaries_path, swap)?;
 
         Ok(Self {
             boundary_types,
@@ -1015,7 +1013,7 @@ mod tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults")
+            .join("python/hares/defaults")
             .join("envelope");
         let lut = EnvelopeLookup::load(&dir).expect("shipped envelope LUT loads");
         let findings = lut.check_csv_vs_hardcoded_consistency();
@@ -1045,7 +1043,7 @@ mod tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults")
+            .join("python/hares/defaults")
             .join("envelope");
         let lut = EnvelopeLookup::load(&dir).expect("shipped envelope LUT loads");
         let findings = lut.check_material_invariants(&dir.join("Envelope Materials.csv"));

@@ -6,6 +6,7 @@ import datetime
 from abc import abstractmethod
 from collections.abc import Callable, Iterator
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -2558,7 +2559,7 @@ class DwellingConfig:
     @property
     def config(self) -> SimulationConfig: ...
     @property
-    def defaults(self) -> str | None: ...
+    def defaults(self) -> str: ...
     @property
     def bldg_id(self) -> int: ...
     @property
@@ -3103,7 +3104,7 @@ class ParsedSchedule:
     def from_text(cls, text: str, weather_meta: ParsedWeather | None = ...) -> ParsedSchedule: ...
 
 class ParsedDefaults:
-    def __init__(self, base: str | None = ..., files: dict[str, str] | None = ...) -> None: ...
+    def __init__(self, base: str, files: dict[str, str] | None = ...) -> None: ...
     def read_files(self) -> list[str]: ...
     def with_file(self, relative_path: str, content: str) -> ParsedDefaults: ...
 
@@ -3394,6 +3395,12 @@ def metrics_from_table(
 # every run's Provenance.build carries.
 def build_info() -> BuildInfo: ...
 
+# defaults_dir: the packaged defaults directory, the `defaults` tree the
+# installed `hares` package carries, resolved from the installed package's
+# own location. A dwelling built with no `defaults` keyword reads it; an
+# explicit `defaults` path overrides it.
+def defaults_dir() -> Path: ...
+
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Input schema
@@ -3434,5 +3441,5 @@ def resample_weather(
 # directory): load, the build, then simulate(), returning the replayed
 # run's RunResult, its frames bitwise the original's. `defaults` is the
 # defaults directory the replay reads the exported run's tree from (the
-# export verifies its digest); required until the packaged defaults land.
+# export verifies its digest); None reads the packaged defaults.
 def replay(dir: str, defaults: str | None = None) -> RunResult: ...

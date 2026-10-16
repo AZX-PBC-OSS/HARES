@@ -1,9 +1,9 @@
 {
   "kind": "resstock_fleet",
   "features": [],
-  "defaults_dir": "defaults",
+  "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "588b4c51c4f7dec6186f6ee6b816df40c1f70bd4",
+  "git_head": "8e44a61ed4b1ef7640970e9def2afdfb2fb2e6c6",
   "git_dirty": true,
   "metrics": [],
   "products": {

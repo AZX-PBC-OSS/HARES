@@ -438,7 +438,7 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
         files.insert(replacement.relative.clone(), InputSource::Text(text.into()));
     }
     let defaults = DefaultsSource {
-        base: Some(defaults_base.to_path_buf()),
+        base: defaults_base.to_path_buf(),
         files,
     };
     let parsed_defaults = hares_io::ParsedDefaults::parse(&defaults)?;

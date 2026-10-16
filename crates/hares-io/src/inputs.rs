@@ -227,13 +227,14 @@ impl WeatherInput {
 
 /// The defaults source: a base directory plus per-file replacements. Every
 /// file the tree carries loads from the base directory except the ones
-/// `files` names, which load from the given source instead.
-#[derive(Debug, Clone, Default)]
+/// `files` names, which load from the given source instead. The base is
+/// required: no caller falls back to a working-directory `defaults`, so
+/// the numbers a run produces never depend on where it was started.
+#[derive(Debug, Clone)]
 pub struct DefaultsSource {
-    /// The defaults directory tree. `None` keeps today's optional
-    /// `defaults_path` behavior: the store loads from the working
-    /// directory's `defaults` and the schedule profiles are absent.
-    pub base: Option<PathBuf>,
+    /// The defaults directory tree: a missing, unreadable or incomplete
+    /// tree is a construction error naming the path.
+    pub base: PathBuf,
     /// Relative path -> replacement content, parsed instead of the base
     /// file. An unknown relative path is an error naming the known files.
     pub files: BTreeMap<String, InputSource>,
@@ -244,7 +245,7 @@ impl DefaultsSource {
     #[must_use]
     pub fn directory(path: impl Into<PathBuf>) -> Self {
         Self {
-            base: Some(path.into()),
+            base: path.into(),
             files: BTreeMap::new(),
         }
     }
@@ -266,7 +267,7 @@ impl DefaultsSource {
 /// A defaults source's identity for the parse cache.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DefaultsIdentity {
-    base: Option<PathBuf>,
+    base: PathBuf,
     files: Vec<(String, SourceIdentity)>,
 }
 
@@ -703,14 +704,13 @@ impl ParsedDefaults {
     ) -> Result<Self, HaresError> {
         let load_profiles = || match (profiles.clone(), &source.base) {
             (Some(profiles), _) => Ok(profiles),
-            (None, Some(base)) => match source.files.get(DEFAULT_SCHEDULES_CSV) {
+            (None, base) => match source.files.get(DEFAULT_SCHEDULES_CSV) {
                 Some(overrides) => {
                     let content = overrides.read_text()?;
                     crate::parse_default_profiles_str(&content, &base.join(DEFAULT_SCHEDULES_CSV))
                 }
                 None => crate::load_default_profiles(base),
             },
-            (None, None) => Ok(DefaultProfiles::default()),
         };
         let profiles = load_profiles()?;
         let store = Self::load_store(source)?;
@@ -733,14 +733,13 @@ impl ParsedDefaults {
     ) -> Result<Self, HaresError> {
         let load_profiles = || match (profiles.clone(), &source.base) {
             (Some(profiles), _) => Ok(profiles),
-            (None, Some(base)) => match source.files.get(DEFAULT_SCHEDULES_CSV) {
+            (None, base) => match source.files.get(DEFAULT_SCHEDULES_CSV) {
                 Some(overrides) => {
                     let content = overrides.read_text()?;
                     crate::parse_default_profiles_str(&content, &base.join(DEFAULT_SCHEDULES_CSV))
                 }
                 None => crate::load_default_profiles(base),
             },
-            (None, None) => Ok(DefaultProfiles::default()),
         };
         let store;
         let profiles;
@@ -760,25 +759,23 @@ impl ParsedDefaults {
     }
 
     fn load_store(source: &DefaultsSource) -> Result<DefaultsStore, HaresError> {
-        DefaultsStore::load_with_overrides(source.base.as_deref(), &source.files).map_err(|err| {
-            match &source.base {
-                Some(base) => HaresError::Io(format!(
-                    "defaults load failed for '{}': {err}",
-                    base.display()
-                )),
-                None => HaresError::Io(format!("defaults load failed: {err}")),
-            }
+        DefaultsStore::load_with_overrides(&source.base, &source.files).map_err(|err| {
+            HaresError::Io(format!(
+                "defaults load failed for '{}': {err}",
+                source.base.display()
+            ))
         })
     }
 
     /// The empty store and no profiles: the synthetic dwelling's inputs
-    /// are fully explicit, so no defaults are consulted.
+    /// are fully explicit, so no defaults are consulted. The source
+    /// records the empty base no file is read from.
     #[must_use]
     pub fn empty() -> Self {
         Self {
             store: Arc::new(DefaultsStore::empty()),
             profiles: Arc::new(DefaultProfiles::default()),
-            source: DefaultsSource::default(),
+            source: DefaultsSource::directory(PathBuf::new()),
         }
     }
 
@@ -788,7 +785,7 @@ impl ParsedDefaults {
         Self {
             store: Arc::new(store),
             profiles: Arc::new(profiles),
-            source: DefaultsSource::default(),
+            source: DefaultsSource::directory(PathBuf::new()),
         }
     }
 
@@ -826,21 +823,16 @@ impl ParsedDefaults {
         }
         let mut files = self.source.files.clone();
         files.insert(relative_path.to_string(), source.clone());
-        let base = self
-            .source
-            .base
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("defaults"));
+        let base = self.source.base.clone();
         let content = source.read_text().map_err(|err| {
             HaresError::Io(format!(
                 "'{}' could not be read: {err}",
                 base.join(relative_path).display()
             ))
         })?;
-        let strict_defaults = std::env::var("HARES_STRICT_DEFAULTS").is_ok();
         let store = self
             .store
-            .with_replaced_group(&base, relative_path, &content, strict_defaults)
+            .with_replaced_group(&base, relative_path, &content)
             .map_err(|err| {
                 HaresError::Io(format!(
                     "defaults load failed for '{}': {err}",
@@ -873,14 +865,12 @@ impl ParsedDefaults {
     /// set plus the schedule profiles file plus the replacements.
     fn known_files(&self) -> Result<Vec<String>, HaresError> {
         let mut files = Vec::new();
-        if let Some(base) = &self.source.base {
-            collect_tree_files(base, "", &mut files).map_err(|err| {
-                HaresError::Io(format!(
-                    "the defaults tree '{}' could not be read: {err}",
-                    base.display()
-                ))
-            })?;
-        }
+        collect_tree_files(&self.source.base, "", &mut files).map_err(|err| {
+            HaresError::Io(format!(
+                "the defaults tree '{}' could not be read: {err}",
+                self.source.base.display()
+            ))
+        })?;
         for path in self.source.files.keys() {
             files.push(path.clone());
         }
@@ -907,26 +897,24 @@ impl ParsedDefaults {
     pub fn composed_digest(&self) -> Result<[u8; 32], HaresError> {
         let source = &self.source;
         let mut log = self.store.input_log().to_vec();
-        if let Some(base) = &source.base {
-            // The schedule profiles file: the replacement's content when
-            // the defaults source replaced it, the base tree's file
-            // otherwise — the bytes the profiles load reads.
-            let relative = crate::schedule_resolve::DEFAULT_SCHEDULES_CSV;
-            let bytes = match source.files.get(relative) {
-                Some(overrides) => overrides.read()?,
-                None => {
-                    let profiles = base.join(relative);
-                    std::fs::read(&profiles).map_err(|err| {
-                        HaresError::Io(format!(
-                            "the defaults schedule profiles '{}' could not be read \
-                             for their input record: {err}",
-                            profiles.display()
-                        ))
-                    })?
-                }
-            };
-            log.push((relative.to_string(), bytes));
-        }
+        // The schedule profiles file: the replacement's content when
+        // the defaults source replaced it, the base tree's file
+        // otherwise, the bytes the profiles load reads.
+        let relative = crate::schedule_resolve::DEFAULT_SCHEDULES_CSV;
+        let bytes = match source.files.get(relative) {
+            Some(overrides) => overrides.read()?,
+            None => {
+                let profiles = source.base.join(relative);
+                std::fs::read(&profiles).map_err(|err| {
+                    HaresError::Io(format!(
+                        "the defaults schedule profiles '{}' could not be read \
+                         for their input record: {err}",
+                        profiles.display()
+                    ))
+                })?
+            }
+        };
+        log.push((relative.to_string(), bytes));
         Ok(crate::input::defaults_files_digest(&log))
     }
 }
@@ -1194,14 +1182,7 @@ impl ParsedInputs {
                             .to_string(),
                     )
                 })?;
-                let defaults_base = defaults.base.as_ref().ok_or_else(|| {
-                    HaresError::Io(format!(
-                        "no defaults directory is configured: a generated schedule \
-                         needs the default schedule profiles file '{}' from the \
-                         defaults directory; set defaults_path",
-                        crate::schedule_resolve::DEFAULT_SCHEDULES_CSV,
-                    ))
-                })?;
+                let defaults_base = &defaults.base;
                 let profiles = match defaults.files.get(DEFAULT_SCHEDULES_CSV) {
                     Some(overrides) => {
                         let content = overrides.read_text()?;
@@ -1365,7 +1346,7 @@ mod tests {
         let weather = WeatherInput::Path(
             repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         );
-        let defaults = DefaultsSource::directory(repo_root().join("defaults"));
+        let defaults = DefaultsSource::directory(repo_root().join("python/hares/defaults"));
         let schedule =
             InputSource::from_path(repo_root().join("data/examples/BEopt_example_schedule.csv"));
         let cache = ParsedInputsCache::new();
@@ -1421,7 +1402,7 @@ mod tests {
         let weather = WeatherInput::Path(
             repo_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         );
-        let defaults = DefaultsSource::directory(repo_root().join("defaults"));
+        let defaults = DefaultsSource::directory(repo_root().join("python/hares/defaults"));
 
         let cache = ParsedInputsCache::new();
         let first_source = InputSource::Text(first_text.into());

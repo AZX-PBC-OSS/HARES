@@ -6,7 +6,7 @@ import pytest
 from hares import SimulationConfig
 
 ROOT = Path(__file__).resolve().parents[2]
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 CZ2A = ROOT / "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh"
 
 

@@ -50,7 +50,7 @@ fn generated_schedule_config(schedule_path: Option<PathBuf>) -> DwellingConfig {
         weather: WeatherInput::Path(
             project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
                 start_time,
@@ -145,14 +145,8 @@ fn no_schedule_generates_the_default_schedule() {
     let blueprint = DwellingBlueprint::from_config(config.clone())
         .expect("a None schedule requests the generated schedule");
 
-    let profiles = hares_io::load_default_profiles(
-        config
-            .defaults
-            .base
-            .as_deref()
-            .expect("the config carries a defaults directory"),
-    )
-    .expect("the shipped defaults CSV loads");
+    let profiles = hares_io::load_default_profiles(&config.defaults.base)
+        .expect("the shipped defaults CSV loads");
     let generated = hares_io::hpxml_schedule::generate_default_schedule(
         config.settings.sim_config.start_time,
         config.settings.sim_config.duration,
@@ -198,7 +192,7 @@ fn no_schedule_generates_the_default_schedule() {
 fn generated_schedule_without_defaults_file_is_an_error() {
     let temp = copy_shipped_defaults_csv();
     let mut config = generated_schedule_config(None);
-    config.defaults.base = Some(temp.path().to_path_buf());
+    config.defaults.base = temp.path().to_path_buf();
     std::fs::remove_file(temp.path().join("Default Schedule Parameters.csv"))
         .expect("remove the defaults CSV from the copy");
 
@@ -227,7 +221,7 @@ fn missing_default_profile_is_an_error() {
     std::fs::write(&csv_path, kept).expect("write the CSV without Indoor Lighting");
 
     let mut config = generated_schedule_config(None);
-    config.defaults.base = Some(temp.path().to_path_buf());
+    config.defaults.base = temp.path().to_path_buf();
     let err = match Dwelling::from_config(config) {
         Err(err) => err,
         Ok(_) => panic!("a generated schedule with a missing profile must fail construction"),
@@ -259,7 +253,7 @@ fn malformed_default_profile_row_is_an_error() {
     std::fs::write(&csv_path, truncated).expect("write the CSV with the short row");
 
     let mut config = generated_schedule_config(None);
-    config.defaults.base = Some(temp.path().to_path_buf());
+    config.defaults.base = temp.path().to_path_buf();
     let err = match Dwelling::from_config(config) {
         Err(err) => err,
         Ok(_) => panic!("a generated schedule with a malformed profile row must fail construction"),
@@ -271,63 +265,21 @@ fn malformed_default_profile_row_is_an_error() {
     );
 }
 
-/// No defaults directory and no schedule file fails construction naming the
-/// missing directory and the file the generator needs.
+/// A schedule file that omits a column an equipment maps to builds on the
+/// defaults directory the config names: the default profiles come only
+/// from the configured tree, never from a working-directory guess. The
+/// BEopt example schedule has no lighting or plug-load columns. (The
+/// defaults directory is required, so there is no "no defaults directory"
+/// shape left to probe; a tree without `Default Schedule Parameters.csv`
+/// fails a generated schedule's construction naming the file, the
+/// `generated_schedule_without_defaults_file_is_an_error` pin.)
 #[test]
-fn generated_schedule_requires_a_defaults_directory() {
-    let mut config = generated_schedule_config(None);
-    config.defaults.base = None;
-
-    let err = match Dwelling::from_config(config) {
-        Err(err) => err,
-        Ok(_) => panic!("a generated schedule without a defaults directory must fail construction"),
-    };
-    let message = err.to_string();
-    assert!(
-        message.contains("no defaults directory"),
-        "the error must name the missing directory, got: {message}"
-    );
-    assert!(
-        message.contains("Default Schedule Parameters.csv"),
-        "the error must name the file the generator needs, got: {message}"
-    );
-}
-
-/// A schedule file that omits a column an equipment maps to, with no
-/// defaults directory, fails construction naming the equipment and the
-/// `defaults_path` setting: the default profiles come only from the
-/// directory the config names, never from a working-directory guess. The
-/// BEopt example schedule has no lighting or plug-load columns.
-///
-/// With the defaults policy (a load failure is an error), a config
-/// with no defaults directory fails first at the store load, naming the
-/// path: no dwelling reaches schedule injection through a missing store.
-#[test]
-fn schedule_file_missing_a_column_needs_a_defaults_directory() {
-    let mut config = generated_schedule_config(Some(
+fn schedule_file_missing_a_column_takes_the_default_profiles() {
+    let config = generated_schedule_config(Some(
         project_root().join("data/examples/BEopt_example_schedule.csv"),
     ));
-    config.defaults.base = None;
-
-    let err = match Dwelling::from_config(config.clone()) {
-        Err(err) => err,
-        Ok(_) => {
-            panic!("a config with no defaults directory must fail construction at the store load")
-        }
-    };
-    let message = err.to_string();
-    assert!(
-        message.contains("defaults load failed"),
-        "the error must name the defaults load failure, got: {message}"
-    );
-    assert!(
-        message.contains("defaults"),
-        "the error must name the path it tried, got: {message}"
-    );
-
-    config.defaults.base = Some(project_root().join("defaults"));
     if let Err(err) = Dwelling::from_config(config) {
-        panic!("the same config with the shipped defaults directory must build, got: {err}");
+        panic!("the config with the shipped defaults directory must build, got: {err}");
     }
 }
 
@@ -336,7 +288,7 @@ fn schedule_file_missing_a_column_needs_a_defaults_directory() {
 fn copy_shipped_defaults_csv() -> TempDir {
     let temp = TempDir::new().expect("create temp dir");
     std::fs::copy(
-        project_root().join("defaults/Default Schedule Parameters.csv"),
+        project_root().join("python/hares/defaults/Default Schedule Parameters.csv"),
         temp.path().join("Default Schedule Parameters.csv"),
     )
     .expect("copy the shipped defaults CSV");

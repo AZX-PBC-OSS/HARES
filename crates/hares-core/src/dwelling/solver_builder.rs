@@ -4587,8 +4587,8 @@ mod tests {
         use hares_types::{EnvironmentState, GridState, PriceSignal, ZoneId, ZoneState};
         use std::collections::HashMap;
 
-        let defaults_path =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python/hares/defaults");
         let store = hares_io::DefaultsStore::load(&defaults_path)
             .expect("DefaultsStore must be loadable from project defaults/ directory");
 
@@ -4851,8 +4851,8 @@ mod tests {
         use hares_types::{EnvironmentState, GridState, PriceSignal, ZoneId, ZoneState};
         use std::collections::HashMap;
 
-        let defaults_path =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python/hares/defaults");
         let store = hares_io::DefaultsStore::load(&defaults_path)
             .expect("DefaultsStore must be loadable from project defaults/ directory");
 

@@ -31,7 +31,7 @@ fn dwelling_config_from(sim_toml: &str, fixture: &str) -> DwellingConfig {
         hpxml: InputSource::Path(home.join("building.xml")),
         schedule: Some(InputSource::Path(home.join("schedule.csv"))),
         weather: WeatherInput::Path(home.join("weather.epw")),
-        defaults: DefaultsSource::directory(repo_root().join("defaults")),
+        defaults: DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             hares_io::SimulationConfig::from_toml(sim_toml).expect("sim config parses"),
             None,

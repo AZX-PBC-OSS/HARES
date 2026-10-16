@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use hares_core::{DwellingBlueprint, DwellingBlueprintBuilder, DwellingConfig};
-use hares_io::{ParsedDefaults, ParsedHpxml, ParsedSchedule, ParsedWeather};
+use hares_io::{DefaultsSource, ParsedDefaults, ParsedHpxml, ParsedSchedule, ParsedWeather};
 use hares_types::EndUse;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -68,7 +68,9 @@ impl PyDwellingBlueprint {
                 weather: weather_arg(weather)?,
                 defaults: match defaults {
                     Some(path) => defaults_arg(path)?,
-                    None => DefaultsArg::Source(hares_io::DefaultsSource::default()),
+                    None => DefaultsArg::Source(DefaultsSource::directory(
+                        crate::py_inputs::packaged_defaults_dir(_cls.py())?,
+                    )),
                 },
                 config,
                 bldg_id,

@@ -6512,7 +6512,7 @@ mod tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
         DefaultsStore::load(&defaults_dir).expect("load defaults")
     }
 

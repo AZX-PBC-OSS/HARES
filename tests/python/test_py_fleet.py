@@ -11,7 +11,7 @@ from hares import Fleet as PyFleet
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 RESSTOCK_FIXTURES = ROOT / "tests" / "fixtures" / "resstock" / "2025.1"
 RESSTOCK_FIXTURE_WEATHER = RESSTOCK_FIXTURES / "weather"
 CZ4A_TYPICAL_EPW = ROOT / "tests" / "fixtures" / "parity" / "cz4a_ashp_hpwh" / "weather.epw"

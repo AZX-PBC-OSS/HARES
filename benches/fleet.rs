@@ -64,7 +64,7 @@ fn run_fleet_fold_once() {
                 idx as i64 + 1,
                 schedule_path.clone(),
                 weather_path.clone(),
-                Some(common::repo_defaults_path()),
+                common::repo_defaults_path(),
                 chrono::Duration::hours(24),
             );
             // The production fleet shape: the homes write no own files, so
@@ -118,7 +118,7 @@ fn bench_fleet(c: &mut Criterion) {
                                 idx as i64 + 1,
                                 schedule_path.clone(),
                                 weather_path.clone(),
-                                Some(common::repo_defaults_path()),
+                                common::repo_defaults_path(),
                                 chrono::Duration::days(1),
                             )
                         })
@@ -183,7 +183,7 @@ fn bench_fleet_fold(c: &mut Criterion) {
                                         idx as i64 + 1,
                                         schedule_path.clone(),
                                         weather_path.clone(),
-                                        Some(common::repo_defaults_path()),
+                                        common::repo_defaults_path(),
                                         chrono::Duration::hours(24),
                                     );
                                     // The production fleet shape: the homes write

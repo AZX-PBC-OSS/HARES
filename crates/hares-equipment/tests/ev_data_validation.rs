@@ -84,7 +84,7 @@ fn parse_header_indices(path: &str) -> CsvIndex {
 
 fn csv_path(filename: &str) -> String {
     format!(
-        "{}/../../defaults/ev/{filename}",
+        "{}/../../python/hares/defaults/ev/{filename}",
         env!("CARGO_MANIFEST_DIR")
     )
 }

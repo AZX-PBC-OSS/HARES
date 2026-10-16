@@ -31,7 +31,7 @@ fn one_day_manifest() -> String {
         r#"
 kind = "dwelling"
 features = [{features}]
-defaults = "defaults"
+defaults = "python/hares/defaults"
 
 [simulation]
 start_time = "2023-01-01T00:00:00-07:00"
@@ -94,7 +94,7 @@ fn golden_json_is_byte_stable() {
         first.doc.features,
         frame_golden::manifest::running_features()
     );
-    assert_eq!(first.doc.defaults_dir, "defaults");
+    assert_eq!(first.doc.defaults_dir, "python/hares/defaults");
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn cz2a_one_day_manifest(warmup_line: &str) -> String {
         r#"
 kind = "dwelling"
 features = [{features}]
-defaults = "defaults"
+defaults = "python/hares/defaults"
 
 [simulation]
 start_time = "2023-01-01T00:00:00-07:00"
@@ -237,7 +237,7 @@ overrides = {{}}
         r#"
 kind = "fleet"
 features = [{features}]
-defaults = "defaults"
+defaults = "python/hares/defaults"
 
 [fleet]
 frequency = "hourly"

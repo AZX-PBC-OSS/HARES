@@ -745,7 +745,9 @@ impl PyDwelling {
                 defaults: match defaults {
                     Some(path) => crate::py_inputs::defaults_arg(path)?,
                     None => {
-                        crate::py_inputs::DefaultsArg::Source(hares_io::DefaultsSource::default())
+                        crate::py_inputs::DefaultsArg::Source(hares_io::DefaultsSource::directory(
+                            crate::py_inputs::packaged_defaults_dir(_cls.py())?,
+                        ))
                     }
                 },
                 config,
@@ -4029,7 +4031,7 @@ mod profiling_summary_tests {
             let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             root.push("../..");
             let fixture = root.join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
-            let defaults = root.join("defaults");
+            let defaults = root.join("python/hares/defaults");
 
             let sim_config = crate::py_config::PySimulationConfig::new(
                 "2023-01-01T00:00:00-07:00",
@@ -4155,7 +4157,7 @@ mod profiling_summary_tests {
             let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             root.push("../..");
             let fixture = root.join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
-            let defaults = root.join("defaults");
+            let defaults = root.join("python/hares/defaults");
 
             let sim_config = crate::py_config::PySimulationConfig::new(
                 "2023-01-01T00:00:00-07:00",
@@ -4263,7 +4265,7 @@ mod construction_gil_tests {
             fixture.join("building.xml"),
             fixture.join("schedule.csv"),
             fixture.join("weather.epw"),
-            root.join("defaults"),
+            root.join("python/hares/defaults"),
         )
     }
 
@@ -4477,7 +4479,13 @@ mod construction_gil_tests {
                 PyString::new(py, fixture.join("weather.epw").to_str().expect("utf8")).as_any(),
                 sim_config,
                 1,
-                Some(PyString::new(py, root.join("defaults").to_str().expect("utf8")).as_any()),
+                Some(
+                    PyString::new(
+                        py,
+                        root.join("python/hares/defaults").to_str().expect("utf8"),
+                    )
+                    .as_any(),
+                ),
                 None,
                 None,
             )

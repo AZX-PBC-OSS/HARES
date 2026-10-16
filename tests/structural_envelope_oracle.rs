@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn beopt_boundary_inputs() {
         let building = parse_hpxml(&beopt_xml_path()).expect("parse BEopt HPXML");
-        let defaults_path = project_root().join("defaults");
+        let defaults_path = project_root().join("python/hares/defaults");
         let defaults = DefaultsStore::load(&defaults_path).expect("load defaults");
 
         let n_zones = building.zones.len();
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn beopt_rc_network_topology() {
         let building = parse_hpxml(&beopt_xml_path()).expect("parse BEopt HPXML");
-        let defaults_path = project_root().join("defaults");
+        let defaults_path = project_root().join("python/hares/defaults");
         let defaults = DefaultsStore::load(&defaults_path).expect("load defaults");
 
         let n_zones = building.zones.len();
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn beopt_boundary_ua_diagnostics() {
         let building = parse_hpxml(&beopt_xml_path()).expect("parse BEopt HPXML");
-        let defaults_path = project_root().join("defaults");
+        let defaults_path = project_root().join("python/hares/defaults");
         let defaults = DefaultsStore::load(&defaults_path).expect("load defaults");
 
         let n_zones = building.zones.len();
@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn beopt_ua_parity() {
         let building = parse_hpxml(&beopt_xml_path()).expect("parse BEopt HPXML");
-        let defaults_path = project_root().join("defaults");
+        let defaults_path = project_root().join("python/hares/defaults");
         let defaults = DefaultsStore::load(&defaults_path).expect("load defaults");
 
         let n_zones = building.zones.len();

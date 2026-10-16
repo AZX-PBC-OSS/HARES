@@ -71,7 +71,7 @@ destination = "memory"
         schedule: Some(InputSource::Path(dir.join("in.schedules.csv"))),
         weather: WeatherInput::Path(dir.join("G0600770_2018.csv")),
         defaults: DefaultsSource {
-            base: Some(repo_root().join("defaults")),
+            base: repo_root().join("python/hares/defaults"),
             files: [(
                 "envelope/Envelope Materials.csv".to_string(),
                 InputSource::Path(dir.join("consumer_shape_envelope_materials.csv")),
@@ -177,8 +177,8 @@ fn replay_export_reproduces_frame_bitwise() {
         .expect("the export writes");
     drop(inputs);
 
-    let replayed =
-        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let replayed = replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("the export loads");
     let result = replayed
         .build()
         .expect("the replay builds")
@@ -220,8 +220,8 @@ fn replay_export_writes_dwelling_settings() {
         "overrides.json carries the override"
     );
 
-    let replayed =
-        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let replayed = replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("the export loads");
     assert_eq!(
         replayed.config.settings.bldg_id, 176_227,
         "the bldg_id round trips"
@@ -252,8 +252,8 @@ fn replay_overrides_null_round_trips() {
         .export_replay(export.path())
         .expect("the export writes");
 
-    let replayed =
-        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let replayed = replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("the export loads");
     let result = replayed
         .build()
         .expect("the replay builds")
@@ -295,7 +295,7 @@ destination = "memory"
             content: weather_text.into(),
             format: WeatherFormat::Epw,
         },
-        defaults: DefaultsSource::directory(repo_root().join("defaults")),
+        defaults: DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(sim_config, None, 1, None),
     };
     let original = run(config);
@@ -311,8 +311,8 @@ destination = "memory"
         "the text weather exports in the format it was parsed as: {toml_text}"
     );
 
-    let replayed =
-        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let replayed = replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("the export loads");
     let result = replayed
         .build()
         .expect("the replay builds")
@@ -348,8 +348,8 @@ fn replay_with_attached_tariff_reproduces_billing() {
         "tariff.json is written"
     );
 
-    let replayed =
-        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let replayed = replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("the export loads");
     let mut replay_dwelling = replayed.build().expect("the replay builds");
     let result = replay_dwelling.simulate().expect("the replay runs");
 
@@ -438,8 +438,8 @@ fn replay_of_a_mid_run_tariff_attach_reproduces_billing() {
         "the manifest carries the attach step: {toml_text}"
     );
 
-    let replayed =
-        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let replayed = replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("the export loads");
     assert_eq!(
         replayed
             .tariff
@@ -712,8 +712,8 @@ fn replay_of_a_callback_report_replays_memory_batches_bitwise() {
         .export_replay(export.path())
         .expect("the export writes");
 
-    let replayed =
-        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let replayed = replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("the export loads");
     let result = replayed
         .build()
         .expect("the replay builds")
@@ -748,8 +748,8 @@ fn replay_of_a_file_report_replays_the_file_byte_identical() {
         .export_replay(export.path())
         .expect("the export writes");
 
-    let replayed =
-        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let replayed = replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("the export loads");
     let replay_report = replayed
         .config
         .settings
@@ -790,8 +790,8 @@ fn replay_records_the_exporting_build() {
     original
         .export_replay(export.path())
         .expect("the export writes");
-    let replayed =
-        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let replayed = replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("the export loads");
 
     let build = &original.provenance.build;
     let recorded = &replayed.recorded_build;
@@ -843,14 +843,15 @@ fn replay_load_fails_on_a_tampered_stored_input() {
     original
         .export_replay(export.path())
         .expect("the export writes");
-    replay::load(export.path(), &repo_root().join("defaults")).expect("the intact export loads");
+    replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("the intact export loads");
 
     let weather = export.path().join("inputs/weather.csv");
     let mut bytes = std::fs::read(&weather).expect("the stored weather reads");
     bytes[0] ^= 0x01;
     std::fs::write(&weather, &bytes).expect("the byte flips");
 
-    let err = replay::load(export.path(), &repo_root().join("defaults"))
+    let err = replay::load(export.path(), &repo_root().join("python/hares/defaults"))
         .expect_err("the load over a tampered input fails");
     assert!(matches!(err, HaresError::Io(_)), "the typed error: {err:?}");
     let message = err.to_string();
@@ -893,7 +894,7 @@ fn replay_load_fails_on_defaults_digest_mismatch() {
         .expect("the export writes");
 
     let copied = tempfile::tempdir().expect("the copied defaults directory");
-    copy_tree(&repo_root().join("defaults"), copied.path());
+    copy_tree(&repo_root().join("python/hares/defaults"), copied.path());
     let profiles = copied.path().join("Default Schedule Parameters.csv");
     let mut bytes = std::fs::read(&profiles).expect("the profiles read");
     bytes[0] = bytes[0].wrapping_add(1);
@@ -1059,7 +1060,7 @@ destination = "memory"
         hpxml: InputSource::Path(inputs.path().join("building.xml")),
         schedule: Some(InputSource::Path(inputs.path().join("schedule.csv"))),
         weather: WeatherInput::Path(inputs.path().join("weather.epw")),
-        defaults: DefaultsSource::directory(repo_root().join("defaults")),
+        defaults: DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(sim_config, None, 7, None),
     };
     let mut original_dwelling = Dwelling::from_config(config).expect("the dwelling builds");
@@ -1074,8 +1075,8 @@ destination = "memory"
         .expect("the export writes");
     drop(inputs);
 
-    let replayed =
-        replay::load(export.path(), &repo_root().join("defaults")).expect("the export loads");
+    let replayed = replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("the export loads");
     // The export alone carries the seed derivation's inputs: the master
     // seed and the building id derive the dwelling's stream the
     // construction does, and the replayed dwelling holds it.

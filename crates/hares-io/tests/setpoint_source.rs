@@ -45,7 +45,8 @@ fn fixture() -> PathBuf {
 }
 
 fn repo_defaults() -> DefaultsStore {
-    DefaultsStore::load(&repo_root().join("defaults")).expect("the shipped defaults load")
+    DefaultsStore::load(&repo_root().join("python/hares/defaults"))
+        .expect("the shipped defaults load")
 }
 
 /// The fixture's HPXML resolved into specs the way the parity run resolves
@@ -138,7 +139,7 @@ fn schedule_column_wins_over_hpxml_and_warns() {
     let mut specs = fixture_specs();
     let mut schedule = schedule_with_appended_column("heating_setpoint", 21.0);
     let col_idx = schedule.column_index["heating_setpoint"];
-    let defaults_dir = repo_root().join("defaults");
+    let defaults_dir = repo_root().join("python/hares/defaults");
     let mut warnings: Vec<Warning> = Vec::new();
     inject_schedule_into_specs(
         &mut specs,
@@ -204,7 +205,7 @@ fn schedule_column_wins_over_hpxml_and_warns() {
 fn sides_resolve_independently() {
     let mut specs = fixture_specs();
     let mut schedule = schedule_with_appended_column("heating_setpoint", 21.0);
-    let defaults_dir = repo_root().join("defaults");
+    let defaults_dir = repo_root().join("python/hares/defaults");
     let mut warnings: Vec<Warning> = Vec::new();
     inject_schedule_into_specs(
         &mut specs,
@@ -245,7 +246,7 @@ fn sides_resolve_independently() {
 fn hpxml_setpoints_used_without_a_column() {
     let mut specs = fixture_specs();
     let mut schedule = fixture_schedule();
-    let defaults_dir = repo_root().join("defaults");
+    let defaults_dir = repo_root().join("python/hares/defaults");
     let mut warnings: Vec<Warning> = Vec::new();
     inject_schedule_into_specs(
         &mut specs,
@@ -360,7 +361,7 @@ fn missing_setpoints_resolve_to_the_default_profile_source() {
         source_step_secs: 60,
         column_aggregations: vec![ColumnAggregation::Mean],
     };
-    let defaults_dir = repo_root().join("defaults");
+    let defaults_dir = repo_root().join("python/hares/defaults");
     let mut warnings: Vec<Warning> = Vec::new();
     inject_schedule_into_specs(
         &mut specs,
@@ -422,7 +423,7 @@ fn missing_setpoints_resolve_to_the_default_profile_source() {
 fn water_heater_setpoint_column_is_an_error() {
     let mut specs = fixture_specs();
     let mut schedule = schedule_with_appended_column("water_heater_setpoint", 50.0);
-    let defaults_dir = repo_root().join("defaults");
+    let defaults_dir = repo_root().join("python/hares/defaults");
     let mut warnings: Vec<Warning> = Vec::new();
     let error = inject_schedule_into_specs(
         &mut specs,

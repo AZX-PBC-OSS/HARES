@@ -256,11 +256,9 @@ fn catalogue_queryable_before_run() {
             frequency: hares_io::Frequency::default(),
             destination: hares_io::Destination::Memory,
         }],
-        Some(
-            std::path::Path::new("../../defaults")
-                .canonicalize()
-                .expect("the repo defaults directory exists"),
-        ),
+        std::path::Path::new("../../python/hares/defaults")
+            .canonicalize()
+            .expect("the repo defaults directory exists"),
     )
     .expect("the fixture dwelling builds");
 

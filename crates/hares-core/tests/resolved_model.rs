@@ -39,7 +39,7 @@ fn config(hpxml: &Path) -> DwellingConfig {
         weather: WeatherInput::Path(
             project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
                 start_time,
@@ -309,7 +309,7 @@ fn parity_furnace_dwelling() -> Dwelling {
         hpxml: InputSource::Path(root.join("building.xml")),
         schedule: Some(InputSource::Path(root.join("schedule.csv"))),
         weather: WeatherInput::Path(root.join("weather.epw")),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(sim_config, None, 1, None),
     })
     .expect("the fixture dwelling builds")

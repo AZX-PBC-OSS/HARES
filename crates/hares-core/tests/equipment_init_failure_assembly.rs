@@ -40,7 +40,7 @@ fn config(hpxml: &Path) -> DwellingConfig {
         weather: WeatherInput::Path(
             project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
         ),
-        defaults: DefaultsSource::directory(project_root().join("defaults")),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             hares_io::SimulationConfig {
                 start_time,
@@ -86,8 +86,8 @@ fn gain_fraction_override(equipment_name: &str, sensible_gain_fraction: f64) -> 
 /// not inject.
 fn first_scheduled_load_name(hpxml: &Path) -> String {
     let building = hares_io::parse_hpxml(hpxml).expect("the fixture's HPXML must parse");
-    let defaults =
-        hares_io::DefaultsStore::load(&project_root().join("defaults")).expect("the defaults load");
+    let defaults = hares_io::DefaultsStore::load(&project_root().join("python/hares/defaults"))
+        .expect("the defaults load");
     let mut warnings = Vec::new();
     let specs = hares_io::hpxml::equipment::resolve_equipment(
         &building,

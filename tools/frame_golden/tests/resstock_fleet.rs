@@ -22,7 +22,7 @@ fn resstock_fleet_manifest(duration_s: u64) -> String {
         r#"
 kind = "resstock_fleet"
 features = [{features}]
-defaults = "defaults"
+defaults = "python/hares/defaults"
 metadata = "tests/fixtures/resstock/2025.1/metadata_fleet3.parquet"
 buildings_dir = "tests/fixtures/resstock/2025.1"
 weather_dir = "tests/fixtures/resstock/2025.1/weather"

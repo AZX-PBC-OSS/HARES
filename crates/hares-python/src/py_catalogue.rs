@@ -385,7 +385,7 @@ mod tests {
             hpxml: InputSource::Path(home.join("building.xml")),
             schedule: Some(InputSource::Path(home.join("schedule.csv"))),
             weather: WeatherInput::Path(home.join("weather.epw")),
-            defaults: DefaultsSource::directory(root.join("defaults")),
+            defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
             settings: DwellingSettings::new(sim.clone(), None, 1, None),
         };
         let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");

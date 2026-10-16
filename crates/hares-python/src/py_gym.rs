@@ -991,7 +991,13 @@ mod tests {
             .as_any(),
             sim_config,
             0,
-            Some(PyString::new(py, root.join("defaults").to_str().expect("utf8")).as_any()),
+            Some(
+                PyString::new(
+                    py,
+                    root.join("python/hares/defaults").to_str().expect("utf8"),
+                )
+                .as_any(),
+            ),
             None,
             None,
         )

@@ -20,12 +20,13 @@ pub use blueprint::site_offset_from_inputs;
 pub use blueprint::{DwellingBlueprint, DwellingBlueprintBuilder};
 pub use conversions::{building_to_boundary_inputs, building_to_zone_inputs, stage_rank};
 
-/// The repo's shipped `defaults/` tree, the one directory test and synthetic
-/// setups load a defaults store from (the single helper): a setup whose
-/// dwelling needs the shipped defaults names this path, never a missing or
-/// working-directory-relative file.
+/// The repo's shipped `defaults/` tree, carried inside the Python package
+/// at `python/hares/defaults/` (the packaged copy the wheel ships and the
+/// one directory test and synthetic setups load a defaults store from:
+/// the single helper). A setup whose dwelling needs the shipped defaults
+/// names this path, never a missing or working-directory-relative file.
 pub fn shipped_defaults_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults")
 }
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -238,11 +239,11 @@ pub struct DwellingConfig {
     /// The dwelling's weather file: a path (format detected from the file)
     /// or in-memory content with the format given.
     pub weather: WeatherInput,
-    /// The defaults tree: a directory plus per-file replacements.
-    /// `base: None` keeps the optional defaults directory's behavior (no
-    /// default profiles: an equipment with no schedule column and no HPXML
-    /// schedule fractions is a construction error naming this field, and a
-    /// generated schedule cannot be built). The profiles never come from a
+    /// The defaults tree: a required directory plus per-file replacements.
+    /// The default schedule profiles load from it; an equipment with no
+    /// schedule column and no HPXML schedule fractions takes its default
+    /// profile from there, and a missing or unreadable tree is a
+    /// construction error naming the path. No caller falls back to a
     /// working-directory guess.
     pub defaults: DefaultsSource,
     /// The run's settings: everything the config carries but its inputs.
@@ -2881,14 +2882,13 @@ impl Dwelling {
 
     /// Builds a dwelling directly from ResStock-style input files.
     ///
-    /// No defaults directory is configured, so the schedule file must name
-    /// every mapped column the building's equipment needs: an equipment with
-    /// no schedule column, no HPXML fractions and no default profile is a
-    /// construction error. Pass a defaults directory via
-    /// [`Self::from_hpxml_with_reports`] or [`Self::from_config`].
+    /// The dwelling reads the defaults tree at `defaults`: an equipment
+    /// whose schedule source is missing otherwise (no schedule column, no
+    /// HPXML fractions) takes its default profile from there.
     ///
     /// The built config carries no reports: nothing is recorded and no file
     /// is written unless a report is requested.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_hpxml(
         hpxml_path: &Path,
         schedule_path: &Path,
@@ -2897,6 +2897,7 @@ impl Dwelling {
         time_res: Duration,
         duration: Duration,
         overrides: Option<Value>,
+        defaults: &Path,
     ) -> Result<Self> {
         Self::from_hpxml_with_reports(
             HpxmlInputs {
@@ -2909,19 +2910,19 @@ impl Dwelling {
             duration,
             overrides,
             Vec::new(),
-            None,
+            defaults.to_path_buf(),
         )
     }
 
     /// [`Self::from_hpxml`] with the run's reports, for callers that read
     /// the run's frames or files.
     ///
-    /// `defaults_path` feeds `DwellingConfig.defaults_path`: the default
+    /// `defaults_path` feeds `DwellingConfig.defaults`: the default
     /// schedule profiles load from there, and equipment whose schedule source
     /// is missing otherwise (no schedule column, no HPXML fractions) errors.
     /// The BEopt example schedule this constructor family is tested with does
     /// not name every mapped column, so the warmup regression passes the
-    /// repo's `defaults/` directory.
+    /// repo's shipped defaults directory.
     pub fn from_hpxml_with_reports(
         inputs: HpxmlInputs<'_>,
         start_time: DateTime<FixedOffset>,
@@ -2929,7 +2930,7 @@ impl Dwelling {
         duration: Duration,
         overrides: Option<Value>,
         reports: Vec<hares_io::ReportSpec>,
-        defaults_path: Option<PathBuf>,
+        defaults_path: PathBuf,
     ) -> Result<Self> {
         let HpxmlInputs {
             hpxml_path,
@@ -2959,16 +2960,14 @@ impl Dwelling {
             hpxml: InputSource::Path(hpxml_path.to_path_buf()),
             schedule: Some(InputSource::Path(schedule_path.to_path_buf())),
             weather: WeatherInput::Path(weather_path.to_path_buf()),
-            defaults: defaults_path
-                .map(DefaultsSource::directory)
-                .unwrap_or_default(),
+            defaults: DefaultsSource::directory(defaults_path),
             settings: DwellingSettings::new(sim_config, overrides, 0, None),
         };
         Self::from_config(config)
     }
 
     /// OCHRE-compatible constructor from kwargs.
-    pub fn from_ochre_kwargs(kwargs: HashMap<String, Value>) -> Result<Self> {
+    pub fn from_ochre_kwargs(kwargs: HashMap<String, Value>, defaults: &Path) -> Result<Self> {
         let hpxml_path = required_path(&kwargs, "hpxml_file")?;
         let schedule_path = required_path(&kwargs, "hpxml_schedule_file")?;
         let weather_path = required_path(&kwargs, "weather_file")?;
@@ -2985,6 +2984,7 @@ impl Dwelling {
             time_res,
             duration,
             overrides,
+            defaults,
         )
     }
 
@@ -3049,7 +3049,10 @@ impl Dwelling {
             // source is never read on this path.
             schedule: None,
             weather: hares_io::WeatherInput::Path(path.to_path_buf()),
-            defaults: hares_io::DefaultsSource::default(),
+            // The defaults field is never read on this path: the inputs
+            // below are assembled from parts around the empty handle, so
+            // the field records the empty base no file is read from.
+            defaults: hares_io::DefaultsSource::directory(PathBuf::new()),
             settings: DwellingSettings::new(
                 config.simulation.clone(),
                 config.overrides.clone(),
@@ -9331,7 +9334,7 @@ destination = "memory"
                 hpxml: InputSource::Path(home.join("building.xml")),
                 schedule: Some(InputSource::Path(home.join("schedule.csv"))),
                 weather: WeatherInput::Path(home.join("weather.epw")),
-                defaults: DefaultsSource::directory(root.join("defaults")),
+                defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
                 settings: DwellingSettings::new(
                     hares_io::SimulationConfig::from_toml(&sim_toml).expect("sim config parses"),
                     None,
@@ -9390,7 +9393,7 @@ destination = "memory"
             Vec::new(),
             // The BEopt example schedule does not name every mapped
             // column; the profiles load from the repo's defaults.
-            Some(root.join("defaults")),
+            root.join("python/hares/defaults"),
         )
         .expect("build the fixture dwelling");
 
@@ -14597,18 +14600,23 @@ occupancy = 1.0
         let sim_config = config.simulation.clone();
         sim_config.validate().expect("valid sim config");
 
-        // Point defaults_path at a defaults directory whose store loads
-        // (the shipped zip, generator-curve and EV-mapping files; a store
-        // needs them) and whose profiles CSV carries no 'Occupancy'
-        // profile, while the Occupancy spec has no HPXML extension
-        // fractions (only NumberofResidents): no occupancy source of any
-        // kind is available.
+        // Point defaults at a defaults directory whose store loads
+        // (the shipped zip, generator-curve and EV-mapping files, the
+        // multispeed and water-heating CSVs and the envelope LUT's three
+        // CSVs: a store needs them) and whose profiles CSV carries no
+        // 'Occupancy' profile, while the Occupancy spec has no HPXML
+        // extension fractions (only NumberofResidents): no occupancy
+        // source of any kind is available.
         let no_occupancy_defaults = tempfile::tempdir().expect("create temp dir");
         let shipped = shipped_defaults_dir();
         std::fs::create_dir_all(no_occupancy_defaults.path().join("ev"))
             .expect("create the ev defaults dir");
         std::fs::create_dir_all(no_occupancy_defaults.path().join("generator"))
             .expect("create the generator defaults dir");
+        std::fs::create_dir_all(no_occupancy_defaults.path().join("water_heating"))
+            .expect("create the water-heating defaults dir");
+        std::fs::create_dir_all(no_occupancy_defaults.path().join("envelope"))
+            .expect("create the envelope defaults dir");
         std::fs::copy(
             shipped.join("zip_parameters.toml"),
             no_occupancy_defaults.path().join("zip_parameters.toml"),
@@ -14630,6 +14638,34 @@ occupancy = 1.0
                 .join("vehicle_mapping.csv"),
         )
         .expect("copy the shipped EV vehicle mapping");
+        for (relative, file) in [
+            (
+                "HVAC Multispeed Parameters.csv",
+                "HVAC Multispeed Parameters.csv",
+            ),
+            (
+                "water_heating/default_paramters.csv",
+                "water_heating/default_paramters.csv",
+            ),
+            (
+                "envelope/Envelope Boundary Types.csv",
+                "envelope/Envelope Boundary Types.csv",
+            ),
+            (
+                "envelope/Envelope Materials.csv",
+                "envelope/Envelope Materials.csv",
+            ),
+            (
+                "envelope/Envelope Boundaries.csv",
+                "envelope/Envelope Boundaries.csv",
+            ),
+        ] {
+            std::fs::copy(
+                shipped.join(relative),
+                no_occupancy_defaults.path().join(relative),
+            )
+            .unwrap_or_else(|err| panic!("copy the shipped {file}: {err}"));
+        }
         std::fs::write(
             no_occupancy_defaults
                 .path()
@@ -17976,7 +18012,7 @@ destination = "memory"
             hpxml: InputSource::Path(home.join("building.xml")),
             schedule: Some(InputSource::Path(home.join("schedule.csv"))),
             weather: WeatherInput::Path(home.join("weather.epw")),
-            defaults: DefaultsSource::directory(root.join("defaults")),
+            defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 hares_io::SimulationConfig::from_toml(&sim_toml).expect("sim config parses"),
                 None,
@@ -20873,7 +20909,7 @@ latent_gain_fraction = 0.08
             schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
             weather: WeatherInput::Path(fixture.join("weather.epw")),
             defaults: DefaultsSource::directory(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults"),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults"),
             ),
             settings: DwellingSettings::new(
                 SimulationConfig {

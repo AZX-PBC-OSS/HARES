@@ -29,15 +29,13 @@ fn config_for(
     hpxml: PathBuf,
     schedule: Option<PathBuf>,
     weather: PathBuf,
-    defaults: Option<PathBuf>,
+    defaults: PathBuf,
 ) -> DwellingConfig {
     DwellingConfig {
         hpxml: hares_io::InputSource::Path(hpxml),
         schedule: schedule.map(hares_io::InputSource::Path),
         weather: hares_io::WeatherInput::Path(weather),
-        defaults: defaults
-            .map(hares_io::DefaultsSource::directory)
-            .unwrap_or_default(),
+        defaults: hares_io::DefaultsSource::directory(defaults),
         settings: DwellingSettings::new(
             SimulationConfig {
                 start_time: DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")
@@ -120,14 +118,14 @@ fn copy_fixture(src: &Path, dst: &Path) {
 #[test]
 fn two_runs_on_the_same_inputs_record_equal_input_records() {
     let (hpxml, schedule, weather) = cz4a_paths();
-    let defaults = project_root().join("defaults");
+    let defaults = project_root().join("python/hares/defaults");
     let first = run(config_for(
         hpxml.clone(),
         Some(schedule.clone()),
         weather.clone(),
-        Some(defaults.clone()),
+        defaults.clone(),
     ));
-    let second = run(config_for(hpxml, Some(schedule), weather, Some(defaults)));
+    let second = run(config_for(hpxml, Some(schedule), weather, defaults));
     assert_eq!(first, second, "the same inputs record equal digests");
 }
 
@@ -135,7 +133,7 @@ fn two_runs_on_the_same_inputs_record_equal_input_records() {
 /// schedule's digest moves, every other record is identical.
 #[test]
 fn changing_one_input_changes_exactly_that_input_record() {
-    let defaults = project_root().join("defaults");
+    let defaults = project_root().join("python/hares/defaults");
     let tmp = TempDir::new().expect("temp directory");
     copy_fixture(
         &project_root().join("tests/fixtures/parity/cz4a_ashp_hpwh"),
@@ -145,7 +143,7 @@ fn changing_one_input_changes_exactly_that_input_record() {
         tmp.path().join("building.xml"),
         Some(tmp.path().join("schedule.csv")),
         tmp.path().join("weather.epw"),
-        Some(defaults.clone()),
+        defaults.clone(),
     ));
 
     let edited = fs::read_to_string(tmp.path().join("schedule.csv"))
@@ -157,7 +155,7 @@ fn changing_one_input_changes_exactly_that_input_record() {
         tmp.path().join("building.xml"),
         Some(tmp.path().join("schedule.csv")),
         tmp.path().join("weather.epw"),
-        Some(defaults),
+        defaults,
     ));
 
     let (before_schedule, after_schedule) = (
@@ -192,7 +190,7 @@ fn input_digests_follow_content_not_path() {
         hpxml.clone(),
         Some(schedule.clone()),
         weather.clone(),
-        Some(project_root().join("defaults")),
+        project_root().join("python/hares/defaults"),
     ));
 
     let tmp = TempDir::new().expect("temp directory");
@@ -201,13 +199,16 @@ fn input_digests_follow_content_not_path() {
         tmp.path(),
     );
     let defaults_copy = tmp.path().join("defaults");
-    copy_defaults_light(&project_root().join("defaults"), &defaults_copy);
+    copy_defaults_light(
+        &project_root().join("python/hares/defaults"),
+        &defaults_copy,
+    );
 
     let moved = run(config_for(
         tmp.path().join("building.xml"),
         Some(tmp.path().join("schedule.csv")),
         tmp.path().join("weather.epw"),
-        Some(defaults_copy),
+        defaults_copy,
     ));
 
     assert_eq!(
@@ -253,8 +254,14 @@ fn defaults_digest_changes_when_one_file_is_replaced() {
     let tmp = TempDir::new().expect("temp directory");
     let defaults_before = tmp.path().join("defaults-before");
     let defaults_after = tmp.path().join("defaults-after");
-    copy_defaults_light(&project_root().join("defaults"), &defaults_before);
-    copy_defaults_light(&project_root().join("defaults"), &defaults_after);
+    copy_defaults_light(
+        &project_root().join("python/hares/defaults"),
+        &defaults_before,
+    );
+    copy_defaults_light(
+        &project_root().join("python/hares/defaults"),
+        &defaults_after,
+    );
 
     let mut edited = fs::read_to_string(defaults_after.join("zip_parameters.toml"))
         .expect("the zip parameters copy");
@@ -265,14 +272,9 @@ fn defaults_digest_changes_when_one_file_is_replaced() {
         hpxml.clone(),
         Some(schedule.clone()),
         weather.clone(),
-        Some(defaults_before),
+        defaults_before,
     ));
-    let after = run(config_for(
-        hpxml,
-        Some(schedule),
-        weather,
-        Some(defaults_after),
-    ));
+    let after = run(config_for(hpxml, Some(schedule), weather, defaults_after));
 
     assert_ne!(
         before.defaults_files_sha256, after.defaults_files_sha256,
@@ -303,8 +305,14 @@ fn file_schedule_defaults_digest_moves_with_the_profiles_csv() {
     let tmp = TempDir::new().expect("temp directory");
     let defaults_before = tmp.path().join("defaults-before");
     let defaults_after = tmp.path().join("defaults-after");
-    copy_defaults_light(&project_root().join("defaults"), &defaults_before);
-    copy_defaults_light(&project_root().join("defaults"), &defaults_after);
+    copy_defaults_light(
+        &project_root().join("python/hares/defaults"),
+        &defaults_before,
+    );
+    copy_defaults_light(
+        &project_root().join("python/hares/defaults"),
+        &defaults_after,
+    );
 
     let profiles = "Default Schedule Parameters.csv";
     let edited = fs::read_to_string(defaults_after.join(profiles))
@@ -325,14 +333,9 @@ fn file_schedule_defaults_digest_moves_with_the_profiles_csv() {
         hpxml.clone(),
         Some(schedule.clone()),
         weather.clone(),
-        Some(defaults_before),
+        defaults_before,
     ));
-    let after = run(config_for(
-        hpxml,
-        Some(schedule),
-        weather,
-        Some(defaults_after),
-    ));
+    let after = run(config_for(hpxml, Some(schedule), weather, defaults_after));
 
     assert_ne!(
         before.defaults_files_sha256, after.defaults_files_sha256,
@@ -362,7 +365,7 @@ fn generated_schedule_has_no_input_record() {
         project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
         None,
         project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        Some(project_root().join("defaults")),
+        project_root().join("python/hares/defaults"),
     ));
     assert!(
         inputs.schedule.is_none(),

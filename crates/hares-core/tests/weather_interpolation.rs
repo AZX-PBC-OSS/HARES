@@ -176,7 +176,7 @@ fn hourly_step_reads_the_record_of_the_hour_it_ends() {
         hpxml: hares_io::InputSource::Path(cz4a_dir().join("building.xml")),
         schedule: Some(hares_io::InputSource::Path(cz4a_dir().join("schedule.csv"))),
         weather: hares_io::WeatherInput::Path(weather_path),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("defaults")),
+        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(cfg, None, 1, None),
     })
     .expect("the dwelling builds");
@@ -256,7 +256,7 @@ fn first_hour_run_frame(first_hour: hares_io::FirstHour) -> Vec<u64> {
         hpxml: hares_io::InputSource::Path(cz4a_dir().join("building.xml")),
         schedule: Some(hares_io::InputSource::Path(cz4a_dir().join("schedule.csv"))),
         weather: hares_io::WeatherInput::Path(weather_path),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("defaults")),
+        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(cfg, None, 1, None),
     })
     .expect("the dwelling builds");

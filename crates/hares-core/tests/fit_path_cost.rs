@@ -74,7 +74,7 @@ impl<T> Pipe for T {}
 #[ignore = "the fit path's per-candidate cost, run by hand in the release build"]
 fn fit_path_per_candidate_cost() {
     let weather = project_root().join("tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv");
-    let defaults = DefaultsSource::directory(project_root().join("defaults"));
+    let defaults = DefaultsSource::directory(project_root().join("python/hares/defaults"));
     let candidates: Vec<f64> = (0..50).map(|idx| 2.0 + idx as f64 * 0.1).collect();
 
     // The shared handles, parsed once: the batch's weather, schedule and

@@ -154,16 +154,12 @@ pub fn rejected_hpxml_element_schemas() -> Vec<RejectedHpxmlElementSchema> {
 
 /// The defaults files a load of the defaults tree at `base` reads, in
 /// load order: the load's own read list (the input digest's material),
-/// never a parallel list. `base: None` is the engine's working-directory
-/// convention.
+/// never a parallel list.
 pub fn defaults_file_schemas(
-    base: Option<&std::path::Path>,
+    base: &std::path::Path,
 ) -> Result<Vec<String>, hares_types::HaresError> {
-    let source = match base {
-        Some(base) => crate::inputs::DefaultsSource::directory(base),
-        None => crate::inputs::DefaultsSource::default(),
-    };
-    let parsed = crate::inputs::ParsedDefaults::parse(&source)?;
+    let parsed =
+        crate::inputs::ParsedDefaults::parse(&crate::inputs::DefaultsSource::directory(base))?;
     Ok(parsed.read_files())
 }
 
@@ -235,13 +231,13 @@ mod tests {
     /// shipped `defaults/` tree reads, in load order.
     #[test]
     fn input_schema_defaults_files_equal_files_read() {
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
         let parsed =
             crate::inputs::ParsedDefaults::parse(&crate::inputs::DefaultsSource::directory(&base))
                 .expect("the shipped defaults tree parses");
         let expected = parsed.read_files();
         assert!(!expected.is_empty());
-        let schema = super::defaults_file_schemas(Some(&base)).expect("the schema's read");
+        let schema = super::defaults_file_schemas(&base).expect("the schema's read");
         assert_eq!(schema, expected);
     }
 }

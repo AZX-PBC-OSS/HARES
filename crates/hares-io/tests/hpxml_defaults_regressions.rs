@@ -23,7 +23,7 @@ fn repo_defaults() -> DefaultsStore {
         .expect("crates dir")
         .parent()
         .expect("repo root")
-        .join("defaults");
+        .join("python/hares/defaults");
     DefaultsStore::load(&defaults_dir).expect("load defaults")
 }
 

@@ -2140,6 +2140,77 @@ directory rule and the re-captured goldens.
 **Measurement:** the golden record; expected zero delta for every golden
 captured with a working defaults directory, recorded as measured.
 
+**State:** committed (2026-10-16, branch `row/r92-b10`, based on
+`8e44a61e`, one commit; the schedule row is 92). The strictness sites'
+fates. The blueprint-level error existed at the parent (the OD-64/O-49
+policy, pinned by `crates/hares-core/tests/defaults_store_policy.rs`):
+the entry's missing, unreadable and empty acceptance tests passed at the
+parent and pin it, and the store load's `MissingFile` was the error
+behind them. What this row adds. (1) The required path everywhere:
+`DefaultsSource.base` is `PathBuf`, the `Default` impl is deleted, the
+two working-directory fallbacks are gone (`load_with_overrides` takes
+`&Path`; `ParsedDefaults::with_file` uses the recorded base), the
+`inject_schedule_into_specs` relative fallback did not exist any more at
+the parent (RT-4's shared handle: the injection reads the parsed
+handle's profiles table), the Rust convenience constructors take the
+new required argument (`Dwelling::from_hpxml`'s `defaults: &Path`,
+`from_hpxml_with_reports`' `defaults_path` required,
+`from_ochre_kwargs` too), `Fleet::from_resstock`'s `defaults_path` is
+required (`&Path`; the fleet test that pinned the unset shape is
+rewritten to pin the directory reaching every dwelling's config), the
+test callers point at the shipped tree through the one helpers
+(`shipped_defaults_dir()`, now `python/hares/defaults`), and
+`ParsedDefaults::empty`/`from_parts` record the empty base no file is
+read from (the synthetic path's typed declaration, untouched).
+(2) The loader-internal strictness: `HARES_STRICT_DEFAULTS` and
+`load_with_strict_defaults` are removed (one behaviour, the strict one;
+the env-var pin asserts the load is identical with the variable set and
+unset), the envelope LUT's warn-then-fallback is an error
+(`DefaultsError::EnvelopeLut`; the lumped `fallback_r` downgrade is
+gone from the load, `envelope_lut()` stays `Option` only for the
+synthetic empty store whose boundaries never consult it),
+`Envelope Boundaries.csv` is required with the LUT's other two files
+(the hardcoded boundary-name fallback remains the resolve-time rule for
+a triple the CSV map lacks), the HVAC multispeed CSV is required (no
+relaxed mode), and the water-heating CSV is required
+(`load_water_heating_csv` returns `Result`); the generator curve and
+the EV vehicle mapping were already required at the parent (verified:
+`load_generator_curve`'s typed error, OD-24's mapping rule).
+(3) The Python packaged defaults: `hares.defaults_dir()` (a pyfunction
+resolving `hares._hares`'s own `__file__`'s parent + `defaults`,
+returning a `pathlib.Path`), the default defaults source of every
+Python surface (`Dwelling.from_hpxml`, `DwellingBlueprint.from_hpxml`,
+`DwellingConfig`, `Fleet.from_resstock`, `hares.replay`) is the
+packaged tree, an explicit path overrides it, `ParsedDefaults(base,
+files)`'s base is required, and nothing depends on the working
+directory. (4) The packaging: the tree moved `defaults/` →
+`python/hares/defaults/` (git mv, the bytes untouched), the pyproject
+`include` glob deleted (the tree rides `python-source`; at the parent
+the wheel carried no defaults at all: the glob matched nothing), the
+wheel holds 56 defaults files under `hares/defaults/` and no top-level
+`defaults/` entry. `tracing` at `debug`: the resolved defaults path at
+the load and the packaged resolution. RED first, witnessed at the
+parent: the store-level probes (`missing_multispeed_csv_is_a_load_error`,
+`water_heating_csv_missing_file_is_a_load_error`,
+`envelope_lut_missing_files_are_a_load_error`,
+`hares_strict_defaults_env_var_is_ignored`) and the dwelling-level
+`envelope_lut_load_failure_is_a_construction_error` failed on the
+warn-then-fallback behaviour, and the Python
+`python_default_defaults_are_the_packaged_tree` (no `defaults_dir`, the
+no-keyword construction reading the working directory) and
+`wheel_carries_defaults_inside_the_package` failed; GREEN the same
+tests at the row. The wheel acceptance runs explicitly
+(`--run-ignored only`; it builds a release wheel). The goldens:
+`compare-all` 8 identical and the dst set 1 identical, every product
+bitwise, the defaults digest unchanged; re-captured at the row (the movement is
+the manifests' `defaults_dir` provenance string, `defaults`
+to `python/hares/defaults`, and the capture head; the compare's second
+run of every manifest is the bitwise re-verification). Gates: fmt
+clean, clippy `--workspace --all-targets --all-features -D warnings`
+clean, nextest `--workspace --all-features -j 2` 8135/8135 (8 skipped:
+the ignored generators, this row's wheel pin among them), `pytest -m ''`
+1766 passed + 6 xfailed, 0 failed, 0 errors, pyright 0.
+
 ## B-11: Mode aggregation for multi-valued enum columns
 
 **Kind:** numeric fix (`numeric_fixes`: Mode aggregation;
