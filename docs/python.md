@@ -812,3 +812,22 @@ golden fixtures re-captured.
   other metrics field moves; the per-golden values are in the
   measurement log. A run that does not request metrics is unchanged
   (`None`, nothing computed).
+
+- 2026-10-16: the ResStock fleet's start is declared, not hardcoded: every
+  home starts Jan 1 00:00 local standard time at its own site's standard
+  offset (the site-location resolution the built dwelling runs) in the
+  weather file's own year for an actual-year release (2025.1, AMY: the
+  calendar year whose hours the file's records cover, read from the
+  file's dated stamps, so an AMY 2018 file runs 2018, not the last
+  stamp's 2019), and the caller's `typical_year` argument for a
+  typical-year release (2024.x, TMY3: no built-in year). The release
+  declares the weather-year rule (`weather_year` = `actual` for 2025.1,
+  `typical` for 2024.x), and a building whose weather file cannot be
+  resolved or read is a construction error naming every failing building
+  with its county (the warned empty weather path is gone). `Fleet.from_resstock`
+  gains the `typical_year=None` keyword. `resstock_2025_fleet`
+  re-captured: the movement is the `Time` labels' year (2019 to 2018)
+  in the `aggregate` and `covered_weight` products only - every energy,
+  power and weather column is bitwise unchanged (the homes read the
+  same records of the file: the same month, day and hour), and the
+  `homes` and `fleet_report` products are bitwise unchanged.

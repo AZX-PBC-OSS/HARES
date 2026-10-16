@@ -322,8 +322,8 @@ fn run_resstock_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
 
     // The manifest's duration (or the run's --duration-s override) is the
     // ResStock constructor's duration argument; the step and the start
-    // stay the constructor's own (one minute, the constructor's fixed
-    // start rule).
+    // stay the constructor's own (one minute; the start the constructor
+    // resolves: the weather file's own year at the site's offset).
     let seconds: i64 = match req.duration_override_s {
         Some(override_s) => override_s,
         None => i64::try_from(manifest.duration.expect("validated")).map_err(|_| {
@@ -352,6 +352,10 @@ fn run_resstock_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
             manifest.weather_dir.as_deref().expect("validated"),
         ),
         manifest.version,
+        // No typical-year argument: the manifest's 2025.1 release is an
+        // actual-year one and reads every file's own year; a typical-year
+        // release's manifest needs the argument when one exists.
+        None,
         None,
         Some(chrono::Duration::seconds(seconds)),
         Some(defaults_tree.dir()),

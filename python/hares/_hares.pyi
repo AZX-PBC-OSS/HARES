@@ -2937,6 +2937,7 @@ class Fleet:
         weather_dir: str,
         filter: dict[str, str] | None = ...,
         resstock_version: ResStockVersion | str | None = ...,
+        typical_year: int | None = ...,
         duration_s: int | None = ...,
         defaults_path: str | None = ...,
         *,

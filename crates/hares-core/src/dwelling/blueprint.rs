@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Datelike, Duration, FixedOffset};
 use hares_io::{
-    Catalogue, EquipmentSpec, InputRecords, ParsedInputs, SiteLocation, epw::DesignConditions,
-    hpxml::resolve_equipment, site_location::resolve_site_location,
+    Catalogue, EquipmentSpec, InputRecords, InputSource, ParsedInputs, SiteLocation, WeatherInput,
+    epw::DesignConditions, hpxml::resolve_equipment, site_location::resolve_site_location,
 };
 use hares_types::{EndUse, HaresError, Warning};
 
@@ -535,27 +535,46 @@ pub(crate) fn checked_offset(offset_hours: f64) -> Result<FixedOffset, HaresErro
     Ok(FixedOffset::east_opt(secs).expect("valid site offset"))
 }
 
-/// Reads a home's site UTC offset the way the built dwelling resolves it:
-/// the HPXML document's `Site` and the weather file's header (the same
-/// read-only-header functions the full parsers call, with no schedule, no
-/// defaults tree and no weather row read) and the config's site-location
-/// override through `resolve_site_location`, the offset hours converted
-/// with the blueprint's checked conversion. The fleet's alignment pre-pass
-/// reads every home's offset through this before the first home runs.
+/// Reads a home's site UTC offset from its inputs the way the built
+/// dwelling resolves it: the HPXML document's `Site` and the weather
+/// file's header (the same read-only-header functions the full parsers
+/// call, with no schedule, no defaults tree and no weather row read) and
+/// the config's site-location override through `resolve_site_location`,
+/// the offset hours converted with the blueprint's checked conversion.
+/// The fleet's alignment pre-pass reads every home's offset through this
+/// before the first home runs.
 ///
 /// # Errors
 ///
 /// [`HaresError`] when the site or the weather header cannot be read, or
 /// the resolved offset is not a finite offset within ±24 h.
 pub fn site_offset(config: &DwellingConfig) -> Result<FixedOffset, HaresError> {
-    let site = hares_io::read_site_input(&config.hpxml)
-        .map_err(|err| HaresError::Io(format!("HPXML site read failed: {err}")))?;
-    let weather_meta = hares_io::read_weather_meta_input(&config.weather)
-        .map_err(|err| HaresError::Io(format!("weather header read failed: {err}")))?;
-    let location = resolve_site_location(
-        &site,
-        &weather_meta,
+    site_offset_from_inputs(
+        &config.hpxml,
+        &config.weather,
         &config.settings.sim_config.site_location,
-    );
+    )
+}
+
+/// The site-offset resolution over one home's inputs directly: the same
+/// read `site_offset` runs on a config's fields, for a caller that
+/// resolves the offset before it has built the config (the ResStock
+/// fleet's constructor, which sets every home's start from the offset
+/// the config will then carry).
+///
+/// # Errors
+///
+/// [`HaresError`] when the site or the weather header cannot be read, or
+/// the resolved offset is not a finite offset within ±24 h.
+pub fn site_offset_from_inputs(
+    hpxml: &InputSource,
+    weather: &WeatherInput,
+    override_location: &hares_io::SiteLocationOverride,
+) -> Result<FixedOffset, HaresError> {
+    let site = hares_io::read_site_input(hpxml)
+        .map_err(|err| HaresError::Io(format!("HPXML site read failed: {err}")))?;
+    let weather_meta = hares_io::read_weather_meta_input(weather)
+        .map_err(|err| HaresError::Io(format!("weather header read failed: {err}")))?;
+    let location = resolve_site_location(&site, &weather_meta, override_location);
     checked_offset(location.utc_offset_h)
 }

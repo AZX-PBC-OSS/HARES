@@ -16,6 +16,7 @@ pub use warnings::{WarningLog, WarningLogSnapshot};
 pub use premise_zip::PremiseZip;
 
 pub use blueprint::site_offset;
+pub use blueprint::site_offset_from_inputs;
 pub use blueprint::{DwellingBlueprint, DwellingBlueprintBuilder};
 pub use conversions::{building_to_boundary_inputs, building_to_zone_inputs, stage_rank};
 

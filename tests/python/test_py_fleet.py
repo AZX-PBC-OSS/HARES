@@ -12,15 +12,28 @@ from hares import Fleet as PyFleet
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
 HARES_DEFAULTS = ROOT / "defaults"
+RESSTOCK_FIXTURES = ROOT / "tests" / "fixtures" / "resstock" / "2025.1"
+RESSTOCK_FIXTURE_WEATHER = RESSTOCK_FIXTURES / "weather"
+CZ4A_TYPICAL_EPW = ROOT / "tests" / "fixtures" / "parity" / "cz4a_ashp_hpwh" / "weather.epw"
 
 _RESSTOCK_HPXML = """<?xml version="1.0" encoding="UTF-8"?>
 <HPXML xmlns="http://hpxmlonline.com/2023/09" schemaVersion="4.0">
   <Building>
     <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <Elevation>30.0</Elevation>
+          <Latitude>41.77</Latitude>
+          <Longitude>-72.69</Longitude>
+          <TimeZone>
+            <UTCOffset>-5.0</UTCOffset>
+          </TimeZone>
+        </Site>
+      </BuildingSummary>
       <ClimateandRiskZones>
         <WeatherStation>
           <SystemIdentifier id="WeatherStation"/>
-          <Name>G0800130</Name>
+          <Name>G0900090</Name>
         </WeatherStation>
       </ClimateandRiskZones>
     </BuildingDetails>
@@ -35,6 +48,18 @@ def _write_extracted_building(buildings_dir: Path, bldg_id: int) -> Path:
     (bldg_dir / "home.xml").write_text(_RESSTOCK_HPXML)
     (bldg_dir / "in.schedules.csv").write_text("occupants\n1\n")
     return buildings_dir
+
+
+def _write_typical_epw_weather(tmp_path: Path) -> Path:
+    """Write the typical-year (TMY3) weather directory the 2024.x
+    constructor resolves: the committed cz4a typical EPW at the synthetic
+    building's own station name."""
+    import shutil
+
+    weather_dir = tmp_path / "weather"
+    weather_dir.mkdir(exist_ok=True)
+    shutil.copyfile(CZ4A_TYPICAL_EPW, weather_dir / "G0900090.epw")
+    return weather_dir
 
 
 def _create_minimal_dwelling_config(tmp_path: Path):
@@ -196,28 +221,17 @@ def test_len_returns_correct_count(tmp_path: Path) -> None:
 
 def test_from_resstock_accepts_enum(tmp_path: Path) -> None:
     """Verify from_resstock still works (regression)."""
-    metadata = tmp_path / "metadata.parquet"
-    table = pa.table(
-        {
-            "building_id": pa.array([12345]),
-            "upgrade_id": pa.array([0]),
-            "weight": pa.array([1.0]),
-            "in.state": pa.array(["CO"]),
-        }
-    )
-    pq.write_table(table, metadata)
-    _write_extracted_building(tmp_path, 12345)
-
     from hares import ResStockVersion
 
     fleet = PyFleet.from_resstock(
-        str(metadata),
-        str(tmp_path),
-        str(tmp_path),
+        str(RESSTOCK_FIXTURES / "metadata_fleet3.parquet"),
+        str(RESSTOCK_FIXTURES),
+        str(RESSTOCK_FIXTURE_WEATHER),
         resstock_version=ResStockVersion.V2025_1,
     )
 
     assert isinstance(fleet, PyFleet)
+    assert len(fleet) == 3
 
 
 def test_from_resstock_accepts_string(tmp_path: Path) -> None:
@@ -233,12 +247,14 @@ def test_from_resstock_accepts_string(tmp_path: Path) -> None:
     )
     pq.write_table(table, metadata)
     _write_extracted_building(tmp_path, 12345)
+    weather_dir = _write_typical_epw_weather(tmp_path)
 
     fleet = PyFleet.from_resstock(
         str(metadata),
         str(tmp_path),
-        str(tmp_path),
+        str(weather_dir),
         resstock_version="2024.2",
+        typical_year=2018,
     )
 
     assert isinstance(fleet, PyFleet)
@@ -246,50 +262,26 @@ def test_from_resstock_accepts_string(tmp_path: Path) -> None:
 
 def test_from_resstock_default_version_is_2025_1(tmp_path: Path) -> None:
     """Verify from_resstock defaults to V2025_1 when no version specified."""
-    metadata = tmp_path / "metadata.parquet"
-    table = pa.table(
-        {
-            "building_id": pa.array([12345]),
-            "upgrade_id": pa.array([0]),
-            "weight": pa.array([1.0]),
-            "in.state": pa.array(["CO"]),
-        }
-    )
-    pq.write_table(table, metadata)
-    _write_extracted_building(tmp_path, 12345)
-
     fleet = PyFleet.from_resstock(
-        str(metadata),
-        str(tmp_path),
-        str(tmp_path),
+        str(RESSTOCK_FIXTURES / "metadata_fleet3.parquet"),
+        str(RESSTOCK_FIXTURES),
+        str(RESSTOCK_FIXTURE_WEATHER),
     )
 
     assert isinstance(fleet, PyFleet)
-    assert len(fleet) == 1
+    assert len(fleet) == 3
 
 
 def test_from_resstock_accepts_a_defaults_path(tmp_path: Path) -> None:
     """The binding takes the defaults_path keyword its stub declares."""
-    metadata = tmp_path / "metadata.parquet"
-    table = pa.table(
-        {
-            "building_id": pa.array([12345]),
-            "upgrade_id": pa.array([0]),
-            "weight": pa.array([1.0]),
-            "in.state": pa.array(["CO"]),
-        }
-    )
-    pq.write_table(table, metadata)
-    _write_extracted_building(tmp_path, 12345)
-
     fleet = PyFleet.from_resstock(
-        str(metadata),
-        str(tmp_path),
-        str(tmp_path),
+        str(RESSTOCK_FIXTURES / "metadata_fleet3.parquet"),
+        str(RESSTOCK_FIXTURES),
+        str(RESSTOCK_FIXTURE_WEATHER),
         defaults_path=str(HARES_DEFAULTS),
     )
 
-    assert len(fleet) == 1
+    assert len(fleet) == 3
 
 
 def test_from_resstock_hpxml_dir_names_buildings_dir(tmp_path: Path) -> None:

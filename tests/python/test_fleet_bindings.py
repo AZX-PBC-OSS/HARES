@@ -5,14 +5,27 @@ import pyarrow.parquet as pq
 import pytest
 from hares import Fleet
 
+ROOT = Path(__file__).resolve().parents[2]
+CZ4A_TYPICAL_EPW = ROOT / "tests" / "fixtures" / "parity" / "cz4a_ashp_hpwh" / "weather.epw"
+
 _RESSTOCK_HPXML = """<?xml version="1.0" encoding="UTF-8"?>
 <HPXML xmlns="http://hpxmlonline.com/2023/09" schemaVersion="4.0">
   <Building>
     <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <Elevation>30.0</Elevation>
+          <Latitude>41.77</Latitude>
+          <Longitude>-72.69</Longitude>
+          <TimeZone>
+            <UTCOffset>-5.0</UTCOffset>
+          </TimeZone>
+        </Site>
+      </BuildingSummary>
       <ClimateandRiskZones>
         <WeatherStation>
           <SystemIdentifier id="WeatherStation"/>
-          <Name>G0800130</Name>
+          <Name>G0900090</Name>
         </WeatherStation>
       </ClimateandRiskZones>
     </BuildingDetails>
@@ -45,12 +58,16 @@ def test_fleet_from_resstock_accepts_2024_2(tmp_path: Path) -> None:
     metadata = tmp_path / "metadata.parquet"
     _write_resstock_2024_2_metadata(metadata)
     _write_extracted_building(tmp_path, 12345)
+    weather_dir = tmp_path / "weather"
+    weather_dir.mkdir()
+    (weather_dir / "G0900090.epw").write_bytes(CZ4A_TYPICAL_EPW.read_bytes())
 
     fleet = Fleet.from_resstock(
         str(metadata),
         str(tmp_path),
-        str(tmp_path),
+        str(weather_dir),
         resstock_version="2024.2",
+        typical_year=2018,
     )
 
     assert isinstance(fleet, Fleet)

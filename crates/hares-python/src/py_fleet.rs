@@ -188,11 +188,18 @@ impl PyFleet {
     /// dataset zips to. The fleet never unpacks a zip; a building whose
     /// directory or files are missing is an error naming the building and
     /// the fix. Each building's weather file is resolved from the FIPS code
-    /// in its own HPXML (``WeatherStation/Name``) against ``weather_dir``.
-    /// Unresolved weather only warns and leaves the dwelling an empty
-    /// weather path for now; a later row tightens this to an error.
+    /// in its own HPXML (``WeatherStation/Name``) against ``weather_dir``;
+    /// a building whose weather file cannot be resolved or read is an
+    /// error, one error naming every failing building with its county.
+    ///
+    /// The release declares the weather-year rule: 2025.1 ships
+    /// actual-meteorological-year (AMY 2018) CSV files and runs the
+    /// weather file's own year; 2024.x ships typical (TMY3) EPW files and
+    /// needs ``typical_year`` (the run's calendar year; there is no
+    /// built-in year). Every home starts Jan 1 00:00 local standard time
+    /// at its own site's standard offset.
     #[classmethod]
-    #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, duration_s=None, defaults_path=None, *, alignment=None, **unexpected))]
+    #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, typical_year=None, duration_s=None, defaults_path=None, *, alignment=None, **unexpected))]
     #[allow(clippy::too_many_arguments)]
     pub fn from_resstock(
         _cls: &Bound<'_, PyType>,
@@ -201,6 +208,7 @@ impl PyFleet {
         weather_dir: String,
         filter: Option<&Bound<'_, PyDict>>,
         resstock_version: Option<Bound<'_, PyAny>>,
+        typical_year: Option<i32>,
         duration_s: Option<i64>,
         defaults_path: Option<String>,
         alignment: Option<PyAlignment>,
@@ -237,6 +245,7 @@ impl PyFleet {
             Path::new(&buildings_dir),
             Path::new(&weather_dir),
             parsed_version,
+            typical_year,
             parsed_filter,
             duration,
             defaults_path.as_deref().map(Path::new),

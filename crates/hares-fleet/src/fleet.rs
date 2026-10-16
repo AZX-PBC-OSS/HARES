@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, FixedOffset, TimeZone};
+use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{
     Dwelling, DwellingBlueprintBuilder, DwellingConfig, DwellingSettings, DwellingTelemetry,
     RunResult, SimulationEngine, StepResult, WarmupOutcome,
@@ -214,6 +214,21 @@ pub enum FleetError {
          offset's step grid covering at least one whole reference period)"
     )]
     HeterogeneousTimeGrid { bldg_id: i64 },
+    #[error(
+        "ResStock {version} ships typical (TMY3) weather: pass the run's calendar year \
+         as `typical_year`; there is no built-in year"
+    )]
+    TypicalYearRequired { version: String },
+    #[error(
+        "ResStock {version} ships actual-year (AMY) weather and reads every file's own \
+         year: `typical_year` must be None, got {year}"
+    )]
+    TypicalYearConflict { version: String, year: i32 },
+    #[error(
+        "the ResStock fleet's weather failed for {count} building(s); every building was \
+         resolved before this error: {details}"
+    )]
+    ResStockWeatherUnresolved { count: usize, details: String },
 }
 
 /// Errors returned by [`Fleet::simulate`].
@@ -296,11 +311,29 @@ impl Fleet {
     /// building, the missing element and the fix. The layout resolution
     /// covers every metadata row: a `filter` narrows the fleet, not the
     /// parse, so a filtered fleet still requires every metadata building
-    /// to be unpacked. Each building's weather
-    /// file is resolved from the FIPS code in its own HPXML
-    /// (`WeatherStation/Name`) against `weather_dir`. Unresolved weather
-    /// only warns and leaves the dwelling an empty weather path for now;
-    /// a later row tightens this to a construction error.
+    /// to be unpacked.
+    ///
+    /// # The declared weather year and start: nothing hardcoded
+    ///
+    /// Each building's weather file is resolved from the FIPS code in its
+    /// own HPXML (`WeatherStation/Name`) against `weather_dir`, and every
+    /// building is resolved before any error is raised: a building whose
+    /// weather file cannot be resolved or read is a fleet construction
+    /// error, one error naming every failing building with its county.
+    ///
+    /// The release declares the weather-year rule (`hares_io::WeatherYear`):
+    /// 2025.1 ships actual-meteorological-year (AMY 2018) CSV files and declares
+    /// `Actual`; 2024.x ships typical (TMY3) EPW files and declares
+    /// `Typical`. Every home starts Jan 1 00:00 local standard time at its
+    /// own site's standard offset (the resolution the built dwelling runs:
+    /// the HPXML `Site`, the weather file's header and the config's
+    /// override through `resolve_site_location`). The start's year
+    /// is the weather file's own year for an actual-year release (the
+    /// calendar year whose hours the file's records cover, read from the
+    /// file's dated stamps at construction) and `typical_year` for a
+    /// typical-year release: there is no built-in year, so a typical-year
+    /// release without the argument is a construction error naming
+    /// `typical_year`, raised before any file is read.
     ///
     /// `resstock_version` defaults to the latest known schema when `None`.
     /// `duration` overrides the default 24-hour simulation duration;
@@ -309,21 +342,46 @@ impl Fleet {
     /// [`DwellingConfig::defaults_path`], with the same meaning: `None` means
     /// no default schedule profiles, so a building whose schedule lacks a
     /// column an equipment maps to fails construction naming the setting.
+    // The flat keyword-shaped argument list is the point: it mirrors the
+    // Python `Fleet.from_resstock` keyword surface name for name.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_resstock(
         metadata_path: &Path,
         buildings_dir: &Path,
         weather_dir: &Path,
         resstock_version: Option<ResStockVersion>,
+        typical_year: Option<i32>,
         filter: Option<HashMap<String, String>>,
         duration: Option<chrono::Duration>,
         defaults_path: Option<&Path>,
     ) -> Result<Self> {
         let version = resstock_version.unwrap_or(DEFAULT_RESSTOCK_VERSION);
+        // The release's declared weather-year rule, and the start's year
+        // when the release is a typical-year one. Both are decided before
+        // any file is read.
+        let weather_year = resstock_weather_year(version);
+        let typical_start_year = match (weather_year, typical_year) {
+            (hares_io::WeatherYear::Typical, None) => {
+                return Err(FleetError::TypicalYearRequired {
+                    version: version.to_string(),
+                });
+            }
+            (hares_io::WeatherYear::Actual, Some(year)) => {
+                return Err(FleetError::TypicalYearConflict {
+                    version: version.to_string(),
+                    year,
+                });
+            }
+            (hares_io::WeatherYear::Actual, None) => None,
+            (hares_io::WeatherYear::Typical, Some(year)) => Some(year),
+        };
+
         let buildings = parse_resstock_metadata(metadata_path, version, buildings_dir)
             .map_err(|err| FleetError::ResStock(err.to_string()))?;
 
-        let sim_config = resstock_sim_config(duration);
-        let duration_hours = sim_config.duration.num_seconds() as f64 / 3600.0;
+        let buildings_parsed = buildings.len();
+        let run_duration = duration.unwrap_or_else(|| Duration::hours(24));
+        let duration_hours = run_duration.num_seconds() as f64 / 3600.0;
 
         tracing::info!(
             duration_hours,
@@ -331,76 +389,143 @@ impl Fleet {
             duration_hours,
         );
 
-        let mut resolved = 0usize;
-        let mut unresolved = 0usize;
-        let buildings_parsed = buildings.len();
-
-        let entries: Vec<FleetEntry> = buildings
+        let filtered: Vec<ResStockBuilding> = buildings
             .into_iter()
             .filter(|building| matches_filter(&building.characteristics, filter.as_ref()))
-            .map(|building| {
-                let weather_path =
-                    resolve_weather_path_for_building(&building, weather_dir, version);
+            .collect();
 
-                match &weather_path {
-                    Some(path) if path.exists() && path_is_readable_weather_file(path) => {
-                        resolved += 1;
-                    }
-                    Some(_) => {
-                        unresolved += 1;
-                        tracing::warn!(
-                            bldg_id = building.bldg_id,
-                            fips = building.weather_fips.as_deref().unwrap_or("none"),
-                            "weather file not found or not readable for building"
-                        );
+        // Every building's weather is resolved before the error is raised,
+        // so the one error names every failing building with its county.
+        let mut failures: Vec<String> = Vec::new();
+        let mut entries = Vec::with_capacity(filtered.len());
+        for building in filtered {
+            let county = building
+                .weather_fips
+                .clone()
+                .unwrap_or_else(|| "unread".to_string());
+            let weather_path =
+                match resolve_weather_path_for_building(&building, weather_dir, version) {
+                    Some(path) if path_is_readable_weather_file(&path) => path,
+                    Some(path) => {
+                        failures.push(format!(
+                            "bldg{:07} (county {county}): the weather file {} is not found or not \
+                         readable",
+                            building.bldg_id,
+                            path.display()
+                        ));
+                        continue;
                     }
                     None => {
-                        unresolved += 1;
-                        tracing::error!(
-                            bldg_id = building.bldg_id,
-                            "no weather station FIPS code; cannot resolve weather file"
-                        );
+                        failures.push(format!(
+                        "bldg{:07} (county {county}): the HPXML carries no weather station FIPS \
+                         code; the weather file cannot be resolved",
+                        building.bldg_id
+                    ));
+                        continue;
+                    }
+                };
+
+            // The start's year: the weather file's own year for an
+            // actual-year release, read from the file's dated stamps
+            // (B-1c); the caller's `typical_year` for a typical-year one.
+            let start_year = match weather_year {
+                hares_io::WeatherYear::Actual => {
+                    match hares_io::parse_weather_with_location(&weather_path, 0.0, 0.0, 0.0, 0.0) {
+                        Ok(series) => match series.file_year() {
+                            Some(year) => year,
+                            None => {
+                                failures.push(format!(
+                                    "bldg{:07} (county {county}): the weather file carries no \
+                                     dated records; the actual-year start needs them",
+                                    building.bldg_id
+                                ));
+                                continue;
+                            }
+                        },
+                        Err(err) => {
+                            failures.push(format!(
+                                "bldg{:07} (county {county}): the weather file cannot be read: \
+                                 {err}",
+                                building.bldg_id
+                            ));
+                            continue;
+                        }
                     }
                 }
+                hares_io::WeatherYear::Typical => typical_start_year
+                    .expect("checked above: a typical-year release requires the year"),
+            };
 
-                let weather_path = weather_path.unwrap_or_else(|| PathBuf::from(""));
-                validate_fleet_building_zone(&building.hpxml_path, &weather_path, building.bldg_id);
-                FleetEntry {
-                    config: DwellingConfig {
-                        hpxml: InputSource::Path(building.hpxml_path),
-                        schedule: Some(InputSource::Path(building.schedule_path)),
-                        weather: WeatherInput::Path(weather_path),
-                        defaults: defaults_path
-                            .map(DefaultsSource::directory)
-                            .unwrap_or_default(),
-                        settings: DwellingSettings::new(
-                            sim_config.clone(),
-                            None,
-                            building.bldg_id,
-                            Some(hares_io::HpxmlDataPatches::from_resstock_characteristics(
-                                &building.characteristics,
-                            )),
-                        ),
-                    },
-                    sample_weight: building.sample_weight,
+            // The site's standard offset, the same resolution the built
+            // dwelling runs.
+            let offset = match hares_core::dwelling::site_offset_from_inputs(
+                &InputSource::Path(building.hpxml_path.clone()),
+                &WeatherInput::Path(weather_path.clone()),
+                &hares_io::SiteLocationOverride::default(),
+            ) {
+                Ok(offset) => offset,
+                Err(err) => {
+                    failures.push(format!(
+                        "bldg{:07} (county {county}): the site's standard offset cannot be \
+                         resolved: {err}",
+                        building.bldg_id
+                    ));
+                    continue;
                 }
-            })
-            .collect();
+            };
+            let start_time = offset
+                .with_ymd_and_hms(start_year, 1, 1, 0, 0, 0)
+                .single()
+                .expect("Jan 1 midnight is a valid local start");
+            tracing::debug!(
+                bldg_id = building.bldg_id,
+                county = county.as_str(),
+                offset_s = offset.local_minus_utc(),
+                %start_time,
+                "ResStock home start and site offset resolved"
+            );
+
+            validate_fleet_building_zone(&building.hpxml_path, &weather_path, building.bldg_id);
+            entries.push(FleetEntry {
+                config: DwellingConfig {
+                    hpxml: InputSource::Path(building.hpxml_path),
+                    schedule: Some(InputSource::Path(building.schedule_path)),
+                    weather: WeatherInput::Path(weather_path),
+                    defaults: defaults_path
+                        .map(DefaultsSource::directory)
+                        .unwrap_or_default(),
+                    settings: DwellingSettings::new(
+                        resstock_sim_config(run_duration, start_time, weather_year),
+                        None,
+                        building.bldg_id,
+                        Some(hares_io::HpxmlDataPatches::from_resstock_characteristics(
+                            &building.characteristics,
+                        )),
+                    ),
+                },
+                sample_weight: building.sample_weight,
+            });
+        }
+
+        if !failures.is_empty() {
+            return Err(FleetError::ResStockWeatherUnresolved {
+                count: failures.len(),
+                details: failures.join("; "),
+            });
+        }
 
         tracing::info!(
             total = entries.len(),
-            resolved,
-            unresolved,
-            "ResStock fleet: {} buildings with resolved weather paths, {} unresolved",
-            resolved,
-            unresolved,
+            resolved = entries.len(),
+            unresolved = 0,
+            "ResStock fleet: every building's weather file resolved and read"
         );
 
         let report = FleetBuildReport {
             buildings_parsed,
             dwellings_built: entries.len(),
-            weather_resolved: resolved,
-            weather_failed: unresolved,
+            weather_resolved: entries.len(),
+            weather_failed: 0,
         };
         Ok(Self {
             entries,
@@ -1856,14 +1981,18 @@ fn step_dwellings_parallel(
         .collect()
 }
 
-fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
+/// The ResStock home's sim config: the constructor's one-minute step and
+/// duration, and the start and weather-year rule the fleet resolved from
+/// the home's weather file and site (`from_resstock`), never a hardcoded
+/// year or offset.
+fn resstock_sim_config(
+    duration: chrono::Duration,
+    start_time: DateTime<FixedOffset>,
+    weather_year: hares_io::WeatherYear,
+) -> SimulationConfig {
     SimulationConfig {
-        start_time: FixedOffset::east_opt(0)
-            .expect("valid UTC offset")
-            .with_ymd_and_hms(2019, 1, 1, 0, 0, 0)
-            .single()
-            .expect("valid constant simulation start timestamp"),
-        duration: duration.unwrap_or_else(|| Duration::hours(24)),
+        start_time,
+        duration,
         time_res: Duration::minutes(1),
         reports: Vec::new(),
         diagnostics: false,
@@ -1876,8 +2005,19 @@ fn resstock_sim_config(duration: Option<chrono::Duration>) -> SimulationConfig {
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy: hares_io::HealthPolicy::default(),
         first_hour_interpolation: hares_io::FirstHour::default(),
-        weather_year: hares_io::WeatherYear::default(),
+        weather_year,
         warmup: hares_io::Warmup::default(),
+    }
+}
+
+/// The weather-year rule the release declares (B-1c's `WeatherYear`):
+/// 2025.1 ships actual-meteorological-year (AMY 2018) CSV files and
+/// declares `Actual`; 2024.x ships typical (TMY3) EPW files and declares
+/// `Typical`.
+fn resstock_weather_year(version: ResStockVersion) -> hares_io::WeatherYear {
+    match version {
+        ResStockVersion::V2024_1 | ResStockVersion::V2024_2 => hares_io::WeatherYear::Typical,
+        ResStockVersion::V2025_1 => hares_io::WeatherYear::Actual,
     }
 }
 
@@ -3373,6 +3513,31 @@ mod tests {
         );
     }
 
+    /// The 2024.2 metadata schema's one-row parquet (the 2024.2 column
+    /// names: `building_id`, `sample_weight`, `upgrade`), weight 1.0.
+    fn write_resstock_parquet_v2024_2(path: &Path, bldg_id: i64) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("building_id", DataType::Int64, false),
+            Field::new("sample_weight", DataType::Float64, false),
+            Field::new("upgrade", DataType::Int64, false),
+            Field::new("in.state", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![bldg_id])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![0])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["CO"])) as ArrayRef,
+            ],
+        )
+        .expect("batch");
+        let file = std::fs::File::create(path).expect("create parquet");
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), None).expect("writer");
+        writer.write(&batch).expect("write");
+        writer.close().expect("close");
+    }
+
     fn write_resstock_parquet_v2025(path: &Path, bldg_id: i64) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("building_id", DataType::Int64, false),
@@ -3397,7 +3562,10 @@ mod tests {
     }
 
     /// Write one building in the extracted layout the constructor requires:
-    /// `root/bldg{bldg_id:07}/home.xml` and `in.schedules.csv`.
+    /// `root/bldg{bldg_id:07}/home.xml` and `in.schedules.csv`. The home.xml
+    /// carries the `BuildingSummary/Site` (the site's elevation, latitude,
+    /// longitude and standard-time UTC offset) the fleet's site-offset
+    /// resolution reads, as the released ResStock HPXML documents do.
     fn write_extracted_building(root: &Path, bldg_id: i64, weather_station_name: &str) {
         let dir = root.join(format!("bldg{bldg_id:07}"));
         fs::create_dir_all(&dir).expect("create building dir");
@@ -3408,6 +3576,16 @@ mod tests {
 <HPXML xmlns='http://hpxmlonline.com/2023/09' schemaVersion='4.0'>
   <Building>
     <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <Elevation>30.0</Elevation>
+          <Latitude>41.77</Latitude>
+          <Longitude>-72.69</Longitude>
+          <TimeZone>
+            <UTCOffset>-5.0</UTCOffset>
+          </TimeZone>
+        </Site>
+      </BuildingSummary>
       <ClimateandRiskZones>
         <WeatherStation>
           <SystemIdentifier id='WeatherStation'/>
@@ -3443,6 +3621,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("fleet construction");
 
@@ -3467,7 +3646,20 @@ mod tests {
             schedule: None,
             weather: WeatherInput::Path(PathBuf::from("no.epw")),
             defaults: DefaultsSource::default(),
-            settings: DwellingSettings::new(resstock_sim_config(None), None, 1, None),
+            settings: DwellingSettings::new(
+                resstock_sim_config(
+                    Duration::hours(24),
+                    FixedOffset::east_opt(0)
+                        .expect("valid offset")
+                        .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                        .single()
+                        .expect("valid start"),
+                    hares_io::WeatherYear::Actual,
+                ),
+                None,
+                1,
+                None,
+            ),
         };
         let fleet = Fleet::from_buildings(vec![config])
             .expect("the configs carry no reserved report or shared destination");
@@ -3480,13 +3672,18 @@ mod tests {
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
         write_resstock_parquet_v2025(&pq, 1);
-        write_extracted_building(tmp.path(), 1, "G0800130");
+        write_extracted_building(tmp.path(), 1, "G0900090");
+        // The building's weather resolves against the committed weather
+        // directory: the constructor requires every building's weather
+        // file to resolve and read.
+        let weather = resstock_fixtures_root().join("2025.1/weather");
 
         let fleet = Fleet::from_resstock(
             &pq,
             tmp.path(),
-            tmp.path(),
+            &weather,
             Some(ResStockVersion::V2025_1),
+            None,
             None,
             None,
             None,
@@ -3528,6 +3725,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("fleet construction");
         assert_eq!(fleet.entries.len(), 1);
@@ -3562,13 +3760,15 @@ mod tests {
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
         write_resstock_parquet_v2025(&pq, 1);
-        write_extracted_building(tmp.path(), 1, "G0800130");
+        write_extracted_building(tmp.path(), 1, "G0900090");
+        let weather = resstock_fixtures_root().join("2025.1/weather");
 
         let fleet = Fleet::from_resstock(
             &pq,
             tmp.path(),
-            tmp.path(),
+            &weather,
             Some(ResStockVersion::V2025_1),
+            None,
             None,
             Some(Duration::days(365)),
             None,
@@ -3604,6 +3804,7 @@ mod tests {
             &fixtures,
             &fixtures.join("weather"),
             Some(ResStockVersion::V2025_1),
+            None,
             None,
             None,
             None,
@@ -3644,6 +3845,7 @@ mod tests {
             &fixtures,
             &fixtures.join("weather"),
             Some(ResStockVersion::V2025_1),
+            None,
             None,
             None,
             Some(&repo_defaults_path()),
@@ -3701,6 +3903,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect_err("a zip archive is not the unpacked layout");
         let message = err.to_string();
@@ -3711,6 +3914,242 @@ mod tests {
         assert!(
             message.contains("unpacked buildings directory"),
             "must name the fix: {message}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // B-9's acceptance: the ResStock fleet's year and offset are
+    // declared, not hardcoded.
+    // -------------------------------------------------------------------
+
+    /// The B-9a fixture's inputs: the three WA homes (G5300330) and their
+    /// AMY 2018 weather files.
+    fn fleet3_inputs() -> (PathBuf, PathBuf, PathBuf) {
+        let fixtures = resstock_fixtures_root().join("2025.1");
+        (
+            fixtures.join("metadata_fleet3.parquet"),
+            fixtures.clone(),
+            fixtures.join("weather"),
+        )
+    }
+
+    /// A ResStock fleet on an actual-year (AMY) file runs the weather
+    /// file's own year at the site's offset: every home of the B-9a
+    /// fixture starts 2018-01-01T00:00:00-08:00 (Washington, G5300330,
+    /// the HPXML Site's own UTCOffset) with `weather_year = Actual`,
+    /// never the removed 2019-01-01 UTC+0 assumption.
+    #[test]
+    fn resstock_actual_year_fleet_runs_the_weather_year() {
+        let (metadata, buildings, weather) = fleet3_inputs();
+        let fleet = Fleet::from_resstock(
+            &metadata,
+            &buildings,
+            &weather,
+            Some(ResStockVersion::V2025_1),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("the fleet builds");
+        assert_eq!(fleet.entries.len(), 3);
+        for entry in &fleet.entries {
+            let sim = &entry.config.settings.sim_config;
+            assert_eq!(
+                sim.start_time,
+                FixedOffset::east_opt(-8 * 3600)
+                    .expect("valid offset")
+                    .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                    .single()
+                    .expect("valid start"),
+                "the home starts the weather file's own year at the site's offset"
+            );
+            assert_eq!(
+                sim.weather_year,
+                hares_io::WeatherYear::Actual,
+                "the AMY release declares the actual-year rule"
+            );
+        }
+    }
+
+    /// A typical-year (TMY3) release has no built-in year: without the
+    /// year argument the construction is an error naming the argument,
+    /// raised before any file is read (the metadata path here does not
+    /// exist, so a metadata read would name the file instead).
+    #[test]
+    fn resstock_typical_year_needs_a_year() {
+        let (_metadata, buildings, _) = fleet3_inputs();
+        let err = Fleet::from_resstock(
+            &PathBuf::from(MISSING_ROOT).join("metadata.parquet"),
+            &buildings,
+            &buildings,
+            Some(ResStockVersion::V2024_2),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("a typical-year release without a year is an error");
+        let message = err.to_string();
+        assert!(
+            message.contains("typical_year"),
+            "the error must name the argument: {message}"
+        );
+    }
+
+    /// A typical-year ResStock fleet's run wraps by day of year (B-1c):
+    /// the constructor declares `Typical` and the caller's year, and a run
+    /// longer than the file's year reads Jan 1's records again on the
+    /// wrapped dates. The home runs the constructor's declared start
+    /// (2023-01-01 00:00 at the site's offset) over 367 days at the hour
+    /// step, and the last 24 hours - the steps ending 2024-01-01 01:00 to
+    /// 2024-01-02 00:00 local - read the file's own Jan 1 records.
+    #[test]
+    fn resstock_typical_year_fleet_wraps_by_day_of_year() {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("test.parquet");
+        // One home at the metadata's weight 1.0, so the aggregate's
+        // weighted mean is the home's own values bit for bit.
+        write_resstock_parquet_v2024_2(&pq, 19_694);
+        let buildings = resstock_fixtures_root().join("2025.1");
+        // The weather: a typical-year EPW at the building's own station
+        // name (2024.x resolves `{fips}.epw`).
+        let weather_dir = tempdir().expect("weather dir");
+        let epw = weather_dir.path().join("G5300330.epw");
+        fs::copy(
+            repo_root().join("tests/fixtures/parity/cz4a_ashp_hpwh/weather.epw"),
+            &epw,
+        )
+        .expect("the cz4a typical file copies");
+
+        let mut fleet = Fleet::from_resstock(
+            &pq,
+            &buildings,
+            weather_dir.path(),
+            Some(ResStockVersion::V2024_2),
+            Some(2023),
+            None,
+            None,
+            Some(&repo_defaults_path()),
+        )
+        .expect("the typical-year fleet builds with its declared year");
+        assert_eq!(fleet.entries.len(), 1);
+        assert_eq!(
+            fleet.entries[0].config.settings.sim_config.start_time,
+            FixedOffset::east_opt(-8 * 3600)
+                .expect("valid offset")
+                .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid start"),
+            "the declared year at the site's offset"
+        );
+        // The wrap run at the hour step (the file's own step): 367 days
+        // crosses Dec 31 into Jan 1. The LocalClock alignment labels the
+        // hourly rows at the home's own local period starts, so the
+        // wrapped Jan 1 rows carry their local labels.
+        for entry in &mut fleet.entries {
+            entry.config.settings.sim_config.time_res = Duration::hours(1);
+            entry.config.settings.sim_config.duration = Duration::days(367);
+        }
+        let fleet = fleet.with_alignment(crate::fold::Alignment::LocalClock);
+
+        let result = fleet
+            .simulate(
+                &crate::fold::FleetReport {
+                    selection: hares_io::Selection::Verbosity(2),
+                    frequency: hares_io::Frequency::Hourly,
+                    health_policy: hares_io::HealthPolicy::default(),
+                },
+                1,
+                chunk(2),
+            )
+            .expect("the wrap run completes");
+        let home = &result.homes[0];
+        assert!(
+            matches!(home.status, HomeStatus::Ok),
+            "the wrap run is clean: {:?}",
+            home.status
+        );
+
+        // The file's own Jan 1 records, parsed from the same EPW copy.
+        let series = hares_io::parse_weather(&epw).expect("the typical file parses");
+        let jan1: Vec<f64> = series.dry_bulb_c[..24].to_vec();
+
+        let aggregate = &result.aggregate;
+        let time = aggregate
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("a Utf8 Time column");
+        let dry_bulb = aggregate
+            .column(
+                aggregate
+                    .schema()
+                    .fields()
+                    .iter()
+                    .position(|field| field.name() == "Outdoor Dry Bulb (C)")
+                    .expect("the verbosity-2 aggregate carries the outdoor dry bulb"),
+            )
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("a Float64 outdoor dry bulb column");
+        let len = time.len();
+        assert_eq!(len, 367 * 24, "the run's hours, the wrap included");
+        assert!(
+            (0..len).any(|row| time.value(row).starts_with("2023-12-31T00:00:00")),
+            "the run reaches the file's Dec 31 on its local labels"
+        );
+        // The run covers local 2023-01-01 to 2024-01-03; the wrapped Jan 1
+        // is the 24 rows before the last 24 (the wrapped Jan 2).
+        assert!(
+            time.value(len - 24).starts_with("2024-01-02"),
+            "the run crosses the wrapped Jan 1: {:?}",
+            time.value(len - 24)
+        );
+        for (k, expected) in jan1.iter().enumerate() {
+            let row = len - 48 + k;
+            assert!(
+                time.value(row).starts_with("2024-01-01"),
+                "row {row} is on the wrapped date: {:?}",
+                time.value(row)
+            );
+            assert_eq!(
+                dry_bulb.value(row),
+                *expected,
+                "the wrapped Jan 1 reads the file's Jan 1 record {k}"
+            );
+        }
+    }
+
+    /// A building whose weather file cannot be resolved is a fleet
+    /// construction error: one error naming every unresolved building
+    /// with its county, not a warned empty path.
+    #[test]
+    fn unresolved_resstock_weather_is_an_error() {
+        let (metadata, buildings, _) = fleet3_inputs();
+        let empty_weather = tempdir().expect("tmp");
+        let err = Fleet::from_resstock(
+            &metadata,
+            &buildings,
+            empty_weather.path(),
+            Some(ResStockVersion::V2025_1),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("unresolved weather is a construction error");
+        let message = err.to_string();
+        for building in ["bldg0019694", "bldg0162486", "bldg0352714"] {
+            assert!(
+                message.contains(building),
+                "must name {building}: {message}"
+            );
+        }
+        assert_eq!(
+            message.matches(" (county G5300330)").count(),
+            3,
+            "each building is named with its county: {message}"
         );
     }
 

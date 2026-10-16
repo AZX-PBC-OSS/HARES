@@ -3521,3 +3521,41 @@ the end use's electric (the fan draw), as the formula documents.
 The goldens re-captured TWICE BYTE-IDENTICAL (compare-all 8 + dst 1),
 the two captures' sha256 equal per manifest; after the re-capture
 compare-all is green on both builds.
+
+### The ResStock weather year and offset row, 2026-10-16 (the worktree `r91-b9`)
+
+The B-9 delta on `resstock_2025_fleet`, read with `frame_golden delta`
+against the parent `588b4c51`'s materialized frames: the movement is the
+timestamps only, and every energy, power and weather column is bitwise
+unchanged.
+
+- `aggregate`, `covered_weight`: the `Time` column's 48 cells move,
+  row 0 `2019-01-01T08:00:00Z` to `2018-01-01T08:00:00Z` and in step to
+  the end of the run; no other column of either product differs (0
+  differing cells). The start moves from the hardcoded 2019-01-01 00:00
+  +00:00 to the weather file's own year at the site's standard offset
+  (2018-01-01 00:00 -08:00, the HPXML Site's own UTCOffset for the
+  Washington homes, county G5300330); the `Z` rendering is the fold's
+  +00:00 alignment for a single-offset fleet, the same string shape in
+  both runs.
+- `homes`, `fleet_report`: bitwise identical (every per-home total,
+  status, weight and the construction report's counts).
+
+Why nothing else moves: the parent's run started 2019-01-01 00:00 +00:00
+under the typical rule and read the file's Jan 1 records at its first
+steps (the calendar addressing, row 81); the row's run starts the
+file's own year 2018-01-01 00:00 -08:00 under the actual rule and reads
+the same records of the file at the same step indices (the same month,
+day and hour of an hourly file; the schedule's month-and-day rows
+likewise, both years non-leap). The 2-day fixture's energies are
+identical bit for bit; the timestamps carry the whole movement. The
+entry's "annual energy per home" premise does not arise on the fixture:
+the duration is 2 days and no energy column moves.
+
+The capture re-run twice byte-identical (the golden's sha256 equal,
+`be37d362748c7c8e9949676a042794418b2343a93b7cbc14758ec14cb5066c25`);
+compare-all 8 identical, the dst set's `full_year_900s_dst` identical.
+No physics comparison suite moves: the row changes no engine physics
+path (the fleet's construction declares the config; the dwelling,
+environment and solver surfaces are untouched and the full workspace
+suite's BESTEST and parity tests pass unchanged).

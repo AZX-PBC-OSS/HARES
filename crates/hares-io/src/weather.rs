@@ -734,6 +734,61 @@ impl WeatherTimeSeries {
             .position(|stamp| stamp.stamp_datetime() == Some(t))
     }
 
+    /// The file's own year: the calendar year whose hours the file's
+    /// records cover. The covered interval runs from the first record's
+    /// interval start to the last record's interval end (an
+    /// [`RecordLabel::IntervalEnd`] file's covered interval starts one
+    /// interval before its first stamp; an [`RecordLabel::IntervalStart`]
+    /// file's ends one interval after its last stamp), and the year that
+    /// owns most of those hours is the file's own year: for an
+    /// `IntervalEnd` AMY 2018 file stamped 2018-01-01 01:00 to
+    /// 2019-01-01 00:00 the covered hours are the hours of 2018, not the
+    /// year of the last stamp. `None` when the series carries no dated
+    /// stamps (a series built in code).
+    #[must_use]
+    pub fn file_year(&self) -> Option<i32> {
+        use chrono::Datelike;
+
+        let covered_start = self.stamps.first()?.stamp_datetime()?;
+        let covered_end = self.stamps.last()?.stamp_datetime()?;
+        let interval = i64::from(self.meta.source_step_secs.max(1));
+        let (covered_start, covered_end) = match self.meta.record_label {
+            RecordLabel::IntervalEnd => (
+                covered_start - chrono::Duration::seconds(interval),
+                covered_end,
+            ),
+            RecordLabel::IntervalStart => (
+                covered_start,
+                covered_end + chrono::Duration::seconds(interval),
+            ),
+        };
+        // The covered interval's seconds per calendar year; the majority
+        // year is the file's own year. A complete-year file covers one
+        // calendar year exactly, so this loop is two iterations there.
+        let mut best_year = covered_start.year();
+        let mut best_secs: i64 = -1;
+        let mut year = covered_start.year();
+        while year <= covered_end.year() {
+            let year_start = chrono::NaiveDate::from_ymd_opt(year, 1, 1)
+                .expect("Jan 1 is a real date")
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is a real time");
+            let next_start = chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+                .expect("Jan 1 is a real date")
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight is a real time");
+            let lo = covered_start.max(year_start);
+            let hi = covered_end.min(next_start);
+            let secs = (hi - lo).num_seconds().max(0);
+            if secs > best_secs {
+                best_secs = secs;
+                best_year = year;
+            }
+            year += 1;
+        }
+        Some(best_year)
+    }
+
     /// Indexed access into a specific weather column.
     ///
     /// # Panics
@@ -2232,5 +2287,102 @@ Year,Month,Day,Hour,Minute,DHI,DNI,GHI,Temperature,Pressure,Dew Point,Relative H
         assert_eq!(circular_interp(180.0, f64::NAN, 0.5), 180.0);
         assert_eq!(circular_interp(180.0, -9999.0, 0.5), 180.0);
         assert_eq!(circular_interp(180.0, 360.0, 0.5), 180.0);
+    }
+
+    /// A stamped hourly series: `count` records whose stamps run from
+    /// the stated first stamp (year, month, day, hour 1) forward one
+    /// hour per record, under the stated record label.
+    fn stamped_series(
+        year: i32,
+        month: u32,
+        day: u32,
+        count: usize,
+        label: RecordLabel,
+    ) -> WeatherTimeSeries {
+        use super::RecordStamp;
+        use chrono::Datelike;
+        use chrono::Timelike;
+
+        let start = NaiveDate::from_ymd_opt(year, month, day)
+            .expect("a valid start date")
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight");
+        let stamps = (0..count)
+            .map(|k| {
+                let t = start + chrono::Duration::hours(k as i64 + 1);
+                RecordStamp {
+                    year: t.year(),
+                    month: t.month() as u8,
+                    day: t.day() as u8,
+                    hour: t.hour() as u8,
+                    minute: 0,
+                }
+            })
+            .collect();
+        let mut series = hourly_series(&[0.0; 24]);
+        series.stamps = stamps;
+        series.meta.record_label = label;
+        // Pad every column from the helper's one day to the record count
+        // so the series is self-consistent.
+        for column in [
+            &mut series.dry_bulb_c,
+            &mut series.dew_point_c,
+            &mut series.rel_humidity_pct,
+            &mut series.pressure_kpa,
+            &mut series.ghi_w_m2,
+            &mut series.dni_w_m2,
+            &mut series.dhi_w_m2,
+            &mut series.wind_speed_m_s,
+            &mut series.wind_dir_deg,
+            &mut series.opaque_sky_cover,
+            &mut series.horizontal_infrared_w_m2,
+            &mut series.sky_temp_c,
+            &mut series.ground_temp_c,
+            &mut series.liquid_precip_m,
+        ] {
+            column.extend(core::iter::repeat_n(0.0, count.saturating_sub(24)));
+        }
+        series
+    }
+
+    /// The file's own year of the B-9 evidence file's shape: an
+    /// `IntervalEnd` AMY 2018 file stamped 2018-01-01 01:00 to
+    /// 2019-01-01 00:00 covers the hours of 2018, not the year of its
+    /// last stamp.
+    #[test]
+    fn file_year_of_an_interval_end_amy_file_is_the_year_its_hours_cover() {
+        use chrono::Datelike;
+
+        let series = stamped_series(2018, 1, 1, 8760, RecordLabel::IntervalEnd);
+        let first = series.stamps.first().expect("stamps").date();
+        let last = series.stamps.last().expect("stamps").date();
+        assert_eq!((first.year(), first.month(), first.day()), (2018, 1, 1));
+        assert_eq!(
+            (last.year(), last.month(), last.day()),
+            (2019, 1, 1),
+            "the last stamp is the next Jan 1 midnight, the hour-ending convention"
+        );
+        assert_eq!(
+            series.file_year(),
+            Some(2018),
+            "the covered hours are the hours of 2018, not the last stamp's year"
+        );
+    }
+
+    /// An `IntervalStart` file's covered interval ends one interval after
+    /// its last stamp: a 2019 file stamped Jan 1 00:00 to Dec 31 23:00
+    /// covers the hours of 2019.
+    #[test]
+    fn file_year_of_an_interval_start_file_is_the_year_its_hours_cover() {
+        let series = stamped_series(2019, 1, 1, 8760, RecordLabel::IntervalStart);
+        assert_eq!(series.file_year(), Some(2019));
+    }
+
+    /// A series with no dated stamps (built in code) carries no file
+    /// year.
+    #[test]
+    fn file_year_of_a_series_without_stamps_is_none() {
+        let series = hourly_series(&[0.0; 24]);
+        assert_eq!(series.file_year(), None);
     }
 }

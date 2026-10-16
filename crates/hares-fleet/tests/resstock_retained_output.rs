@@ -18,6 +18,7 @@ fn fleet() -> hares_fleet::Fleet {
         &fixtures.join("weather"),
         Some(ResStockVersion::V2025_1),
         None,
+        None,
         Some(chrono::Duration::seconds(3600)),
         Some(&root.join("defaults")),
     )

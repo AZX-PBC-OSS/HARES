@@ -1971,6 +1971,66 @@ offset and `resstock_2025_fleet`.
 timestamps; the weather the homes read moves from 2019 dates on 2018
 records to 2018 dates, and the clock from UTC to UTC-8).
 
+**State:** committed (branch `row/r91-b9`, worktree `r91-b9`, based on
+`588b4c51`). The hardcodes, found where the entry names them:
+`resstock_sim_config`'s `FixedOffset::east_opt(0)` and
+`with_ymd_and_hms(2019, 1, 1, 0, 0, 0)` (the start every home ran) and
+its `weather_year: WeatherYear::default()` (the typical rule over AMY
+files), and the unresolved-weather path's
+`weather_path.unwrap_or_else(|| PathBuf::from(""))` behind the
+`tracing::warn!`/`error!`. RED first, at the parent `588b4c51`: the
+acceptance tests failed to compile there on the missing `typical_year`
+argument (E0061, only the tests applied), and the two differentials,
+temporarily written to the parent's signature, failed on the behaviour -
+`resstock_actual_year_fleet_runs_the_weather_year` read
+`2019-01-01T00:00:00+00:00` against the declared
+`2018-01-01T00:00:00-08:00` (the differential: the file's own year 2018
+against the hardcoded 2019, the site's -08:00 against the hardcoded
++00:00), and `unresolved_resstock_weather_is_an_error` built the fleet
+with all three homes' weather pointing into the empty directory
+(`weather_resolved: 0, weather_failed: 3`, the warned empty path). GREEN
+at the commit: `resstock_sim_config` takes the resolved start and the
+declared year (no year, no offset in it); the release declares the
+weather-year rule (`resstock_weather_year`: 2025.1 `Actual`, 2024.x
+`Typical`); the actual-year start's year is each file's own year, read
+from the parsed file's dated stamps through the new
+`WeatherTimeSeries::file_year` (hares-io; the covered interval from the
+stamps and record label, the majority year its own: the 2018 file
+stamped 2018-01-01 01:00 to 2019-01-01 00:00 reads 2018, not the last
+stamp's year), and the typical-year start's year is the new required
+`typical_year` argument (no built-in year; the check fires before any
+file is read, and a year passed to an actual-year release is a
+conflict error naming it); the offset is the site's standard offset
+through the new `site_offset_from_inputs` (hares-core, the
+`site_offset` resolution over the inputs directly, the same
+`resolve_site_location` and checked conversion the built dwelling and
+the alignment pre-pass run); every building's weather is resolved
+before the error is raised, one `ResStockWeatherUnresolved` naming
+every failing building with its county, the site-offset failures
+joined; `tracing::debug!` carries each home's start and offset. The
+Python surface: the binding gains the `typical_year=None` keyword (the
+stub with it). The wrap crossing pinned at the fleet level
+(`resstock_typical_year_fleet_wraps_by_day_of_year`): a 2024.2 fleet at
+the declared year 2023 runs 367 days at the hour step through the
+LocalClock alignment and the last-but-one day's 24 hourly rows read the
+file's own Jan 1 records bit for bit. The test buildings'
+`write_extracted_building` gained the `BuildingSummary/Site` the
+offset resolution reads (the released HPXML documents carry it), and
+the Python binding tests' synthetic buildings with it; the
+`resstock_2025_fleet` manifest, buildings and weather unchanged. The
+delta (in `02-measurement.md`'s ResStock section): the movement is the
+`Time` labels' year in `aggregate` and `covered_weight` (48 cells each,
+2019 to 2018); `homes`, `fleet_report` and every energy, power and
+weather column bitwise (the homes read the same records of the file at
+the same step indices; the schedule's month-and-day rows likewise), so
+the entry's "annual energy per home" premise does not arise on the
+2-day fixture. Gates at the row: fmt clean, clippy `--workspace
+--all-targets --all-features -D warnings` clean, nextest `--workspace
+--all-features -j 2` 8129/8129 (7 skipped), `pytest -m ''` 1764 passed
++ 6 xfailed, 0 failed, 0 errors, pyright 0, the goldens: compare-all 8
+identical, the dst set 1 identical, `resstock_2025_fleet` re-captured
+twice byte-identical.
+
 ## B-10: missing defaults directory is an error
 
 **Kind:** numeric fix (a silent-default removal that changes which
