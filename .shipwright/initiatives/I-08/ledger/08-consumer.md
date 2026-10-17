@@ -1408,6 +1408,97 @@ precedence and row selection, see B-13).
 file after `defaults.py` leaves); `contract.txt` holds
 `[hares-contract] PASS` on this row's engine. Absorbed by B1.
 
+**State:** landed (2026-10-16). Consumer `a7b35cdd` on branch
+`row/r95-cn3` (cut from the landed main `78f20657`), carrying the row 82
+consumer commit replayed as `1316d184` (branch tip `c7b56ddb`; its
+weather alignment this row's gate needs on this engine, the rebase's
+shared kwarg-rules text resolved to this row's wording) and `973f57e8`
+(the two AMI2 bands re-measured, below); engine `482323b9` on the row
+branch
+(worktree `r95-cn3`, based on `fc705e43`), the input-schema fold
+addition the entry needs: `impl DescribeFields for EnvelopeScales`
+beside the definition (the two fields, default 1.0, bounds (0, 10]) and
+the reserved `envelope` key among the schema's override classes, from
+that impl, with the `envelope_scales_described_with_bounds` acceptance
+and the enforcement test treating the reserved key as its own class
+(no equipment sample: the scales' own deserialisation and bounds
+validation enforce it). Landed whole: the two factors are OVERRIDE
+factors with `equipment="envelope"` and `path=("opaque_r_scale",)` /
+`path=("thermal_mass_scale",)`, so the injector's existing override
+dispatch writes `overrides["envelope"]` and the engine applies the
+scales after the LUT row selection; the `DEFAULTS` route constant,
+`Factor.defaults_key`, its validation and its `_route_target` arm are
+deleted with `calibration/defaults.py` (the `build_bundle.py`
+registration with it, the registry reporting no MISSING and none
+untracked after), `DefaultsVariant` and its `suite_inject` case, the
+`by_defaults` map and its use, and the `Defaults(base, files)` form of
+`RunSpec.defaults` with its `engine_inputs` branch (`RunSpec.defaults`
+is a `Path`; every spec carries `paths.DEFAULTS` itself); the
+`Resistance|Capacitance` rule classifies the two columns STRUCTURAL
+naming the override route (no factor edits them any more), the
+`Assembly R Value` and `NominalRValue|AssemblyEffectiveRValue` notes
+state the declared-R precedence and the new route (the latter's
+`UNREACHABLE` premise, the LUT outranking the declared R, is gone with
+that precedence: the element is live physics again, UNIDENTIFIABLE, not
+in the declared free set), the override surface enumerates the
+schema's reserved class beside the equipment classes, the accepted
+keyword set drops the removed `initialization_duration` and `warmup`,
+`first_hour_interpolation` and `weather_year` classify (the gate reads
+the published schema of an engine that carries them; the row 82
+consumer commit classifies the same three and the folds reconcile),
+`known_kwargs`' accepted set loses the removed key, the
+bench's defaults-variant timing is gone, and the four-route prose
+follows. The SI renames of the entry's later range are consistent
+rather than moved: this row's engine carries no equipment SI renames
+(their rows unlanded), so the consumer's kW spellings stay consistent
+with it, and the entry's post-rename census form (written for the state
+where the engine's SI commits have landed and prints nothing there)
+still matches these same consistent reads on this row's engine; the
+renames this entry's range owns resolve on the consumer row that gates
+on an engine carrying them.
+
+RED first, all four consumer pieces, witnessed at the base (the
+consumer at main plus the defaults-path fix only, the engine at
+`fc705e43`): `opaque_r_scale_never_reselects_a_row` failed on every
+opaque boundary (got nominal, want nominal times the factor: the old
+route was inert under the declared-R rescale), 
+`thermal_mass_scale_moves_resolved_capacitance_only` failed off bits at
+1.5 (the CSV text's 10-significant-digit rounding),
+`no_evaluation_replaces_a_defaults_file` failed (the spec carried a
+replaced file), and `every_registry_factor_targets_a_real_field` failed
+on the two factors not being OVERRIDE on the published schema. GREEN
+after, on the row's engine.
+
+Movement declared: the DE-trace on the row's final state captured
+twice, identical. Against the recorded B0: 269 of the 379 common
+per-premise leaves differ, every premise's loss and fitted vector
+moved, and `n_eval` is at -2 per premise (the recorded parent-probe
+rule, not this row); the attribution: the recorded engine rows 1 to 93
+and consumer rows 72 to 82 carry most of it, each with its own delta
+record, and the row's own routing is isolated by a differential capture
+on the same engine with the old routing: every premise's trace diverges
+at generation 0, because the envelope factors' evaluations move bitwise
+under the new routing, and the DE's early exits propagate the
+divergence from the first generation (every fitted vector differs;
+premise 2's `n_rejected` 1 to 0). Two AMI2 measured bands the engine
+rows since the last consumer-gated engine crossed are re-measured and
+re-pinned with the cause: F7's event-window band 0.10 to 0.15 (measured
+-13.1% against the realised shed; the own-event form stays inside 10%)
+and the GEB shape's comfort bound 2.0 to 2.5 (measured 2.116 C; the
+assertion stays a bound on the executed shape's comfort cost, no longer
+the era's claim). Absorbed by B1.
+
+Gates: the consumer `run_all` 382 passed, 0 failed, 7 skipped (the base
+seven), ruff clean, `hares_contract_check.py` prints
+`[hares-contract] PASS` on this row's engine, `build_bundle.py`'s
+registry no MISSING file and none untracked; the engine fmt clean,
+clippy `--workspace --all-targets --all-features -D warnings` clean,
+nextest `--workspace --all-features -j 2` once 8145/8145 (8 skipped;
+the first run's one failure was the fresh worktree's uninitialised
+OCHRE submodule, populated and the suite re-run), `pytest -m ''`
+1766 passed + 6 xfailed, 0 failed, 0 errors, pyright 0 errors, the
+goldens bitwise (compare-all 8 + dst 1 identical, no re-capture).
+
 **Commit:** `fix: route the envelope factors through the engine's envelope scales`
 
 **Dependencies:** `09-numeric-fixes.md` B-2, B-5, B-13, B-14 (its three
