@@ -1029,17 +1029,31 @@ fn inject_setpoint_schedules(
                 // Schedule CSV provides a per-timestep heating column.
                 Some(col_idx) => {
                     if set_typed_setpoint_source(spec, "heating", col_idx) {
-                        spec.heating_setpoint_source = Some(SetpointSource::ScheduleColumn {
+                        let source = SetpointSource::ScheduleColumn {
                             column: "heating_setpoint".to_string(),
-                        });
+                        };
+                        tracing::debug!(
+                            equipment = %spec.name,
+                            side = "heating",
+                            source = %source.label(),
+                            "setpoint source chosen",
+                        );
+                        spec.heating_setpoint_source = Some(source);
                     }
                 }
                 None => match hpxml_setpoint_profile(spec, "heating") {
                     Some((weekday_c, weekend_c)) => {
-                        spec.heating_setpoint_source = Some(SetpointSource::Hpxml {
+                        let source = SetpointSource::Hpxml {
                             weekday_c,
                             weekend_c,
-                        });
+                        };
+                        tracing::debug!(
+                            equipment = %spec.name,
+                            side = "heating",
+                            source = %source.label(),
+                            "setpoint source chosen",
+                        );
+                        spec.heating_setpoint_source = Some(source);
                     }
                     None => {
                         inject_default_setpoint(
@@ -1048,28 +1062,50 @@ fn inject_setpoint_schedules(
                             OS_HPXML_DEFAULT_HEATING_SETPOINT_F,
                             warnings,
                         )?;
-                        spec.heating_setpoint_source = Some(SetpointSource::DefaultProfile {
+                        let source = SetpointSource::DefaultProfile {
                             profile: SetpointSource::MANUAL_THERMOSTAT.to_string(),
-                        });
+                        };
+                        tracing::debug!(
+                            equipment = %spec.name,
+                            side = "heating",
+                            source = %source.label(),
+                            "setpoint source chosen",
+                        );
+                        spec.heating_setpoint_source = Some(source);
                     }
                 },
             }
         }
         if COOLING_EQUIPMENT.contains(&spec.name.as_str()) {
             match cooling_col {
+                // Schedule CSV provides a per-timestep cooling column.
                 Some(col_idx) => {
                     if set_typed_setpoint_source(spec, "cooling", col_idx) {
-                        spec.cooling_setpoint_source = Some(SetpointSource::ScheduleColumn {
+                        let source = SetpointSource::ScheduleColumn {
                             column: "cooling_setpoint".to_string(),
-                        });
+                        };
+                        tracing::debug!(
+                            equipment = %spec.name,
+                            side = "cooling",
+                            source = %source.label(),
+                            "setpoint source chosen",
+                        );
+                        spec.cooling_setpoint_source = Some(source);
                     }
                 }
                 None => match hpxml_setpoint_profile(spec, "cooling") {
                     Some((weekday_c, weekend_c)) => {
-                        spec.cooling_setpoint_source = Some(SetpointSource::Hpxml {
+                        let source = SetpointSource::Hpxml {
                             weekday_c,
                             weekend_c,
-                        });
+                        };
+                        tracing::debug!(
+                            equipment = %spec.name,
+                            side = "cooling",
+                            source = %source.label(),
+                            "setpoint source chosen",
+                        );
+                        spec.cooling_setpoint_source = Some(source);
                     }
                     None => {
                         inject_default_setpoint(
@@ -1078,9 +1114,16 @@ fn inject_setpoint_schedules(
                             OS_HPXML_DEFAULT_COOLING_SETPOINT_F,
                             warnings,
                         )?;
-                        spec.cooling_setpoint_source = Some(SetpointSource::DefaultProfile {
+                        let source = SetpointSource::DefaultProfile {
                             profile: SetpointSource::MANUAL_THERMOSTAT.to_string(),
-                        });
+                        };
+                        tracing::debug!(
+                            equipment = %spec.name,
+                            side = "cooling",
+                            source = %source.label(),
+                            "setpoint source chosen",
+                        );
+                        spec.cooling_setpoint_source = Some(source);
                     }
                 },
             }

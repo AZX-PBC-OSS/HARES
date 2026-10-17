@@ -917,3 +917,17 @@ golden fixtures re-captured.
   the columns the fallback got wrong moves those cells: the acceptance
   run's delta (three weather channels, from the weighted sum to the
   weighted mean) is in the measurement log.
+- 2026-10-17: a dwelling with no schedule file runs the HPXML thermostat's
+  own hourly weekday and weekend profiles, or the manual-thermostat default
+  profile when the HPXML declares no thermostat, instead of the generated
+  schedule's constant setpoint columns (the profile's first weekday hour,
+  or 20 C heating and 24 C cooling when the HPXML has none): the generated
+  schedule carries no setpoint column, so each side resolves by the
+  setpoint-source rule and the resolution's active source is recorded and
+  logged at debug level. No golden fixture moves: no golden manifest runs a
+  generated schedule, compare-all 8 and the dst set's 1 are bitwise
+  identical compared twice on the final state, and the acceptance run's
+  every variable is bitwise identical before and after on this line (the
+  constant columns' removal landed with the phase-1 fold, before any row's
+  capture; the acceptance tests fail against the reverted generator, which
+  still wrote the constants). No golden re-captured.

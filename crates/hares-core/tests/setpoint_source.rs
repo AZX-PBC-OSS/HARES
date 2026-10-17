@@ -13,11 +13,20 @@
 //! `SetpointTempCoolingSeason`, and whose schedule.csv carries no setpoint
 //! column; each test appends one constant setpoint column and runs the
 //! dwelling on it.
+//!
+//! The generated-schedule tests run `tests/fixtures/resstock/2025.1/bldg0000002/home.xml`
+//! with no schedule file: the generated schedule carries no setpoint column,
+//! so each side resolves by the rule to the HPXML's own profiles (heating:
+//! weekday 67 F at hours 0 to 2 and 5 to 12, 70 F at hours 3, 4 and 13 to
+//! 17; weekend 70 F from hour 3 to hour 17; cooling: the constant 67 F
+//! arrays), or, with the HVACControl removed, to the manual-thermostat
+//! default profile.
 
 use std::path::PathBuf;
 
 use arrow::array::{Float64Array, RecordBatch};
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings};
+use hares_physics::units::temperature_f_to_c;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -72,6 +81,103 @@ selection = { verbosity = 8 }
 destination = "memory"
 "#
     .to_string()
+}
+
+/// The generated-schedule run's config: the ResStock home, no schedule file
+/// (the schedule generated from the defaults' profiles), the home's county
+/// weather, a Friday start, 3 d at 3600 s, no warm-up.
+fn generated_sim_toml() -> String {
+    r#"
+start_time = "2018-01-05T00:00:00-05:00"
+duration = 259200
+time_res = 3600
+warmup = "disabled"
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 8 }
+destination = "memory"
+"#
+    .to_string()
+}
+
+fn dwelling_generated(hpxml: PathBuf) -> Dwelling {
+    let config = DwellingConfig {
+        hpxml: hares_io::InputSource::Path(hpxml),
+        schedule: None,
+        weather: hares_io::WeatherInput::Path(
+            repo_root().join("tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"),
+        ),
+        defaults: hares_io::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            hares_io::SimulationConfig::from_toml(&generated_sim_toml())
+                .expect("the config parses"),
+            None,
+            1,
+            None,
+        ),
+    };
+    Dwelling::from_config(config).expect("the dwelling builds")
+}
+
+/// The ResStock home's HPXML with its HVACControl element removed, written
+/// to a temporary directory: the home declares no thermostat input at all.
+fn home_xml_without_thermostat(dir: &tempfile::TempDir) -> PathBuf {
+    let original = std::fs::read_to_string(
+        repo_root().join("tests/fixtures/resstock/2025.1/bldg0000002/home.xml"),
+    )
+    .expect("the fixture's HPXML reads");
+    let start = original
+        .find("<HVACControl>")
+        .expect("the fixture declares an HVACControl");
+    let end = original
+        .find("</HVACControl>")
+        .expect("the HVACControl closes")
+        + "</HVACControl>".len();
+    let stripped = format!("{}{}", &original[..start], &original[end..]);
+    assert!(
+        !stripped.contains("SetpointTempsHeatingSeason"),
+        "the stripped HPXML carries no thermostat setpoints"
+    );
+    let path = dir.path().join("home.xml");
+    std::fs::write(&path, stripped).expect("the stripped HPXML writes");
+    path
+}
+
+fn scheduled_heating_setpoints(dwelling: &mut Dwelling, expected_len: usize) -> Vec<f64> {
+    dwelling.simulate().expect("the run completes");
+    let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
+    let setpoints = column_values(&batches, "Gas Boiler Setpoint (C)");
+    assert_eq!(setpoints.len(), expected_len, "the run's step count");
+    setpoints
+}
+
+fn heating_source_is(dwelling: &Dwelling, equipment: &str, expected: &hares_io::SetpointSource) {
+    let model = dwelling.resolved_model();
+    let unit = model
+        .equipment
+        .iter()
+        .find(|eq| eq.name == equipment)
+        .unwrap_or_else(|| panic!("the read-back carries '{equipment}'"));
+    assert_eq!(
+        unit.heating_setpoint.as_ref(),
+        Some(expected),
+        "{equipment}'s heating source"
+    );
+}
+
+fn cooling_source_is(dwelling: &Dwelling, equipment: &str, expected: &hares_io::SetpointSource) {
+    let model = dwelling.resolved_model();
+    let unit = model
+        .equipment
+        .iter()
+        .find(|eq| eq.name == equipment)
+        .unwrap_or_else(|| panic!("the read-back carries '{equipment}'"));
+    assert_eq!(
+        unit.cooling_setpoint.as_ref(),
+        Some(expected),
+        "{equipment}'s cooling source"
+    );
 }
 
 fn dwelling_with_schedule(schedule_path: PathBuf) -> Dwelling {
@@ -189,4 +295,130 @@ fn hpxml_setpoints_used_without_a_column() {
              {expected} C, got {value}"
         );
     }
+}
+
+/// With no schedule file the generated schedule carries no setpoint column,
+/// so the HPXML's hourly profiles are the scheduled setpoints: the
+/// read-back's hourly heating and cooling values on bits the resolution's
+/// Fahrenheit to Celsius conversion of the profile values, the HPXML
+/// recorded as the active source, and the run's active heating setpoint
+/// carrying those values to the boiler at the run's hours. The home's
+/// heating profiles (home.xml:837-838): weekday 67 F at hours 0 to 2 and 5
+/// to 12, 70 F at hours 3, 4 and 13 to 17; weekend 70 F from hour 3 to hour
+/// 17 and 67 F around it; the cooling profiles the constant 67 F arrays
+/// (home.xml:839-840). The home schedules heating and cooling at the same
+/// temperatures, so the resolution's setpoint-pair rule (the 2 C gap the
+/// thermostat requires, matching OCHRE's reconciliation) re-centers each
+/// hour's pair on the midpoint with a symmetric 1 C offset; the expectation
+/// applies the same rule to the converted values, and the 70 F hours stay
+/// visible as the higher branch of both sides.
+#[test]
+fn generated_schedule_keeps_the_hpxml_setpoint_profile() {
+    // The resolution's pair rule: a gap below 2 C re-centers the hour's pair
+    // on the midpoint with a symmetric 1 C offset (the average built from
+    // the heating and cooling values in that order).
+    let cooling_profile_c = temperature_f_to_c(67.0);
+    let reconcile = |heat_f: f64| -> (f64, f64) {
+        let heat_c = temperature_f_to_c(heat_f);
+        if cooling_profile_c - heat_c < 2.0 {
+            let avg = 0.5 * (heat_c + cooling_profile_c);
+            (avg - 1.0, avg + 1.0)
+        } else {
+            (heat_c, cooling_profile_c)
+        }
+    };
+    let weekday_profile_f = [
+        67.0, 67.0, 67.0, 70.0, 70.0, 67.0, 67.0, 67.0, 67.0, 67.0, 67.0, 67.0, 67.0, 70.0, 70.0,
+        70.0, 70.0, 70.0, 67.0, 67.0, 67.0, 67.0, 67.0, 67.0,
+    ];
+    let weekend_profile_f = [
+        67.0, 67.0, 67.0, 70.0, 70.0, 70.0, 70.0, 70.0, 70.0, 70.0, 70.0, 70.0, 70.0, 70.0, 70.0,
+        70.0, 70.0, 70.0, 67.0, 67.0, 67.0, 67.0, 67.0, 67.0,
+    ];
+    let mut heating_weekday_c = Vec::new();
+    let mut cooling_weekday_c = Vec::new();
+    for hour in weekday_profile_f {
+        let (heat, cool) = reconcile(hour);
+        heating_weekday_c.push(heat);
+        cooling_weekday_c.push(cool);
+    }
+    let mut heating_weekend_c = Vec::new();
+    let mut cooling_weekend_c = Vec::new();
+    for hour in weekend_profile_f {
+        let (heat, cool) = reconcile(hour);
+        heating_weekend_c.push(heat);
+        cooling_weekend_c.push(cool);
+    }
+
+    // The read-back records the HPXML as the active source on both sides,
+    // every hourly value on bits the conversion above: 03:00 on the Friday
+    // is the weekday profile's hour 3 (the 70 F branch), 06:00 on the Friday
+    // its hour 6 (the 67 F branch), 06:00 on the Saturday the weekend
+    // profile's hour 6 (the 70 F branch).
+    let dwelling =
+        dwelling_generated(repo_root().join("tests/fixtures/resstock/2025.1/bldg0000002/home.xml"));
+    heating_source_is(
+        &dwelling,
+        "Gas Boiler",
+        &hares_io::SetpointSource::Hpxml {
+            weekday_c: heating_weekday_c.clone(),
+            weekend_c: heating_weekend_c.clone(),
+        },
+    );
+    cooling_source_is(
+        &dwelling,
+        "Room AC",
+        &hares_io::SetpointSource::Hpxml {
+            weekday_c: cooling_weekday_c.clone(),
+            weekend_c: cooling_weekend_c.clone(),
+        },
+    );
+
+    // The run heats to the resolved profile: the boiler's active setpoint is
+    // the resolved schedule's value at the run's hour, step k starting at
+    // k:00 (3 d at 3600 s from the Friday 00:00 start: Friday, Saturday,
+    // Sunday).
+    let mut dwelling =
+        dwelling_generated(repo_root().join("tests/fixtures/resstock/2025.1/bldg0000002/home.xml"));
+    let setpoints = scheduled_heating_setpoints(&mut dwelling, 72);
+    for (step, value) in setpoints.iter().enumerate() {
+        let hour = step % 24;
+        let weekend = step >= 24;
+        let expected = if weekend {
+            heating_weekend_c[hour]
+        } else {
+            heating_weekday_c[hour]
+        };
+        assert_eq!(
+            value.to_bits(),
+            expected.to_bits(),
+            "step {step} (hour {hour}): the resolved profile's heating setpoint, got {value}"
+        );
+    }
+}
+
+/// The same home with its HVACControl removed declares no thermostat input
+/// at all: with no schedule file either, both sides resolve to the
+/// manual-thermostat default profile and record it as the active source,
+/// the heating setpoint the profile's 68 F on every step (the 68 F heating
+/// and 78 F cooling defaults' gap exceeds the deadband, so no
+/// reconciliation moves the value).
+#[test]
+fn generated_schedule_without_thermostat_uses_the_default_profile() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut dwelling = dwelling_generated(home_xml_without_thermostat(&dir));
+    let setpoints = scheduled_heating_setpoints(&mut dwelling, 72);
+    let default_c = temperature_f_to_c(68.0);
+    for (step, value) in setpoints.iter().enumerate() {
+        assert_eq!(
+            value.to_bits(),
+            default_c.to_bits(),
+            "step {step}: the default profile's 68 F heating setpoint, got {value}"
+        );
+    }
+    let default_source = hares_io::SetpointSource::DefaultProfile {
+        profile: hares_io::SetpointSource::MANUAL_THERMOSTAT.to_string(),
+    };
+    heating_source_is(&dwelling, "Gas Boiler", &default_source);
+    cooling_source_is(&dwelling, "Room AC", &default_source);
 }

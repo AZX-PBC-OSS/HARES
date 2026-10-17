@@ -667,6 +667,52 @@ thermostat profile, no golden re-captured unless one moved.
 
 **Commit:** `fix: a generated schedule keeps the HPXML thermostat profile instead of one constant`
 
+**State:** FIXED (2026-10-17, branch `row/r94ab`, worktree `r94ab`, based
+on `ff39b24b`). The generated schedule writes no setpoint column, so each
+side resolves by the setpoint-source rule to the HPXML's hourly profiles
+or, without them, the default profile, recorded as the active
+`SetpointSource` and logged at `debug` level with the equipment, the side
+and the source's label ("setpoint source chosen"); the two literal
+defaults and any generated-constant source variant are gone. The numeric
+state is the phase-1 fold's (`c561eb69`, the initiative's base): the fold
+replaced the HPXML-schedule generator with the profile generator that
+carries no setpoint column, so the deletion this entry describes predates
+every row's capture, and `SetpointSource` (the setpoint-source entry's
+record covers this) landed without the variant. What this row lands: the two
+acceptance tests
+(`generated_schedule_keeps_the_hpxml_setpoint_profile`,
+`generated_schedule_without_thermostat_uses_the_default_profile`, in
+`crates/hares-core/tests/setpoint_source.rs`, the fixture
+`tests/fixtures/resstock/2025.1/bldg0000002/home.xml` with the county
+weather `G0900090_2018.csv`, the Friday start, 3 d at 3600 s, no warm-up)
+and the per-side debug log. Two premise adaptations, both recorded: the
+acceptance's setpoint values are read from the resolution's source record
+and the boiler's active setpoint column, because the home schedules
+heating and cooling at the same 67 F temperatures and the resolution's
+setpoint-pair rule (the 2 C gap, matching OCHRE's reconciliation)
+re-centers each hour's pair on the midpoint with a symmetric 1 C offset
+before any step runs, so the entry's raw "70 F at 03:00" surfaces as the
+reconciled branch of the converted profile (the expectation applies the
+same rule to the converted values, on bits, and the 70 F hours stay
+visible as the higher branch of both sides); and RED was witnessed against
+the reverted source (the generator locally restored to the two constant
+columns fails both tests: the heating source reads `ScheduleColumn` where
+`Hpxml` is wanted, and the no-thermostat home runs the literal 20.0 C
+where the default profile's 68 F conversion is wanted), the phase-1
+pattern for a change the fold already carried. Movement: none. The
+acceptance run's every variable (every report column's every step, the
+resolved sources, the warnings) is bitwise identical at the parent
+`ff39b24b` and at the row's final state, and the goldens are bitwise
+identical compared twice (compare-all 8 + dst 1), the cause recorded in
+the measurement log; no golden runs a generated schedule, none
+re-captured. The commit adds its `docs/python.md` "Numeric changes" line.
+Gates at the row: fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `-p hares-io -p hares-core`
+3300/3300 (5 skipped; the host's 1Password commit signing breaks one
+scratch-repo test under the global config, green with
+`GIT_CONFIG_GLOBAL=/dev/null`, the neutralisation the earlier signing
+record documents, and independent of this row's files).
+
 **Dependencies:** `12-inputs.md` IN-5; OD-6 (the explicit request for a
 generated schedule); OD-17 (the generator's profiles fail loudly) and
 OD-19 (a malformed or setback thermostat profile is an error), so the

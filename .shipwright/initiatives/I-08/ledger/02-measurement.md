@@ -3888,3 +3888,47 @@ and in the `-F dst` build (`full_year_900s_dst`); the compare outputs and the
 products live under `/tmp/opencode/r99-m4a-verify/`. The workflow's YAML
 validates by parse (actionlint unavailable on this host); the main `ci.yml`
 and the engine's tests are untouched by the commit.
+
+### The generated-schedule setpoint row, 2026-10-17 (the worktree `r94ab`)
+
+The generated schedule's constant setpoint columns are gone from the
+engine, and the two acceptance runs are the measurement. This host's
+history carries the change already: the phase-1 fold `c561eb69` replaced
+the HPXML-schedule generator (which wrote `heating_setpoint` and
+`cooling_setpoint` columns holding one constant each, the HPXML weekday
+profile's first hourly value, or 20.0 C and 24.0 C when the HPXML had no
+thermostat) with the profile generator that writes no setpoint column, so
+each side resolves by the setpoint-source rule to the HPXML profiles or
+the default profile. The row's commit lands the acceptance tests and the
+per-side debug log of the chosen source; the numeric state is the fold's.
+
+RED, against the reverted source: with the generator locally restored to
+writing the two constant columns (20.0 C heating, 24.0 C cooling; the
+literals the fold deleted), both acceptance tests fail at the same parent
+`generated_schedule_keeps_the_hpxml_setpoint_profile` on the read-back
+(`Gas Boiler`'s heating source `ScheduleColumn { column: "heating_setpoint" }`,
+want `Hpxml` with the 48 hourly values) and
+`generated_schedule_without_thermostat_uses_the_default_profile` on the run
+(step 0 reads 20.0 C, the literal, want the default profile's 68 F
+conversion). GREEN with the generator as landed: both pass, with
+`crates/hares-io`'s no-column pins and the injection test
+`hvac_without_a_schedule_file_keeps_the_hpxml_hourly_setpoints` around
+them.
+
+The acceptance run's every variable, before and after: the run of the
+entry's fixture (`bldg0000002`, no schedule file, weather `G0900090_2018.csv`,
+start `2018-01-05T00:00:00-05:00`, 3 d at 3600 s, no warm-up) dumped every
+report column's every step as raw bits, the resolved sources and the
+warnings, once at the parent `ff39b24b` (the tree plus only the dump
+harness, an untracked scratch test since deleted) and once at the row's
+final state: the two dumps are byte-identical (176 lines each, `diff`
+empty). The delta of the acceptance run is zero on every variable; the
+cause is the fold's, recorded above.
+
+Goldens: compare-all 8 (`consumer_shape_900s`, `fleet_mixed_offset`,
+`fleet_same_offset_300s`, `full_year_hourly`, `leap_year_february_900s`,
+`month_boundary_billing_3600s`, `resstock_2025_fleet`,
+`weather_wrap_900s`) and the dst set's `full_year_900s_dst` are bitwise
+identical, compared twice on the final state. No golden manifest runs a
+generated schedule (every manifest sets an explicit `schedule` path), so
+no golden is expected to move and none is re-captured.
