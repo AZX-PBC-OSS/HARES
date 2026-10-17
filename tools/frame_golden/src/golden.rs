@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::digest::FrameDigests;
 use crate::error::{FrameGoldenError, FrameGoldenResult};
+use crate::resolved::ResolvedHomeDoc;
 
 /// One metrics field: the f64 bit pattern in hex beside its decimal value.
 /// `None` fields carry nulls on both.
@@ -55,6 +56,14 @@ pub struct GoldenDoc {
     /// `weights` and `homes` for a fleet; `billing` when a tariff was
     /// configured.
     pub products: BTreeMap<String, FrameDigests>,
+    /// The resolved equipment parameters, one entry per home, in home
+    /// order (the `resolved` product, B-14's first commit): per equipment
+    /// in model order, the name and each resolved parameter's name, unit
+    /// symbol and value bits. Defaulted so a golden captured before the
+    /// product existed reads empty and `compare` reports the difference
+    /// instead of the field's absence.
+    #[serde(default)]
+    pub resolved: Vec<ResolvedHomeDoc>,
     /// Dwelling only today: the run's health record as JSON. Fleet
     /// outcomes do not expose health yet, so the field is null there.
     pub health: Option<serde_json::Value>,

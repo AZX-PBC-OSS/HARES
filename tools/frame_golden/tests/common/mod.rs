@@ -154,6 +154,7 @@ pub fn golden_doc(products: BTreeMap<String, frame_golden::FrameDigests>) -> Gol
         git_dirty: Some(false),
         metrics: vec![metrics],
         products,
+        resolved: Vec::new(),
         health: Some(serde_json::json!({
             "port_rollbacks": 0,
             "rejected_control_signals": 0,

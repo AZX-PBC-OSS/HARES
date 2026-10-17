@@ -562,6 +562,18 @@ impl Fleet {
         self.build_report.as_ref()
     }
 
+    /// The homes' dwelling configs, in entry order, cloned: exactly what
+    /// `simulate` builds and runs, the ResStock constructor's configs
+    /// included. A read-only view for tools that report a home's resolved
+    /// model of the config the fleet runs; the fleet itself is unchanged.
+    #[must_use]
+    pub fn home_configs(&self) -> Vec<DwellingConfig> {
+        self.entries
+            .iter()
+            .map(|entry| entry.config.clone())
+            .collect()
+    }
+
     /// The fleet's building identities, in fleet order: the order
     /// [`simulate`](Self::simulate) folds its homes in, so a caller can
     /// label the homes table's rows without re-reading the metadata.

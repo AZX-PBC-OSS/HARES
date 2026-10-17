@@ -13,19 +13,21 @@
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
 use arrow::array::{Float64Builder, Int64Array, RecordBatch, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
-use hares_core::{Dwelling, DwellingConfig, DwellingSettings, SimulationEngine};
+use hares_core::{DwellingBlueprint, DwellingConfig, DwellingSettings, SimulationEngine};
 use hares_fleet::{Fleet, FleetBuildReport};
 use hares_io::{DefaultsSource, InputSource, WeatherInput};
 
 use crate::defaults;
 use crate::error::{FrameGoldenError, FrameGoldenResult};
 use crate::golden::{MetricsRow, flatten_metrics};
-use crate::manifest::{GoldenManifest, ManifestKind, repo_path};
+use crate::manifest::{GoldenManifest, HomeEntry, ManifestKind, repo_path};
+use crate::resolved::{ResolvedHomeDoc, resolved_home_doc};
 
 /// The retained batches across the run result's memory reports, in
 /// `reports` order: the frames a dwelling golden compares.
@@ -90,6 +92,10 @@ pub struct RunProducts {
     /// `covered_weight` and `homes`.
     pub frames: BTreeMap<String, FrameProducts>,
     pub metrics_rows: Vec<MetricsRow>,
+    /// The resolved product: per home, the resolved equipment parameters
+    /// of the config the home runs, in home order. Empty for a
+    /// `Discard` run, which builds nothing to read back.
+    pub resolved: Vec<ResolvedHomeDoc>,
     /// Dwelling only today: the fleet outcome surface does not expose
     /// per-home health yet.
     pub health: Option<serde_json::Value>,
@@ -147,6 +153,46 @@ fn prepare_sim_config(req: &RunRequest) -> FrameGoldenResult<hares_io::Simulatio
     Ok(sim)
 }
 
+/// One home's `DwellingConfig`, built from the manifest's `[[home]]`
+/// entry: the one config function the dwelling and fleet paths both
+/// call, so a home's resolved product is the model of the config the
+/// run builds from. The defaults directory is the prepared tree's (a
+/// replacement tree's temporary directory for a manifest with
+/// `[defaults_files]`), alive as long as the run holds the tree.
+fn home_config(
+    req: &RunRequest,
+    sim: hares_io::SimulationConfig,
+    home: &HomeEntry,
+    defaults_dir: &Path,
+) -> DwellingConfig {
+    DwellingConfig {
+        hpxml: InputSource::Path(repo_path(req.repo_root, &home.hpxml)),
+        schedule: Some(InputSource::Path(repo_path(req.repo_root, &home.schedule))),
+        weather: WeatherInput::Path(repo_path(req.repo_root, &home.weather)),
+        defaults: DefaultsSource::directory(defaults_dir.to_path_buf()),
+        settings: DwellingSettings::new(sim, Some(home.overrides.clone()), home.bldg_id, None),
+    }
+}
+
+/// The homes' resolved products: per config, the resolved model read
+/// through `DwellingBlueprint::validate` (the assembly alone, no warm-up
+/// and no step), the model the built home's `resolved_model()` carries.
+/// The reads share the blueprint parse cache with the run's own
+/// construction.
+fn resolved_products(configs: &[DwellingConfig]) -> FrameGoldenResult<Vec<ResolvedHomeDoc>> {
+    let mut homes = Vec::with_capacity(configs.len());
+    for config in configs {
+        let blueprint = DwellingBlueprint::from_config(config.clone()).map_err(|err| {
+            FrameGoldenError::Engine(format!("dwelling construction failed: {err}"))
+        })?;
+        let model = blueprint.validate().map_err(|err| {
+            FrameGoldenError::Engine(format!("dwelling validation failed: {err}"))
+        })?;
+        homes.push(resolved_home_doc(&model));
+    }
+    Ok(homes)
+}
+
 fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
     let home = req
         .manifest
@@ -157,21 +203,22 @@ fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
     let defaults_tree = defaults::prepare(req.repo_root, req.manifest)?;
     let defaults_digest = defaults::digest_used(&defaults_tree)?;
 
-    let config = DwellingConfig {
-        hpxml: InputSource::Path(repo_path(req.repo_root, &home.hpxml)),
-        schedule: Some(InputSource::Path(repo_path(req.repo_root, &home.schedule))),
-        weather: WeatherInput::Path(repo_path(req.repo_root, &home.weather)),
-        defaults: DefaultsSource::directory(defaults_tree.dir().to_path_buf()),
-        settings: DwellingSettings::new(
-            sim.clone(),
-            Some(home.overrides.clone()),
-            home.bldg_id,
-            None,
-        ),
-    };
-
+    let config = home_config(&req, sim.clone(), home, defaults_tree.dir());
     let construct_start = Instant::now();
-    let mut dwelling = Dwelling::from_config(config)
+    let blueprint = DwellingBlueprint::from_config(config)
+        .map_err(|err| FrameGoldenError::Engine(format!("dwelling construction failed: {err}")))?;
+    // The resolved product before the build: same assembly, no warm-up
+    // and no step (the read-back's own path). A discarded run records
+    // none: `--discard-output` times construction as it stands.
+    let resolved = if req.output == RunOutput::Full {
+        vec![resolved_home_doc(&blueprint.validate().map_err(|err| {
+            FrameGoldenError::Engine(format!("dwelling validation failed: {err}"))
+        })?)]
+    } else {
+        Vec::new()
+    };
+    let mut dwelling = blueprint
+        .build()
         .map_err(|err| FrameGoldenError::Engine(format!("dwelling construction failed: {err}")))?;
     let construct = construct_start.elapsed();
 
@@ -230,6 +277,7 @@ fn run_dwelling(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         },
         frames,
         metrics_rows,
+        resolved,
         health: Some(health),
         defaults_dir: req.manifest.defaults.clone(),
         defaults_digest,
@@ -248,22 +296,16 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         .manifest
         .home
         .iter()
-        .map(|home| {
-            let sim = base_sim.clone();
-            DwellingConfig {
-                hpxml: InputSource::Path(repo_path(req.repo_root, &home.hpxml)),
-                schedule: Some(InputSource::Path(repo_path(req.repo_root, &home.schedule))),
-                weather: WeatherInput::Path(repo_path(req.repo_root, &home.weather)),
-                defaults: DefaultsSource::directory(defaults_tree.dir().to_path_buf()),
-                settings: DwellingSettings::new(
-                    sim,
-                    Some(home.overrides.clone()),
-                    home.bldg_id,
-                    None,
-                ),
-            }
-        })
+        .map(|home| home_config(&req, base_sim.clone(), home, defaults_tree.dir()))
         .collect();
+    // The homes' resolved products: the model of the config the fleet
+    // runs, read per home before the fleet consumes the configs. A
+    // discarded run records none, like the dwelling path.
+    let resolved = if req.output == RunOutput::Full {
+        resolved_products(&configs)?
+    } else {
+        Vec::new()
+    };
     // The manifest states each home's weight and the fleet's report
     // request ([fleet]); both rule sets are checked when the manifest
     // parses, so the adapter hands them to the fleet untouched. The
@@ -303,6 +345,7 @@ fn run_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         construct,
         simulate_start.elapsed(),
         defaults_digest,
+        resolved,
         None,
     )
 }
@@ -366,6 +409,16 @@ fn run_resstock_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         .expect("a fleet built from ResStock metadata carries its construction report");
     let construct = construct_start.elapsed();
 
+    // The homes' resolved products: the model of the config the fleet
+    // runs, read per home before the simulation. The ResStock
+    // constructor builds the configs, so they are read off the fleet. A
+    // discarded run records none, like the other paths.
+    let resolved = if req.output == RunOutput::Full {
+        resolved_products(&fleet.home_configs())?
+    } else {
+        Vec::new()
+    };
+
     // The capture's thread count is pinned, not ambient: one thread, the
     // fold's chunk barrier at the Python default (64).
     let fleet_spec = spec.fleet_report();
@@ -383,6 +436,7 @@ fn run_resstock_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         construct,
         simulate_start.elapsed(),
         defaults_digest,
+        resolved,
         Some(report),
     )
 }
@@ -399,6 +453,7 @@ fn fleet_products(
     construct: StdDuration,
     simulate_elapsed: StdDuration,
     defaults_digest: String,
+    resolved: Vec<ResolvedHomeDoc>,
     report: Option<FleetBuildReport>,
 ) -> FrameGoldenResult<RunProducts> {
     for home in &result.homes {
@@ -443,6 +498,7 @@ fn fleet_products(
         },
         frames,
         metrics_rows,
+        resolved,
         health: None,
         defaults_dir: manifest.defaults.clone(),
         defaults_digest,

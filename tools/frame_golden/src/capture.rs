@@ -47,6 +47,7 @@ fn build_doc(
         git_dirty,
         metrics: products.metrics_rows.clone(),
         products: products_digests,
+        resolved: products.resolved.clone(),
         health: products.health.clone(),
     })
 }
@@ -143,6 +144,7 @@ pub fn materialize(
     }
     if doc.products != committed.products
         || doc.metrics != committed.metrics
+        || doc.resolved != committed.resolved
         || doc.health != committed.health
     {
         return Err(FrameGoldenError::MaterializedFrames(format!(

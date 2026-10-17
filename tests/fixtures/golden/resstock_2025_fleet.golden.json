@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "7101953e6a6e1f814f8a55ba4e3f5cf177f20a76",
+  "git_head": "a66ffa8a583739eeb3924cf9db8bb6480e15e257",
   "git_dirty": true,
   "metrics": [],
   "products": {
@@ -804,5 +804,503 @@
       ]
     }
   },
+  "resolved": [
+    [
+      {
+        "name": "Electric Baseboard",
+        "parameters": [
+          {
+            "name": "rated_capacity_w",
+            "unit": "W",
+            "bits": "0x407ddb4b232ed931"
+          },
+          {
+            "name": "efficiency",
+            "unit": "fraction",
+            "bits": "0x3ff0000000000000"
+          },
+          {
+            "name": "rated_eir",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Room AC",
+        "parameters": [
+          {
+            "name": "rated_capacity_w",
+            "unit": "W",
+            "bits": "0x409165820af57c6e"
+          },
+          {
+            "name": "rated_eir",
+            "unit": "-",
+            "bits": "0x3fd232b5f1104b24"
+          },
+          {
+            "name": "rated_shr",
+            "unit": "fraction",
+            "bits": "0x3fe4cccccccccccd"
+          }
+        ]
+      },
+      {
+        "name": "Heat Pump Water Heater",
+        "parameters": [
+          {
+            "name": "heating_capacity_w",
+            "unit": "W",
+            "bits": "0x409af40000000000"
+          },
+          {
+            "name": "setpoint_c",
+            "unit": "C",
+            "bits": "0x4049d55555555555"
+          },
+          {
+            "name": "tank_volume_m3",
+            "unit": "m3",
+            "bits": "0x3fc5cdd12eb1435a"
+          },
+          {
+            "name": "ua_w_k",
+            "unit": "W/K",
+            "bits": "0x3ffe62b73dba0ce6"
+          },
+          {
+            "name": "rated_cop",
+            "unit": "-",
+            "bits": "0x40103566a6ffbdf9"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Washer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Dryer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Dishwasher",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Refrigerator",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3fee666666666666"
+          }
+        ]
+      },
+      {
+        "name": "Cooking Range",
+        "parameters": [
+          {
+            "name": "active_power_w",
+            "unit": "W",
+            "bits": "0x408f400000000000"
+          },
+          {
+            "name": "active_duration_s",
+            "unit": "s",
+            "bits": "0x408c200000000000"
+          }
+        ]
+      },
+      {
+        "name": "Exterior Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Indoor Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "TV",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3fdd1eb851eb851f"
+          }
+        ]
+      },
+      {
+        "name": "MELs",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3fdd1eb851eb851f"
+          }
+        ]
+      }
+    ],
+    [
+      {
+        "name": "Electric Boiler",
+        "parameters": [
+          {
+            "name": "rated_capacity_w",
+            "unit": "W",
+            "bits": "0x4090c73fe5e9536b"
+          },
+          {
+            "name": "efficiency",
+            "unit": "fraction",
+            "bits": "0x3ff0000000000000"
+          },
+          {
+            "name": "rated_eir",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Electric Resistance Water Heater",
+        "parameters": [
+          {
+            "name": "heating_capacity_w",
+            "unit": "W",
+            "bits": "0x40ab57b59d96ff35"
+          },
+          {
+            "name": "setpoint_c",
+            "unit": "C",
+            "bits": "0x4049d55555555555"
+          },
+          {
+            "name": "tank_volume_m3",
+            "unit": "m3",
+            "bits": "0x3fba2a2e3807ea6c"
+          },
+          {
+            "name": "ua_w_k",
+            "unit": "W/K",
+            "bits": "0x3ff29df971aa77ab"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Washer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Dryer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Dishwasher",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Refrigerator",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Cooking Range",
+        "parameters": [
+          {
+            "name": "active_power_w",
+            "unit": "W",
+            "bits": "0x408f400000000000"
+          },
+          {
+            "name": "active_duration_s",
+            "unit": "s",
+            "bits": "0x408c200000000000"
+          }
+        ]
+      },
+      {
+        "name": "Exterior Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Indoor Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "TV",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3fed1eb851eb851f"
+          }
+        ]
+      },
+      {
+        "name": "MELs",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3fed1eb851eb851f"
+          }
+        ]
+      }
+    ],
+    [
+      {
+        "name": "Gas Furnace",
+        "parameters": [
+          {
+            "name": "rated_capacity_w",
+            "unit": "W",
+            "bits": "0x40c345ff7cdc8a04"
+          },
+          {
+            "name": "afue",
+            "unit": "fraction",
+            "bits": "0x3fe999999999999a"
+          }
+        ]
+      },
+      {
+        "name": "Gas Water Heater",
+        "parameters": [
+          {
+            "name": "heating_capacity_w",
+            "unit": "W",
+            "bits": "0x40c5c059af3a14cf"
+          },
+          {
+            "name": "setpoint_c",
+            "unit": "C",
+            "bits": "0x4049d55555555555"
+          },
+          {
+            "name": "tank_volume_m3",
+            "unit": "m3",
+            "bits": "0x3fc26988d2188884"
+          },
+          {
+            "name": "ua_w_k",
+            "unit": "W/K",
+            "bits": "0x4010b285a7a01c58"
+          }
+        ]
+      },
+      {
+        "name": "PV",
+        "parameters": [
+          {
+            "name": "nameplate_w",
+            "unit": "W",
+            "bits": "0x40c57c0000000000"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Washer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Dryer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Dishwasher",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Refrigerator #1",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0cccccccccccd"
+          }
+        ]
+      },
+      {
+        "name": "Refrigerator #2",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ffc28f5c28f5c29"
+          }
+        ]
+      },
+      {
+        "name": "Freezer",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff23d70a3d70a3d"
+          }
+        ]
+      },
+      {
+        "name": "Cooking Range",
+        "parameters": [
+          {
+            "name": "active_power_w",
+            "unit": "W",
+            "bits": "0x408f400000000000"
+          },
+          {
+            "name": "active_duration_s",
+            "unit": "s",
+            "bits": "0x408c200000000000"
+          }
+        ]
+      },
+      {
+        "name": "Exterior Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Garage Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Indoor Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Ceiling Fan",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "TV",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ffe147ae147ae14"
+          }
+        ]
+      },
+      {
+        "name": "MELs",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ffe147ae147ae14"
+          }
+        ]
+      }
+    ]
+  ],
   "health": null
 }

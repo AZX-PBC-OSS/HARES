@@ -93,6 +93,7 @@ fn compare_rejects_schema_mismatch_unless_columns_selected() {
         &common::frame_map(drifted.clone()),
         &common::fresh_metrics(),
         Some(&common::fresh_health()),
+        &[],
         &None,
         None,
     )
@@ -116,6 +117,7 @@ fn compare_rejects_schema_mismatch_unless_columns_selected() {
         &common::frame_map(drifted),
         &common::fresh_metrics(),
         Some(&common::fresh_health()),
+        &[],
         &Some(vec!["A (kW)".to_string()]),
         None,
     )
@@ -155,6 +157,7 @@ fn compare_reports_first_mismatch_row_from_materialized_frames() {
         &common::frame_map(fresh),
         &common::fresh_metrics(),
         Some(&common::fresh_health()),
+        &[],
         &None,
         Some(dir.path()),
     )
@@ -202,6 +205,7 @@ fn delta_reports_per_column_max_abs_difference() {
         dir.path(),
         &common::frame_map(fresh),
         &common::fresh_metrics(),
+        &[],
         &None,
     )
     .unwrap();
@@ -241,6 +245,7 @@ fn delta_without_materialized_frames_names_materialize() {
         &missing,
         &common::frame_map(reference_frame),
         &common::fresh_metrics(),
+        &[],
         &None,
     )
     .expect_err("delta without materialized frames must fail");
@@ -293,6 +298,7 @@ fn row_level_report_covers_int64_and_boolean_columns() {
         &fresh_map_of(fresh_batches),
         &common::fresh_metrics(),
         Some(&common::fresh_health()),
+        &[],
         &None,
         Some(dir.path()),
     )
@@ -316,6 +322,7 @@ fn row_level_report_covers_int64_and_boolean_columns() {
         &fresh_map_of(fresh_batches),
         &common::fresh_metrics(),
         Some(&common::fresh_health()),
+        &[],
         &None,
         Some(dir.path()),
     )
@@ -372,6 +379,7 @@ fn metrics_extra_nested_key_is_rejected() {
         &common::frame_map(frame),
         &[fresh_row],
         Some(&common::fresh_health()),
+        &[],
         &None,
         None,
     )

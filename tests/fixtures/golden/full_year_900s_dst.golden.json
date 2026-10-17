@@ -5,7 +5,7 @@
   ],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "7101953e6a6e1f814f8a55ba4e3f5cf177f20a76",
+  "git_head": "a66ffa8a583739eeb3924cf9db8bb6480e15e257",
   "git_dirty": true,
   "metrics": [
     {
@@ -11489,6 +11489,200 @@
       ]
     }
   },
+  "resolved": [
+    [
+      {
+        "name": "ASHP Heater",
+        "parameters": [
+          {
+            "name": "rated_capacity_w",
+            "unit": "W",
+            "bits": "0x40d469d2d2018a44"
+          },
+          {
+            "name": "rated_eir",
+            "unit": "-",
+            "bits": "0x3fd8c261c55d91c5"
+          },
+          {
+            "name": "backup_capacity_w",
+            "unit": "W",
+            "bits": "0x40c5831935bf5494"
+          },
+          {
+            "name": "backup_eir",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "ASHP Cooler",
+        "parameters": [
+          {
+            "name": "rated_capacity_w",
+            "unit": "W",
+            "bits": "0x40d469d2d2018a44"
+          },
+          {
+            "name": "rated_eir",
+            "unit": "-",
+            "bits": "0x3fcd052c58726f52"
+          },
+          {
+            "name": "rated_shr",
+            "unit": "fraction",
+            "bits": "0x3fe75c28f5c28f5c"
+          }
+        ]
+      },
+      {
+        "name": "Heat Pump Water Heater",
+        "parameters": [
+          {
+            "name": "heating_capacity_w",
+            "unit": "W",
+            "bits": "0x409af40000000000"
+          },
+          {
+            "name": "setpoint_c",
+            "unit": "C",
+            "bits": "0x4049d55555555555"
+          },
+          {
+            "name": "tank_volume_m3",
+            "unit": "m3",
+            "bits": "0x3fd17174255a9c47"
+          },
+          {
+            "name": "ua_w_k",
+            "unit": "W/K",
+            "bits": "0x4000e1823ebcb1d5"
+          },
+          {
+            "name": "rated_cop",
+            "unit": "-",
+            "bits": "0x40119e37ed2c3dcb"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Washer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Dryer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Dishwasher",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Refrigerator",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Cooking Range",
+        "parameters": [
+          {
+            "name": "active_power_w",
+            "unit": "W",
+            "bits": "0x408f400000000000"
+          },
+          {
+            "name": "active_duration_s",
+            "unit": "s",
+            "bits": "0x408c200000000000"
+          }
+        ]
+      },
+      {
+        "name": "Exterior Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Indoor Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "MELs",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "TV",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Ventilation Fan",
+        "parameters": [
+          {
+            "name": "supply_fan_power_w",
+            "unit": "W",
+            "bits": "0x0000000000000000"
+          },
+          {
+            "name": "exhaust_fan_power_w",
+            "unit": "W",
+            "bits": "0x4033f33333333333"
+          },
+          {
+            "name": "flow_rate_m3_s",
+            "unit": "m3/s",
+            "bits": "0x3f9b8ab31e3161db"
+          }
+        ]
+      }
+    ]
+  ],
   "health": {
     "clamped_actions": 0,
     "cross_tier_deadband_events": 0,
