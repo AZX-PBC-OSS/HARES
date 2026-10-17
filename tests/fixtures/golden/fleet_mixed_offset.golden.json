@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "8e44a61ed4b1ef7640970e9def2afdfb2fb2e6c6",
+  "git_head": "cf3985f3b16d28da9a83701b7cfa0ba4179eb395",
   "git_dirty": true,
   "metrics": [
     {
@@ -586,7 +586,7 @@
       "schema": [
         {
           "name": "Time",
-          "arrow_type": "Utf8",
+          "arrow_type": "Timestamp(ms)",
           "nullable": false
         },
         {
@@ -813,10 +813,10 @@
       "columns": [
         {
           "name": "Time",
-          "digest": "bdcc1752a1015222a8d2c58e833f349c4fd419942e2de83c6c06ed5a9c22ec0a",
+          "digest": "81ca70df200b9f43667b64cbb0cfc14b5e316b612a137c1af1e8f0409ffa5203",
           "blocks": [
-            "42384411f68c8e92a54f9ed17759689e719e2fed07a2ca89a52fb7b10d5e940c",
-            "e3e5cb6988a9bb0f44f1424f2a04643864cfde21e83b51da8dbd4134a791fc6c"
+            "890816e7013d6c52615b9773f4ce22348a797c64b61c22ca222b58a6144ce994",
+            "27a235974db50df4e5e91280e4038e30fb7ce91a31561f5212018cfd8f9b6401"
           ]
         },
         {
@@ -1178,7 +1178,7 @@
       "schema": [
         {
           "name": "Time",
-          "arrow_type": "Utf8",
+          "arrow_type": "Timestamp(ms)",
           "nullable": false
         },
         {
@@ -1405,10 +1405,10 @@
       "columns": [
         {
           "name": "Time",
-          "digest": "bdcc1752a1015222a8d2c58e833f349c4fd419942e2de83c6c06ed5a9c22ec0a",
+          "digest": "81ca70df200b9f43667b64cbb0cfc14b5e316b612a137c1af1e8f0409ffa5203",
           "blocks": [
-            "42384411f68c8e92a54f9ed17759689e719e2fed07a2ca89a52fb7b10d5e940c",
-            "e3e5cb6988a9bb0f44f1424f2a04643864cfde21e83b51da8dbd4134a791fc6c"
+            "890816e7013d6c52615b9773f4ce22348a797c64b61c22ca222b58a6144ce994",
+            "27a235974db50df4e5e91280e4038e30fb7ce91a31561f5212018cfd8f9b6401"
           ]
         },
         {

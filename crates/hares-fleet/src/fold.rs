@@ -13,10 +13,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use arrow::array::{Array, Float64Builder, StringArray, StringBuilder};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::array::{Array, Float64Builder, StringBuilder, TimestampMillisecondBuilder};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, FixedOffset, SecondsFormat, TimeZone};
+use chrono::{DateTime, FixedOffset, TimeZone};
 use hares_io::Frequency;
 use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
 use hares_io::output::reduce::{
@@ -35,25 +35,33 @@ use crate::fleet::{FleetError, HomeStatus};
 pub enum Alignment {
     /// Rows align by the period's start instant: every home's reduction
     /// buckets on the declared offset's period boundaries, whatever its
-    /// own site offset, and the labels render at the declared offset.
+    /// own site offset, and the labels are that instant's wall clock at
+    /// the declared offset, a naive `Timestamp` (B-12).
     Instant(FixedOffset),
     /// Rows align by the naive local period start: every home reduces on
-    /// its own local calendar and the labels carry no offset.
+    /// its own local calendar and the labels are the local wall clock
+    /// each folded home's step starts at, a naive `Timestamp`.
     LocalClock,
 }
 
 /// The aggregate's row alignment: the keys the buckets are filed under
 /// and the labels they render as. The fleet's declared alignment decides,
 /// or, undeclared, the homes' shared site offset keeps today's instant
-/// keys and UTC `Z` labels.
+/// keys and the labels in the homes' local wall clock. Every label is a
+/// naive local `Timestamp(Millisecond, None)` at the period's start
+/// (`09-numeric-fixes.md` B-12): the instant keys render at the
+/// alignment's offset (a declared reference zone, or the homes' shared
+/// site offset), the local keys are the wall clock itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FoldRows {
     /// Buckets keyed by the period's start instant; labels render the
-    /// instant at the offset (`Z` for `+00:00`, byte for byte today's
-    /// undeclared label).
+    /// instant's wall clock at the offset, naive (the declared reference
+    /// zone under a declared alignment, the homes' shared site offset
+    /// under the undeclared single-offset default).
     Instant(FixedOffset),
-    /// Buckets keyed by the naive local period start; labels carry no
-    /// offset, because the homes share no offset.
+    /// Buckets keyed by the naive local period start; labels are that
+    /// wall clock, because the homes share no offset and the row is the
+    /// local time each folded home's step starts at.
     LocalClock,
 }
 
@@ -118,8 +126,9 @@ pub struct HomeResult {
 /// homes table and the coverage weights.
 #[derive(Debug, Clone)]
 pub struct FleetResult {
-    /// The weighted fleet timeseries: `Time` (Utf8 RFC 3339 UTC labels)
-    /// then one `Float64` column per folded variable.
+    /// The weighted fleet timeseries: `Time` (a naive local
+    /// `Timestamp(Millisecond, None)` at each period's start, B-12) then
+    /// one `Float64` column per folded variable.
     pub aggregate: RecordBatch,
     /// The weight behind each aggregate cell: `Time` then the same
     /// variable columns.
@@ -442,7 +451,9 @@ impl FleetFold {
     /// folding home has a row for; the columns are the union.
     pub(crate) fn finish(self) -> (RecordBatch, RecordBatch, usize) {
         if self.folded == 0 {
-            return (empty_table(), empty_table(), 0);
+            // Nothing folded: the emptied tables carry the schema the
+            // alignment labels (the `Time` type and its offset metadata).
+            return (self.build_table(true), self.build_table(false), 0);
         }
         (
             self.build_table(true),
@@ -454,9 +465,14 @@ impl FleetFold {
     /// Builds one of the two per-period tables: the aggregate's cells by
     /// their across-homes rule, or the covered weight behind them. Both
     /// walk the intersection's buckets in ascending order and read the
-    /// same running sums.
+    /// same running sums. The `Time` column is a naive
+    /// `Timestamp(Millisecond, None)` at each period's start (B-12): the
+    /// instant keys render at the alignment's offset's wall clock, the
+    /// local keys are the wall clock itself, and the schema metadata
+    /// records the offset (the declared reference zone, or the homes'
+    /// shared site offset) whenever one offset applies.
     fn build_table(&self, aggregate: bool) -> RecordBatch {
-        let mut timestamps = StringBuilder::new();
+        let mut timestamps = TimestampMillisecondBuilder::new();
         let mut builders: Vec<Float64Builder> = (0..self.columns.len())
             .map(|_| Float64Builder::new())
             .collect();
@@ -467,18 +483,22 @@ impl FleetFold {
                     let Some(instant) = DateTime::from_timestamp(bucket, 0) else {
                         continue;
                     };
+                    // The instant's wall clock at the offset, stamped
+                    // naive: `timestamp_millis` on the shifted datetime
+                    // would return the instant, not the label.
                     timestamps.append_value(
                         offset
                             .from_utc_datetime(&instant.naive_utc())
-                            .to_rfc3339_opts(SecondsFormat::Secs, true),
+                            .naive_local()
+                            .and_utc()
+                            .timestamp_millis(),
                     );
                 }
                 FoldRows::LocalClock => {
                     let Some(instant) = DateTime::from_timestamp(bucket, 0) else {
                         continue;
                     };
-                    timestamps
-                        .append_value(instant.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string());
+                    timestamps.append_value(instant.naive_utc().and_utc().timestamp_millis());
                 }
             }
             let cells = self.cells.get(&bucket).map_or(&[][..], Vec::as_slice);
@@ -511,27 +531,27 @@ impl FleetFold {
             }
         }
 
-        let mut fields = vec![Field::new("Time", DataType::Utf8, false)];
+        let mut fields = vec![Field::new(
+            "Time",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        )];
         fields.extend(self.columns.iter().cloned());
-        let schema = Arc::new(Schema::new(fields));
+        let mut metadata = std::collections::HashMap::new();
+        if let FoldRows::Instant(offset) = self.rows {
+            metadata.insert(
+                "hares:utc_offset_s".to_string(),
+                offset.local_minus_utc().to_string(),
+            );
+        }
+        let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
         let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(self.columns.len() + 1);
         arrays.push(Arc::new(timestamps.finish()));
         for mut builder in builders {
             arrays.push(Arc::new(builder.finish()));
         }
-        RecordBatch::try_new(schema, arrays).unwrap_or_else(|_| empty_table())
+        RecordBatch::try_new(schema, arrays).expect("the fold's table builds")
     }
-}
-
-/// The empty per-period table: the `Time` label only, zero rows. The
-/// schema an emptied aggregate carries.
-fn empty_table() -> RecordBatch {
-    let schema = Arc::new(Schema::new(vec![Field::new("Time", DataType::Utf8, false)]));
-    RecordBatch::try_new(
-        schema,
-        vec![Arc::new(StringArray::from(Vec::<&str>::new()))],
-    )
-    .expect("empty aggregate table")
 }
 
 /// One reduced period the home's reducer emitted: the naive local
@@ -850,7 +870,7 @@ pub(crate) fn homes_batch(homes: &[HomeResult]) -> RecordBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Array, Float64Array};
+    use arrow::array::{Array, Float64Array, TimestampMillisecondArray};
     use hares_types::Unit;
 
     fn field(name: &str, unit: &str) -> Field {
@@ -886,15 +906,13 @@ mod tests {
             .collect()
     }
 
-    fn time_labels(batch: &RecordBatch) -> Vec<String> {
+    fn time_labels(batch: &RecordBatch) -> Vec<i64> {
         let values = batch
             .column(0)
             .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("a Utf8 Time column");
-        (0..values.len())
-            .map(|row| values.value(row).to_string())
-            .collect()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("a Timestamp Time column");
+        (0..values.len()).map(|row| values.value(row)).collect()
     }
 
     fn default_fold() -> FleetFold {
@@ -1068,10 +1086,9 @@ mod tests {
         assert_eq!(temp[0].unwrap().to_bits(), expected_temp.to_bits());
         let weight = column(&covered_weight, 1);
         assert_eq!(weight[0].unwrap().to_bits(), 4.0_f64.to_bits());
-        assert_eq!(
-            time_labels(&aggregate),
-            vec!["2023-11-14T22:13:20Z".to_string()]
-        );
+        // The naive local label: the instant key's wall clock at the
+        // fold's offset (+00:00 here), in milliseconds.
+        assert_eq!(time_labels(&aggregate), vec![1_700_000_000_i64 * 1000]);
     }
 
     /// The chunk barrier must not disturb the accumulation: the tables

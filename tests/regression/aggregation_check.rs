@@ -230,20 +230,26 @@ pub fn run_aggregation_check() -> Result<(), Vec<String>> {
     // A power cell is the weighted sum of the three homes' period means;
     // a temperature cell is their weighted mean. The homes' own period
     // means come from standalone runs at the same building ids.
-    let period_start = result
+    //
+    // The fleet's `Time` label is the period's local wall clock as a
+    // naive `Timestamp` (B-12); the schema's `hares:utc_offset_s`
+    // recovers the start instant the fold keyed and the standalone
+    // homes' buckets use (UTC = Time - offset).
+    let time_ms = result
         .aggregate
         .column(0)
         .as_any()
-        .downcast_ref::<arrow::array::StringArray>()
+        .downcast_ref::<arrow::array::TimestampMillisecondArray>()
         .expect("the Time column")
-        .value(0)
-        .to_string();
-    let bucket = chrono::DateTime::parse_from_rfc3339(&period_start)
-        .map(|dt| dt.timestamp())
-        .unwrap_or_else(|err| {
-            failures.push(format!("the aggregate's Time label: {err}"));
-            0
-        });
+        .value(0);
+    let fleet_offset_s: i64 = result
+        .aggregate
+        .schema_ref()
+        .metadata()
+        .get("hares:utc_offset_s")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let bucket = time_ms / 1000 - fleet_offset_s;
 
     let homes: [(i64, f64); 3] = [(1, 1.0), (2, 2.0), (3, 5.0)];
     let mut weighted_power = 0.0;

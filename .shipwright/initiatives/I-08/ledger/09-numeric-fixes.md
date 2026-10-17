@@ -2367,6 +2367,70 @@ weighted Mode and states that no golden was re-captured.
 
 ## B-12: fleet local time labels
 
+**State:** committed (branch `row/r93-b12`, worktree `r93-b12`, based on
+`cf3985f3`). The fleet's `Time` column is a naive
+`Timestamp(Millisecond, None)` at each period's start, for every
+alignment, and the schema metadata records the offset: a single-offset
+fleet's labels are the homes' own local wall clock (the undeclared
+default's fold rows take the homes' shared site offset, not +00:00, so
+`Instant`'s label rendering covers both the declared reference zone and
+the undeclared fleet's local clock), a declared `Instant(offset)` fleet
+labels in the declared reference zone's wall clock, and `LocalClock`
+labels by the local wall clock each folded home's step in the row
+starts at (the naive local bucket itself); under `LocalClock` no single
+offset applies and the schema records none. The two fold stages' keys,
+weights and arithmetic are untouched: the row counts, the period
+semantics and every number are the parent's. The `Time` field is
+`Timestamp(TimeUnit::Millisecond, None)`, non-nullable, the label
+written once per row as an `i64` millisecond (an instant key renders at
+its offset's wall clock, the naive local key stamps itself), and
+`tracing` at `debug` names the alignment and the offset chosen. FL-4's
+three Utf8 label tests (`local_clock_labels_are_shared_naive_local_time`,
+`instant_alignment_buckets_on_reference_boundaries`,
+`instant_utc_equals_todays_output`) are rewritten to read the
+`Timestamp` column, the last from "the declared `Instant(+00:00)`
+reproduces the undeclared fleet's output bitwise" to what survives B-12:
+the number columns bitwise, the labels the same instants shifted by the
+homes' offset, the metadata naming each run's offset; FL-4's
+`cross_offset_homes_align_on_the_start_instant` and
+`instant_alignment_of_one_start_instant_covers_every_period` pins read
+the same instants as naive labels, and the wrap pin's label reads move
+to the timestamp column. The regression suite's `aggregation_check`
+reads the fleet label back with the schema's `hares:utc_offset_s`
+(UTC = Time - offset) instead of parsing an RFC 3339 string. The
+three acceptance tests above are written first and failed at the parent
+`cf3985f3` with the rest of the label-reading tests (nine failures:
+`left: Utf8, right: Timestamp(Millisecond, None)` on the type asserts,
+the helper's downcast panic on the label reads); green on the commit.
+The Python surface passes the batch through untouched (polars reads
+`timestamp[ms]`, the local test's label a naive `datetime`). Python
+`test_local_clock_alignment_runs_the_mixed_offset_fleet` asserts the
+naive `datetime`.
+
+**Movement** (in `02-measurement.md`'s log): the three fleet goldens'
+`Time` labels only, in the `aggregate` and `covered_weight` products:
+`fleet_same_offset_300s` and `resstock_2025_fleet` (undeclared,
+UTC-8): the UTC `Z` strings to the homes' local wall clock (192 and 48
+cells per product, the -8 h shift); `fleet_mixed_offset` (declared
+`Instant(+00:00)`): the same instants, the RFC 3339 `Z` string to the
+naive timestamp, 165 rows; every other column, the row counts and the
+`homes` and `fleet_report` products bitwise. The schema metadata gains
+`hares:utc_offset_s` (-28800, -28800, 0). The other goldens identical:
+compare-all 8 + the dst set's `full_year_900s_dst`; the three fleet
+goldens re-captured twice byte-identical. `docs/PHYSICS_DECISIONS.md`
+gains the section (the rule, that OCHRE has no fleet aggregation, and
+the labels' move from UTC to local site time), and `docs/python.md`'s
+"Numeric changes" list names the naive local fleet labels and the
+re-captured fleet goldens.
+
+Gates: fmt clean; clippy `--workspace --all-targets --all-features
+-D warnings` clean; nextest `--workspace --all-features -j 2` 8138/8138
+(8 skipped; the first full run's one failure was the regression
+`aggregation_check`'s RFC 3339 read of the fleet label, rewritten to
+the timestamp-plus-metadata read and the suite re-run whole);
+`pytest -m ''` 1766 passed + 6 xfailed, 0 failed, 0 errors; pyright 0
+(`uv run pyright`); the goldens as above.
+
 **Kind:** numeric fix (`numeric_fixes`: fleet local time labels;
 `dl-i08-architecture.fleet`). `04-fleet.md` FL-4 adds the declared
 alignment and keeps the fleet `Time` column a Utf8 RFC 3339 string

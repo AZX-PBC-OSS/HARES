@@ -547,3 +547,37 @@ fleet goldens' verbosity-2 selection holds no `Enum` column, so every
 golden compares bitwise); a fleet run at a selection that holds mode
 columns moves those columns' cells from the mean of the mode codes to
 the weighted Mode, carried by the acceptance tests.
+
+## A fleet's `Time` labels are the local site time
+
+The fleet's aggregate and covered-weight rows are labelled at each
+period's start in **local site time**, as a naive Arrow
+`Timestamp(Millisecond, None)`: the same convention every per-dwelling
+output already follows (`03-output-reporting.md` OR-7), so the fleet's
+`Time` is no longer the one output that is neither naive nor a
+timestamp. The rule (`decision-log.md` `dl-i08-architecture.time` and
+`.fleet`): a single-offset fleet's labels are the homes' own local wall
+clock; a multi-offset fleet declares its alignment, and `LocalClock`
+labels by the local wall clock each folded home's step in the row
+starts at while `Instant(offset)` labels by the declared reference
+zone's wall clock. The schema metadata records the offset, the homes'
+shared site offset or the declared reference zone, as
+`hares:utc_offset_s` (adding it to a label gives the UTC instant);
+under `LocalClock` no single offset applies and none is recorded.
+
+Before this rule the fleet's `Time` was a Utf8 RFC 3339 string: an
+undeclared fleet and `Instant(+00:00)` rendered each row's start
+instant in UTC with a `Z` suffix (a UTC-5 home's local midnight read
+`2018-01-01T05:00:00Z`), `Instant(offset)` rendered the instant at the
+declared offset, and `LocalClock` rendered the naive local period start
+as text: labels, not timestamps, and UTC-shaped whatever the homes'
+local time.
+
+OCHRE has no fleet aggregation to compare with: the fleet's output
+surface is HARES's own, and the per-dwelling convention it now follows
+is the naive local standard time the engine reports everywhere else.
+Direction of the delta: the three fleet goldens' `Time` labels move
+from the RFC 3339 strings to the naive local timestamps in the
+`aggregate` and `covered_weight` products (the `homes` and
+`fleet_report` products carry no `Time` column and are unchanged); no
+energy, power or weather number moves.

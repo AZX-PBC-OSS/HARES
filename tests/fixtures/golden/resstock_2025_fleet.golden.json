@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "8e44a61ed4b1ef7640970e9def2afdfb2fb2e6c6",
+  "git_head": "cf3985f3b16d28da9a83701b7cfa0ba4179eb395",
   "git_dirty": true,
   "metrics": [],
   "products": {
@@ -12,7 +12,7 @@
       "schema": [
         {
           "name": "Time",
-          "arrow_type": "Utf8",
+          "arrow_type": "Timestamp(ms)",
           "nullable": false
         },
         {
@@ -149,9 +149,9 @@
       "columns": [
         {
           "name": "Time",
-          "digest": "5e4ef91734d9e9e541b488fbf61ac3f7f22ec0d87018c0185dd566093efb4c24",
+          "digest": "7e59087a1023051d5066656b4390d20bc0d97349a10eb326c5155d5bccddb149",
           "blocks": [
-            "5e4ef91734d9e9e541b488fbf61ac3f7f22ec0d87018c0185dd566093efb4c24"
+            "7e59087a1023051d5066656b4390d20bc0d97349a10eb326c5155d5bccddb149"
           ]
         },
         {
@@ -343,7 +343,7 @@
       "schema": [
         {
           "name": "Time",
-          "arrow_type": "Utf8",
+          "arrow_type": "Timestamp(ms)",
           "nullable": false
         },
         {
@@ -480,9 +480,9 @@
       "columns": [
         {
           "name": "Time",
-          "digest": "5e4ef91734d9e9e541b488fbf61ac3f7f22ec0d87018c0185dd566093efb4c24",
+          "digest": "7e59087a1023051d5066656b4390d20bc0d97349a10eb326c5155d5bccddb149",
           "blocks": [
-            "5e4ef91734d9e9e541b488fbf61ac3f7f22ec0d87018c0185dd566093efb4c24"
+            "7e59087a1023051d5066656b4390d20bc0d97349a10eb326c5155d5bccddb149"
           ]
         },
         {

@@ -3559,3 +3559,52 @@ No physics comparison suite moves: the row changes no engine physics
 path (the fleet's construction declares the config; the dwelling,
 environment and solver surfaces are untouched and the full workspace
 suite's BESTEST and parity tests pass unchanged).
+
+### The fleet local time labels row, 2026-10-16 (the worktree `r93-b12`)
+
+The B-12 delta, read with `frame_golden delta` against the parent
+`cf3985f3`'s materialized frames: the movement is the `Time` labels
+only, in the fleet's `aggregate` and `covered_weight` products of the
+three fleet goldens; every energy, power and weather column and the
+`homes` (and `fleet_report`) products are bitwise unchanged, and the
+row counts are unchanged (the alignments' period semantics untouched).
+The delta command's per-column statistics are skipped where the schema
+differs (the `Time` column's type moved), so the labels were read off
+the parent's materialized Parquet against a run of the fixed engine.
+
+- `fleet_same_offset_300s` (FL-1, undeclared, homes at UTC-8): the
+  labels move from the UTC `Z` strings to the homes' local wall clock,
+  row 0 `2018-01-01T08:00:00Z` to `2018-01-01 00:00` and row 191
+  `2018-01-03T07:45:00Z` to `2018-01-02 23:45`, the -8 h shift, 192
+  cells per product; `arrow_type` `Utf8` to `Timestamp(ms)`; no other
+  column differs (0 differing cells); `homes` identical.
+- `resstock_2025_fleet` (B-9a, undeclared, the same UTC-8 offset): the
+  same shape, row 0 `2018-01-01T08:00:00Z` to `2018-01-01 00:00` and
+  row 47 `2018-01-03T07:00:00Z` to `2018-01-02 23:00`, 48 cells per
+  product; `homes` identical.
+- `fleet_mixed_offset` (M-2, declared `Instant(+00:00)`): the labels
+  carry the same instants at the declared reference zone's wall clock
+  (+00:00, the instant itself): row 0 `2018-01-01T08:00:00Z` to
+  `2018-01-01 08:00` and the last row `2018-01-08T04:00:00Z` to
+  `2018-01-08 04:00`, 165 rows in both runs; the movement is the type
+  and rendering (the RFC 3339 `Z` string to the naive timestamp); no
+  other column differs; `homes` identical.
+
+The schema metadata gains `hares:utc_offset_s` on both products of
+every fleet run that has one offset (the single-offset fleets' shared
+site offset, or the declared reference zone: -28800 on the first two,
+0 on the declared `+00:00` mixed offset); a `LocalClock` fleet records
+none (each home's own wall clock). The six non-fleet goldens compare
+identical (compare-all 8 after the re-capture) and the dst set's
+`full_year_900s_dst` is identical. The three fleet goldens re-captured
+TWICE BYTE-IDENTICAL, the two captures' sha256 equal per manifest
+(`fleet_mixed_offset`
+`a0a250302f75f21556a5483731bab4ca62246f6a9270e9cb4d6f64744c539d1a`,
+`fleet_same_offset_300s`
+`a0ee127390a1f1e674f917061e2e819b30bea3953c8f6553d0d7993d66b3e79c`,
+`resstock_2025_fleet`
+`6f0aacb4e697868b2ffc49a3d85a8745ad71973d1272558f1684f0a99dafa0dd`).
+No physics comparison suite moves: the row changes no physics path
+(the fleet's label rendering and its schema metadata only; the fold's
+keys, weights and arithmetic untouched) and the full workspace suite's
+BESTEST and parity tests pass unchanged.

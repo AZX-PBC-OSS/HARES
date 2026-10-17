@@ -733,6 +733,22 @@ impl Fleet {
             )
             .collect();
         let fold_rows = decide_fold_rows(&home_offsets, self.alignment)?;
+        // The alignment and offset the labels carry, at debug: the
+        // declared alignment's, or the single-offset fleet's shared site
+        // offset (B-12's local labels).
+        match fold_rows {
+            FoldRows::Instant(offset) => tracing::debug!(
+                alignment = "instant",
+                offset_s = offset.local_minus_utc(),
+                "the fleet's rows align by the period's start instant, labelled \
+                 in that instant's wall clock at the offset"
+            ),
+            FoldRows::LocalClock => tracing::debug!(
+                alignment = "local_clock",
+                "the fleet's rows align by the naive local period start, labelled \
+                 by the homes' local wall clock"
+            ),
+        }
         check_time_grid(
             &self.entries,
             &home_offsets,
@@ -1024,8 +1040,9 @@ fn distinct_offsets(offsets: &[Option<FixedOffset>]) -> Vec<i32> {
 }
 
 /// The reference offsets' decision the undeclared fleet makes: the homes'
-/// own local calendars and today's instant keys and `Z` labels. A fleet
-/// whose homes span more than one UTC offset fails here instead:
+/// own local calendars and today's instant keys, labelled in the homes'
+/// local wall clock (the shared site offset's), B-12's local labels. A
+/// fleet whose homes span more than one UTC offset fails here instead:
 /// [`FleetError::AlignmentRequired`] naming the distinct offsets, before
 /// any home runs.
 fn decide_fold_rows(
@@ -1036,8 +1053,15 @@ fn decide_fold_rows(
         Some(Alignment::Instant(offset)) => Ok(FoldRows::Instant(offset)),
         Some(Alignment::LocalClock) => Ok(FoldRows::LocalClock),
         None => match distinct_offsets(offsets).as_slice() {
-            [] | [_] => Ok(FoldRows::Instant(
+            // No home resolved an offset: every run fails for its own
+            // cause, and the emptied tables still need a label offset.
+            [] => Ok(FoldRows::Instant(
                 FixedOffset::east_opt(0).expect("a zero offset is representable"),
+            )),
+            // The single-offset fleet labels in the homes' own local
+            // wall clock: the shared site offset.
+            [offset_s] => Ok(FoldRows::Instant(
+                FixedOffset::east_opt(*offset_s).expect("the pre-pass offsets are representable"),
             )),
             _ => Err(FleetError::AlignmentRequired {
                 offsets_s: distinct_offsets(offsets),
@@ -2269,8 +2293,10 @@ mod tests {
     use std::sync::Mutex;
     use std::thread;
 
-    use arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::array::{
+        Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+    };
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::arrow_writer::ArrowWriter;
     use std::sync::Arc;
@@ -4060,11 +4086,8 @@ mod tests {
         let jan1: Vec<f64> = series.dry_bulb_c[..24].to_vec();
 
         let aggregate = &result.aggregate;
-        let time = aggregate
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("a Utf8 Time column");
+        let time_ms = time_labels_of(aggregate);
+        let time_text: Vec<String> = time_ms.iter().map(|&ms| label_text(ms)).collect();
         let dry_bulb = aggregate
             .column(
                 aggregate
@@ -4077,25 +4100,25 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .expect("a Float64 outdoor dry bulb column");
-        let len = time.len();
+        let len = time_ms.len();
         assert_eq!(len, 367 * 24, "the run's hours, the wrap included");
         assert!(
-            (0..len).any(|row| time.value(row).starts_with("2023-12-31T00:00:00")),
+            (0..len).any(|row| time_text[row].starts_with("2023-12-31T00:00:00")),
             "the run reaches the file's Dec 31 on its local labels"
         );
         // The run covers local 2023-01-01 to 2024-01-03; the wrapped Jan 1
         // is the 24 rows before the last 24 (the wrapped Jan 2).
         assert!(
-            time.value(len - 24).starts_with("2024-01-02"),
+            time_text[len - 24].starts_with("2024-01-02"),
             "the run crosses the wrapped Jan 1: {:?}",
-            time.value(len - 24)
+            time_text[len - 24]
         );
         for (k, expected) in jan1.iter().enumerate() {
             let row = len - 48 + k;
             assert!(
-                time.value(row).starts_with("2024-01-01"),
+                time_text[row].starts_with("2024-01-01"),
                 "row {row} is on the wrapped date: {:?}",
-                time.value(row)
+                time_text[row]
             );
             assert_eq!(
                 dry_bulb.value(row),
@@ -4854,8 +4877,9 @@ mod tests {
     /// boundaries and the fold's periods align on the instant, so the
     /// aggregate is the full common grid (no intersection loss) and the
     /// covered weight is the two homes' weight sum in every cell, on
-    /// bits. At `+00:00` the labels render with `Z`, byte for byte the
-    /// undeclared single-offset fleet's.
+    /// bits. At `+00:00` the labels are that instant's UTC wall clock,
+    /// naive, the same instants the undeclared single-offset fleet
+    /// labels in the homes' local wall clock (B-12).
     #[test]
     fn cross_offset_homes_align_on_the_start_instant() {
         let examples = repo_root().join("data/examples");
@@ -4946,14 +4970,9 @@ mod tests {
             2,
             "the homes' hour rows align on the instant: no intersection loss"
         );
-        let times = result
-            .aggregate
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("a Utf8 Time column");
-        assert_eq!(times.value(0), "2021-01-01T07:00:00Z");
-        assert_eq!(times.value(1), "2021-01-01T08:00:00Z");
+        let times_ms = time_labels_of(&result.aggregate);
+        assert_eq!(times_ms[0], naive_ms(2021, 1, 1, 7, 0));
+        assert_eq!(times_ms[1], naive_ms(2021, 1, 1, 8, 0));
         for slot in 1..result.covered_weight.num_columns() {
             let weights = result
                 .covered_weight
@@ -6062,15 +6081,46 @@ mod tests {
         }
     }
 
-    fn time_labels_of(batch: &RecordBatch) -> Vec<String> {
+    /// The fleet aggregate's `Time` labels, in milliseconds: the column
+    /// is a naive `Timestamp(Millisecond, None)` (B-12).
+    fn time_labels_of(batch: &RecordBatch) -> Vec<i64> {
         let values = batch
             .column(0)
             .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("a Utf8 Time column");
-        (0..values.len())
-            .map(|row| values.value(row).to_string())
-            .collect()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("a Timestamp Time column");
+        (0..values.len()).map(|row| values.value(row)).collect()
+    }
+
+    /// The local wall clock a naive millisecond label denotes, as text
+    /// for the label assertions.
+    fn label_text(ms: i64) -> String {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .expect("a representable label")
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string()
+    }
+
+    /// The naive millisecond label of a local wall clock.
+    fn naive_ms(y: i32, m: u32, d: u32, h: u32, min: u32) -> i64 {
+        chrono::NaiveDate::from_ymd_opt(y, m, d)
+            .expect("a date")
+            .and_hms_opt(h, min, 0)
+            .expect("a time")
+            .and_utc()
+            .timestamp_millis()
+    }
+
+    /// The fleet tables' `hares:utc_offset_s` metadata: the offset (or
+    /// the declared reference zone) the labels carry, absent under
+    /// `LocalClock` (each home's own wall clock).
+    fn offset_metadata_of(batch: &RecordBatch) -> Option<i32> {
+        batch
+            .schema_ref()
+            .metadata()
+            .get("hares:utc_offset_s")
+            .map(|value| value.parse::<i32>().expect("an offset in seconds"))
     }
 
     /// A fleet whose homes span more than one UTC offset and declares no
@@ -6165,17 +6215,12 @@ mod tests {
             );
         }
         let times = time_labels_of(&result.aggregate);
+        let expected: Vec<i64> = (0..7)
+            .map(|day| naive_ms(2018, 1, 1 + day as u32, 0, 0))
+            .collect();
         assert_eq!(
-            times,
-            [
-                "2018-01-01T00:00:00-08:00",
-                "2018-01-02T00:00:00-08:00",
-                "2018-01-03T00:00:00-08:00",
-                "2018-01-04T00:00:00-08:00",
-                "2018-01-05T00:00:00-08:00",
-                "2018-01-06T00:00:00-08:00",
-                "2018-01-07T00:00:00-08:00",
-            ]
+            times, expected,
+            "the labels are the declared offset's wall clock's midnights, naive"
         );
         for slot in 1..result.covered_weight.num_columns() {
             let weights = result
@@ -6227,7 +6272,8 @@ mod tests {
     }
 
     /// `LocalClock` aligns the rows by the naive local period start the
-    /// homes share, labelled with no offset.
+    /// homes share, labelled by that wall clock as a naive `Timestamp`
+    /// (B-12): no offset applies, so the schema records none.
     #[test]
     fn local_clock_labels_are_shared_naive_local_time() {
         let fleet = mixed_offset_fleet([0, 0, 0]).with_alignment(Alignment::LocalClock);
@@ -6242,10 +6288,19 @@ mod tests {
             );
         }
         let time_field = result.aggregate.schema_ref().field(0).clone();
-        assert_eq!(time_field.data_type(), &DataType::Utf8);
+        assert_eq!(
+            time_field.data_type(),
+            &DataType::Timestamp(TimeUnit::Millisecond, None)
+        );
         assert_eq!(
             time_labels_of(&result.aggregate).first().expect("a row"),
-            "2018-01-01T00:00:00",
+            &naive_ms(2018, 1, 1, 0, 0),
+            "the first row is the homes' shared local midnight, naive"
+        );
+        assert_eq!(
+            offset_metadata_of(&result.aggregate),
+            None,
+            "each home's own wall clock: no single offset to record"
         );
         for slot in 1..result.covered_weight.num_columns() {
             let weights = result
@@ -6264,10 +6319,11 @@ mod tests {
         }
     }
 
-    /// `Instant` buckets on the declared offset's reference boundaries: the
-    /// homes' edge periods at the run's ends are partial for the homes
+    /// `Instant` buckets on the declared offset's reference boundaries:
+    /// the homes' edge periods at the run's ends are partial for the homes
     /// that do not cover them whole, and fold at the reduced covered
-    /// weight.
+    /// weight. The labels are the reference zone's wall clock, naive
+    /// `Timestamp` (B-12).
     #[test]
     fn instant_alignment_buckets_on_reference_boundaries() {
         // The homes start at their local midnights: instants 05:00Z (UTC-5),
@@ -6284,17 +6340,18 @@ mod tests {
         let result = fleet
             .simulate(&report, 1, chunk(64))
             .expect("the fleet runs");
+        let labels = time_labels_of(&result.aggregate);
+        let expected: Vec<i64> = (0..7)
+            .map(|day| naive_ms(2018, 1, 1 + day as u32, 0, 0))
+            .collect();
         assert_eq!(
-            time_labels_of(&result.aggregate),
-            [
-                "2018-01-01T00:00:00-07:00",
-                "2018-01-02T00:00:00-07:00",
-                "2018-01-03T00:00:00-07:00",
-                "2018-01-04T00:00:00-07:00",
-                "2018-01-05T00:00:00-07:00",
-                "2018-01-06T00:00:00-07:00",
-                "2018-01-07T00:00:00-07:00",
-            ]
+            labels, expected,
+            "the labels are the reference wall clock's midnights, naive"
+        );
+        assert_eq!(
+            offset_metadata_of(&result.aggregate),
+            Some(-7 * 3600),
+            "the metadata names the declared reference zone"
         );
         let weights = result
             .covered_weight
@@ -6312,12 +6369,14 @@ mod tests {
         }
     }
 
-    /// Declaring `Instant(+00:00)` reproduces the undeclared fleet's
-    /// output bitwise, the `Time` column included: `+00:00` renders with
-    /// `Z`, byte for byte today's label, and the declared offset's
-    /// calendar buckets the same hours a single-offset fleet's local
-    /// calendar does at whole-hour offsets. The `fleet_mixed_offset`
-    /// golden's bitwise reproduction under its declared `Instant(+00:00)`
+    /// Declaring `Instant(+00:00)` keeps the undeclared single-offset
+    /// fleet's numbers bitwise and names the same instants: the number
+    /// columns are bitwise equal, both `Time` columns are naive
+    /// `Timestamp`s, and the undeclared fleet's label (the homes' local
+    /// wall clock) is the declared label (the +00:00 reference wall
+    /// clock) shifted by the homes' offset (B-12's local labels: FL-4's
+    /// bitwise label equality is gone, the instant equality stays). The
+    /// `fleet_mixed_offset` golden under its declared `Instant(+00:00)`
     /// is the compare-all gate.
     #[test]
     fn instant_utc_equals_todays_output() {
@@ -6330,22 +6389,269 @@ mod tests {
             ))
             .simulate(&minutes_15(), 1, chunk(64))
             .expect("the fleet runs");
-        assert_batches_bitwise_equal(&undeclared.aggregate, &declared.aggregate, "the aggregate");
-        assert_batches_bitwise_equal(
-            &undeclared.covered_weight,
-            &declared.covered_weight,
-            "the covered weight",
-        );
+        for (label, left, right) in [
+            ("the aggregate", &undeclared.aggregate, &declared.aggregate),
+            (
+                "the covered weight",
+                &undeclared.covered_weight,
+                &declared.covered_weight,
+            ),
+        ] {
+            assert_eq!(left.num_rows(), right.num_rows(), "{label}: row count");
+            for slot in 1..left.num_columns() {
+                assert_eq!(
+                    left.schema_ref().field(slot),
+                    right.schema_ref().field(slot),
+                    "{label}: column {slot} field"
+                );
+                assert_eq!(
+                    left.column(slot).to_data(),
+                    right.column(slot).to_data(),
+                    "{label}: column {} differs",
+                    left.schema_ref().field(slot).name()
+                );
+            }
+        }
         assert_batches_bitwise_equal(
             &undeclared.homes_table(),
             &declared.homes_table(),
             "the homes table",
         );
+        let home_offset_ms = i64::from(golden_fleet_offset_s()) * 1000;
+        for (label, undeclared_ms, declared_ms) in [
+            (
+                "the aggregate",
+                time_labels_of(&undeclared.aggregate),
+                time_labels_of(&declared.aggregate),
+            ),
+            (
+                "the covered weight",
+                time_labels_of(&undeclared.covered_weight),
+                time_labels_of(&declared.covered_weight),
+            ),
+        ] {
+            assert_eq!(
+                undeclared_ms.first().expect("a row"),
+                &naive_ms(2018, 1, 1, 0, 0),
+                "{label}: the undeclared fleet labels its homes' local midnight (UTC-8)"
+            );
+            assert_eq!(
+                declared_ms.first().expect("a row"),
+                &naive_ms(2018, 1, 1, 8, 0),
+                "{label}: the declared +00:00 label is the same instant's UTC wall clock"
+            );
+            assert_eq!(
+                declared_ms.len(),
+                undeclared_ms.len(),
+                "{label}: the same rows"
+            );
+            for (local, utc) in undeclared_ms.iter().zip(&declared_ms) {
+                assert_eq!(
+                    utc - local,
+                    -home_offset_ms,
+                    "{label}: the labels differ by the homes' offset, the instants equal"
+                );
+            }
+        }
         assert_eq!(
-            time_labels_of(&declared.aggregate).first().expect("a row"),
-            "2018-01-01T08:00:00Z",
-            "the run starts at 08:00Z (local midnight at UTC-8), labelled at +00:00 with Z"
+            offset_metadata_of(&undeclared.aggregate),
+            Some(golden_fleet_offset_s()),
+            "the undeclared fleet's metadata names the homes' shared offset"
         );
+        assert_eq!(
+            offset_metadata_of(&declared.aggregate),
+            Some(0),
+            "the declared fleet's metadata names the +00:00 reference zone"
+        );
+    }
+
+    /// The golden fleet's homes' shared site offset: UTC-8.
+    fn golden_fleet_offset_s() -> i32 {
+        -8 * 3600
+    }
+
+    // -------------------------------------------------------------------
+    // B-12: the fleet's labels in local site time.
+    // -------------------------------------------------------------------
+
+    /// One UTC-5 home of the single-offset acceptance fleet.
+    fn single_offset_config(bldg_id: i64, home: &str, weather: &str) -> DwellingConfig {
+        DwellingConfig {
+            hpxml: InputSource::Path(resstock_fixture(&format!("{home}/home.xml"))),
+            schedule: Some(InputSource::Path(resstock_fixture(&format!(
+                "{home}/in.schedules.csv"
+            )))),
+            weather: WeatherInput::Path(resstock_fixture("weather").join(weather)),
+            defaults: DefaultsSource::directory(repo_defaults_path()),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: FixedOffset::west_opt(5 * 3600)
+                        .expect("valid offset")
+                        .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                        .single()
+                        .expect("valid start"),
+                    duration: Duration::days(2),
+                    time_res: Duration::seconds(3600),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 10_000,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: hares_io::FirstHour::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::default(),
+                },
+                None,
+                bldg_id,
+                None,
+            ),
+        }
+    }
+
+    /// A single-offset fleet's rows are labelled in the homes' local
+    /// time: a naive `Timestamp(Millisecond, None)` at each period's
+    /// start, the UTC-5 homes' local midnight first, with the schema
+    /// metadata recording the offset (B-12).
+    #[test]
+    fn single_offset_fleet_is_labelled_in_local_time() {
+        let fleet = Fleet::from_buildings(vec![
+            single_offset_config(2, "bldg0000002", "G0900090_2018.csv"),
+            single_offset_config(17, "bldg0000017", "G0900010_2018.csv"),
+            single_offset_config(3, "bldg0000003", "G2500170_2018.csv"),
+        ])
+        .expect("the homes carry no reserved report or shared destination")
+        .with_sample_weights(vec![1.0, 1.0, 1.0])
+        .expect("the weights are finite and non-negative");
+        let result = fleet
+            .simulate(&hourly_named_common(), 1, chunk(64))
+            .expect("the fleet runs");
+        for home in &result.homes {
+            assert!(
+                !matches!(home.status, HomeStatus::Failed(_)),
+                "every home runs: {:?}",
+                home.status
+            );
+        }
+        assert_eq!(result.aggregate.num_rows(), 48, "2 days at 3600 s, hourly");
+        let time_field = result.aggregate.schema_ref().field(0).clone();
+        assert_eq!(
+            time_field.data_type(),
+            &DataType::Timestamp(TimeUnit::Millisecond, None),
+            "the Time column is a naive millisecond Timestamp, not FL-4's Utf8"
+        );
+        let labels = time_labels_of(&result.aggregate);
+        assert_eq!(
+            labels.first().expect("a row"),
+            &naive_ms(2018, 1, 1, 0, 0),
+            "the first row is the homes' local midnight, naive"
+        );
+        assert_ne!(
+            labels.first().expect("a row"),
+            &naive_ms(2018, 1, 1, 5, 0),
+            "not FL-4's UTC rendering of the same instant (05:00Z)"
+        );
+        assert_eq!(
+            labels.last().expect("a row"),
+            &naive_ms(2018, 1, 2, 23, 0),
+            "the last row is the second day's last local hour"
+        );
+        assert_eq!(
+            offset_metadata_of(&result.aggregate),
+            Some(-5 * 3600),
+            "the schema metadata records the homes' shared offset"
+        );
+    }
+
+    /// A mixed-offset fleet declared `Instant` with reference zone UTC-6
+    /// labels in the reference zone's wall clock: the homes start at
+    /// their own local midnights (the manifest's naive start read in
+    /// each home's offset), so in reference time the UTC-5 home starts
+    /// at 2017-12-31 23:00, the UTC-6 home at 00:00 and the UTC-8 home
+    /// at 02:00, and the rows are the periods every folded home has a
+    /// row for: the first row is 2018-01-01 02:00, naive (B-12).
+    #[test]
+    fn instant_fleet_is_labelled_in_the_reference_zone() {
+        let fleet = mixed_offset_fleet([0, 0, 0]).with_alignment(Alignment::Instant(
+            FixedOffset::west_opt(6 * 3600).expect("valid offset"),
+        ));
+        let result = fleet
+            .simulate(&hourly_named_common(), 1, chunk(64))
+            .expect("the fleet runs");
+        for home in &result.homes {
+            assert!(
+                !matches!(home.status, HomeStatus::Failed(_)),
+                "every home runs: {:?}",
+                home.status
+            );
+        }
+        let labels = time_labels_of(&result.aggregate);
+        assert_eq!(
+            labels.first().expect("a row"),
+            &naive_ms(2018, 1, 1, 2, 0),
+            "the first row every home covers is the UTC-8 home's first reference hour"
+        );
+        assert_ne!(
+            labels.first().expect("a row"),
+            &naive_ms(2018, 1, 1, 0, 0),
+            "not the homes' local midnight: the label is the reference zone's"
+        );
+        // The labels continue hourly on the reference clock.
+        for (row, label) in labels.iter().enumerate().skip(1).take(4) {
+            assert_eq!(
+                label,
+                &(naive_ms(2018, 1, 1, 2, 0) + i64::try_from(row).expect("a row") * 3_600_000),
+                "row {row}: the reference hours continue"
+            );
+        }
+        assert_eq!(
+            offset_metadata_of(&result.aggregate),
+            Some(-6 * 3600),
+            "the schema metadata names the declared reference zone"
+        );
+    }
+
+    /// A mixed-offset fleet declared `LocalClock` labels every row by
+    /// the local wall-clock time each folded home's step in that row
+    /// starts at: the homes start at their own local midnights and run
+    /// the same resolution, so the labels are the shared wall clock's
+    /// hourly sequence, a naive `Timestamp` (B-12), not FL-4's text.
+    #[test]
+    fn local_clock_fleet_is_labelled_by_local_wall_clock() {
+        let fleet = mixed_offset_fleet([0, 0, 0]).with_alignment(Alignment::LocalClock);
+        let result = fleet
+            .simulate(&hourly_named_common(), 1, chunk(64))
+            .expect("the fleet runs");
+        for home in &result.homes {
+            assert!(
+                !matches!(home.status, HomeStatus::Failed(_)),
+                "every home runs: {:?}",
+                home.status
+            );
+        }
+        let time_field = result.aggregate.schema_ref().field(0).clone();
+        assert_eq!(
+            time_field.data_type(),
+            &DataType::Timestamp(TimeUnit::Millisecond, None),
+            "the Time column is a Timestamp, not FL-4's Utf8 text"
+        );
+        // Every home starts at its local midnight (the naive start read
+        // in the home's own offset) and steps hourly, so the wall clock
+        // each home's step in row j starts at is 2018-01-01T00:00 + j h.
+        let labels = time_labels_of(&result.aggregate);
+        assert_eq!(labels.len(), 168, "7 days at 3600 s, hourly");
+        for (row, label) in labels.iter().enumerate() {
+            let expected =
+                naive_ms(2018, 1, 1, 0, 0) + i64::try_from(row).expect("a row") * 3_600_000;
+            assert_eq!(
+                label, &expected,
+                "row {row}: the label is each home's step's local wall clock"
+            );
+        }
     }
 
     /// Two homes whose naive local starts differ, no alignment declared:

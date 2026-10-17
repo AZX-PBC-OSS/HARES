@@ -873,3 +873,23 @@ golden fixtures re-captured.
   (`defaults` to `python/hares/defaults`) and the capture head; the
   defaults digest is unchanged (the digest runs over tree-relative
   paths and bytes).
+
+- 2026-10-16: the fleet's `Time` labels are the local site time: the
+  fleet's `aggregate` and `covered_weight` products carry a naive
+  `Timestamp(Millisecond, None)` at each period's start, the convention
+  every per-dwelling output follows, replacing the Utf8 RFC 3339
+  strings (an undeclared fleet and `Instant(+00:00)` rendered each
+  row's start instant in UTC with a `Z` suffix, `Instant(offset)` at
+  the declared offset, `LocalClock` as bare text). A single-offset
+  fleet's labels are the homes' own local wall clock; a multi-offset
+  fleet declares its alignment and `LocalClock` labels by the local
+  wall clock each folded home's step starts at, `Instant(offset)` by
+  the declared reference zone's. The schema metadata records the offset
+  or the reference zone as `hares:utc_offset_s` (under `LocalClock` no
+  single offset applies and none is recorded). The three fleet goldens
+  re-captured (`fleet_mixed_offset`, `fleet_same_offset_300s`,
+  `resstock_2025_fleet`): the movement is the `Time` labels only in the
+  `aggregate` and `covered_weight` products; every energy, power and
+  weather column and the `homes` and `fleet_report` products are
+  bitwise unchanged. The other goldens are bitwise identical
+  (compare-all 8 + dst 1).

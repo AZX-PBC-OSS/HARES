@@ -1,5 +1,6 @@
 """Tests for the Fleet API."""
 
+import datetime
 import tempfile
 from pathlib import Path
 
@@ -657,4 +658,8 @@ def test_local_clock_alignment_runs_the_mixed_offset_fleet() -> None:
     results = fleet.simulate(report)
     assert results.n_succeeded == 3
     assert results.aggregate.table().height == 24
-    assert results.aggregate.table()["Time"][0] == "2018-01-01T00:00:00"
+    first = results.aggregate.table()["Time"][0]
+    assert first == datetime.datetime(2018, 1, 1, 0, 0), (
+        "the first Time is the homes' shared local wall clock, a naive "
+        "datetime (the fleet's Time is a naive Timestamp, B-12)"
+    )
