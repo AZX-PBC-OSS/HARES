@@ -337,7 +337,11 @@ TRACE_WORST_6H_C = 2.0452
 TRACE_MEAN_48H_C = 0.3988
 TRACE_HEATING_OCHRE_KWH = 47.052
 TRACE_HEATING_HARES_KWH = 31.3747
-OVERNIGHT_WORST_C = 1.3706
+# OVERNIGHT_WORST_C updated by the opaque-R precedence row (the
+# numeric-fixes ledger's opaque-R precedence entry, 2026-10-16): the declared assembly R now sets the
+# LUT layers' resistance and the overnight divergence tightened,
+# 1.3706 to 1.2309 C (the mean moved inside its margin, 0.3823 to 0.3753).
+OVERNIGHT_WORST_C = 1.2309
 OVERNIGHT_MEAN_C = 0.3823
 SOLAR_MEAN_RATIO = 0.9885
 SOLAR_WORST_REL_ERR = 0.0918

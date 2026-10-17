@@ -84,13 +84,21 @@ pub fn building_to_boundary_inputs(
             // includes film per spec, so subtract computed film R to get material-only.
             // NominalRValue layers are already material-only. Film R is added back in
             // boundary_rc.rs for all three construction paths.
-            let material_r = bd
-                .assembly_r_value_m2_k_w
-                .map(|r| (r - r_film_int - r_film_ext).max(1e-6))
-                .or_else(|| {
+            //
+            // The declared assembly R is the opaque-R precedence's winner
+            // (the numeric-fixes ledger's opaque-R precedence entry): on the
+            // LUT path it sets the
+            // matched row's layer resistances below, and here it feeds the
+            // single-resistor fallback. Its old `.max(1e-6)` clamp is gone:
+            // a declared R that leaves no material resistance is the
+            // film-sum error checked on the LUT path, not a silent near-zero.
+            let material_r = match bd.assembly_r_value_m2_k_w {
+                Some(r) => Some(r - r_film_int - r_film_ext),
+                None => {
                     let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
                     if sum > 0.0 { Some(sum) } else { None }
-                });
+                }
+            };
 
             #[cfg(feature = "observe")]
             let used_default_r = material_r.is_none();
@@ -179,56 +187,126 @@ pub fn building_to_boundary_inputs(
                 // synthetic configs define their own layer stack).
                 Vec::new()
             } else {
-                envelope_lut
-                    .and_then(|lut| {
-                        let boundary_name = bd.lut_boundary_name.as_deref().or_else(|| {
-                            lut.resolve_name(
-                                &bd.boundary_type,
-                                bd.interior_zone.as_ref(),
-                                bd.exterior_zone.as_ref(),
-                            )
-                        })?;
-                        let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
-                            let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
-                            if sum > 0.0 { Some(sum) } else { None }
-                        });
-                        let result = lut.lookup(
-                            boundary_name,
-                            bd.construction_type.as_deref(),
-                            bd.finish_type.as_deref(),
-                            bd.insulation_details.as_deref(),
-                            r_value,
-                        );
-                        if result.is_none() {
-                            tracing::debug!(
-                                boundary = boundary_name,
-                                construction = ?bd.construction_type,
-                                finish = ?bd.finish_type,
-                                insulation = ?bd.insulation_details,
-                                r_value = ?r_value,
-                                "envelope LUT lookup miss"
-                            );
+                // The opaque-R precedence (the numeric-fixes ledger's
+                // opaque-R precedence entry): the row selection is unchanged - by the
+                // construction and finish filters, then the row whose
+                // assembly R plus the convention films is nearest the
+                // declared R - and a declared `AssemblyEffectiveRValue`
+                // then sets the matched row's resistance: every layer
+                // resistance of the row is multiplied by
+                // `k = (declared R - convention films) / sum(row layer
+                // resistances)`, so the layers plus the convention films
+                // equal the declared R in the convention the declaration
+                // and the row selection speak. The row's layer
+                // capacitances are kept (they are mass, not resistance).
+                // The convention films are the LUT's row-selection films,
+                // not the weather's convection-only films: the declared
+                // assembly R includes the standard films per HPXML, and
+                // HARES's convection-only film sums (the radiative part
+                // rides the LWR network) exceed legitimate declared
+                // assembly R values - the corpus's low-R roofs and
+                // floors among them - so the network's films cannot be
+                // the scaling's or the error's measure.
+                match envelope_lut {
+                    Some(lut) => {
+                        let boundary_name = bd
+                            .lut_boundary_name
+                            .clone()
+                            .or_else(|| {
+                                lut.resolve_name(
+                                    &bd.boundary_type,
+                                    bd.interior_zone.as_ref(),
+                                    bd.exterior_zone.as_ref(),
+                                )
+                                .map(str::to_string)
+                            });
+                        match boundary_name {
+                            Some(boundary_name) => {
+                                // A declared R at or below the convention film
+                                // sum leaves no material resistance: a
+                                // construction error naming the boundary, the
+                                // declared R and the film sum, where the old
+                                // clamp scaled the LUT layers to almost no
+                                // resistance without a word.
+                                if let Some(declared) = bd.assembly_r_value_m2_k_w {
+                                    let films = lut.convention_films(&boundary_name);
+                                    if declared <= films {
+                                        return Err(HaresError::Dwelling(format!(
+                                            "boundary '{}': the declared assembly R-value {declared} m²·K/W \
+                                             is at or below the film resistance sum {films} m²·K/W, so the \
+                                             films alone leave no material resistance for the construction",
+                                            bd.id
+                                        )));
+                                    }
+                                }
+                                let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
+                                    let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
+                                    if sum > 0.0 { Some(sum) } else { None }
+                                });
+                                let result = lut.lookup(
+                                    &boundary_name,
+                                    bd.construction_type.as_deref(),
+                                    bd.finish_type.as_deref(),
+                                    bd.insulation_details.as_deref(),
+                                    r_value,
+                                );
+                                match result {
+                                    Some(result) => {
+                                        tracing::debug!(
+                                            boundary = boundary_name,
+                                            layers = result.layers.len(),
+                                            matched_type = %result.matched_boundary_type,
+                                            "envelope LUT match"
+                                        );
+                                        // LUT layers are exterior→interior (OCHRE CSV convention),
+                                        // matching boundary_rc's expected ordering.
+                                        let mut layers: Vec<_> = result
+                                            .layers
+                                            .into_iter()
+                                            .map(|l| PrecomputedRCLayer {
+                                                resistance_m2_k_w: l.resistance_m2_k_w,
+                                                capacitance_kj_m2_k: l.capacitance_kj_m2_k,
+                                            })
+                                            .collect();
+                                        if let Some(declared) = bd.assembly_r_value_m2_k_w {
+                                            let films = lut.convention_films(&boundary_name);
+                                            let row_sum: f64 =
+                                                layers.iter().map(|l| l.resistance_m2_k_w).sum();
+                                            if row_sum > 0.0 {
+                                                let k = (declared - films) / row_sum;
+                                                for layer in &mut layers {
+                                                    layer.resistance_m2_k_w *= k;
+                                                }
+                                                tracing::debug!(
+                                                    boundary = boundary_name,
+                                                    row = %result.matched_boundary_type,
+                                                    declared_r_m2_k_w = declared,
+                                                    k,
+                                                    "opaque-R precedence: the declared assembly R \
+                                                     scales the matched LUT row's layer resistances"
+                                                );
+                                            }
+                                        }
+                                        layers
+                                    }
+                                    None => {
+                                        tracing::debug!(
+                                            boundary = boundary_name,
+                                            construction = ?bd.construction_type,
+                                            finish = ?bd.finish_type,
+                                            insulation = ?bd.insulation_details,
+                                            r_value = ?r_value,
+                                            "envelope LUT lookup miss"
+                                        );
+                                        Vec::new()
+                                    }
+                                }
+                            }
+                            None => Vec::new(),
                         }
-                        let result = result?;
-                        tracing::debug!(
-                            boundary = boundary_name,
-                            layers = result.layers.len(),
-                            matched_type = %result.matched_boundary_type,
-                            "envelope LUT match"
-                        );
-                        // LUT layers are exterior→interior (OCHRE CSV convention),
-                        // matching boundary_rc's expected ordering.
-                        let layers: Vec<_> = result
-                            .layers
-                            .into_iter()
-                            .map(|l| PrecomputedRCLayer {
-                                resistance_m2_k_w: l.resistance_m2_k_w,
-                                capacitance_kj_m2_k: l.capacitance_kj_m2_k,
-                            })
-                            .collect();
-                        Some(layers)
-                    })
-                    .unwrap_or_default()
+                    }
+                    None => Vec::new(),
+                }
             };
 
             // Window / Skylight U-factor decomposition: EnergyPlus Simple Window
@@ -3333,6 +3411,129 @@ mod tests {
             inputs[0].r_film_exterior_m2_k_w > 0.0,
             "wall boundary must have non-zero exterior film"
         );
+    }
+
+    /// A material-layer boundary is unchanged by the opaque-R precedence
+    /// (the numeric-fixes ledger's opaque-R precedence entry): a wall with a declared
+    /// `AssemblyEffectiveRValue` of 23.0 (IP) and two explicit material
+    /// layers takes the material path with the conversion's output the
+    /// parent commit's on bits - no precomputed layers, the stated layers
+    /// verbatim, and the fallback the declared R's material part minus the
+    /// boundary's own films.
+    #[test]
+    fn material_layer_boundary_unchanged_by_the_declared_r() {
+        let plywood = hares_io::hpxml::MaterialLayer {
+            thickness_m: 0.02,
+            conductivity_w_m_k: 0.13,
+            density_kg_m3: 545.0,
+            specific_heat_j_kg_k: 1215.0,
+            area_m2: 20.0,
+        };
+        let batt = hares_io::hpxml::MaterialLayer {
+            thickness_m: 0.14,
+            conductivity_w_m_k: 0.043,
+            density_kg_m3: 12.0,
+            specific_heat_j_kg_k: 840.0,
+            area_m2: 20.0,
+        };
+        let declared = hares_physics::units::r_value_ip_to_si(23.0);
+        let building = hares_io::Building {
+            boundaries: vec![Boundary {
+                id: "mat-wall".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 20.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: Some(declared),
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![plywood.clone(), batt.clone()],
+                framing_factor: None,
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(90.0),
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0)
+            .expect("building_to_boundary_inputs");
+        assert_eq!(inputs.len(), 1);
+        let input = &inputs[0];
+        assert!(
+            input.precomputed_rc.is_empty(),
+            "a material-layer boundary takes no LUT layers"
+        );
+        for (stated, carried) in [&plywood, &batt].iter().zip(&input.material_layers) {
+            assert_eq!(carried.thickness_m.to_bits(), stated.thickness_m.to_bits());
+            assert_eq!(
+                carried.conductivity_w_m_k.to_bits(),
+                stated.conductivity_w_m_k.to_bits()
+            );
+            assert_eq!(
+                carried.density_kg_m3.to_bits(),
+                stated.density_kg_m3.to_bits()
+            );
+            assert_eq!(
+                carried.specific_heat_j_kg_k.to_bits(),
+                stated.specific_heat_j_kg_k.to_bits()
+            );
+        }
+        let films = input.r_film_interior_m2_k_w + input.r_film_exterior_m2_k_w;
+        assert_eq!(
+            input.fallback_r_m2_k_w.to_bits(),
+            (declared - films).to_bits(),
+            "the fallback is the declared R's material part, the parent commit's on bits"
+        );
+        // The read-back's material-path derivation, unchanged by the
+        // opaque-R precedence: the
+        // layers' resolved resistances and capacitances, on the parent
+        // commit's bits (no framing factor: the conductivity passes
+        // through; the capacitance is density times specific heat times
+        // thickness).
+        let expected_r: [u64; 2] = [
+            (0.02_f64 / hares_envelope::boundary_rc::parallel_path_conductivity(0.13, None))
+                .to_bits(),
+            (0.14_f64 / hares_envelope::boundary_rc::parallel_path_conductivity(0.043, None))
+                .to_bits(),
+        ];
+        let expected_c: [u64; 2] = [
+            (plywood.density_kg_m3 * plywood.specific_heat_j_kg_k * plywood.thickness_m).to_bits(),
+            (batt.density_kg_m3 * batt.specific_heat_j_kg_k * batt.thickness_m).to_bits(),
+        ];
+        for (index, layer) in input.material_layers.iter().enumerate() {
+            let resolved_r = layer.thickness_m
+                / hares_envelope::boundary_rc::parallel_path_conductivity(
+                    layer.conductivity_w_m_k,
+                    input.framing_factor,
+                );
+            let resolved_c = layer.density_kg_m3 * layer.specific_heat_j_kg_k * layer.thickness_m;
+            assert_eq!(resolved_r.to_bits(), expected_r[index]);
+            assert_eq!(resolved_c.to_bits(), expected_c[index]);
+        }
     }
 
     /// SteelFrame without framing factor on the LUT-miss path must error.

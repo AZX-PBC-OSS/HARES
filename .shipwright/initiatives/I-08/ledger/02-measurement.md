@@ -3608,3 +3608,49 @@ No physics comparison suite moves: the row changes no physics path
 (the fleet's label rendering and its schema metadata only; the fold's
 keys, weights and arithmetic untouched) and the full workspace suite's
 BESTEST and parity tests pass unchanged.
+### The opaque-R precedence row, 2026-10-16 (the worktree `r94-b13`)
+The B-13 delta, per golden, as annual heating and cooling energy
+(`envelope_loads_kwh.hvac_heating_kwh` / `.hvac_cooling_kwh`, the
+committed golden's value against the re-captured one; `resstock_2025_fleet`
+captures no metrics rows, so its delta reads off its frame products):
+- `consumer_shape_900s`: heating 3592.57 to 4374.14 kWh (+781.58),
+  cooling 3272.71 to 3457.43 kWh (+184.71).
+- `full_year_hourly`: heating 9188.65 to 9356.33 kWh (+167.68), cooling
+  703.46 to 734.70 kWh (+31.24).
+- `full_year_900s_dst`: heating 9781.93 to 9956.20 kWh (+174.27), cooling
+  758.10 to 794.95 kWh (+36.85).
+- `month_boundary_billing_3600s`: heating 764.03 to 777.46 kWh (+13.43),
+  cooling 0.0 unchanged.
+- `leap_year_february_900s`: heating 197.90 to 200.69 kWh (+2.78), cooling
+  0.0 unchanged.
+- `weather_wrap_900s`: heating 293.43 to 299.16 kWh (+5.73), cooling 0.0
+  unchanged.
+- `fleet_mixed_offset`: heating 693.81 to 688.26 kWh (-5.55), cooling 0.0
+  unchanged. The one golden whose heating falls: home bldg0000002's
+  Floor1 declares 2.10 IP (0.3698 m²·K/W) against a "Standard" row whose
+  layers sum to 1.32 m²·K/W, so k = 0.16 there and the floor loses
+  resistance; the home's other declared boundaries move under 1%.
+- `fleet_same_offset_300s`: heating 96.91 to 94.62 kWh (-2.29), cooling
+  0.0 unchanged (the same home bldg0176227 three times, its own
+  boundaries' k in [0.9874, 1.0985]).
+- `resstock_2025_fleet`: no metrics rows captured; the three homes'
+  frame products move in the power and temperature columns.
+The direction is mostly up in heating because most declared assembly
+R-values sit slightly below their matched row's construction R in the
+LUT's convention, so k < 1: the distribution of k over the homes'
+declared boundaries is [0.9874, 1.0985] over bldg0176227's 17,
+[0.1601, 1.0047] over bldg0000002's 7, [0.4136, 1.0047] over
+bldg0000004's 6, and [0.5521, 0.9946] over the cz2a and cz4a parity
+homes' 10 each (the Est. R-3.1 garage walls 0.5521, the R-15 walls
+0.9275, the uninsulated roofs 0.9311, the doors 0.9946). Every k is
+positive and finite; no boundary's declared R touches its convention
+film sum (the minimum declared R in the corpus is 0.3698 m²·K/W against
+0.2642 m²·K/W, the floor/ceiling constant).
+The goldens re-captured TWICE BYTE-IDENTICAL per manifest (the two
+captures' sha256 equal; compare-all 8 on the default build and the dst
+set's `full_year_900s_dst` on the dst build, both green after the
+re-capture). The corrected acceptance fixture's own pins: the
+`diagnostics_cz4a.csv` pin re-captured (the preamble's provenance lines
+identical, the zone temperatures and the opaque LWR column moved at the
+printed precision), and the structural envelope oracle's per-boundary UA
+comparison for declared-R groups pinned to the declaration's expectation.

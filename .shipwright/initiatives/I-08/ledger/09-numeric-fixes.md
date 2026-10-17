@@ -2605,6 +2605,84 @@ with); `08-consumer.md` CN-3 depends on this.
 **Measurement:** per golden, annual heating and cooling energy delta and the
 distribution of `k` over its boundaries.
 
+**State:** committed (2026-10-16, branch `row/r94-b13`, based on
+`cf3985f3`, one commit; the schedule row is 94). The delta and the k
+distribution are in `02-measurement.md` (the opaque-R precedence row).
+
+Landed: the k normalisation in `building_to_boundary_inputs`'s LUT path
+(`crates/hares-core/src/dwelling/conversions.rs`, restructured from the
+`and_then`/`unwrap_or_default` chain into one match so the error below
+propagates): row selection unchanged, then every matched row's layer
+resistance multiplied by `k = (declared R - convention films) / sum(row
+layer resistances)`, the row's capacitances kept, and a `tracing::debug!`
+per boundary naming the row, the declared R and k; the envelope scales
+apply after it, so a layer's resolved resistance is the row's times k
+times `opaque_r_scale` and its capacitance the row's times
+`thermal_mass_scale`. The LUT's convention films are now exposed as
+`EnvelopeLookup::convention_films(boundary_name)`
+(`crates/hares-io/src/envelope_lut.rs`), and the row selection's own
+nearest-R match reads them from the same method. The declared-R arm of
+`material_r` lost its `.max(1e-6)` clamp (the fallback's own clamp, one
+line below, still guards the single-resistor path). The read-back names
+the winning source: `RValueSource`
+(`crates/hares-core/src/resolved.rs`: `DeclaredAssemblyR`, `LutRowR`,
+`MaterialLayers`, `FallbackR`, `SlabFfactor`, with a `label()` for the
+Python surface) on `ResolvedBoundary.r_source`, filled where the
+read-back derives the layers; `Dwelling.resolved_model()` reports each
+boundary's `r_source` label. `docs/PHYSICS_DECISIONS.md` records the
+rule, the film-sum error, the OCHRE deviation and the film convention.
+
+One premise correction, with the evidence that forced it: the entry's
+film-sum error and its k equation read "the boundary's interior and
+exterior film resistances" - the conversion's weather-computed,
+convection-only films (the radiative part rides the LWR network). Those
+sums exceed legitimate declared assembly R values: on this entry's own
+acceptance fixture `base.xml`'s Roof1 declares 2.3 IP (0.405 m²·K/W)
+against a convection-only film sum of 0.489 m²·K/W, and the corpus
+carries about sixty such roofs (2.19 to 2.30 IP) and floors (2.10 IP
+against 2.11 m²·K/W of films), so the entry's literal error would reject
+the OCHRE and ResStock sample corpus, the entry's own acceptance
+fixture, and its own acceptance tests with it. The films in the k
+equation and in the film-sum error are the row-selection convention's
+films (`convention_films`, 0.1585 walls and roofs, 0.2642 floor and
+ceiling) - the convention the declared R speaks (HPXML's assembly R
+includes the standard films) and the same constants the row selection
+adds to the row's assembly R. The film-sum error's threshold inherits
+the convention, and nothing in the corpus is near it (the minimum
+declared R is 0.3698 m²·K/W against 0.2642 m²·K/W). The k distribution
+and the deltas are in the measurement log; the k are positive and finite
+everywhere, in [0.16, 1.10] over the corpus's homes.
+
+RED first, witnessed at the parent `cf3985f3` with only the tests
+applied (`crates/hares-core/tests/envelope_assembly_r.rs`, new):
+`assembly_r_distributes_across_lut_layers_uniformly` failed on layer 0's
+resistance (the row's raw 0.248 m²·K/W resolved where the declared R
+demands the row's times k = 1.3880, the differential the entry names:
+the declared 23.0 IP against the row's resolved 3.20 m²·K/W plus films);
+`declared_r_between_rows_moves_the_resolved_resistance` failed on 22.5
+IP's layer 0 resistance equalling the 23.0 IP one on bits (the
+staircase); `declared_r_at_or_below_the_films_is_an_error` failed on
+construction succeeding (the clamp, silently);
+`assembly_r_and_opaque_r_scale_compose` failed the same distribution
+assertion. The read-back's `r_source` was the missing surface (compile
+errors at the parent when the assertions first named it). GREEN: the
+five acceptance tests pass, the distribution's k on bits, the
+capacitances the row's on bits, the layers plus the convention films
+equal to the declared R within 1e-12 relative, the between-rows
+resistances distinct with equal capacitances, the film-sum error naming
+Wall1, the declared R and the film sum, the composition exact on bits,
+and the slab's resolved read-back bitwise the parent's.
+
+Movement: every golden moved (all nine carry fixtures with declared
+opaque assembly R values); re-captured twice byte-identical, the deltas
+in `02-measurement.md`. Two committed value pins moved and were
+re-captured with the cause: `diagnostics_cz4a.csv` (the diagnostics
+columns' pin; the preamble's provenance lines identical, the zone
+temperatures and the opaque LWR column moved) and the structural
+envelope oracle's per-boundary UA comparison, whose declared-R groups
+now pin the declaration's expectation instead of the OCHRE row's (the
+deviation the doc records).
+
 ## B-14: HARES stores and computes in SI units
 
 **Kind:** defect fix, numeric (`dl-i08-architecture.si_units`, a found

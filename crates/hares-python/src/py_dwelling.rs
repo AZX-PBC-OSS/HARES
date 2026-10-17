@@ -2659,6 +2659,7 @@ fn resolved_model_to_py(py: Python<'_>, model: &hares_core::ResolvedModel) -> Py
         entry.set_item("films_m2k_w", boundary.films_m2k_w)?;
         entry.set_item("c_j_k", boundary.c_j_k)?;
         entry.set_item("same_zone", boundary.same_zone)?;
+        entry.set_item("r_source", boundary.r_source.label())?;
         let layers = PyList::empty(py);
         for layer in &boundary.layers {
             let item = PyDict::new(py);

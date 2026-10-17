@@ -119,6 +119,55 @@ unchanged (every golden runs the ideal path at its resolution); the
 single-building benchmark (60 s steps) runs about 10 % faster with the
 modulating fraction than with whole-step cycling.
 
+## A declared assembly R-value sets the resistance of the LUT layers
+
+For an opaque boundary matched to an envelope LUT row, the declared
+`AssemblyEffectiveRValue` (or the older `RValue`) sets the construction's
+resistance: the row selection is unchanged (the construction and finish
+filters, then the row whose `Assembly R Value` plus the convention films
+is nearest the declared R), and every layer resistance of the matched row
+is then multiplied by `k = (declared R - convention films) / sum(row
+layer resistances)`, so the layers plus the convention films equal the
+declared R exactly. The row's layer capacitances are kept: they are mass,
+not resistance. A declared R between two rows now moves the resolved
+resistance continuously instead of leaving it at the row's until it
+crosses a row boundary - the declared resistance is the boundary's
+resistance, not a staircase over it. The envelope scales compose after
+it: a layer's resolved resistance is the row's times `k` times
+`opaque_r_scale`, its capacitance the row's times `thermal_mass_scale`.
+
+The films in the equation are the row-selection convention's films (the
+constants the LUT's row match adds to the row's assembly R: 0.1585
+m²·K/W for walls and roofs, 0.2642 m²·K/W for floor/ceiling boundaries),
+because that is the convention the declared R speaks: HPXML's assembly
+R-value includes the standard films, and the row selection already
+measures both the row and the declaration against the same constants.
+HARES's own film resistances are convection-only (the radiative part
+rides the interior LWR network), and their weather-computed sums exceed
+legitimate declared assembly R values - an uninsulated roof at R-2.3 IP
+(0.405 m²·K/W) sits below its convection-only film sum on the reference
+corpus - so the network's films cannot be the measure of either the
+scaling or the error below. The boundary's total conduction resistance is
+the declared R in the declaration's convention plus the film-convention
+difference.
+
+A declared R at or below the convention film sum leaves no material
+resistance: it is a construction error naming the boundary, the declared
+R and the film sum. The clamp the old code applied
+(`(r - r_film_int - r_film_ext).max(1e-6)`) would otherwise scale the LUT
+layers to almost no resistance without a word. Slab boundaries (the
+F-factor perimeter method), boundaries with explicit material layers and
+boundaries without a declared R are unchanged.
+
+OCHRE uses the LUT row as is: the declared `AssemblyEffectiveRValue`
+selects the row (`get_boundary_rc_values`, the nearest-row match HARES
+implements) and the row's precomputed layer resistances are used
+unchanged, so the declared resistance is inert between rows. HARES's
+scaling is a deliberate deviation, recorded here; the calibration
+consumer scales the declared R (a continuous knob) rather than the
+LUT's `Resistance (m^2-K/W)` column, which the `k` normalisation makes
+inert.
+
 ## Wet-appliance hot water follows the OpenStudio-HPXML daily volume
 
 The clothes washer's and dishwasher's daily hot-water volume is the

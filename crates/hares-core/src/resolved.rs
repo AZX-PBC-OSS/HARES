@@ -65,6 +65,45 @@ pub struct ResolvedEquipment {
     pub cooling_setpoint: Option<SetpointSource>,
 }
 
+/// Where a boundary's resistance came from: the winner of the opaque-R
+/// precedence (the numeric-fixes ledger's opaque-R precedence entry). A
+/// declared assembly R-value (`AssemblyEffectiveRValue` or `RValue`) sets
+/// the matched LUT row's layer resistances when the boundary takes the
+/// LUT path, or the fallback's single resistor when it does not; the LUT
+/// row's own construction R wins only where nothing is declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RValueSource {
+    /// The declared assembly R-value set the resistance: over the matched
+    /// LUT row's layer distribution (scaled by `k`, the row's capacitances
+    /// kept), or as the fallback's single resistor on a LUT miss.
+    DeclaredAssemblyR,
+    /// The matched LUT row's own construction R: nothing declared, the
+    /// row's layers as they stand (OCHRE's behavior).
+    LutRowR,
+    /// The boundary's explicit material layers.
+    MaterialLayers,
+    /// The single-resistor fallback with nothing declared: the
+    /// `NominalRValue` layer sum, else the default R, after a LUT miss.
+    FallbackR,
+    /// The F-factor perimeter method (a slab): no declared R drives it.
+    SlabFfactor,
+}
+
+impl RValueSource {
+    /// The provenance label: the winning source, in the form the Python
+    /// read-back records.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::DeclaredAssemblyR => "declared assembly R",
+            Self::LutRowR => "LUT row",
+            Self::MaterialLayers => "material layers",
+            Self::FallbackR => "fallback R",
+            Self::SlabFfactor => "F-factor slab",
+        }
+    }
+}
+
 /// One assembled boundary: the effective resistance the RC network
 /// conducts through (films included), the films that make up part of it,
 /// the network's capacitance, and the layers' own resistances and
@@ -89,6 +128,11 @@ pub struct ResolvedBoundary {
     /// construction the network keeps as a dead-end fin (the interior
     /// half of the stack). The effective R's convention follows it.
     pub same_zone: bool,
+    /// The winning source of the boundary's resistance (the opaque-R
+    /// precedence): the declared assembly R-value, the LUT row's own
+    /// construction R, the explicit material layers, the fallback, or
+    /// the F-factor slab method.
+    pub r_source: RValueSource,
     pub layers: Vec<ResolvedLayer>,
 }
 
@@ -151,7 +195,12 @@ pub(crate) fn resolved_envelope(
             } else {
                 diagnostic.r_film_ext_m2_k_w
             };
-        let layers = resolved_layers(input, same_zone, &bd.boundary_type);
+        let (layers, r_source) = resolved_layers(
+            input,
+            same_zone,
+            &bd.boundary_type,
+            bd.assembly_r_value_m2_k_w.is_some(),
+        );
         // The read-back's effective resistance, films included, per the
         // boundary kind:
         //
@@ -183,6 +232,7 @@ pub(crate) fn resolved_envelope(
             films_m2k_w: films,
             c_j_k: diagnostic.capacitance_j_k,
             same_zone,
+            r_source,
             layers,
         });
     }
@@ -210,20 +260,23 @@ pub(crate) fn resolved_envelope(
     }
 }
 
-/// The layers the network builds for one boundary, outside to inside:
-/// the precomputed LUT layers when the boundary took that path, the
-/// material layers' effective resistances (the framing correction the
-/// parallel-path method applies) when it took the material path, and a
-/// single layer carrying the fallback assembly R when no layer stack
-/// exists. Slabs report none: the F-factor perimeter conductance is the
-/// read-back's one excluded path.
+/// The layers the network builds for one boundary, outside to inside, and
+/// the winning source of the boundary's resistance: the precomputed LUT
+/// layers when the boundary took that path (the declared assembly R's when
+/// one is declared, else the row's own), the material layers' effective
+/// resistances (the framing correction the parallel-path method applies)
+/// when it took the material path, and a single layer carrying the
+/// fallback assembly R when no layer stack exists. Slabs report none and
+/// the F-factor method as their source: the F-factor perimeter conductance
+/// is not a layer stack.
 fn resolved_layers(
     input: &BoundaryInput,
     same_zone: bool,
     kind: &BoundaryType,
-) -> Vec<ResolvedLayer> {
+    has_declared_r: bool,
+) -> (Vec<ResolvedLayer>, RValueSource) {
     if *kind == BoundaryType::Slab {
-        return Vec::new();
+        return (Vec::new(), RValueSource::SlabFfactor);
     }
     if !input.precomputed_rc.is_empty() {
         let layers = input
@@ -236,12 +289,18 @@ fn resolved_layers(
             .collect::<Vec<_>>();
         // A same-zone boundary's network keeps the interior half of the
         // stack; the read-back reports the layers it keeps.
-        return if same_zone {
+        let kept = if same_zone {
             let keep = layers.len().div_ceil(2);
             layers[layers.len() - keep..].to_vec()
         } else {
             layers
         };
+        let source = if has_declared_r {
+            RValueSource::DeclaredAssemblyR
+        } else {
+            RValueSource::LutRowR
+        };
+        return (kept, source);
     }
     let valid: Vec<_> = input
         .material_layers
@@ -250,11 +309,20 @@ fn resolved_layers(
         .collect();
     if valid.is_empty() {
         // The fallback-R path: the one lumped resistance the network
-        // builds, reported as the single layer it is.
-        return vec![ResolvedLayer {
-            r_m2k_w: input.fallback_r_m2_k_w,
-            c_j_m2k: 0.0,
-        }];
+        // builds, reported as the single layer it is. The declared
+        // assembly R is the lump's source when one is declared.
+        let source = if has_declared_r {
+            RValueSource::DeclaredAssemblyR
+        } else {
+            RValueSource::FallbackR
+        };
+        return (
+            vec![ResolvedLayer {
+                r_m2k_w: input.fallback_r_m2_k_w,
+                c_j_m2k: 0.0,
+            }],
+            source,
+        );
     }
     let layers = valid
         .iter()
@@ -271,9 +339,12 @@ fn resolved_layers(
         .collect::<Vec<_>>();
     if same_zone {
         let keep = layers.len().div_ceil(2);
-        layers[layers.len() - keep..].to_vec()
+        (
+            layers[layers.len() - keep..].to_vec(),
+            RValueSource::MaterialLayers,
+        )
     } else {
-        layers
+        (layers, RValueSource::MaterialLayers)
     }
 }
 

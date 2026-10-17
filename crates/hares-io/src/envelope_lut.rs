@@ -571,6 +571,23 @@ impl EnvelopeLookup {
         findings
     }
 
+    /// The row-selection convention's film resistance for a boundary
+    /// name: the interior-plus-exterior film sum the LUT's `Assembly R
+    /// Value` column is stated with (OCHRE's frozen films). The declared
+    /// assembly R speaks this same convention - HPXML's assembly R-value
+    /// includes the standard films - so the opaque-R precedence's
+    /// scaling (`k`, the numeric-fixes ledger's opaque-R precedence
+    /// entry) and its film-sum error use it, and `lookup` uses it for
+    /// the nearest-row match.
+    #[must_use]
+    pub fn convention_films(&self, boundary_name: &str) -> f64 {
+        if FLOOR_CEILING_BOUNDARIES.contains(&boundary_name) {
+            FILM_R_FLOOR_CEILING
+        } else {
+            FILM_R_WALL_ROOF
+        }
+    }
+
     /// Implements OCHRE's `get_boundary_rc_values` matching algorithm.
     pub fn lookup(
         &self,
@@ -642,11 +659,7 @@ impl EnvelopeLookup {
                 r_val = 88.0;
             }
 
-            let film_r = if FLOOR_CEILING_BOUNDARIES.contains(&boundary_name) {
-                FILM_R_FLOOR_CEILING
-            } else {
-                FILM_R_WALL_ROOF
-            };
+            let film_r = self.convention_films(boundary_name);
 
             // Find closest adjusted R-value
             filtered

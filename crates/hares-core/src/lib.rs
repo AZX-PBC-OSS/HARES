@@ -67,8 +67,8 @@ pub use observation::ObservationPlan;
 pub use rand_chacha::ChaCha8Rng;
 pub use replay::{RecordedBuild, Replay};
 pub use resolved::{
-    ResolvedBoundary, ResolvedClock, ResolvedEnvelope, ResolvedEquipment, ResolvedInfiltration,
-    ResolvedLayer, ResolvedModel, ResolvedWindow,
+    RValueSource, ResolvedBoundary, ResolvedClock, ResolvedEnvelope, ResolvedEquipment,
+    ResolvedInfiltration, ResolvedLayer, ResolvedModel, ResolvedWindow,
 };
 pub use result::{
     BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
