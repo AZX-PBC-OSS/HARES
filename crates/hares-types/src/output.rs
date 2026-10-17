@@ -15,11 +15,7 @@ use serde::{Deserialize, Serialize};
 /// of the telemetry declarations' `unit` strings and the parenthesised
 /// units in the output column names, with spellings of one unit merged.
 ///
-/// `Unit::symbol()` returns the spelling today's column names use. The
-/// fleet's unit-keyed aggregation rules key on that symbol string until
-/// they fold by the declared kinds instead, so `"enum"` stays distinct from
-/// `"code"` (the fleet averages `enum` columns and sums `code` ones) even
-/// though both decode as `VariableKind::Enum`.
+/// `Unit::symbol()` returns the spelling today's column names use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Unit {
     /// The empty unit: a value with no unit at all.
@@ -84,14 +80,10 @@ pub enum Unit {
     Percent,
     /// A fraction in [0, 1]; merges the `ratio` spelling.
     Fraction,
-    /// A code whose value space is a label table; merges the `index`
-    /// spelling. Kind `Enum`; the fleet sums code columns until the
-    /// unit-keyed rules fold by kind.
+    /// A code whose value space is a label table; merges the `index` and
+    /// `enum` spellings. Kind `Enum`; the fleet folds code columns by
+    /// their declared kind.
     Code,
-    /// The `enum` metadata unit the fleet path averages; distinct from
-    /// [`Unit::Code`] until the unit-keyed rules fold by kind and the two
-    /// merge.
-    Enum,
     /// A boolean 0/1 flag.
     Boolean,
 }
@@ -131,7 +123,6 @@ impl Unit {
         Self::Percent,
         Self::Fraction,
         Self::Code,
-        Self::Enum,
         Self::Boolean,
     ];
 
@@ -181,7 +172,6 @@ impl Unit {
             Self::Percent => "%",
             Self::Fraction => "fraction",
             Self::Code => "code",
-            Self::Enum => "enum",
             Self::Boolean => "bool",
         }
     }
@@ -207,8 +197,8 @@ impl Unit {
 
 /// The fleet's across-homes rule for a [`VariableKind::Quantity`], declared
 /// by the variable: extensive quantities sum across homes, intensive ones
-/// average, weighted in both cases. Nothing reads it before the fleet
-/// folds by the declared kinds.
+/// average, weighted in both cases. The fleet fold reads it as the
+/// declared kinds' across-homes rule for a quantity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AcrossHomes {
     /// Extensive: mass and volume flows, event counts, currents, charge
@@ -217,6 +207,28 @@ pub enum AcrossHomes {
     /// Intensive: irradiance, durations, voltages, specific heat, fuel
     /// economy, degrees.
     Mean,
+}
+
+impl AcrossHomes {
+    /// The lowercase tag: `"sum"` or `"mean"`. The schema field metadata's
+    /// `across_homes` entry and the catalogue readers share it.
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Sum => "sum",
+            Self::Mean => "mean",
+        }
+    }
+
+    /// The tag's rule, or `None` for any other spelling.
+    #[must_use]
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "sum" => Some(Self::Sum),
+            "mean" => Some(Self::Mean),
+            _ => None,
+        }
+    }
 }
 
 /// The labels of an [`VariableKind::Enum`] variable: code `i` decodes to
@@ -306,6 +318,47 @@ pub enum VariableKind {
     Quantity { across_homes: AcrossHomes },
 }
 
+impl VariableKind {
+    /// The lowercase kind tag: `"energy"`, `"power"`, `"temperature"`,
+    /// `"ratio"`, `"state"`, `"enum"` or `"quantity"`. The schema field
+    /// metadata's `kind` entry and the catalogue readers share it.
+    #[must_use]
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Energy => "energy",
+            Self::Power => "power",
+            Self::Temperature => "temperature",
+            Self::Ratio => "ratio",
+            Self::State => "state",
+            Self::Enum { .. } => "enum",
+            Self::Quantity { .. } => "quantity",
+        }
+    }
+
+    /// The tag's kind, or `None` for any other spelling. The tag carries
+    /// no payload: an `Enum` kind's label table rides the schema field
+    /// metadata's `enum_labels` count and a `Quantity`'s across-homes rule
+    /// its `across_homes` entry, so both parse back with their payloads
+    /// empty.
+    #[must_use]
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "energy" => Some(Self::Energy),
+            "power" => Some(Self::Power),
+            "temperature" => Some(Self::Temperature),
+            "ratio" => Some(Self::Ratio),
+            "state" => Some(Self::State),
+            "enum" => Some(Self::Enum {
+                labels: EnumLabels::Static(&[]),
+            }),
+            "quantity" => Some(Self::Quantity {
+                across_homes: AcrossHomes::Sum,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// The over-time aggregation rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Aggregation {
@@ -318,6 +371,33 @@ pub enum Aggregation {
     /// The value at the period's last valid step (a running total's value
     /// at period end).
     Last,
+}
+
+impl Aggregation {
+    /// The lowercase tag: `"sum"`, `"mean"`, `"mode"` or `"last"`. The
+    /// schema field metadata's `aggregation` entry and the catalogue
+    /// readers share it.
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Sum => "sum",
+            Self::Mean => "mean",
+            Self::Mode => "mode",
+            Self::Last => "last",
+        }
+    }
+
+    /// The tag's rule, or `None` for any other spelling.
+    #[must_use]
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "sum" => Some(Self::Sum),
+            "mean" => Some(Self::Mean),
+            "mode" => Some(Self::Mode),
+            "last" => Some(Self::Last),
+            _ => None,
+        }
+    }
 }
 
 /// When in the step a variable's value is taken.
@@ -510,8 +590,8 @@ impl TelemetryField {
         description: &'static str,
     ) -> Self {
         assert!(
-            matches!(unit, Unit::Code | Unit::Enum | Unit::Dimensionless),
-            "a code declaration needs the code, enum or dimensionless unit"
+            matches!(unit, Unit::Code | Unit::Dimensionless),
+            "a code declaration needs the code or dimensionless unit"
         );
         Self {
             name: Cow::Borrowed(name),
@@ -526,8 +606,7 @@ impl TelemetryField {
         }
     }
 
-    /// A code channel under the `code` unit (the fleet sums code columns
-    /// until the unit-keyed rules fold by kind).
+    /// A code channel under the `code` unit.
     #[must_use]
     pub const fn code_code(
         name: &'static str,
@@ -535,17 +614,6 @@ impl TelemetryField {
         description: &'static str,
     ) -> Self {
         Self::code(name, Unit::Code, labels, description)
-    }
-
-    /// A code channel under the `enum` unit (the fleet averages enum
-    /// columns until the unit-keyed rules fold by kind).
-    #[must_use]
-    pub const fn code_enum(
-        name: &'static str,
-        labels: &'static [&'static str],
-        description: &'static str,
-    ) -> Self {
-        Self::code(name, Unit::Enum, labels, description)
     }
 
     /// A stock or level channel in `kWh`: `Quantity {{ across_homes: Sum }}`,
@@ -878,7 +946,6 @@ mod tests {
         assert_eq!(Unit::Percent.symbol(), "%");
         assert_eq!(Unit::Fraction.symbol(), "fraction");
         assert_eq!(Unit::Code.symbol(), "code");
-        assert_eq!(Unit::Enum.symbol(), "enum");
         assert_eq!(Unit::Boolean.symbol(), "bool");
     }
 

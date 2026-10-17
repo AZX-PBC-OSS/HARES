@@ -893,3 +893,27 @@ golden fixtures re-captured.
   weather column and the `homes` and `fleet_report` products are
   bitwise unchanged. The other goldens are bitwise identical
   (compare-all 8 + dst 1).
+
+- 2026-10-17: the fleet's variables fold by their declared kind, not by
+  unit string: each home's period reduction takes the variable's
+  declared over-time rule (a quantity declared `Sum` sums its steps
+  instead of averaging them, a running total takes its value at the
+  period's last valid step) and the across-homes fold takes the kind's
+  rule (energy and power the weighted sum, temperature, ratio and state
+  the weighted mean, a quantity its declared across-homes rule, an enum
+  the weighted Mode), replacing the unit-keyed tables and their
+  fallbacks. A fleet's ratio, binary state, mode code and
+  intensive-quantity cells are no longer weighted sums over homes, and
+  a per-step count or volume is no longer averaged over the period. The
+  declared rules reach the fold as schema field metadata: the schema
+  builders write every variable's `kind`, over-time `aggregation` and,
+  for a quantity, `across_homes` tag beside the unit. The `enum` unit
+  symbol merges into `code` (no catalogue variable declared it, so no
+  column's unit metadata changes). No golden re-captured: the fleet
+  goldens' verbosity-2 selection holds only energy, power and
+  temperature columns, whose unit-keyed rules already matched the
+  declared ones, and every golden compares bitwise (compare-all 8
+  identical, the dst set identical). A fleet run at a selection holding
+  the columns the fallback got wrong moves those cells: the acceptance
+  run's delta (three weather channels, from the weighted sum to the
+  weighted mean) is in the measurement log.

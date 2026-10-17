@@ -2619,8 +2619,8 @@ static DWELLING_VARIABLES: &[(&str, VariableDef, u8, bool)] = &[
 /// `Time` label, then every catalogue variable emitted at the verbosity,
 /// preserving catalogue order. With `diagnostics`, the diagnostics block
 /// appends last, each of its fields marked so the row plan's freeze
-/// resolves the block from the schema alone. Field metadata carries
-/// `Unit::symbol()` as the `unit` entry (no metadata for [`Unit::None`]);
+/// resolves the block from the schema alone. Field metadata carries the
+/// declared rules the aggregation readers resolve (see `variable_field`);
 /// the schema metadata carries the catalogue digest.
 #[must_use]
 pub fn build_schema(catalogue: &Catalogue, verbosity: u8, diagnostics: bool) -> Schema {
@@ -2653,12 +2653,13 @@ pub fn time_field() -> arrow::datatypes::FieldRef {
 }
 
 /// One variable's Arrow field: the column name, `Float64`, the
-/// declaration's nullability, and the unit metadata (no metadata for
-/// [`Unit::None`]). An [`VariableKind::Enum`] variable's field carries
-/// its label count beside the unit: the mode columns' unit is the
-/// dimensionless `-`, so no unit string identifies an Enum column, and
-/// the fleet's rule resolver reads the label count to fold the column by
-/// Mode in both stages.
+/// declaration's nullability, and the field metadata the aggregation
+/// readers resolve the declared rules from: the `unit` (no entry for
+/// [`Unit::None`]), an [`VariableKind::Enum`] variable's `enum_labels`
+/// label count (the mode columns' unit is the dimensionless `-`, so no
+/// unit string identifies an Enum column), and every variable's declared
+/// `kind`, over-time `aggregation` and, for a `Quantity`, its
+/// `across_homes` rule.
 #[must_use]
 pub fn variable_field(var: &VariableDef) -> arrow::datatypes::FieldRef {
     let mut metadata = std::collections::HashMap::new();
@@ -2668,21 +2669,28 @@ pub fn variable_field(var: &VariableDef) -> arrow::datatypes::FieldRef {
     if let VariableKind::Enum { labels } = &var.kind {
         metadata.insert("enum_labels".to_string(), labels.len().to_string());
     }
+    metadata.insert("kind".to_string(), var.kind.tag().to_string());
+    metadata.insert("aggregation".to_string(), var.aggregation.tag().to_string());
+    if let VariableKind::Quantity { across_homes } = &var.kind {
+        metadata.insert("across_homes".to_string(), across_homes.tag().to_string());
+    }
     let field = Field::new(var.name.as_ref(), DataType::Float64, var.nullable);
-    std::sync::Arc::new(if metadata.is_empty() {
-        field
-    } else {
-        field.with_metadata(metadata)
-    })
+    std::sync::Arc::new(field.with_metadata(metadata))
 }
 
 /// One diagnostics block's Arrow field: the column name, `Float64`, the
-/// declaration's nullability, the unit metadata, and the block's own
-/// marker the row plan's freeze resolves the selection from.
+/// declaration's nullability, the variable's field metadata (the same
+/// entries `variable_field` writes), and the block's own marker the row
+/// plan's freeze resolves the selection from.
 fn diagnostics_field(var: &VariableDef) -> arrow::datatypes::FieldRef {
     let mut metadata = std::collections::HashMap::new();
     if var.unit != Unit::None {
         metadata.insert("unit".to_string(), var.unit.symbol().to_string());
+    }
+    metadata.insert("kind".to_string(), var.kind.tag().to_string());
+    metadata.insert("aggregation".to_string(), var.aggregation.tag().to_string());
+    if let VariableKind::Quantity { across_homes } = &var.kind {
+        metadata.insert("across_homes".to_string(), across_homes.tag().to_string());
     }
     metadata.insert(DIAGNOSTICS_METADATA_KEY.to_string(), "true".to_string());
     std::sync::Arc::new(

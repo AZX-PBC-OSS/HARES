@@ -22,24 +22,11 @@ use crate::py_metrics::PyRunMetrics;
 /// spellings, with the enum's labels and the quantity's across-homes rule
 /// carried by the Variable's own `labels` and `across_homes`.
 fn kind_tag(kind: &VariableKind) -> &'static str {
-    match kind {
-        VariableKind::Energy => "energy",
-        VariableKind::Power => "power",
-        VariableKind::Temperature => "temperature",
-        VariableKind::Ratio => "ratio",
-        VariableKind::State => "state",
-        VariableKind::Enum { .. } => "enum",
-        VariableKind::Quantity { .. } => "quantity",
-    }
+    kind.tag()
 }
 
 fn aggregation_tag(aggregation: Aggregation) -> &'static str {
-    match aggregation {
-        Aggregation::Sum => "sum",
-        Aggregation::Mean => "mean",
-        Aggregation::Mode => "mode",
-        Aggregation::Last => "last",
-    }
+    aggregation.tag()
 }
 
 fn sampling_tag(sampling: Sampling) -> &'static str {

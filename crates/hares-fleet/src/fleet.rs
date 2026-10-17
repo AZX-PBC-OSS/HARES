@@ -7082,14 +7082,371 @@ mod tests {
         }
     }
 
-    /// One home's period codes per Enum column: the home run standalone
-    /// with a Timestep Memory report of every variable it declares, the
-    /// batches reduced onto the report frequency by the declared rules
-    /// (the reporting reducer), each Enum column's period value its most
-    /// frequent code, ties to the lowest, null where no step reported.
-    fn home_period_codes(
+    /// The count probe: an actor declaring a count quantity summed over
+    /// time and publishing a scripted count each step. The first
+    /// 15-minute period's three 300 s steps report 1, 2 and 3, so the
+    /// period's declared reduction is 6, the sum, never the mean 2.
+    struct CountProbeActor {
+        steps: u64,
+        telemetry: Telemetry,
+    }
+
+    impl CountProbeActor {
+        const NAME: &str = "count_probe";
+        const COLUMN: &str = "actor:count_probe:count";
+
+        const OUTPUT_VARIABLES: &'static [TelemetryField] = &[TelemetryField::step_count(
+            "count",
+            "the count probe's per-step count",
+        )];
+
+        fn count(steps: u64) -> f64 {
+            match steps {
+                1 => 1.0,
+                2 => 2.0,
+                3 => 3.0,
+                _ => 0.0,
+            }
+        }
+    }
+
+    impl Actor for CountProbeActor {
+        fn name(&self) -> &str {
+            Self::NAME
+        }
+
+        fn output_variables(&self) -> &[TelemetryField] {
+            Self::OUTPUT_VARIABLES
+        }
+
+        fn telemetry(&self) -> Option<&Telemetry> {
+            Some(&self.telemetry)
+        }
+
+        fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {
+            self.steps += 1;
+            self.telemetry.set("count", Self::count(self.steps));
+        }
+    }
+
+    /// The per-home stage: the home's fleet reducer takes the declared
+    /// over-time rule, so a quantity declared `Sum` sums over time. The
+    /// probe's first 15-minute period reports counts 1, 2 and 3 over its
+    /// three 300 s steps; the reduced period is 6, the declared sum,
+    /// never the mean 2.
+    #[test]
+    fn home_reducer_sums_a_quantity_declared_sum() {
+        let mut config = fleet_same_offset_config(1, "G0600770_2018.csv");
+        // Verbosity(0): the actor registers after construction, so the
+        // report cannot name the probe's column; the actor columns ride
+        // every verbosity tier, and the run resolves the tier after the
+        // actor is in the catalogue.
+        config
+            .settings
+            .sim_config
+            .reports
+            .push(hares_io::ReportSpec {
+                name: "fleet".to_string(),
+                selection: hares_io::Selection::Verbosity(0),
+                frequency: hares_io::Frequency::Timestep,
+                destination: hares_io::Destination::Callback,
+            });
+        let mut dwelling = Dwelling::from_config(config.clone()).expect("the home builds");
+        dwelling
+            .add_actor(Box::new(CountProbeActor {
+                steps: 0,
+                telemetry: Telemetry::from_fields(CountProbeActor::OUTPUT_VARIABLES),
+            }))
+            .expect("the probe actor registers");
+        let state = Arc::new(Mutex::new(HomeFoldState::new(&HomeFoldAlignment {
+            frequency: hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            step_ms: 300_000,
+            calendar: PeriodCalendar::home(),
+            key_offset_s: 0,
+            instant_aligned: false,
+        })));
+        dwelling
+            .attach_callback("fleet", Box::new(ReducerFeed::new(state.clone())))
+            .expect("the callback attaches");
+
+        let engine = SimulationEngine::new();
+        engine
+            .run_dwelling(&mut dwelling, &config.settings.sim_config)
+            .expect("the home runs");
+
+        let (table, fields) = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .finish();
+        let slot = fields
+            .iter()
+            .position(|field| field.name() == CountProbeActor::COLUMN)
+            .expect("the probe column folds");
+        let (_, values) = table.iter().next().expect("periods reduced");
+        assert_eq!(
+            values[slot],
+            Some(6.0),
+            "the first period's value is the declared sum 1 + 2 + 3, not the mean 2"
+        );
+    }
+
+    /// The across-homes rule a variable's declared kind folds by: energy
+    /// and power the weighted sum, temperature, ratio and state the
+    /// weighted mean, a quantity its declared across-homes rule; `None`
+    /// for an enum, whose across-homes fold is the weighted Mode.
+    fn declared_across_homes(kind: &VariableKind) -> Option<hares_types::AcrossHomes> {
+        match kind {
+            VariableKind::Energy | VariableKind::Power => Some(hares_types::AcrossHomes::Sum),
+            VariableKind::Temperature | VariableKind::Ratio | VariableKind::State => {
+                Some(hares_types::AcrossHomes::Mean)
+            }
+            VariableKind::Quantity { across_homes } => Some(*across_homes),
+            VariableKind::Enum { .. } => None,
+        }
+    }
+
+    /// The run both declared-kind fold tests measure: the same-offset
+    /// golden homes' inputs at 15-minute frequency, the selection naming
+    /// every verbosity-8 variable the homes declare plus the three
+    /// weather channels no tier preset carries. The weather channels are
+    /// where the unit-keyed tables and the declared kinds disagree for
+    /// these homes: the outdoor pressure (kPa), the outdoor humidity
+    /// ratio (kg/kg, a ratio) and the wind speed (m/s) are intensive
+    /// quantities declared to average across homes, which the unit-keyed
+    /// fallback sums; the tier-8 columns' declared rules (energy and
+    /// power summing, temperature, ratio, state and the dimensionless
+    /// quantities meaning, the enums in Mode) agree with the unit-keyed
+    /// ones, so the run carries the pinned columns beside the moving
+    /// ones.
+    fn declared_kinds_selection() -> (Vec<DwellingConfig>, hares_io::Selection) {
+        let weathers = [
+            "G0600770_2018.csv",
+            "G0600650_2018.csv",
+            "G0600790_2018.csv",
+        ];
+        let configs: Vec<DwellingConfig> = weathers
+            .iter()
+            .enumerate()
+            .map(|(index, weather)| fleet_same_offset_config(index as i64 + 1, weather))
+            .collect();
+        let catalogue = Dwelling::from_config(configs[0].clone())
+            .expect("the home builds")
+            .catalogue()
+            .clone();
+        let mut names = hares_io::resolve_selection(&hares_io::Selection::Verbosity(8), &catalogue)
+            .expect("the tier resolves");
+        for channel in [
+            "Outdoor Pressure (kPa)",
+            "Outdoor Humidity Ratio (kg/kg)",
+            "Wind Speed (m/s)",
+        ] {
+            assert!(
+                catalogue.resolve(channel).is_some(),
+                "{channel} is a catalogue variable of the home"
+            );
+            names.push(channel.to_string());
+        }
+        (configs, hares_io::Selection::Named(names))
+    }
+
+    /// The fleet's cells follow the declared kinds. The test first asserts
+    /// that the selection holds at least one ratio and one intensive
+    /// quantity (the outdoor humidity ratio, the wind speed and the
+    /// outdoor pressure among them). For every aggregate variable that is
+    /// not an enum and every period, the cell equals the declared
+    /// combination of the three homes' period values, each computed from
+    /// that home's own Timestep Memory report by the declared time rule,
+    /// added in entry order and compared on bits. The enum variables are
+    /// excluded: their across-homes fold is the weighted Mode, whose own
+    /// tests carry it.
+    #[test]
+    fn fleet_cells_follow_declared_kinds() {
+        let weights = [1.0, 2.5, 0.5];
+        let (configs, selection) = declared_kinds_selection();
+
+        // The declared kinds the selection holds, from a home's catalogue:
+        // the kinds the fold must follow.
+        let catalogue = Dwelling::from_config(configs[0].clone())
+            .expect("the home builds")
+            .catalogue()
+            .clone();
+        let names = hares_io::resolve_selection(&selection, &catalogue).expect("the names resolve");
+        let mut ratios = 0_usize;
+        let mut intensive = 0_usize;
+        for name in &names {
+            match &catalogue.resolve(name).expect("a catalogue variable").kind {
+                VariableKind::Ratio => ratios += 1,
+                VariableKind::Quantity {
+                    across_homes: hares_types::AcrossHomes::Mean,
+                } => intensive += 1,
+                _ => {}
+            }
+        }
+        assert!(
+            ratios >= 1,
+            "the selection holds at least one Ratio variable: the outdoor \
+             humidity ratio and the runtime fractions"
+        );
+        assert!(
+            intensive >= 1,
+            "the selection holds at least one intensive Quantity: the wind \
+             speed, the outdoor pressure and the minimum on and off times"
+        );
+
+        // Each home's own Timestep Memory run, reduced to period values
+        // by the declared rules: the source of the expected cells.
+        let home_values: Vec<BTreeMap<String, Vec<Option<f64>>>> = configs
+            .iter()
+            .map(|config| home_period_values(config, &selection))
+            .collect();
+
+        let fleet = Fleet::from_buildings(configs)
+            .expect("the homes carry no reserved report or shared destination")
+            .with_sample_weights(weights.to_vec())
+            .expect("the weights are finite and non-negative");
+        let report = crate::fold::FleetReport {
+            selection,
+            frequency: hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let result = fleet
+            .simulate(&report, 1, chunk(64))
+            .expect("the fleet runs");
+        assert_eq!(result.aggregate.num_rows(), 192, "48 h at 15 minutes");
+
+        for slot in 1..result.aggregate.num_columns() {
+            let name = result.aggregate.schema_ref().field(slot).name().clone();
+            let def = catalogue
+                .resolve(&name)
+                .unwrap_or_else(|| panic!("{name} is a catalogue variable"));
+            let Some(across) = declared_across_homes(&def.kind) else {
+                continue;
+            };
+            let cells = table_float_column(&result.aggregate, &name);
+            let weight_cells = table_float_column(&result.covered_weight, &name);
+            assert_eq!(cells.len(), 192, "{name}: one cell per period");
+            for period in 0..cells.len() {
+                let mut sum = 0.0;
+                let mut weight = 0.0;
+                for (home, values) in home_values.iter().enumerate() {
+                    if let Some(value) = values[&name][period] {
+                        sum += value * weights[home];
+                        weight += weights[home];
+                    }
+                }
+                match cells[period] {
+                    None => assert_eq!(
+                        weight, 0.0,
+                        "{name} period {period}: a null cell has no weight behind it"
+                    ),
+                    Some(cell) => {
+                        let expected = match across {
+                            hares_types::AcrossHomes::Sum => sum,
+                            hares_types::AcrossHomes::Mean => sum / weight,
+                        };
+                        assert_eq!(
+                            cell.to_bits(),
+                            expected.to_bits(),
+                            "{name} period {period}: the cell is the declared combination of \
+                             the homes' period values"
+                        );
+                    }
+                }
+                assert_eq!(
+                    weight_cells[period]
+                        .unwrap_or_else(|| panic!("{name} period {period}"))
+                        .to_bits(),
+                    weight.to_bits(),
+                    "{name} period {period}: the covered weight is the covered homes' weight"
+                );
+            }
+        }
+    }
+
+    /// The ratio and state cells are weighted means: in the same run,
+    /// every ratio and state cell lies between the smallest and largest
+    /// of the homes' period values, which a weighted sum of humidity
+    /// ratios or of binary states is not. A period whose cell no home
+    /// covers is null.
+    #[test]
+    fn fleet_ratio_and_state_are_weighted_means() {
+        let weights = [1.0, 2.5, 0.5];
+        let (configs, selection) = declared_kinds_selection();
+
+        let catalogue = Dwelling::from_config(configs[0].clone())
+            .expect("the home builds")
+            .catalogue()
+            .clone();
+        let home_values: Vec<BTreeMap<String, Vec<Option<f64>>>> = configs
+            .iter()
+            .map(|config| home_period_values(config, &selection))
+            .collect();
+
+        let fleet = Fleet::from_buildings(configs)
+            .expect("the homes carry no reserved report or shared destination")
+            .with_sample_weights(weights.to_vec())
+            .expect("the weights are finite and non-negative");
+        let report = crate::fold::FleetReport {
+            selection,
+            frequency: hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        let result = fleet
+            .simulate(&report, 1, chunk(64))
+            .expect("the fleet runs");
+
+        let mut checked = 0_usize;
+        for slot in 1..result.aggregate.num_columns() {
+            let name = result.aggregate.schema_ref().field(slot).name().clone();
+            let kind = &catalogue
+                .resolve(&name)
+                .unwrap_or_else(|| panic!("{name} is a catalogue variable"))
+                .kind;
+            match kind {
+                VariableKind::Ratio | VariableKind::State => {}
+                _ => continue,
+            }
+            let cells = table_float_column(&result.aggregate, &name);
+            for period in 0..cells.len() {
+                let home_period: Vec<f64> = home_values
+                    .iter()
+                    .filter_map(|values| values[&name][period])
+                    .collect();
+                let Some(cell) = cells[period] else {
+                    assert!(
+                        home_period.is_empty(),
+                        "{name} period {period}: a covered cell is not null"
+                    );
+                    continue;
+                };
+                let smallest = home_period.iter().copied().fold(f64::INFINITY, f64::min);
+                let largest = home_period
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                assert!(
+                    smallest <= cell && cell <= largest,
+                    "{name} period {period}: the cell {cell} lies between the homes' period \
+                     values [{smallest}, {largest}]"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "the run holds at least one ratio or state cell to check"
+        );
+    }
+
+    /// One home's period values per column: the home run standalone with
+    /// a Timestep Memory report of the given selection, the batches
+    /// reduced onto the report frequency by the declared rules (the
+    /// reporting reducer, fed each column's catalogue declaration), each
+    /// column's period value its declared reduction, null where no step
+    /// reported.
+    fn home_period_values(
         config: &DwellingConfig,
-        enum_labels: &BTreeMap<String, usize>,
+        selection: &hares_io::Selection,
     ) -> BTreeMap<String, Vec<Option<f64>>> {
         use hares_io::output::reduce::{PeriodReducer, TimeRule};
 
@@ -7100,7 +7457,7 @@ mod tests {
             .reports
             .push(hares_io::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(3),
+                selection: selection.clone(),
                 frequency: hares_io::Frequency::Timestep,
                 destination: hares_io::Destination::Memory,
             });
@@ -7150,22 +7507,44 @@ mod tests {
             rows.push((row.values.to_vec(), row.valid_steps.to_vec()));
         });
 
-        let mut codes: BTreeMap<String, Vec<Option<f64>>> = enum_labels
-            .keys()
-            .map(|name| (name.clone(), Vec::new()))
+        let mut values: BTreeMap<String, Vec<Option<f64>>> = schema
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|field| (field.name().clone(), Vec::new()))
             .collect();
-        for name in enum_labels.keys() {
+        for (name, slots) in values.iter_mut() {
             let slot = schema
                 .fields()
                 .iter()
                 .position(|field| field.name() == name)
-                .expect("the enum column is in the home's report");
-            let values = rows
+                .expect("the column is in the home's report");
+            *slots = rows
                 .iter()
                 .map(|(row_values, valid)| (valid[slot - 1] > 0).then_some(row_values[slot - 1]))
-                .collect::<Vec<_>>();
-            codes.insert(name.clone(), values);
+                .collect();
         }
-        codes
+        values
+    }
+
+    /// One home's period codes per Enum column: the period values of the
+    /// named columns, each the most frequent code of the home's own steps
+    /// in the period by the declared rules, ties to the lowest, null
+    /// where no step reported.
+    fn home_period_codes(
+        config: &DwellingConfig,
+        enum_labels: &BTreeMap<String, usize>,
+    ) -> BTreeMap<String, Vec<Option<f64>>> {
+        let all = home_period_values(config, &hares_io::Selection::Verbosity(3));
+        enum_labels
+            .keys()
+            .map(|name| {
+                let values = all
+                    .get(name)
+                    .unwrap_or_else(|| panic!("{name} is in the home's report"))
+                    .clone();
+                (name.clone(), values)
+            })
+            .collect()
     }
 }
