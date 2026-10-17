@@ -3654,3 +3654,134 @@ re-capture). The corrected acceptance fixture's own pins: the
 identical, the zone temperatures and the opaque LWR column moved at the
 printed precision), and the structural envelope oracle's per-boundary UA
 comparison for declared-R groups pinned to the declaration's expectation.
+
+### The surrogate-search trial, 2026-10-17 (the row 98 worktree `r98-cn12`, report only)
+
+The consumer entry's trial, run as it specifies and recorded here because the row
+lands no consumer or engine change. The question: can a surrogate model, a cheap
+predictor of the fit's loss surface, cut the production fit's engine-run count at
+the same fit quality? Scope note first: this is the report-only execution. The
+consumer tree is untouched: no dependency in the manifest, no registered tool, no
+`docs/Surrogate_Trial.md`; the entry's registered `tools/surrogate_trial.py`, its
+check-mode acceptance case and its `trial` dependency group belong to the adoption
+row an operator decision would open. egobox 1.0.0 was installed into the consumer
+venv only (`uv pip install egobox`; the manifest and `uv.lock` unchanged, and
+`uv sync --locked --extra engine --dry-run` reports no changes; the venv's ruff
+stays the lock's 0.16.10). The trial tool is `scratch/surrogate_trial.py`
+(scratch/ is gitignored by design) and its raw numbers are
+`scratch/surrogate_trial_results.json`; to reproduce, `uv pip install
+egobox==1.0.0`, then run the commands below.
+
+The trial's baseline is the recorded B0 production capture
+(`baselines/B0-de-trace.json`), because row 97 (the B1 re-baseline) has not
+landed. Row 96's gate re-captured the DE trace twice on this engine and consumer
+and it was bitwise identical to B0, so B0's per-premise values are this tree's DE
+behaviour; run counts are the recorded `n_eval` plus the one TOWT warm-start
+regression run `n_eval` never sees (`scale.py`'s `engine_runs`).
+
+The design, as run. Production set: `feeder.build_group("G4802010",
+mix=scale._mix_for(4))[:4]`, seed 0, a 365-day year, the `Fitter` built exactly as
+`calibrate_premise` builds it (the full per-home resolved set: 9, 8, 10 and 10
+factors), the oracle the same batched `Fitter.evaluate` with the 1e6 PENALTY for a
+refusal, the strict health policy armed on every evaluation. Two methods, each
+scored exactly as the production capture scores its fit: in-sample F0 and
+out-of-sample F1 through `Experiment.candidate_series` and `scale._score`.
+
+- BO, egobox 1.0.0 `Egor`: a Gaussian-process surrogate with expected-improvement
+  infill, qEI batch 4, seed 0. The initial design is 10 points evaluated as one
+  batch: the nominal vector, the TOWT warm start (its regression is one engine run
+  outside `evaluate`, counted), and 8 egobox LHS draws (seed 0). The infill
+  iteration count was fixed per premise before the run so the BO budget is half
+  the premise's recorded engine runs: 55, 48, 61 and 61 iterations of 4, so 231,
+  203, 255 and 255 engine runs against the recorded 462, 411, 513 and 513.
+- M+DE, Morris screening then DE on the retained factors: elementary effects
+  hand-rolled (numpy `default_rng(0)`), 8 trajectories, one batched `evaluate` per
+  trajectory (n+1 points), delta 0.2 of each factor's span in unit space, the
+  perturbation sign alternating and the dimension order shuffled per trajectory;
+  the retention rule fixed before the run (mu* at least 10 percent of mu*_max, at
+  least 3 and at most 8 factors); then the Fitter's own DE protocol on the
+  retained box (`generations=16`, seed 0, the default population rule
+  `max(12, 3n)`).
+
+The numbers. Loss is the fit objective, lower is better; "out" is the F1 monthly
+CVRMSE, the honest one (`scale.py`). The baseline's runs are the recorded
+`n_eval + 1`:
+
+| premise | baseline runs / loss / out | BO runs / loss / out | M+DE runs / loss / out |
+|---|---|---|---|
+| 0 ashp bldg0053954 | 462 / 0.597421 / 5.08 | 231 / 0.578216 / 3.28 | 489 / 0.599948 / 3.11 |
+| 1 elecfurn bldg0092742 | 411 / 0.741001 / 4.02 | 203 / 0.713439 / 2.53 | 430 / 0.749879 / 4.65 |
+| 2 gasfurn bldg0031262 | 513 / 0.593824 / 3.97 | 255 / 0.548655 / 3.34 | 293 / 0.565166 / 3.95 |
+| 3 gasfurn bldg0063724 | 513 / 0.546443 / 3.56 | 255 / 0.563510 / 4.40 | 293 / 0.759215 / 16.56 |
+
+M+DE's totals are screening plus retained-box DE: 80 + 409, 72 + 358, 88 + 205 and
+88 + 205 runs (the retained sets 8/9, 7/8, 3/10 and 3/10 factors; populations 24,
+21, 12 and 12). Loss deltas against the baseline: BO -3.21, -3.72, -7.61 and
++3.12 percent; the retained-box DE +0.42, +1.20, -4.83 and +38.94 percent.
+
+The trajectories. BO's best-so-far plateaus by about 100 runs on premises 0 to 2
+(premise 0: 0.6120 at 50 runs, 0.5782 at 98, its final 0.5782; premise 1: 0.8813
+at 50, 0.7134 at 150, its final; premise 2: 0.6085 at 50, 0.5487 at 98, its
+final), and keeps creeping on premise 3 (0.5742 at 98, 0.5706 at 198, 0.5635 at
+255) without reaching the baseline's 0.5464. The baseline DE's traces run 17
+generations each (the initial batch plus 16), from first-generation minima
+0.6710, 0.9052, 0.8376 and 0.6780 to their finals.
+
+Surrogate fidelity, measured by the trial rather than taken from egobox's
+internals: a 5-fold cross-validated q2 of a GP fitted on every point the BO stage
+evaluated (egobox's default `GpMix` configuration), on the penalty-free points:
+0.841, 0.622, 0.931 and 0.594 per premise (Pearson r 0.917, 0.798, 0.967 and
+0.770). With the refused 1e6 penalties included, premise 2's q2 falls to -0.184:
+the one premise where the BO stage drew refusals (6 of 255 evaluations; the
+engine's strict construction rules reject some corners of the box, and a GP
+cannot interpolate a 1e6 cliff). Morris's own honesty check: the factors the
+baseline fits actually moved (the fitted value at least 2 percent of span from
+nominal) number 9 of 9, 8 of 8, 10 of 10 and 9 of 10, so the surface is not
+sparse, and the elementary effects measured from uniform-random box points rank
+the heating factors last on both gas premises (heating_eff_scale 10th of 10 on
+premise 3) while the baseline fits move them: the directions that matter are
+visible only near the good region, not from the box at large.
+
+Reproducibility: every method is seeded (egobox `Egor` seed 0, `lhs` seed 0,
+numpy `default_rng(0)`, the Fitter's own seed 0; budgets derive from the recorded
+baseline counts, fixed inputs). The tool's check mode re-ran premise 0 with the
+report's seeds and compared its loss, in- and out-of-sample scores and
+engine-run counts with the stored row on bits: PASS, exit 0. The provenance the
+report carries: consumer `24c27a72` (main), engine `1d91a684` (the submodule pin,
+build clean, sha256 `4c45b677756c74ad`), egobox 1.0.0, host `Rich-AZX`, 13-worker
+pools, premises run sequentially (`scale.py`'s measured claim: per-home results
+byte-identical serial versus concurrent).
+
+The gates on the same tree: the consumer `run_all` 383 passed, 0 failed, 7
+skipped (the base seven), ruff (the configured select, E9 and F821) clean; the
+engine repo untouched. No golden, baseline or recorded number moves (report
+only).
+
+The verdict: NOT WORTH ADOPTING as the production fit stands, with one measured
+positive an operator may want to pursue as a new entry.
+
+1. Morris screening followed by DE is rejected on this evidence. The surface is
+   not sparse (above), so the screening saves runs only where it breaks the fit:
+   on premises 0 and 1 it retains 8/9 and 7/8 factors and the method totals 106
+   and 105 percent of the baseline's runs for a worse loss; on the gas premises it
+   retains 3 factors that miss the heating directions, and premise 3's
+   retained-box DE lands 38.9 percent above the baseline's loss at 16.56 percent
+   out-of-sample monthly CVRMSE. The retention is also unstable across two
+   same-archetype homes (the same 3 retained factors: premise 2 -4.83 percent,
+   premise 3 +38.94 percent), so no fixed retention rule can serve the fleet.
+2. BO halves the run count (49 to 50 percent of the recorded runs) and matches or
+   beats the baseline's loss on 3 of the 4 premises while improving the
+   out-of-sample monthly CVRMSE on the same three (5.08 to 3.28, 4.02 to 2.53,
+   3.97 to 3.34 percent), but regresses the fourth (premise 3: loss +3.12
+   percent, out-of-sample 3.56 to 4.40 percent; the weakest GP fidelity, q2
+   0.594). One seed over four premises does not clear the entry's bar (the same
+   fit quality at fewer runs); a method that loses one home in four is not a
+   drop-in for the production fit.
+3. The positive worth a new entry: BO's first 100 runs already sit within about 3
+   percent of the DE's final loss on 3 of the 4 premises, and a BO premise's wall
+   cost was 83 to 109 s against the retained-box DE's 34 to 73 s (the same
+   13-worker pool). A budgeted BO stage seeding or bracketing the DE, measured
+   over more premises and seeds with the out-of-sample regression watched, is the
+   only shape this trial measured that could cut the count without premise 3's
+   risk. Adopting anything was never part of this row; that study needs its own
+   entry and an operator decision.

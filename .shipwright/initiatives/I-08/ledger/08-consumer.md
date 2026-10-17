@@ -2121,6 +2121,45 @@ commands, the step-2 sync included.
 **Dependencies:** CN-4. Operator checkpoints (`plan.md` section 3): the new
 dependency and running the trial.
 
+**State:** landed as the report-only execution (2026-10-17, the ledger worktree
+`r98-cn12`, branch `row/r98-cn12` on `eeef5700`); the full record in
+`02-measurement.md` ("The surrogate-search trial, 2026-10-17"). The trial ran as
+this entry specifies on the production set (the four premises, seed 0), each
+method against the same `Fitter` objective, with the numbers recorded next to the
+baseline values: row 97's B1 has not landed, so the baseline is the recorded B0
+production capture, which row 96's gate re-captured twice on this tree bitwise
+identical, so its values are this tree's DE behaviour. The scoping this row's
+report-only deliverable forced, recorded rather than hidden: egobox 1.0.0 went
+into the consumer venv only (`uv pip install egobox`; the manifest and `uv.lock`
+unchanged, `uv sync --locked --extra engine --dry-run` reports no changes), the
+tool lives at `scratch/surrogate_trial.py` with its raw numbers in
+`scratch/surrogate_trial_results.json` (scratch/ is gitignored by design), and
+the registered `tools/surrogate_trial.py`, `docs/Surrogate_Trial.md` and the
+`trial` dependency group with the step-2 sync mechanism belong to the adoption
+row an operator decision would open, not to this row. The numbers: BO at half the
+recorded runs per premise (231, 203, 255, 255 against 462, 411, 513, 513) matches
+or beats the baseline's loss on 3 of 4 premises (-3.21, -3.72, -7.61 percent) and
+improves the out-of-sample monthly CVRMSE on the same three (5.08 to 3.28, 4.02
+to 2.53, 3.97 to 3.34 percent), and regresses the fourth (premise 3: +3.12
+percent, 3.56 to 4.40); Morris screening then DE on the retained factors is
+rejected (the surface is not sparse: 9/9, 8/8, 10/10 and 9/10 factors move at
+least 2 percent of span in the baseline fits; the method totals 106 and 105
+percent of the baseline's runs on premises 0 and 1 for a worse loss, and the
+retained box misses the heating directions on the gas furnaces, premise 3's loss
++38.94 percent at 16.56 percent out-of-sample monthly CVRMSE, with the retention
+unstable across two same-archetype homes); the GP's measured fidelity (5-fold CV
+q2 on the penalty-free points) is 0.841, 0.622, 0.931 and 0.594. The verdict:
+NOT WORTH ADOPTING as the production fit stands; the one positive worth a new
+entry is the hybrid shape (BO's first 100 runs sit within about 3 percent of the
+DE's final loss on 3 of 4 premises, at a lower wall cost than a DE stage), which
+needs more premises and seeds and an operator decision. Every trial method is
+seeded and the tool's check mode re-ran premise 0 with the report's seeds and
+compared its loss, in- and out-of-sample scores and engine-run counts with the
+stored row on bits: PASS, exit 0. Gates: the consumer `run_all` 383 passed, 0
+failed, 7 skipped (the base seven) on the same tree, ruff (the configured select,
+E9 and F821) clean, the engine untouched; no golden, baseline or recorded number
+moves (report only).
+
 ## CN-13: the consumer follows the engine package rename
 
 **Kind:** initiative work, consumer half of `dl-i08-architecture.package`
