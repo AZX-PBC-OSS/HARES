@@ -115,3 +115,26 @@ and pushed:
   `/tmp/opencode/rescued/` and their content was verified landed or
   obsolete. The stash rule stands: an agent never stashes work it did
   not create.
+
+## The closing sequence's state (2026-10-17)
+
+- The engine `feat/output-results` at `92b1b80a`, pushed: the full
+  schedule drained through row 99 (M-4a: the reproducibility workflow
+  lands UNRUN by design: macOS arm64 needs a triggered run).
+- The consumer `main` at `48547ac1`, pushed: the final pin (row 101)
+  advanced and signed; every gate green on the pinned engine (383/0/7,
+  ruff, the DE-trace twice identical).
+- Row 100 (M-4b: the cross-platform publish) waits on a
+  `workflow_dispatch` run of `.github/workflows/reproducibility.yml`
+  (the branch is pushed; dispatch on GitHub or `gh workflow run`).
+- Row 97 (CN-4: the re-baseline) is THE open operator ruling: the final
+  B0 compare shows 275 differing paths (the fitted vectors, the losses,
+  the scores: the accumulated declared movement from the strict-input
+  repair, the weather/warm-up conventions, the declared-R precedence and
+  the fit-path changes, every family attributed in the rows' records).
+  The proposal: `verification/cn4-rebaseline-proposal.md`.
+- Row 101a (the push): the consumer's main is pushed through the pin;
+  the row's remaining formality: the operator's `i08-consumer` branch
+  push per plan.md §3 if that branch still lives.
+- The closing PR (BR-10): feat/output-results → initial-implementation,
+  the same shape as PR 34. Opened on the operator's word.
