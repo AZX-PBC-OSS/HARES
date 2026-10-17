@@ -1262,6 +1262,76 @@ by B1.
 **Dependencies:** CN-1, CN-3; `03-output-reporting.md` OR-5, OR-12;
 `09-numeric-fixes.md` B-2 (warm-up outcome), B-13.
 
+**State:** landed (2026-10-17). Consumer `24c27a72` on branch
+`row/cn2-strict-health` (cut from the landed main `494b5cf3`), one
+commit, gated on the engine `aa1a3ad5` (branch `row/r96-cn2`, worktree
+`r96-cn2`, where the row's schedule record lands). The engine's policy
+surface needed nothing: row 42's `HealthPolicy` already carries
+`strict()` over every event kind this entry names (the four counter
+limits `Some(0)` and the warm-up requirement, every violation naming
+the event, the step, the source, the count and the limit), so the
+row's engine side is its ledger record alone. Landed whole: the fit's
+kwargs builder builds its `SimulationConfig` with
+`health_policy=HealthPolicy.strict()` on every evaluation's config,
+whatever path reaches the engine (the fit's per-evaluation runs and
+every other runner alike), so a degraded evaluation reaches the fit as
+a `FailedRun` (scored `PENALTY`, counted in `n_rejected`) and can
+never come back as a value that looks like a fit input.
+
+RED first: the entry's acceptance case
+`strict_policy_fails_a_run_whose_warmup_did_not_converge`
+(`suite_engine`; the `suite_fit` study home `bldg0050945`, county
+`G4804390`, `STUDY_GRID`, 2 days, `WarmupConfig(max_days=1)` - the
+first warm-up day has no predecessor and is never converged, row 83's
+record), witnessed at the base: under the empty policy the run
+completed with `health.warmup` `Ran` and `converged == False` (the
+degraded run scoreable, exactly the pre-policy behavior), and
+`run_specs` returned a scored result from the same degraded run - no
+refusal. GREEN after: the same run comes back from `run_specs` as a
+`FailedRun` whose message names the event
+(`HaresHealthPolicyError: health policy: WarmupNotConverged from
+'warmup': count 1 exceeds the limit 0`).
+
+One consequence the gate caught: the F15 shape case's precondition was
+the converging pair (heating up, cooling down), which the engine
+rejects and counts since its one-band rule - never applied - so the
+shape the case measured was half-executed, its precondition inert by
+refusal rather than by physics, and a run carrying that rejection now
+fails at the step it occurs. The case's precondition is the engine's
+single-axis form now (the heating setpoint up, the engine's own
+preconditioning rule in `dr_compliance.rs`), the shape is accepted end
+to end, and the executed shape re-measured: peak 2.7422 -> 1.0412 kW,
++6.937 kWh stored before the peak, 5.103 kWh shed in it, the day
++2.391 kWh (the real cost of storing: the old reading, -1.714 kWh, was
+a saving of a shape whose storing half never ran), comfort 1.955 C
+max; the conservation bound (no day saving beyond the coast's own
+shed) is kept, and the case records the executed measurements.
+
+Movement declared: the DE-trace on the row's final state captured
+twice, identical, and identical to the recorded state (the consumer at
+the landed main, the same engine): on the production calibration set
+the strict policy newly rejected zero evaluations - all four premises'
+`n_eval` (459, 408, 510, 510), `n_rejected` (0), losses, nominal
+losses, traces and fitted vectors bitwise unchanged, `first_rejection`
+empty in both - so the one re-baseline's absorption carries no delta
+from this row. The row's refusal path is exercised by the acceptance
+case and by the F15 consequence; the fit's own corners never tripped
+it.
+
+Gates: the consumer `run_all` 383 passed, 0 failed, 7 skipped (the
+base seven; the +1 the entry's acceptance case), ruff clean,
+`hares_contract_check.py` prints `[hares-contract] PASS` on this row's
+engine, with two pre-existing NEW items (the catalogue's `Other` and
+`Refrigeration` end-use aggregates outside the contract's five read
+aggregates; present on the unchanged main consumer against the same
+engine, considered, no drift item), `build_bundle.py`'s registry every
+file present and none untracked; the engine fmt clean, clippy
+`--workspace --all-targets --all-features -D warnings` clean, nextest
+`--workspace --all-features -j 2` once 8145/8145 (8 skipped),
+`pytest -m ''` 1766 passed + 6 xfailed, 0 failed, 0 errors, pyright 0
+errors, the goldens bitwise (compare-all 8 + dst 1 identical, no
+re-capture). Absorbed by B1.
+
 ## CN-3: envelope factors through the engine's envelope scales
 
 **Kind:** initiative work, the consumer side of `09-numeric-fixes.md` B-13
