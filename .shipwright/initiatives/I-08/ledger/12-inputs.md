@@ -1223,6 +1223,58 @@ recorded in `02-measurement.md`, and the entry's line in the
 
 **Commit:** `fix: read schedule-file thermostat setpoint columns in degrees Fahrenheit`
 
+**State:** DONE (2026-10-17, branch `row/r94ab`, worktree `r94ab`, on the
+generated-schedule row's commit `a36f3485`). Landed: both columns read as
+degrees Fahrenheit and converted to Celsius at the parse with the `uom`
+conversion (`hares_physics::units::temperature_f_to_c`,
+`ThermodynamicTemperature::new::<degree_fahrenheit>` to `degree_celsius`),
+once per value in `parse_schedule_csv_str`, keyed on the column table's
+two thermostat setpoint columns (`column_read_in_fahrenheit`; the
+`water_heater_setpoint` column stays the construction error, no unit ever
+applies), with a `tracing` debug line per converted column naming the
+column and the unit conversion; the input schema's column table states
+the unit as Fahrenheit, the parse stated in the description (the schema
+test's pin moved from Celsius with it); the doc comment on
+`inject_setpoint_schedules` points at the physics decisions;
+`docs/PHYSICS_DECISIONS.md`'s setpoint section states the rule, the
+citations (the detailed-schedule documentation, `schedules.rb:1465-1484`
+`convert_setpoints`, OCHRE `schedule.py:408-427`), what changed and the
+direction of the delta, replacing the pending-Celsius statement. A
+generated schedule is untouched: it carries no setpoint column (the
+generated-schedule row's removal, this branch's first commit), so nothing
+in it converts. RED first: at the parent the acceptance tests fail
+reading the 70.0 heating column as 70 C (the run's heating setpoint
+carries the bits of 70.0 where the conversion is wanted); GREEN at the
+row: `setpoint_column_is_read_in_fahrenheit` (the heating leg every step
+on bits the uom conversion of 70 F to Celsius computed in the test; the
+cooling leg, from a July start, every step the cooler's own setpoint
+column on bits the conversion of 75 F — the cooling witness is the
+cooler's own column from a summer start because a January run's
+compressor outdoor lockout never evaluates the cooler's control and the
+dwelling-level scheduled-cooling read reports the first HVAC unit's
+telemetry, a heating-only unit on this fixture);
+`schedule_column_wins_over_hpxml_and_warns` and `sides_resolve_independently`
+(both levels) write 70.0 and expect the conversion, their source and
+warning assertions unchanged; `appended_column_values_are_the_injected_ones`
+pins the parsed column's values as the parser read them; the io level's
+appended-column helper now reads through the parser (a temporary file
+parsed by `parse_schedule_csv`), which is where the reading applies.
+Delta: the 48 h run of the parity inputs with a 70.0 heating column,
+before (read as 70 C) and after: delivered heating 788.4359349702 to
+137.3248583510 kWh over the 48 h (the annual-equivalent at the 48 h to
+year scale, 143889.5581320653 to 25061.7866490558 kWh) and the mean zone
+temperature 64.2784703820 to 21.1235089246 C, both down, recorded in
+`02-measurement.md`; the commit adds its `docs/python.md` "Numeric
+changes" line. Goldens: compare-all 8 and the dst set's `full_year_900s_dst`
+bitwise identical, compared twice on the final state; no golden carries a
+setpoint column, none re-captured, any change would have stopped the
+entry. Gates: fmt clean; clippy `--workspace --all-targets --all-features
+-D warnings` clean; nextest `--workspace --all-features -j 2` 8149/8149
+(8 skipped); `pytest -m ''` 1766 passed + 6 xfailed, 0 failed, 0 errors;
+pyright 0 errors. The commit is unsigned through the host's 1Password
+signing failure (the bridge unreachable from this session's shell), in
+the re-signing record's pattern for the span to re-sign.
+
 **Dependencies:** IN-5; `11-other-defects.md` OD-9; `09-numeric-fixes.md`
 B-1a (`docs/PHYSICS_DECISIONS.md`).
 

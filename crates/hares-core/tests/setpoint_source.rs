@@ -69,20 +69,6 @@ fn schedule_with_appended_column(
     path
 }
 
-fn sim_toml() -> String {
-    r#"
-start_time = "2023-01-01T00:00:00-07:00"
-duration = 172800
-time_res = 900
-
-[[reports]]
-name = "frame"
-selection = { verbosity = 8 }
-destination = "memory"
-"#
-    .to_string()
-}
-
 /// The generated-schedule run's config: the ResStock home, no schedule file
 /// (the schedule generated from the defaults' profiles), the home's county
 /// weather, a Friday start, 3 d at 3600 s, no warm-up.
@@ -181,13 +167,29 @@ fn cooling_source_is(dwelling: &Dwelling, equipment: &str, expected: &hares_io::
 }
 
 fn dwelling_with_schedule(schedule_path: PathBuf) -> Dwelling {
+    dwelling_with_schedule_at(schedule_path, "2023-01-01T00:00:00-07:00")
+}
+
+fn dwelling_with_schedule_at(schedule_path: PathBuf, start_time: &str) -> Dwelling {
+    let sim_toml = format!(
+        r#"
+start_time = "{start_time}"
+duration = 172800
+time_res = 900
+
+[[reports]]
+name = "frame"
+selection = {{ verbosity = 8 }}
+destination = "memory"
+"#
+    );
     let config = DwellingConfig {
         hpxml: hares_io::InputSource::Path(fixture().join("building.xml")),
         schedule: Some(hares_io::InputSource::Path(schedule_path)),
         weather: hares_io::WeatherInput::Path(fixture().join("weather.epw")),
         defaults: hares_io::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(&sim_toml()).expect("the config parses"),
+            hares_io::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
             None,
             1,
             None,
@@ -226,11 +228,13 @@ fn column_values(batches: &[RecordBatch], name: &str) -> Vec<f64> {
 /// With a heating setpoint column and HPXML heating setpoints both given,
 /// the run's heating setpoint is the column's value on every step and one
 /// warning names the column and the ignored HPXML heating elements: the
-/// OS-HPXML rule's record (hvac.rb:1669-1670).
+/// OS-HPXML rule's record (hvac.rb:1669-1670). The column is read in
+/// degrees Fahrenheit: the 70 F values run as the parser's Fahrenheit to
+/// Celsius conversion, on bits.
 #[test]
 fn schedule_column_wins_over_hpxml_and_warns() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let schedule_path = schedule_with_appended_column(&dir, "heating_setpoint", 21.0);
+    let schedule_path = schedule_with_appended_column(&dir, "heating_setpoint", 70.0);
     let mut dwelling = dwelling_with_schedule(schedule_path);
     dwelling.simulate().expect("the run completes");
 
@@ -255,10 +259,64 @@ fn schedule_column_wins_over_hpxml_and_warns() {
     let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
     let setpoints = column_values(&batches, "Scheduled Heating Setpoint (C)");
     assert_eq!(setpoints.len(), 192, "48 h at 900 s");
+    let expected = temperature_f_to_c(70.0);
     for (step, value) in setpoints.iter().enumerate() {
-        assert!(
-            (*value - 21.0).abs() < 1e-12,
-            "step {step}: the heating setpoint is the column's 21.0 C, got {value}"
+        assert_eq!(
+            value.to_bits(),
+            expected.to_bits(),
+            "step {step}: the heating setpoint is the column's 70 F as the parser's \
+             Fahrenheit to Celsius conversion, got {value}"
+        );
+    }
+}
+
+/// A schedule file's setpoint columns are read in degrees Fahrenheit, the
+/// detailed-schedule convention OS-HPXML specifies and converts
+/// (`schedules.rb:1465-1484`), OCHRE converting the same columns from
+/// Fahrenheit at its own schedule load (`schedule.py:408-427`): with a
+/// 70 F heating column every step's heating setpoint is, on bits, the uom
+/// conversion of 70 F to Celsius computed here, and with a 75 F cooling
+/// column the same for the cooler's active setpoint (the cooling side's
+/// own column: the dwelling-level scheduled-cooling read reports the first
+/// HVAC unit's telemetry, and the heating-only unit carries no cooling
+/// source). The cooling leg runs from a July start so the compressor's
+/// outdoor lockout (a January run never evaluates the cooler's control)
+/// leaves the column's value the one the cooler acts on. Written for
+/// Fahrenheit, the same files previously drove the dwelling at 70 C and
+/// 75 C.
+#[test]
+fn setpoint_column_is_read_in_fahrenheit() {
+    let expected_heating_c = temperature_f_to_c(70.0);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let schedule_path = schedule_with_appended_column(&dir, "heating_setpoint", 70.0);
+    let mut dwelling = dwelling_with_schedule(schedule_path);
+    dwelling.simulate().expect("the run completes");
+    let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
+    let heating = column_values(&batches, "Scheduled Heating Setpoint (C)");
+    assert_eq!(heating.len(), 192, "48 h at 900 s");
+    for (step, value) in heating.iter().enumerate() {
+        assert_eq!(
+            value.to_bits(),
+            expected_heating_c.to_bits(),
+            "step {step}: the 70 F heating column runs as the uom conversion to Celsius, \
+             got {value}"
+        );
+    }
+
+    let expected_cooling_c = temperature_f_to_c(75.0);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let schedule_path = schedule_with_appended_column(&dir, "cooling_setpoint", 75.0);
+    let mut dwelling = dwelling_with_schedule_at(schedule_path, "2023-07-01T00:00:00-07:00");
+    dwelling.simulate().expect("the run completes");
+    let batches: Vec<RecordBatch> = dwelling.flushed_batches().to_vec();
+    let cooling = column_values(&batches, "ASHP Cooler Setpoint (C)");
+    assert_eq!(cooling.len(), 192, "48 h at 900 s");
+    for (step, value) in cooling.iter().enumerate() {
+        assert_eq!(
+            value.to_bits(),
+            expected_cooling_c.to_bits(),
+            "step {step}: the 75 F cooling column runs as the uom conversion to Celsius, \
+             got {value}"
         );
     }
 }

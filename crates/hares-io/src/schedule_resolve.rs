@@ -954,8 +954,10 @@ fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Valu
 /// (hvac.rb:1669-1675); HARES warns for every ignored input, so no choice
 /// is silent. The schedule-file setpoint columns are degrees Fahrenheit in
 /// OS-HPXML's detailed-schedule convention ("Detailed Schedule Inputs",
-/// converted in `schedules.rb:1465-1484`); the column values here are read
-/// as Celsius, which is their own numeric entry to change.
+/// converted in `schedules.rb:1465-1484`): the parser reads them in
+/// Fahrenheit and converts every value to Celsius at the parse, the rule
+/// and its citations stated in `docs/PHYSICS_DECISIONS.md`'s setpoint
+/// section.
 ///
 /// The resolution is recorded per side in the spec's
 /// `heating_setpoint_source` / `cooling_setpoint_source`, and the source
@@ -2350,13 +2352,27 @@ pub fn check_hvac_setpoint_invariants(specs: &[EquipmentSpec]) {
     }
 }
 
+/// Whether a schedule column's values are degrees Fahrenheit, converted to
+/// Celsius at the parse, once per value: the two thermostat setpoint
+/// columns. OpenStudio-HPXML's detailed-schedule convention states them in
+/// Fahrenheit and converts them ("Detailed Schedule Inputs",
+/// `HPXMLtoOpenStudio/resources/schedules.rb:1465-1484` `convert_setpoints`);
+/// OCHRE converts the same columns from Fahrenheit at its own schedule load
+/// (`vendors/OCHRE/ochre/utils/schedule.py:408-427`). The
+/// `water_heater_setpoint` column is a construction error when present, so
+/// no unit ever applies to it.
+pub(crate) fn column_read_in_fahrenheit(name: &str) -> bool {
+    matches!(name, "heating_setpoint" | "cooling_setpoint")
+}
+
 /// The schedule columns the engine reads and the columns it accepts
 /// without reading, derived from the mapping table (the input schema's
 /// `schedule_columns` and `unused_schedule_columns`). The setpoint columns
-/// carry the unit the parser reads them in (Celsius), and the
-/// `water_heater_setpoint` column is in neither list: the mapping table's
-/// entry is the construction error's, since IN-5 (a column the engine
-/// accepts is a column it applies, and HARES does not apply it).
+/// carry the unit the parser reads them in (degrees Fahrenheit, converted
+/// to Celsius at the parse), and the `water_heater_setpoint` column is in
+/// neither list: the mapping table's entry is the construction error's,
+/// because a column the engine accepts is a column it applies, and HARES
+/// does not apply it.
 pub(crate) fn schedule_column_schemas() -> (
     Vec<crate::input_schema::ScheduleColumnSchema>,
     Vec<crate::input_schema::UnusedScheduleColumnSchema>,
@@ -2384,8 +2400,9 @@ pub(crate) fn schedule_column_schemas() -> (
                 }
                 used.push(ScheduleColumnSchema {
                     name: mapping.csv_column.to_string(),
-                    unit: Some("C".to_string()),
-                    description: "the thermostat setpoint column, read in degrees Celsius"
+                    unit: Some("F".to_string()),
+                    description: "the thermostat setpoint column, read in degrees Fahrenheit \
+                                  and converted to degrees Celsius at the parse"
                         .to_string(),
                 });
             }

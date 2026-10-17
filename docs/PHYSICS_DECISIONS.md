@@ -251,8 +251,23 @@ resolves the same precedence and warns for every ignored HPXML input, so
 no choice is silent. The schedule-file setpoint columns are degrees
 Fahrenheit in OS-HPXML's detailed-schedule convention ("Detailed Schedule
 Inputs", <https://openstudio-hpxml.readthedocs.io/en/latest/workflow_inputs.html>;
-converted in `resources/schedules.rb:1465-1484`); HARES reads them as
-Celsius pending the Fahrenheit reading's own numeric entry.
+converted in `resources/schedules.rb:1465-1484`), and HARES reads them the
+same way: the parser converts every value of a `heating_setpoint` or
+`cooling_setpoint` column from Fahrenheit to Celsius at the parse, once
+per value, with the `uom` conversion
+(`ThermodynamicTemperature::new::<degree_fahrenheit>` to
+`degree_celsius`), so every reader downstream sees one column of one
+unit. The conversion is unit-for-unit: OS-HPXML's `convert_setpoints`
+applies the on-off thermostat's deadband offset after its own conversion,
+and HARES's deadband is the thermostat's own configuration, not a
+schedule-column property; OCHRE converts the same columns from
+Fahrenheit at its schedule load
+(`vendors/OCHRE/ochre/utils/schedule.py:408-427`) with no offset. The
+direction of the change: a schedule file written for the HPXML ecosystem
+(previously read as Celsius) drives cooler: a 70 F heating column reads
+21.11 C, not 70 C, so heating energy and mean zone temperature fall on
+any home whose schedule file carries setpoint columns; no committed
+golden carries one, and no golden moved.
 
 The active source per side is recorded where the setpoints resolve
 (`crates/hares-io/src/setpoint_source.rs`, the equipment spec's

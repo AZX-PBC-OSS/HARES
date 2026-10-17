@@ -3932,3 +3932,40 @@ Goldens: compare-all 8 (`consumer_shape_900s`, `fleet_mixed_offset`,
 identical, compared twice on the final state. No golden manifest runs a
 generated schedule (every manifest sets an explicit `schedule` path), so
 no golden is expected to move and none is re-captured.
+
+### The schedule setpoint Fahrenheit row, 2026-10-17 (the worktree `r94ab`)
+
+The delta, on the parity inputs (`cz4a_ashp_hpwh`, 48 h at 900 s from
+`2023-01-01T00:00:00-07:00`, the fixture's `schedule.csv` with a constant
+`heating_setpoint` column of 70.0 appended, so the column wins over the
+HPXML heating setpoints and the overlap is warned). Before: the column
+read as 70 C, at the row's parent `a36f3485` (the tree plus only the dump
+harness, an untracked scratch test since deleted). After: the column read
+as 70 F, converted at the parse.
+- Delivered heating energy (`envelope_loads_kwh.hvac_heating_kwh`, the
+  run's 48-h total): 788.4359349702 to 137.3248583510 kWh (bits
+  `4088a37ccb79423f` to `40612a653d572ad0`); at the 48 h to year scale
+  (x 8760/48) the annual-equivalent: 143889.5581320653 to
+  25061.7866490558 kWh.
+- Mean zone temperature (the mean of `Temperature - Indoor (C)` over the
+  run's 192 steps): 64.2784703820 to 21.1235089246 C (bits
+  `405011d2756ff305` to `40351f9e47e7d030`).
+Both fall, the direction the defect predicts: the Fahrenheit file read as
+Celsius drove the thermostat at 70 C (the home overheated until the
+engine's safety cutoff held the zone near 64.3 C mean and the heating
+energy ballooned); the Fahrenheit read heats to the converted 21.11 C.
+Goldens: compare-all 8 and the dst set's `full_year_900s_dst` bitwise
+identical, compared twice on the final state. The census behind it:
+`grep -l -E '(heating|cooling)_setpoint' -r tests/fixtures/golden
+tests/fixtures/resstock` lists no schedule (only the metadata parquet's
+binary match), so no golden manifest's schedule carries a setpoint
+column; any golden change would have stopped the row, none is re-captured.
+RED: at the parent `setpoint_column_is_read_in_fahrenheit` (the heating
+leg, on bits) and `schedule_column_wins_over_hpxml_and_warns` (the run's
+heating setpoint the column's converted value, on bits) fail reading
+70.0 as 70 C (the bits of 70.0 where the conversion is wanted); GREEN at
+the row, both legs (the cooling leg's witness is the cooler's own
+setpoint column from a July start: a January run's compressor outdoor
+lockout never evaluates the cooler's control, and the dwelling-level
+scheduled-cooling read reports the first HVAC unit's telemetry, a
+heating-only unit on this fixture).

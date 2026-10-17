@@ -416,6 +416,28 @@ pub(crate) fn parse_schedule_csv_str(
         });
     }
 
+    // The thermostat setpoint columns are degrees Fahrenheit:
+    // OpenStudio-HPXML's detailed-schedule convention ("Detailed Schedule
+    // Inputs", converted in `schedules.rb:1465-1484`; OCHRE converts the
+    // same columns from Fahrenheit at its own schedule load,
+    // `vendors/OCHRE/ochre/utils/schedule.py:408-427`). Every value of such
+    // a column converts to Celsius exactly once, here at the parse, so
+    // every reader downstream (the injection, the per-step schedule domain,
+    // any aggregation) reads one column of one unit.
+    let fahrenheit_columns: Vec<bool> = data_column_names
+        .iter()
+        .map(|name| crate::schedule_resolve::column_read_in_fahrenheit(name))
+        .collect();
+    for (idx, converted) in fahrenheit_columns.iter().enumerate() {
+        if *converted {
+            tracing::debug!(
+                column = %data_column_names[idx],
+                unit = "degF -> degC",
+                "schedule setpoint column read in degrees Fahrenheit, converted to Celsius at the parse",
+            );
+        }
+    }
+
     let mut timestamps = Vec::new();
     let mut columns = vec![Vec::new(); data_column_names.len()];
 
@@ -463,6 +485,12 @@ pub(crate) fn parse_schedule_csv_str(
                     data_column_names[out_col_idx]
                 )));
             }
+            // The Fahrenheit columns convert once per value, at the parse.
+            let value = if fahrenheit_columns[out_col_idx] {
+                hares_physics::units::temperature_f_to_c(value)
+            } else {
+                value
+            };
             columns[out_col_idx].push(value);
         }
     }

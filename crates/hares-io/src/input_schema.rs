@@ -208,7 +208,7 @@ mod tests {
             if column.name.ends_with("setpoint") {
                 assert_eq!(
                     column.unit.as_deref(),
-                    Some("C"),
+                    Some("F"),
                     "the setpoint columns carry the unit the parser reads them in"
                 );
             }

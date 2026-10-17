@@ -931,3 +931,14 @@ golden fixtures re-captured.
   constant columns' removal landed with the phase-1 fold, before any row's
   capture; the acceptance tests fail against the reverted generator, which
   still wrote the constants). No golden re-captured.
+
+- 2026-10-17: a schedule file's `heating_setpoint` and `cooling_setpoint`
+  columns are read in degrees Fahrenheit, OpenStudio-HPXML's
+  detailed-schedule convention, and converted to Celsius at the parse with
+  the uom conversion, once per value (they were read as Celsius, so a
+  schedule written for the HPXML ecosystem drove the thermostat at, for
+  example, 70 C). The input schema's column table states the unit as
+  Fahrenheit. No golden moves: no golden manifest's schedule carries a
+  setpoint column (the census), and compare-all 8 and the dst set's 1 are
+  bitwise identical compared twice on the final state. No golden
+  re-captured.

@@ -19,7 +19,11 @@
 //! The fixture is `tests/fixtures/parity/cz4a_ashp_hpwh`: its HPXML
 //! declares hourly `Weekday/WeekendSetpointTempsHeatingSeason` arrays
 //! (building.xml:794-795) and a simple `SetpointTempCoolingSeason`
-//! (building.xml:780), and its schedule.csv carries no setpoint column.
+//! (building.xml:780), and its schedule.csv carries no setpoint column;
+//! each test appends one constant setpoint column to a copy of the file
+//! and reads it the way the dwelling reads a schedule file, through the
+//! parser, which reads the setpoint columns in degrees Fahrenheit and
+//! converts every value to Celsius at the parse.
 
 use std::path::PathBuf;
 
@@ -65,19 +69,34 @@ fn fixture_specs() -> Vec<EquipmentSpec> {
     .expect("the fixture's equipment resolves")
 }
 
-/// The fixture's schedule with one constant column appended, read the way
-/// the dwelling reads a schedule file.
-fn schedule_with_appended_column(name: &str, value: f64) -> ScheduleTimeSeries {
-    let mut schedule = parse_schedule_csv(fixture().join("schedule.csv"), &[], None, None)
+/// The fixture's schedule with one constant column appended, written to a
+/// temporary file and read the way the dwelling reads a schedule file:
+/// through the parser, where the setpoint columns' Fahrenheit reading
+/// applies.
+fn schedule_with_appended_column(
+    dir: &tempfile::TempDir,
+    name: &str,
+    value: f64,
+) -> ScheduleTimeSeries {
+    let original = std::fs::read_to_string(fixture().join("schedule.csv"))
         .expect("the fixture's schedule reads");
-    schedule
-        .add_column(
-            name,
-            vec![value; schedule.timestamps.len()],
-            ColumnAggregation::Mean,
-        )
-        .expect("the appended column joins the schedule");
-    schedule
+    let mut out = String::with_capacity(original.len() + 32);
+    let mut lines = original.lines();
+    let header = lines.next().expect("the schedule has a header");
+    assert!(
+        !header.contains(name),
+        "the fixture's schedule has no {name} column to start from"
+    );
+    out.push_str(&format!("{header},{name}\n"));
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("{line},{value}\n"));
+    }
+    let path = dir.path().join("schedule.csv");
+    std::fs::write(&path, out).expect("the appended schedule writes");
+    parse_schedule_csv(&path, &[], None, None).expect("the appended schedule parses")
 }
 
 fn fixture_schedule() -> ScheduleTimeSeries {
@@ -133,12 +152,23 @@ fn expected_cz4a_cooling_c() -> Vec<f64> {
 /// With a schedule heating column and HPXML heating setpoints both given,
 /// the column wins and the ignored HPXML heating elements are named in one
 /// warning: the OS-HPXML rule's record (hvac.rb:1669-1670), which HARES
-/// raises for every ignored input.
+/// raises for every ignored input. The column is read in degrees
+/// Fahrenheit: the schedule's column holds the Celsius conversion of the
+/// 70 F values, on bits, and the config reads that converted column each
+/// step.
 #[test]
 fn schedule_column_wins_over_hpxml_and_warns() {
+    let dir = tempfile::tempdir().expect("temp dir");
     let mut specs = fixture_specs();
-    let mut schedule = schedule_with_appended_column("heating_setpoint", 21.0);
+    let mut schedule = schedule_with_appended_column(&dir, "heating_setpoint", 70.0);
     let col_idx = schedule.column_index["heating_setpoint"];
+    for value in &schedule.columns[col_idx] {
+        assert_eq!(
+            value.to_bits(),
+            temperature_f_to_c(70.0).to_bits(),
+            "the heating column is read in degrees Fahrenheit, got {value}"
+        );
+    }
     let defaults_dir = repo_root().join("python/hares/defaults");
     let mut warnings: Vec<Warning> = Vec::new();
     inject_schedule_into_specs(
@@ -200,11 +230,21 @@ fn schedule_column_wins_over_hpxml_and_warns() {
 }
 
 /// The sides resolve independently: with the heating column only, cooling
-/// still resolves to the HPXML setpoints and raises no warning.
+/// still resolves to the HPXML setpoints and raises no warning. The
+/// heating column is read in degrees Fahrenheit, on bits.
 #[test]
 fn sides_resolve_independently() {
+    let dir = tempfile::tempdir().expect("temp dir");
     let mut specs = fixture_specs();
-    let mut schedule = schedule_with_appended_column("heating_setpoint", 21.0);
+    let mut schedule = schedule_with_appended_column(&dir, "heating_setpoint", 70.0);
+    let col_idx = schedule.column_index["heating_setpoint"];
+    for value in &schedule.columns[col_idx] {
+        assert_eq!(
+            value.to_bits(),
+            temperature_f_to_c(70.0).to_bits(),
+            "the heating column is read in degrees Fahrenheit, got {value}"
+        );
+    }
     let defaults_dir = repo_root().join("python/hares/defaults");
     let mut warnings: Vec<Warning> = Vec::new();
     inject_schedule_into_specs(
@@ -421,8 +461,9 @@ fn missing_setpoints_resolve_to_the_default_profile_source() {
 /// it: accepted means applied.
 #[test]
 fn water_heater_setpoint_column_is_an_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
     let mut specs = fixture_specs();
-    let mut schedule = schedule_with_appended_column("water_heater_setpoint", 50.0);
+    let mut schedule = schedule_with_appended_column(&dir, "water_heater_setpoint", 50.0);
     let defaults_dir = repo_root().join("python/hares/defaults");
     let mut warnings: Vec<Warning> = Vec::new();
     let error = inject_schedule_into_specs(
@@ -463,16 +504,19 @@ fn fixture_schedule_has_no_setpoint_columns() {
 }
 
 /// The appended column's values reach the engine at the schedule's own
-/// resolution: the appended constant column's index lands in the config
-/// and the values are the appended ones.
+/// resolution, as the parser read them: an appended heating column's 70.0
+/// is a Fahrenheit value, so the column the config indexes holds the
+/// Celsius conversion of 70 F, on bits.
 #[test]
 fn appended_column_values_are_the_injected_ones() {
-    let schedule = schedule_with_appended_column("heating_setpoint", 21.0);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let schedule = schedule_with_appended_column(&dir, "heating_setpoint", 70.0);
     let idx = schedule.column_index["heating_setpoint"];
-    assert!(
-        schedule.columns[idx]
-            .iter()
-            .all(|v| (*v - 21.0).abs() < 1e-12),
-        "the appended column is the constant 21.0"
-    );
+    for value in &schedule.columns[idx] {
+        assert_eq!(
+            value.to_bits(),
+            temperature_f_to_c(70.0).to_bits(),
+            "the appended column is the 70 F values as the parser read them, got {value}"
+        );
+    }
 }
