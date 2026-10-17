@@ -3785,3 +3785,48 @@ positive an operator may want to pursue as a new entry.
    only shape this trial measured that could cut the count without premise 3's
    risk. Adopting anything was never part of this row; that study needs its own
    entry and an operator decision.
+
+### M-4a, 2026-10-17, the cross-platform workflow (unrun)
+
+Commit `5da29cb4` (branch `row/r99-m4a`, worktree `r99-m4a`, based on
+`f14beb17`; this record lands in the next commit).
+
+The entry's workflow is `.github/workflows/reproducibility.yml`. Triggers:
+`workflow_dispatch` and a pull request into `initial-implementation` (BR-10's
+triggers; no feature-branch name appears in the file). One job over a matrix
+of `ubuntu-24.04` (x86_64) and `macos-15` (arm64) with `fail-fast` off, so one
+leg's outcome cannot cancel the other's. Each leg runs the
+`rust-toolchain.toml` pin (BR-10's golden-job release, through the same
+`dtolnay/rust-toolchain@stable` mechanism the main `ci.yml` golden job uses),
+builds `frame_golden` in release with and without `-F dst`, writes the full
+products of every golden manifest with `run --output-dir` (one directory per
+manifest under `target/reproducibility/`, the flat per-product parquet layout
+`frame_golden diff` consumes), and runs `compare-all` per feature set. Each
+pass's exit status is written to a file instead of failing the step, so a
+macOS difference cannot skip the remaining passes; a verdict step aggregates
+the statuses and fails the leg on any difference. The artifact
+`reproducibility-<runner>` (uploaded on success or failure) carries the
+platform record (runner name, architecture from `RUNNER_ARCH` and `uname -m`,
+`rustc -V`, `cargo -V`, the head), the full products and both compare-all
+outputs.
+
+The agreement rule is M-1's compare: schema, row count, the per-column bit
+digests (floats by `to_bits`, so NaN payloads count) over the whole column and
+per 96-row block, and every metrics field on bits. The committed goldens are
+Linux x86_64 captures, so the Linux leg's `compare-all` must pass; the macOS
+arm64 leg is the cross-platform measurement, identical or not, and M-4b
+publishes either outcome.
+
+No hosted run exists: this environment has no macOS arm64 runner and the
+branch is unpushed, so the workflow lands UNRUN and row 100 (M-4b) waits on a
+run. What was verified locally at the commit, on the Linux x86_64 side
+(rustc 1.99.0, the pinned release, `CARGO_BUILD_JOBS=2`, the warm target of
+the main checkout at the same commit): the workflow's exact command list ran
+green. The products step ran all nine manifests, and `compare-all` is
+identical in the default build (8: `consumer_shape_900s`, `fleet_mixed_offset`,
+`fleet_same_offset_300s`, `full_year_hourly`, `leap_year_february_900s`,
+`month_boundary_billing_3600s`, `resstock_2025_fleet`, `weather_wrap_900s`)
+and in the `-F dst` build (`full_year_900s_dst`); the compare outputs and the
+products live under `/tmp/opencode/r99-m4a-verify/`. The workflow's YAML
+validates by parse (actionlint unavailable on this host); the main `ci.yml`
+and the engine's tests are untouched by the commit.
