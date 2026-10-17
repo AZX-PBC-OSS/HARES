@@ -1298,13 +1298,17 @@ validation's pin (the zero case) moves from the failing list to the
 accepted one with the reason. Second, the water mains temperature moves
 at the ulp scale in every run, so all nine goldens are re-captured
 (compare-all 8 + dst 1 bitwise identical after; the movement is the
+fix's, byte-stable across two capture passes). The counterpart
+`temperature_c_to_f` carried the same deviation class (0 C read
+31.999999999999897 F through the same offset path) and is fixed the
+same way in the row's follow-up `5173c384`: the formula
+`c * 9/5 + 32` directly, the exact bit literals pinned (0 C exactly
+32 F, 100 C exactly 212 F), the mains model's fahrenheit inputs
+shifting at the ulp scale, all nine goldens re-captured again and
+byte-stable across two further capture passes; the movement reaches the
 metrics' last few digits, for example the consumer shape's heating COP
 39.192071398252686 to 39.192071398252665); the `docs/python.md`
-"Numeric changes" list carries the entry. The `temperature_c_to_f`
-counterpart carries the same `uom` offset-path deviation (0 C reads
-31.999999999999897 through the base path) and is untouched: no pin
-covers it and the review names the Fahrenheit-to-Celsius conversion
-only. The row's gates' nextest count above corrects 8149 to 8148 (the
+"Numeric changes" list carries the entry. The row's gates' nextest count above corrects 8149 to 8148 (the
 suite's true count). Amendment gates: fmt clean; clippy
 `--workspace --all-targets --all-features -D warnings` clean; nextest
 `--workspace --all-features -j 2` 8148/8148 (8 skipped); `pytest -m ''`
