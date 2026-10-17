@@ -519,8 +519,9 @@ fields every log row carries:
   of `simulate()` on `consumer_shape_900s` after the entry, and the
   decision it takes at the 5% line.
 - Row 87a (`04-fleet.md` FL-5): the delta of every changed column of the
-  `Pattern("*")` run on the `fleet_same_offset_300s` inputs, and the empty
-  golden delta.
+  acceptance run (the reconciled `Named` selection, the verbosity-8 tier
+  plus the three weather channels) on the `fleet_same_offset_300s`
+  inputs, and the empty golden delta.
 - Row 88 (`09-numeric-fixes.md` B-11): the delta of every `Enum` column of
   the same `Pattern("*")` run, and every golden unchanged.
 - Row 94a (`11-other-defects.md` OD-9): the delta of the generated-schedule

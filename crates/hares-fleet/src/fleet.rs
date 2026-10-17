@@ -176,6 +176,12 @@ pub enum FleetError {
     )]
     ReservedReportName { bldg_id: i64 },
     #[error(
+        "the schema field '{name}' carries no declared-kind tag: a report schema field \
+         without the declared `kind` metadata is a contract violation (the fleet folds \
+         every variable by its declared kind; no rule is guessed from the column name)"
+    )]
+    UndeclaredKind { name: String },
+    #[error(
         "no home declares {names:?}: a selection name must be declared by at least one \
          home's catalogue (a home that does not declare a name folds no value for it)"
     )]
@@ -5631,7 +5637,12 @@ mod tests {
             .fields()
             .iter()
             .skip(1)
-            .map(|field| crate::fold::field_fleet_rules(field).0.aggregation)
+            .map(|field| {
+                crate::fold::field_fleet_rules(field)
+                    .expect("the schema builder writes the kind tag")
+                    .0
+                    .aggregation
+            })
             .collect();
         // Null-aware period building, the reducer's own rule: a null cell
         // (a variable no step produced: the unmet-load column no
@@ -5804,7 +5815,9 @@ mod tests {
             let plain_slot = plain_names.iter().position(|candidate| candidate == name);
             let battery = &battery_columns[battery_slot];
             let field = result.aggregate.schema_ref().field(slot + 1);
-            let across = crate::fold::field_fleet_rules(field).1;
+            let across = crate::fold::field_fleet_rules(field)
+                .expect("the schema builder writes the kind tag")
+                .1;
             let aggregate_column = table_float_column(&result.aggregate, name);
             let weight_column = table_float_column(&result.covered_weight, name);
             for row in 0..rows {

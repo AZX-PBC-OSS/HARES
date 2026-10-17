@@ -1026,7 +1026,8 @@ every `Quantity` declaring `across_homes`). Lands before
 stages.
 
 **Measurement:** the delta of every changed column of
-`fleet_cells_follow_declared_kinds`'s run (`Pattern("*")` on the
+`fleet_cells_follow_declared_kinds`'s run (the reconciled `Named`
+selection, the verbosity-8 tier plus the three weather channels, on the
 `fleet_same_offset_300s` inputs at `Minutes(15)`), before and after,
 recorded in `02-measurement.md`, with the empty golden delta.
 
@@ -1045,10 +1046,13 @@ the period's last valid step); across homes energy and power the
 weighted sum, temperature, ratio and state the weighted mean, a
 quantity its declared `across_homes`, an enum the weighted Mode.
 `unit_keyed_fleet_rules` and the fleet's unit-symbol table are
-deleted; the parent's name-suffix parsing stays as the fallback for a
-field that carries no declared-kind metadata (no catalogue-built field
-reaches it); the fold setup's two debug traces name the kind tag
-beside the two rules. `Unit::Enum` merges into `Unit::Code` (symbol
+deleted, and so is the parent's name-suffix parsing: a schema field
+without the declared-kind tag is a contract violation and a hard
+error naming the field (`FleetError::UndeclaredKind`; no rule is
+guessed from the column name; no catalogue-built field reaches it),
+pinned by its own test; the fold setup's two debug traces name the
+kind tag beside the two rules. `Unit::Enum` merges into `Unit::Code`
+(symbol
 `code`): the unit metadata change of the former `enum` columns is
 none, because no catalogue variable declares the `enum` unit (its
 spellings became `code` and the dimensionless `-` at the catalogue
@@ -1103,3 +1107,17 @@ declared ones. Gates at `a39d17a7`: fmt clean; clippy `--workspace
 passed + 6 xfailed, 0 failed, 0 errors; pyright 0; the goldens
 bitwise. The commit adds `docs/python.md`'s Numeric changes line:
 fleet variables fold by their declared kind, no golden re-captured.
+The independent review's fix on the branch (a later commit on
+`row/r87a-fl5`) lands the shape above: the production-dead
+name-suffix fallback and its pin test are deleted (that test pinned
+the untagged field's silent guess by column name), the untagged case
+is `FleetError::UndeclaredKind` naming the field at both stages (the
+cross-home fold and the reducer feed), the incidental test fixtures
+that hand-built untagged fields carry the declared tags the schema
+builders write instead, and the new pin runs the error at the rules
+function and at the fold. No number moves: the goldens are bitwise.
+Gates re-run at the fix: fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace --all-features
+-j 2` 8148/8148 (8 skipped); `pytest -m ''` 1766 passed + 6 xfailed,
+0 failed, 0 errors; pyright 0; the goldens bitwise (compare-all 8 +
+dst 1).

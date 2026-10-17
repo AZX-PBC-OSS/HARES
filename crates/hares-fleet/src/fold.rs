@@ -176,23 +176,26 @@ impl FleetResult {
 /// the weighted sum, temperature, ratio and state the weighted mean, a
 /// quantity its declared across-homes rule.
 ///
-/// A field without the declared-kind metadata (a hand-built field in a
-/// test) parses the column name's parenthesised suffix, the parent
-/// commit's fallback; a name whose suffix is not recognised either
-/// averages over time and sums across homes.
-pub(crate) fn field_fleet_rules(field: &Field) -> (TimeRule, hares_types::AcrossHomes) {
+/// A field without the declared-kind metadata is a contract violation:
+/// [`FleetError::UndeclaredKind`] names it. The schema builders write
+/// the tag for every catalogue variable, so a field without one is
+/// hand-built, and the fold refuses to guess its rules from the column
+/// name.
+pub(crate) fn field_fleet_rules(
+    field: &Field,
+) -> Result<(TimeRule, hares_types::AcrossHomes), FleetError> {
     if let Some(labels) = field
         .metadata()
         .get("enum_labels")
         .and_then(|count| count.parse::<usize>().ok())
     {
-        return (
+        return Ok((
             TimeRule {
                 aggregation: Aggregation::Mode,
                 enum_codes: Some(labels),
             },
             hares_types::AcrossHomes::Mean,
-        );
+        ));
     }
     if let Some(kind) = field
         .metadata()
@@ -220,56 +223,17 @@ pub(crate) fn field_fleet_rules(field: &Field) -> (TimeRule, hares_types::Across
             // reads it, so the returned across-homes rule is inert.
             hares_types::VariableKind::Enum { .. } => hares_types::AcrossHomes::Mean,
         };
-        return (
+        return Ok((
             TimeRule {
                 aggregation: over_time,
                 enum_codes: None,
             },
             across,
-        );
+        ));
     }
-    suffix_fleet_rules(field.name())
-}
-
-/// The parent commit's suffix-parsing fallback, for a field that carries
-/// no declared-kind metadata: the column name's parenthesised suffix
-/// picks the rules, and a name with no recognised suffix takes the stage
-/// defaults
-/// (mean over time, weighted sum across homes). The recognised suffixes
-/// and their rules are the parent's two suffix tables, `kWh` summing over
-/// time and the power units summing across homes.
-fn suffix_fleet_rules(name: &str) -> (TimeRule, hares_types::AcrossHomes) {
-    let name = name.trim();
-    let over_time = if name.ends_with("(kWh)") {
-        Aggregation::Sum
-    } else {
-        Aggregation::Mean
-    };
-    let across = if name.ends_with("(kW)")
-        || name.ends_with("(kWh)")
-        || name.ends_with("(therms/hour)")
-        || name.ends_with("(kVAR)")
-        || name.ends_with("(W)")
-    {
-        hares_types::AcrossHomes::Sum
-    } else if name.ends_with("(C)")
-        || name.ends_with("(\u{b0}C)")
-        || name.ends_with("(-)")
-        || name.ends_with("(W/m2)")
-        || name.ends_with("(s)")
-        || name.ends_with("(deg)")
-    {
-        hares_types::AcrossHomes::Mean
-    } else {
-        hares_types::AcrossHomes::Sum
-    };
-    (
-        TimeRule {
-            aggregation: over_time,
-            enum_codes: None,
-        },
-        across,
-    )
+    Err(FleetError::UndeclaredKind {
+        name: field.name().clone(),
+    })
 }
 
 /// One cell's running sums: the weighted values and the covered weight,
@@ -377,7 +341,7 @@ impl FleetFold {
                 .iter()
                 .any(|column| column.name() == field.name())
             {
-                let (over_time, across) = field_fleet_rules(field);
+                let (over_time, across) = field_fleet_rules(field)?;
                 self.rules.push(across);
                 self.enum_labels.push(over_time.enum_codes);
                 self.columns.push(field.clone());
@@ -750,8 +714,9 @@ impl BatchCallback for ReducerFeed {
                 .as_ref()
                 .expect("fields set above")
                 .iter()
-                .map(|field| field_fleet_rules(field).0)
-                .collect();
+                .map(|field| field_fleet_rules(field).map(|(over_time, _)| over_time))
+                .collect::<Result<Vec<_>, FleetError>>()
+                .map_err(|err| CallbackError::new(err.to_string()))?;
             for (field, rule) in state
                 .fields
                 .as_ref()
@@ -868,11 +833,22 @@ mod tests {
     }
 
     /// Two variables: a power column (weighted sum across homes) and a
-    /// temperature column (weighted mean across homes).
+    /// temperature column (weighted mean across homes), the declared
+    /// fields the schema builders write.
     fn two_fields() -> Vec<Field> {
         vec![
-            field("Total Electric Power (kW)", "kW"),
-            field("Temperature - Indoor (C)", "C"),
+            declared_field(&declared(
+                "Total Electric Power (kW)",
+                Unit::Kilowatt,
+                hares_types::VariableKind::Power,
+                Aggregation::Mean,
+            )),
+            declared_field(&declared(
+                "Temperature - Indoor (C)",
+                Unit::Celsius,
+                hares_types::VariableKind::Temperature,
+                Aggregation::Mean,
+            )),
         ]
     }
 
@@ -1038,99 +1014,36 @@ mod tests {
         }
     }
 
-    /// A field without the declared-kind metadata parses its name's
-    /// parenthesised suffix, the parent commit's fallback: the energy
-    /// suffix sums over time, the power suffixes sum across homes, the
-    /// intensive suffixes mean across homes, and a name with no
-    /// recognised suffix takes the stage defaults. A unit symbol the
-    /// suffix tables do not key falls through the same way (the unit
-    /// metadata names the reporting unit, not the rule). The declared
-    /// kind's metadata, when present, wins over the name.
+    /// A field without the declared-kind metadata is a contract
+    /// violation, not a guess: the typed error names the field, at the
+    /// rules function and at the fold that takes its rules from it. The
+    /// parent commit's suffix parsing guessed the rules from the column
+    /// name's parenthesised suffix here; the fallback is gone.
     #[test]
-    fn fields_without_declared_metadata_parse_the_name_suffix() {
-        let no_unit = |name: &str| Field::new(name, DataType::Float64, true);
-        let cases: [(&str, Aggregation, hares_types::AcrossHomes); 7] = [
-            (
-                "Total Energy (kWh)",
-                Aggregation::Sum,
-                hares_types::AcrossHomes::Sum,
-            ),
-            (
-                "Total Electric Power (kW)",
-                Aggregation::Mean,
-                hares_types::AcrossHomes::Sum,
-            ),
-            (
-                "Temperature - Indoor (C)",
-                Aggregation::Mean,
-                hares_types::AcrossHomes::Mean,
-            ),
-            (
-                "Temperature - Outdoor (\u{b0}C)",
-                Aggregation::Mean,
-                hares_types::AcrossHomes::Mean,
-            ),
-            (
-                "Gas Power (therms/hour)",
-                Aggregation::Mean,
-                hares_types::AcrossHomes::Sum,
-            ),
-            (
-                "Irradiance (W/m2)",
-                Aggregation::Mean,
-                hares_types::AcrossHomes::Mean,
-            ),
-            (
-                "No Suffix",
-                Aggregation::Mean,
-                hares_types::AcrossHomes::Sum,
-            ),
-        ];
-        for (name, over_time, across) in cases {
-            let (rule_over, rule_across) = field_fleet_rules(&no_unit(name));
-            assert_eq!(
-                rule_over.aggregation, over_time,
-                "{name}: the over-time rule"
-            );
-            assert_eq!(rule_across, across, "{name}: the across-homes rule");
-        }
+    fn an_untagged_field_is_a_typed_error_naming_the_field() {
+        let untagged = field("Schedule (-)", "-");
+        let err = field_fleet_rules(&untagged)
+            .expect_err("an untagged field is a contract violation, not a guess");
+        assert!(
+            matches!(err, FleetError::UndeclaredKind { .. }),
+            "the typed error, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("Schedule (-)"),
+            "the error names the field: {err}"
+        );
 
-        // A unit symbol the suffix tables do not key also falls to the
-        // name's suffix, and a suffix it does not recognise takes the
-        // stage defaults.
-        let unknown_unit = field("Fraction (fraction)", "fraction");
-        let (over, across) = field_fleet_rules(&unknown_unit);
-        assert!(matches!(over.aggregation, Aggregation::Mean));
-        assert!(matches!(across, hares_types::AcrossHomes::Sum));
-
-        let unknown_unit_known_suffix = field("Total Energy (kWh)", "fraction");
-        let (over, across) = field_fleet_rules(&unknown_unit_known_suffix);
-        assert!(matches!(over.aggregation, Aggregation::Sum), "{over:?}");
-        assert!(matches!(across, hares_types::AcrossHomes::Sum));
-
-        // The declared kind's metadata wins over the name: an energy
-        // variable whose name ends in the power suffix sums over time,
-        // and a power variable whose name ends in the energy suffix
-        // means over time.
-        let declared_energy = declared_field(&declared(
-            "Total Power (kW)",
-            Unit::KilowattHour,
-            hares_types::VariableKind::Energy,
-            Aggregation::Sum,
-        ));
-        let (over, across) = field_fleet_rules(&declared_energy);
-        assert!(matches!(over.aggregation, Aggregation::Sum), "{over:?}");
-        assert!(matches!(across, hares_types::AcrossHomes::Sum));
-
-        let declared_power = declared_field(&declared(
-            "Total Energy (kWh)",
-            Unit::Kilowatt,
-            hares_types::VariableKind::Power,
-            Aggregation::Mean,
-        ));
-        let (over, across) = field_fleet_rules(&declared_power);
-        assert!(matches!(over.aggregation, Aggregation::Mean), "{over:?}");
-        assert!(matches!(across, hares_types::AcrossHomes::Sum));
+        let fields = vec![untagged];
+        let mut fold = default_fold();
+        let mut table = BTreeMap::new();
+        table.insert(0_i64, vec![Some(1.0)]);
+        let err = fold
+            .fold_home(0, 1.0, &fields, &table)
+            .expect_err("an untagged field is rejected at the fold");
+        assert!(
+            matches!(err, FleetError::UndeclaredKind { ref name } if name == "Schedule (-)"),
+            "the fold's error names the field: {err:?}"
+        );
     }
 
     /// Three homes, one bucket: the fold's cells accumulate `v * w` and
@@ -1337,8 +1250,18 @@ mod tests {
         let mut home_a = BTreeMap::new();
         home_a.insert(key, row(Some(1.0), Some(20.0)));
         let different = vec![
-            field("Other Power (kW)", "kW"),
-            field("Temperature - Indoor (C)", "C"),
+            declared_field(&declared(
+                "Other Power (kW)",
+                Unit::Kilowatt,
+                hares_types::VariableKind::Power,
+                Aggregation::Mean,
+            )),
+            declared_field(&declared(
+                "Temperature - Indoor (C)",
+                Unit::Celsius,
+                hares_types::VariableKind::Temperature,
+                Aggregation::Mean,
+            )),
         ];
         let mut home_b = BTreeMap::new();
         home_b.insert(key, row(Some(2.0), Some(21.0)));
@@ -1456,11 +1379,11 @@ mod tests {
 
     /// An Enum column's field resolves to the Mode rule with the
     /// metadata's label count over time, whatever its unit string; the
-    /// across-homes fold reads the label count, not the across rule. A
-    /// field without the label metadata keeps the unit-keyed rules.
+    /// across-homes fold reads the label count, not the across rule.
     #[test]
     fn enum_field_rules_are_mode_with_the_label_count() {
-        let (over_time, across) = field_fleet_rules(&enum_field("Mode (-)", 7));
+        let (over_time, across) = field_fleet_rules(&enum_field("Mode (-)", 7))
+            .expect("the label count is the Enum column's tag");
         assert!(
             matches!(over_time.aggregation, Aggregation::Mode),
             "an Enum column folds by Mode over time"
@@ -1474,11 +1397,6 @@ mod tests {
             matches!(across, hares_types::AcrossHomes::Mean),
             "the across rule of an Enum column is inert: the fold reads the label count"
         );
-
-        let (over_time, across) = field_fleet_rules(&field("Schedule (-)", "-"));
-        assert!(matches!(over_time.aggregation, Aggregation::Mean));
-        assert_eq!(over_time.enum_codes, None, "no label count, no Mode rule");
-        assert!(matches!(across, hares_types::AcrossHomes::Mean));
     }
 
     /// The fleet's Enum column folds to the code with the greatest summed
@@ -1587,7 +1505,12 @@ mod tests {
     /// to 0.25. The Mode fold never touches a State column.
     #[test]
     fn fleet_binary_state_is_weighted_duty_fraction() {
-        let fields = vec![field("Defrost State (-)", "-")];
+        let fields = vec![declared_field(&declared(
+            "Defrost State (-)",
+            Unit::Boolean,
+            hares_types::VariableKind::State,
+            Aggregation::Mean,
+        ))];
         let key = 0_i64;
 
         let mut fold = default_fold();
