@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "eb14627938c76e85a58a118c0266456693cb4fef",
+  "git_head": "e3e2a22ff8ebbf3535a8137d3f31992a26a6d815",
   "git_dirty": true,
   "metrics": [
     {
@@ -784,10 +784,10 @@
         },
         {
           "name": "Total Gas Power (therms/hour)",
-          "digest": "e581bf8fef2d6ff4d395d01289cb42eab9caec04e93b72ed0f3b17474fccbfe8",
+          "digest": "a3f413df73c832196351f38dbbb245536a807d3380b85313fadaba2e3c71547c",
           "blocks": [
-            "8aeb48ea89a221b64273fef0e79df8db8b65d71a24cac039d01fd8c03ca6bc4d",
-            "45f44e5acf32efd8164f1b201db36278a5f8997499dede72df1b039dd8dd7952"
+            "ea7d71ab5a644ef30f3a6c7d54efd34876be41c463625b0bfaefeb3d906299ff",
+            "60f5cb8e24b316e9393bbf2fddb979e9f5f9a2c94bd26e2817911daefbed5306"
           ]
         },
         {
@@ -848,10 +848,10 @@
         },
         {
           "name": "Gas Water Heater Gas Power (therms/hour)",
-          "digest": "ff7496b5ee16b568e1eedb7fb161eb387d2d8e7e4ec8c47e11ead5d7f5e136e5",
+          "digest": "4c22ed120e213567fb2780594d6d681002042f8b06848b92ad36f6c1422478b6",
           "blocks": [
-            "8b31eecc10d667090eda825f5df474a8e2bb268ef14ffc1e3ba3e53040c75f2a",
-            "d66189dc3e4f7e303596d7e15784e9bf6d2aa6ff7512a7be8a5401268b205725"
+            "8318f9a7f51c1b89b4ff7ee8d869d827e803b7fb4e0f78bec67bd4b4e637922b",
+            "a9e7c7b3a87c589a181c5ecf635cf4901f6a4d2133306068c490590a6a3efd49"
           ]
         },
         {

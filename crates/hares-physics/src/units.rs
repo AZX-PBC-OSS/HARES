@@ -23,7 +23,7 @@ use uom::si::pressure::pascal;
 use uom::si::specific_heat_capacity::{
     btu_per_pound_degree_fahrenheit, joule_per_kilogram_kelvin, kilojoule_per_kilogram_kelvin,
 };
-use uom::si::thermodynamic_temperature::{degree_celsius, degree_fahrenheit, kelvin};
+use uom::si::thermodynamic_temperature::{degree_celsius, kelvin};
 use uom::si::volume::{cubic_foot, cubic_meter, gallon, liter};
 
 pub type Temperature = UomTemperature;
@@ -275,7 +275,7 @@ pub fn temperature_f_to_c(f: f64) -> f64 {
 
 #[inline]
 pub fn temperature_c_to_f(c: f64) -> f64 {
-    UomTemperature::new::<degree_celsius>(c).get::<degree_fahrenheit>()
+    c * 9.0 / 5.0 + 32.0
 }
 
 /// Temperature delta conversion: °C range → °F range (multiply by 9/5, no +32 offset).
@@ -484,6 +484,15 @@ mod tests {
     fn temperature_c_to_f_known_values() {
         approx_eq(temperature_c_to_f(0.0), 32.0, 1e-10);
         approx_eq(temperature_c_to_f(100.0), 212.0, 1e-10);
+        // The exact bits of the faithful formula, pinned independently of
+        // the production code (0 C is exactly 32 F; 100 C exactly 212 F;
+        // 23.5 C the repeating-pattern value the uom offset path missed).
+        assert_eq!(temperature_c_to_f(0.0).to_bits(), 0x4040_0000_0000_0000);
+        assert_eq!(temperature_c_to_f(100.0).to_bits(), 0x406A_8000_0000_0000);
+        assert_eq!(
+            temperature_c_to_f(23.5).to_bits(),
+            (23.5f64 * 9.0 / 5.0 + 32.0).to_bits()
+        );
     }
 
     #[test]

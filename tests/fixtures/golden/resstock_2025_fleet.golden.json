@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "eb14627938c76e85a58a118c0266456693cb4fef",
+  "git_head": "e3e2a22ff8ebbf3535a8137d3f31992a26a6d815",
   "git_dirty": true,
   "metrics": [],
   "products": {
@@ -205,9 +205,9 @@
         },
         {
           "name": "Heat Pump Water Heater Electric Power (kW)",
-          "digest": "e7aab2202312a1c885d16224b5a4cf4e5eb429a88241c7ecf63993594b7868e9",
+          "digest": "0a0ccde9b62ea1f4182e79a1369ac0f4ba56237d7132dc1a74a555b1ad4da616",
           "blocks": [
-            "e7aab2202312a1c885d16224b5a4cf4e5eb429a88241c7ecf63993594b7868e9"
+            "0a0ccde9b62ea1f4182e79a1369ac0f4ba56237d7132dc1a74a555b1ad4da616"
           ]
         },
         {
@@ -289,9 +289,9 @@
         },
         {
           "name": "Water Heating End Use Electric Power (kW)",
-          "digest": "e7aab2202312a1c885d16224b5a4cf4e5eb429a88241c7ecf63993594b7868e9",
+          "digest": "0a0ccde9b62ea1f4182e79a1369ac0f4ba56237d7132dc1a74a555b1ad4da616",
           "blocks": [
-            "e7aab2202312a1c885d16224b5a4cf4e5eb429a88241c7ecf63993594b7868e9"
+            "0a0ccde9b62ea1f4182e79a1369ac0f4ba56237d7132dc1a74a555b1ad4da616"
           ]
         },
         {

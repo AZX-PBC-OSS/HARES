@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "eb14627938c76e85a58a118c0266456693cb4fef",
+  "git_head": "e3e2a22ff8ebbf3535a8137d3f31992a26a6d815",
   "git_dirty": true,
   "metrics": [
     {
@@ -366,12 +366,12 @@
         },
         {
           "name": "Total Electric Power (kW)",
-          "digest": "55d425cdfa7726649a04d2b068d69c062378921036de240d687c24389353d388",
+          "digest": "29cb3ce280d3588b51dad0bec62719c7dca63b9df58ed56e5c8b6b8c81699303",
           "blocks": [
             "509e892222e794959950fa6f20f13da4308989a37b726a2c3936e96b5556902c",
             "864c2a4b374f7d6b4aa86a12775062795bfbe9af3a8a7baeedde80eaea87383c",
             "e1348bbddec04d015e8aa6603c7a37f6883ed4ae4222ba363988b8cb2287fc45",
-            "f89a325e22c91160a97be5492630333a03b9a2ff487fcfce004f4e90ca1b3ad0"
+            "36b2cc4053ec9928b5c5a73e2e4914ec28d565ac1b29e4157f5f05fe39b5e0fe"
           ]
         },
         {
@@ -386,12 +386,12 @@
         },
         {
           "name": "Total Reactive Power (kVAR)",
-          "digest": "69036267c578338adbaee8c9572cebdee0cdb0b485cad0884ccf1bee300e4a8b",
+          "digest": "a9122c48f3b6cb56ebc91d7769d0a3af0488940fc6e71d39daeebe574dc49d50",
           "blocks": [
             "6c800a165395f67a7e000f10448a4227b5eda71248f978b8d47c03d9884f8b76",
             "7c1281b4432c293462819bb0087c04e37efd45f75774610e5d520f7f8761fe40",
             "55a848c323973a674592229fa2a9609e1de2b88f2099b4265d294f0946075209",
-            "6e69948401b549035496e26ec85b5b5f41c60937a3d276eeb553177695c5614a"
+            "da0754d23a986e3753222860c7c21a9cfac11551b0e86447f3c2428c0d44dc5a"
           ]
         },
         {
@@ -416,12 +416,12 @@
         },
         {
           "name": "ASHP Heater Electric Power (kW)",
-          "digest": "8254933fc8ddd146dcfad4fcf239d1ef185cf43a067dbb0ee8d3af1906dab2a8",
+          "digest": "e1c4ce9792d5491cb62ccd3c7677407e9a3dae94e0faaced3d0f8d6603829246",
           "blocks": [
             "54fa8f2fba209c88d6133f93020230d2912b4d3c613f7e61140be4d6497df687",
             "01ffd784dc2ff7aef637648b7e40f5b89a189fbeddd20eb69490f402be41093c",
             "826b50148451cb70474e34f0cd9350dc1a408810c3f71fdd1826b9ef8a6511a4",
-            "3c5aeb94e518a5f73c088cee4cc0bc5e9c126d126ed87a529adee3986602bc18"
+            "a53b90dbe706caeeac9c32e086df96ccad5e45a1fd61f309d40d468644ffe5eb"
           ]
         },
         {
@@ -436,11 +436,11 @@
         },
         {
           "name": "Heat Pump Water Heater Electric Power (kW)",
-          "digest": "7f8f9545b0253b6358d65efdd615d3c2896e344c5df5c0c4c9658229d1dfa371",
+          "digest": "b838f85da82b74244d466a813750493370497e4cc9f5272c5be153cd9163773f",
           "blocks": [
             "00e7b622fa0052d2ea1b1224acf0ff16f3c6664a516f0d44feba91fb0cd0fac2",
             "c12074caebd51de59f632026ac68222c3496cacdbc19855ee29958df619dc80b",
-            "ccdf19044c9011385b8cb4fd75ea4ad2a30d4c0769ab307078e84ece96484c24",
+            "0c6bbdb3f7360b6193dc0612d424c4c08ff03e12a5a138c5afed06c799ad7e41",
             "e7b980f14fbccf6a8caff599982e934beb0e2fe39c5d2b9168774fd125e4b0dc"
           ]
         },
@@ -546,12 +546,12 @@
         },
         {
           "name": "HVAC Heating End Use Electric Power (kW)",
-          "digest": "8254933fc8ddd146dcfad4fcf239d1ef185cf43a067dbb0ee8d3af1906dab2a8",
+          "digest": "e1c4ce9792d5491cb62ccd3c7677407e9a3dae94e0faaced3d0f8d6603829246",
           "blocks": [
             "54fa8f2fba209c88d6133f93020230d2912b4d3c613f7e61140be4d6497df687",
             "01ffd784dc2ff7aef637648b7e40f5b89a189fbeddd20eb69490f402be41093c",
             "826b50148451cb70474e34f0cd9350dc1a408810c3f71fdd1826b9ef8a6511a4",
-            "3c5aeb94e518a5f73c088cee4cc0bc5e9c126d126ed87a529adee3986602bc18"
+            "a53b90dbe706caeeac9c32e086df96ccad5e45a1fd61f309d40d468644ffe5eb"
           ]
         },
         {
@@ -566,11 +566,11 @@
         },
         {
           "name": "Water Heating End Use Electric Power (kW)",
-          "digest": "7f8f9545b0253b6358d65efdd615d3c2896e344c5df5c0c4c9658229d1dfa371",
+          "digest": "b838f85da82b74244d466a813750493370497e4cc9f5272c5be153cd9163773f",
           "blocks": [
             "00e7b622fa0052d2ea1b1224acf0ff16f3c6664a516f0d44feba91fb0cd0fac2",
             "c12074caebd51de59f632026ac68222c3496cacdbc19855ee29958df619dc80b",
-            "ccdf19044c9011385b8cb4fd75ea4ad2a30d4c0769ab307078e84ece96484c24",
+            "0c6bbdb3f7360b6193dc0612d424c4c08ff03e12a5a138c5afed06c799ad7e41",
             "e7b980f14fbccf6a8caff599982e934beb0e2fe39c5d2b9168774fd125e4b0dc"
           ]
         },
