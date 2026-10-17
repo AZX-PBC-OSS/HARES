@@ -29,7 +29,7 @@ pub fn input_schema() -> InputSchema {
 
 fn assemble(defaults_files: Vec<String>) -> InputSchema {
     let registry = hares_equipment::EquipmentRegistry::new();
-    let override_classes = registry
+    let mut override_classes: Vec<OverrideClassSchema> = registry
         .known_names()
         .into_iter()
         .map(|class| {
@@ -44,6 +44,18 @@ fn assemble(defaults_files: Vec<String>) -> InputSchema {
             }
         })
         .collect();
+    // The reserved `envelope` override: not an equipment class, but an override
+    // target the schema publishes the same way, from the scales' own
+    // `DescribeFields` impl beside the definition (the input-schema row's owed
+    // fold addition). The assembly's override-key validation exempts the key and
+    // the scales' own deserialisation and bounds validation enforce it.
+    override_classes.push(OverrideClassSchema {
+        name: hares_io::ENVELOPE_OVERRIDE_KEY.to_string(),
+        description: "the reserved 'envelope' override: the calibration scales the resolved \
+             envelope layers multiply by, applied after the LUT row selection"
+            .to_string(),
+        fields: <hares_io::EnvelopeScales as DescribeFields>::fields(),
+    });
 
     InputSchema {
         config_fields: <hares_io::SimulationConfig as DescribeFields>::fields(),
@@ -178,6 +190,13 @@ mod tests {
                 "class '{}' lists its fields",
                 class.name
             );
+            if class.name == hares_io::ENVELOPE_OVERRIDE_KEY {
+                // The reserved `envelope` override has no equipment sample and no
+                // merged equipment config: its enforcement is the scales' own
+                // deserialisation and bounds validation, pinned in
+                // `envelope_scales_described_with_bounds` below.
+                continue;
+            }
             let spec = sample_spec(&class.name)
                 .unwrap_or_else(|| panic!("class '{}': the registry builds a sample", class.name));
             let sample_data = spec
@@ -268,11 +287,17 @@ mod tests {
         }
     }
 
-    /// The schema's override classes are the equipment registry's names.
+    /// The schema's override classes are the equipment registry's names
+    /// plus the reserved `envelope` key.
     #[test]
     fn input_schema_classes_equal_registry() {
         let registry = hares_equipment::EquipmentRegistry::new();
-        let mut expected = registry.known_names();
+        let mut expected: Vec<String> = registry
+            .known_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        expected.push(hares_io::ENVELOPE_OVERRIDE_KEY.to_string());
         expected.sort_unstable();
         let mut actual: Vec<String> = schema()
             .override_classes
@@ -281,6 +306,48 @@ mod tests {
             .collect();
         actual.sort();
         assert_eq!(actual, expected);
+    }
+
+    /// The reserved `envelope` class lists the two scales with default 1.0
+    /// and bounds (0, 10], and the enforcement still rejects an unknown
+    /// field naming it (the schema's own envelope-scales acceptance).
+    #[test]
+    fn envelope_scales_described_with_bounds() {
+        use hares_types::ValueType;
+        let schema = schema();
+        let class = schema
+            .override_classes
+            .iter()
+            .find(|class| class.name == hares_io::ENVELOPE_OVERRIDE_KEY)
+            .expect("the reserved 'envelope' override is published");
+        let mut names: Vec<&str> = class.fields.iter().map(|f| f.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["opaque_r_scale", "thermal_mass_scale"]);
+        for field in &class.fields {
+            assert_eq!(
+                field.value_type,
+                ValueType::Number,
+                "{}: a scale is a float",
+                field.name
+            );
+            assert_eq!(field.default, serde_json::json!(1.0), "the unit default");
+            let bounds = field.bounds.expect("the bounds are published");
+            assert_eq!(bounds.min, Some(0.0));
+            assert!(bounds.min_exclusive, "zero is excluded");
+            assert_eq!(bounds.max, Some(10.0));
+            assert!(!bounds.max_exclusive, "ten is included");
+        }
+        let err = hares_io::EnvelopeScales::validate(
+            &serde_json::from_value::<hares_io::EnvelopeScales>(serde_json::json!({
+                "opaque_r_scale": 0.0,
+            }))
+            .expect("the field is a known one"),
+        )
+        .expect_err("an out-of-bounds scale is rejected");
+        assert!(
+            err.to_string().contains("opaque_r_scale") && err.to_string().contains("(0, 10]"),
+            "the rejection names the field and the bounds: {err}"
+        );
     }
 
     /// Two calls serialise to the same JSON bytes.

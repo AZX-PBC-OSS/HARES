@@ -17,7 +17,7 @@ pub const ENVELOPE_OVERRIDE_KEY: &str = "envelope";
 /// selected row. Slab boundaries (the ASHRAE F-factor perimeter method)
 /// are outside both scales: their single resistor is the perimeter
 /// method's, not a construction layer's.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EnvelopeScales {
     /// Every opaque LUT or material layer's resistance multiplies by this,
@@ -63,6 +63,53 @@ impl EnvelopeScales {
             }
         }
         Ok(())
+    }
+}
+
+/// The scales as the input schema publishes them: the two fields with
+/// their default 1.0 and bounds (0, 10], described beside the definition
+/// so the schema cannot drift from the type (the input-schema row's owed
+/// fold addition).
+impl hares_types::DescribeFields for EnvelopeScales {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        use hares_types::{Bounds, FieldMeta, describe};
+        let bounds = Bounds {
+            min: Some(0.0),
+            min_exclusive: true,
+            max: Some(10.0),
+            max_exclusive: false,
+        };
+        describe(
+            &EnvelopeScales::default(),
+            &[
+                (
+                    "opaque_r_scale",
+                    FieldMeta {
+                        bounds: Some(bounds),
+                        description: Some(
+                            "every opaque construction layer's resistance multiplies by \
+                             this, films unscaled; the LUT row is selected on the \
+                             declared R unscaled, so the scale never re-selects a row. \
+                             Slab boundaries (the F-factor perimeter method) and the \
+                             fenestration are outside the scale",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "thermal_mass_scale",
+                    FieldMeta {
+                        bounds: Some(bounds),
+                        description: Some(
+                            "every opaque construction layer's capacitance multiplies \
+                             by this; the resistance never moves with it. Slab \
+                             boundaries and the fenestration are outside the scale",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        )
     }
 }
 
