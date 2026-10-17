@@ -3412,6 +3412,63 @@ null in all 192 steps, the ASHP Heater's COP null in its 8 Off steps
 and non-null in the heating steps, the appliance mode cells and the
 HPWH setpoint null, the never-emitted v8 keys null, and the
 never-produced dwelling columns null in a no-HVAC dwelling.
+### The declared-kind fleet fold row, 2026-10-17 (the worktree `r87a-fl5`)
+
+The golden record, recorded as measured: every golden unchanged.
+`frame_golden compare-all` on the default build reports the 8 manifests
+identical and on the dst build `full_year_900s_dst` identical. The
+fleet goldens' verbosity-2 selection holds only energy, power and
+temperature columns, whose unit-keyed rules already matched the
+declared ones, so no number moves; every variable's field metadata
+gains the declared kind, aggregation and across-homes tags, and the
+goldens' schema digest holds name, type and nullability, so the
+metadata addition does not reach the digests.
+
+The acceptance run's delta, before and after: the run is the
+`fleet_same_offset_300s` inputs at 15-minute frequency, the selection
+naming every verbosity-8 variable the homes declare plus the three
+weather channels no tier preset carries (192 periods, 195 columns),
+dumped as CSV at the parent `ff39b24b` and at `a39d17a7` and compared
+column by column. The aggregate moves 3 of 195 columns, exactly the
+columns whose unit-keyed rule differs from the declared one, each cell
+from the weighted sum to the declared weighted mean (the covered
+weight is 4, the homes' weights 1.0 + 2.5 + 0.5, so every moved cell's
+relative change is -0.75):
+
+- `Outdoor Pressure (kPa)`: period 0, 405.3 to 101.325.
+- `Outdoor Humidity Ratio (kg/kg)` (a ratio): period 0, 0.0184815804823842064
+  to 0.0046203951205960516.
+- `Wind Speed (m/s)`: period 0, 1.825 to 0.45625.
+
+The `covered_weight` product moves nothing (the covered weight is
+rule-independent), and every other column, the row counts and the
+column order compare bitwise. A verbosity-3 run of the same inputs
+(the fleet goldens' tier family) moves nothing: its power,
+temperature and enum columns' two rules agree in both worlds.
+
+The acceptance tests' before and after values (before, run at the
+parent `ff39b24b` over the tests alone; after, at `a39d17a7`):
+
+- `fleet_fold_follows_declared_kinds`: the ratio cell 1.15 to 0.2875
+  (the unit-keyed weighted sum to the declared weighted mean; the
+  test's first failure, at period 0, so the state and the intensive
+  `V` quantity cells stand at their parent sums behind it). The
+  `count` quantity's cell is the weighted sum in both worlds (its
+  declared across-homes rule is the unit-keyed fallback's).
+- `home_reducer_sums_a_quantity_declared_sum`: the reduced period 2.0
+  to 6.0 (the mean of 1, 2 and 3 to the declared sum).
+- `fleet_cells_follow_declared_kinds`: `Outdoor Pressure (kPa)` period
+  0, the cell 405.3 against the declared 101.325; after the fix, every
+  non-enum column's every period cell equals the declared combination
+  of the three homes' period values, each computed from that home's
+  own Timestep Memory report by the declared time rule, added in entry
+  order and compared on bits.
+- `fleet_ratio_and_state_are_weighted_means`:
+  `Outdoor Humidity Ratio (kg/kg)` period 0, the cell 0.0184815805
+  outside the homes' period values [0.0042444, 0.0060966]; after the
+  fix, every ratio and state cell lies between the smallest and largest
+  of the homes' period values.
+
 ### The fleet Mode aggregation row, 2026-10-16 (the worktree `r88-b11`)
 The golden record, recorded as measured: every golden unchanged. The
 fleet goldens (`fleet_mixed_offset`, `fleet_same_offset_300s`,

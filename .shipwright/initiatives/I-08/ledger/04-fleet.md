@@ -1029,3 +1029,77 @@ stages.
 `fleet_cells_follow_declared_kinds`'s run (`Pattern("*")` on the
 `fleet_same_offset_300s` inputs at `Minutes(15)`), before and after,
 recorded in `02-measurement.md`, with the empty golden delta.
+
+**State:** committed `a39d17a7` (branch `row/r87a-fl5`, worktree
+`r87a-fl5`, based on `ff39b24b`, one commit). In brief: both fleet
+stages fold every variable by its declared kind and the unit-keyed
+rules are gone. The declared rules reach the fold as schema field
+metadata: the schema builders write every catalogue variable's
+lowercase `kind` tag, the declared over-time `aggregation` tag and,
+for a `Quantity`, the declared `across_homes` tag beside the unit (an
+`Enum` column's `enum_labels` label count was already there), and
+`field_fleet_rules` reads them: over time the variable's declared
+aggregation (the reporting reducer's own rule set, so a quantity
+declared `Sum` sums its steps and a running total takes its value at
+the period's last valid step); across homes energy and power the
+weighted sum, temperature, ratio and state the weighted mean, a
+quantity its declared `across_homes`, an enum the weighted Mode.
+`unit_keyed_fleet_rules` and the fleet's unit-symbol table are
+deleted; the parent's name-suffix parsing stays as the fallback for a
+field that carries no declared-kind metadata (no catalogue-built field
+reaches it); the fold setup's two debug traces name the kind tag
+beside the two rules. `Unit::Enum` merges into `Unit::Code` (symbol
+`code`): the unit metadata change of the former `enum` columns is
+none, because no catalogue variable declares the `enum` unit (its
+spellings became `code` and the dimensionless `-` at the catalogue
+commit), so no column's `unit` metadata changes; the symbol and the
+never-called enum-unit constructor leave `Unit`. The lowercase kind,
+aggregation and across-homes tags are shared spellings on the
+`hares-types` types, which the Python catalogue's tag functions
+delegate to. The acceptance tests landed with it, RED first, all four
+run at the parent over the tests alone:
+`fleet_fold_follows_declared_kinds` failed there on the ratio cell
+1.15, the unit-keyed weighted sum, against the declared weighted mean
+0.2875; `home_reducer_sums_a_quantity_declared_sum` failed there on
+the count quantity's reduced period 2.0 (the mean of 1, 2 and 3)
+against the declared sum 6.0; `fleet_cells_follow_declared_kinds`
+failed there on `Outdoor Pressure (kPa)` period 0, the cell 405.3
+against the declared 101.325;
+`fleet_ratio_and_state_are_weighted_means` failed there on
+`Outdoor Humidity Ratio (kg/kg)` period 0, the cell 0.0184815805,
+outside the homes' period values [0.0042444, 0.0060966]. After: all
+four green. Three reconciliations. First, B-11 (schedule row 88)
+landed before this row, so the entry's "`Enum` stays `Mean` until
+B-11" cases are B-11's landed Mode rule: its own tests carry it, and
+the two tests the entry wrote an `Enum` case into exclude it exactly
+as they planned to. Second, the acceptance run's selection
+reconciled: the entry's `Pattern("*")` run expected the gas water
+heater's `fraction` and the air conditioner's `min` durations among
+the columns whose unit-keyed rule differs from the declared one, and
+under the catalogue's canonical units those columns are dimensionless
+and seconds columns (the power factor, the runtime fraction and the
+COP at `-`; the minimum on and off times at `s`) whose unit-keyed
+rules already agree with the declared ones; every verbosity-8 column
+of these homes' catalogue agrees with its declared rules, so the run
+is a `Named` selection over the verbosity-8 tier plus the three
+weather channels no tier preset carries, where the differing rules
+live (`Outdoor Pressure (kPa)`, `Outdoor Humidity Ratio (kg/kg)`, a
+ratio, and `Wind Speed (m/s)`: intensive quantities the fallback
+sums). The test's kind census assert holds against the reconciled
+selection. Third, B-11's observe-gate reconciliation carries (a
+pattern selection over the full catalogue panics the roster plan when
+the observe feature is off), so the run selects by name. The
+measurement is in `02-measurement.md`: the acceptance run's delta is
+3 of 195 columns (the weather channels, each cell from the weighted
+sum to the weighted mean, a division by the covered weight 4), the
+`covered_weight` product bitwise, and a verbosity-3 run of the same
+inputs moves nothing; the golden delta is empty, verified bitwise
+(compare-all 8 manifests identical, `full_year_900s_dst` identical):
+the fleet goldens' verbosity-2 selection holds only energy, power and
+temperature columns, whose unit-keyed rules already matched the
+declared ones. Gates at `a39d17a7`: fmt clean; clippy `--workspace
+--all-targets --all-features -D warnings` clean; nextest `--workspace
+--all-features -j 2` 8148/8148 (8 skipped); `pytest -m ''` 1766
+passed + 6 xfailed, 0 failed, 0 errors; pyright 0; the goldens
+bitwise. The commit adds `docs/python.md`'s Numeric changes line:
+fleet variables fold by their declared kind, no golden re-captured.
