@@ -274,19 +274,24 @@ fn schedule_column_wins_over_hpxml_and_warns() {
 /// detailed-schedule convention OS-HPXML specifies and converts
 /// (`schedules.rb:1465-1484`), OCHRE converting the same columns from
 /// Fahrenheit at its own schedule load (`schedule.py:408-427`): with a
-/// 70 F heating column every step's heating setpoint is, on bits, the uom
-/// conversion of 70 F to Celsius computed here, and with a 75 F cooling
-/// column the same for the cooler's active setpoint (the cooling side's
-/// own column: the dwelling-level scheduled-cooling read reports the first
-/// HVAC unit's telemetry, and the heating-only unit carries no cooling
-/// source). The cooling leg runs from a July start so the compressor's
-/// outdoor lockout (a January run never evaluates the cooler's control)
-/// leaves the column's value the one the cooler acts on. Written for
-/// Fahrenheit, the same files previously drove the dwelling at 70 C and
-/// 75 C.
+/// 70 F heating column every step's heating setpoint is, on bits, the
+/// conversion of 70 F to Celsius pinned below as a literal (the
+/// production conversion is never called to compute the expectation, so
+/// a changed or dropped conversion fails the pin), and with a 75 F
+/// cooling column the same for the cooler's active setpoint (the cooling
+/// side's own column: the dwelling-level scheduled-cooling read reports
+/// the first HVAC unit's telemetry, and the heating-only unit carries no
+/// cooling source). The cooling leg runs from a July start so the
+/// compressor's outdoor lockout (a January run never evaluates the
+/// cooler's control) leaves the column's value the one the cooler acts
+/// on. Written for Fahrenheit, the same files previously drove the
+/// dwelling at 70 C and 75 C.
 #[test]
 fn setpoint_column_is_read_in_fahrenheit() {
-    let expected_heating_c = temperature_f_to_c(70.0);
+    // The exact bits of the faithful conversion (t - 32.0) * 5.0 / 9.0 of
+    // 70 F to Celsius (21.111111111111114), pinned as a literal: the
+    // expectation never computes through the production conversion.
+    let expected_heating_bits = 0x40351c71c71c71c7_u64;
     let dir = tempfile::tempdir().expect("temp dir");
     let schedule_path = schedule_with_appended_column(&dir, "heating_setpoint", 70.0);
     let mut dwelling = dwelling_with_schedule(schedule_path);
@@ -297,13 +302,15 @@ fn setpoint_column_is_read_in_fahrenheit() {
     for (step, value) in heating.iter().enumerate() {
         assert_eq!(
             value.to_bits(),
-            expected_heating_c.to_bits(),
-            "step {step}: the 70 F heating column runs as the uom conversion to Celsius, \
+            expected_heating_bits,
+            "step {step}: the 70 F heating column runs as the pinned Celsius bits, \
              got {value}"
         );
     }
 
-    let expected_cooling_c = temperature_f_to_c(75.0);
+    // The exact bits of the faithful conversion (t - 32.0) * 5.0 / 9.0 of
+    // 75 F to Celsius (23.88888888888889), pinned as a literal.
+    let expected_cooling_bits = 0x4037e38e38e38e39_u64;
     let dir = tempfile::tempdir().expect("temp dir");
     let schedule_path = schedule_with_appended_column(&dir, "cooling_setpoint", 75.0);
     let mut dwelling = dwelling_with_schedule_at(schedule_path, "2023-07-01T00:00:00-07:00");
@@ -314,8 +321,8 @@ fn setpoint_column_is_read_in_fahrenheit() {
     for (step, value) in cooling.iter().enumerate() {
         assert_eq!(
             value.to_bits(),
-            expected_cooling_c.to_bits(),
-            "step {step}: the 75 F cooling column runs as the uom conversion to Celsius, \
+            expected_cooling_bits,
+            "step {step}: the 75 F cooling column runs as the pinned Celsius bits, \
              got {value}"
         );
     }

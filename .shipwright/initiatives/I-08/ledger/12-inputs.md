@@ -1269,11 +1269,47 @@ changes" line. Goldens: compare-all 8 and the dst set's `full_year_900s_dst`
 bitwise identical, compared twice on the final state; no golden carries a
 setpoint column, none re-captured, any change would have stopped the
 entry. Gates: fmt clean; clippy `--workspace --all-targets --all-features
--D warnings` clean; nextest `--workspace --all-features -j 2` 8149/8149
+-D warnings` clean; nextest `--workspace --all-features -j 2` 8148/8148
 (8 skipped); `pytest -m ''` 1766 passed + 6 xfailed, 0 failed, 0 errors;
 pyright 0 errors. The commit is unsigned through the host's 1Password
 signing failure (the bridge unreachable from this session's shell), in
 the re-signing record's pattern for the span to re-sign.
+
+**Amended the same day by the review's pin discipline:** the Fahrenheit
+test's expectation is now an independent literal, never computed through
+the production conversion, and the pin exposed a numeric finding: the
+`uom` conversion's arithmetic deviates from the faithful formula. `uom`
+reaches Celsius through the kelvin base with rounded offset constants
+(`(t + 459.67) * 5/9 - 273.15`), so the production
+`temperature_f_to_c(70.0)` carried the bits 0x40351c71c71c71e0
+(21.1111111111112), 25 ulps above the formula's exact
+0x40351c71c71c71c7 (21.111111111111114), and 75 F landed 23 ulps above
+(0x4037e38e38e38e50, 23.88888888888897, against the faithful
+0x4037e38e38e38e39, 23.88888888888889); the literals the row's landing
+pinned were the deviated values. The conversion now computes
+`(t - 32.0) * 5.0 / 9.0` directly and the pins carry the faithful bits.
+Two ripples recorded with it. First, the water-heater autosizing's
+mains bound moves from the exclusive (0, 50) C to [0, 50) C: the
+Burch-Christensen clamp floor (32 F, the EnergyPlus rule) converts to
+exactly 0 C under the faithful formula, while the `uom` rounding sat an
+epsilon above the floor and never met the exclusive bound; 0 C is the
+weather's own value, not a stand-in, negatives stay rejected, and the
+validation's pin (the zero case) moves from the failing list to the
+accepted one with the reason. Second, the water mains temperature moves
+at the ulp scale in every run, so all nine goldens are re-captured
+(compare-all 8 + dst 1 bitwise identical after; the movement is the
+metrics' last few digits, for example the consumer shape's heating COP
+39.192071398252686 to 39.192071398252665); the `docs/python.md`
+"Numeric changes" list carries the entry. The `temperature_c_to_f`
+counterpart carries the same `uom` offset-path deviation (0 C reads
+31.999999999999897 through the base path) and is untouched: no pin
+covers it and the review names the Fahrenheit-to-Celsius conversion
+only. The row's gates' nextest count above corrects 8149 to 8148 (the
+suite's true count). Amendment gates: fmt clean; clippy
+`--workspace --all-targets --all-features -D warnings` clean; nextest
+`--workspace --all-features -j 2` 8148/8148 (8 skipped); `pytest -m ''`
+1766 passed + 6 xfailed, 0 failed, 0 errors; pyright 0; the goldens
+bitwise (compare-all 8 + dst 1, after the re-capture).
 
 **Dependencies:** IN-5; `11-other-defects.md` OD-9; `09-numeric-fixes.md`
 B-1a (`docs/PHYSICS_DECISIONS.md`).

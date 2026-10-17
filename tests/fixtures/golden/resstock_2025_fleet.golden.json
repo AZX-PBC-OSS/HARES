@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "cf3985f3b16d28da9a83701b7cfa0ba4179eb395",
+  "git_head": "eb14627938c76e85a58a118c0266456693cb4fef",
   "git_dirty": true,
   "metrics": [],
   "products": {
@@ -156,9 +156,9 @@
         },
         {
           "name": "Total Electric Power (kW)",
-          "digest": "a44b3e87f6443cc71854faea380a2aabde0e1d3b667178df50cc4469b6d7d090",
+          "digest": "b73c4bb8b2686fc466fda197470081e6224c15a7f3d7c771c4d8b66dfeb63e59",
           "blocks": [
-            "a44b3e87f6443cc71854faea380a2aabde0e1d3b667178df50cc4469b6d7d090"
+            "b73c4bb8b2686fc466fda197470081e6224c15a7f3d7c771c4d8b66dfeb63e59"
           ]
         },
         {
@@ -170,9 +170,9 @@
         },
         {
           "name": "Total Reactive Power (kVAR)",
-          "digest": "f26cacfa08207fb11ad904ee4d9804745077725dd057115d2484517e9ea5723d",
+          "digest": "c8b2a5c3aaafea2191e028115a8e2262d24ebbc937f1f855581bc8a1f215fe26",
           "blocks": [
-            "f26cacfa08207fb11ad904ee4d9804745077725dd057115d2484517e9ea5723d"
+            "c8b2a5c3aaafea2191e028115a8e2262d24ebbc937f1f855581bc8a1f215fe26"
           ]
         },
         {
@@ -184,9 +184,9 @@
         },
         {
           "name": "Temperature - Indoor (C)",
-          "digest": "0b07aed0fe7c83124e3e9dfbdff1c3b2e1bec4ec3ff355d05e5cfe154e71ee85",
+          "digest": "6bbe9d3ca753295abae19aeb8139e8866c988eb19e3b739ab32a485c632d375c",
           "blocks": [
-            "0b07aed0fe7c83124e3e9dfbdff1c3b2e1bec4ec3ff355d05e5cfe154e71ee85"
+            "6bbe9d3ca753295abae19aeb8139e8866c988eb19e3b739ab32a485c632d375c"
           ]
         },
         {
@@ -198,16 +198,16 @@
         },
         {
           "name": "Room AC Electric Power (kW)",
-          "digest": "c636d93a72019207efb783973d190e63d4acf7ce084556802e84c901ad65974c",
+          "digest": "7cfa482c4d01082e134a954dff316b9dcbae41e8fa3993c15c73be2d52176942",
           "blocks": [
-            "c636d93a72019207efb783973d190e63d4acf7ce084556802e84c901ad65974c"
+            "7cfa482c4d01082e134a954dff316b9dcbae41e8fa3993c15c73be2d52176942"
           ]
         },
         {
           "name": "Heat Pump Water Heater Electric Power (kW)",
-          "digest": "7e80c224aa891c4b562fb0c1987610c9b1fe95cb4a3f5106f528ebe2ce309c40",
+          "digest": "e7aab2202312a1c885d16224b5a4cf4e5eb429a88241c7ecf63993594b7868e9",
           "blocks": [
-            "7e80c224aa891c4b562fb0c1987610c9b1fe95cb4a3f5106f528ebe2ce309c40"
+            "e7aab2202312a1c885d16224b5a4cf4e5eb429a88241c7ecf63993594b7868e9"
           ]
         },
         {
@@ -282,16 +282,16 @@
         },
         {
           "name": "HVAC Cooling End Use Electric Power (kW)",
-          "digest": "c636d93a72019207efb783973d190e63d4acf7ce084556802e84c901ad65974c",
+          "digest": "7cfa482c4d01082e134a954dff316b9dcbae41e8fa3993c15c73be2d52176942",
           "blocks": [
-            "c636d93a72019207efb783973d190e63d4acf7ce084556802e84c901ad65974c"
+            "7cfa482c4d01082e134a954dff316b9dcbae41e8fa3993c15c73be2d52176942"
           ]
         },
         {
           "name": "Water Heating End Use Electric Power (kW)",
-          "digest": "7e80c224aa891c4b562fb0c1987610c9b1fe95cb4a3f5106f528ebe2ce309c40",
+          "digest": "e7aab2202312a1c885d16224b5a4cf4e5eb429a88241c7ecf63993594b7868e9",
           "blocks": [
-            "7e80c224aa891c4b562fb0c1987610c9b1fe95cb4a3f5106f528ebe2ce309c40"
+            "e7aab2202312a1c885d16224b5a4cf4e5eb429a88241c7ecf63993594b7868e9"
           ]
         },
         {

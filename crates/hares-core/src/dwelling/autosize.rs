@@ -638,8 +638,8 @@ pub fn autosize_equipment_capacities(
 ///    `capacity_w = max(0, FHR_gph − usable_vol_gal) × W.E.F × ΔT_°C`
 ///    where `W.E.F = 8.33 × 1.8 / 3.412 ≈ 4.395`.
 /// 4. A zero-bedroom home (a studio) sizes from the 50 gal default tank; an
-///    unavailable bedroom count, an out-of-range mains temperature or a
-///    non-positive capacity fail the autosizing naming the input.
+///    unavailable bedroom count, a negative or non-finite mains temperature
+///    or a non-positive capacity fail the autosizing naming the input.
 ///
 /// DOE 10 CFR Part 430 Subpart B Appendix E §2.4: FHR = V_draw + recovery;
 /// V_draw ≈ usable_fraction × tank_volume.
@@ -651,7 +651,10 @@ pub fn autosize_equipment_capacities(
 /// * `n_bedrooms` - Number of bedrooms for sizing (from HPXML or data patches).
 ///   `None` is an error: the count is required input.
 /// * `mains_temp_c` - Mains cold-water supply temperature [°C] for temperature
-///   rise computation; outside (0, 50) °C is an error.
+///   rise computation; outside [0, 50) °C is an error. Exactly 0 °C is the
+///   Burch-Christensen clamp floor (32 °F, the EnergyPlus rule), the
+///   weather's own value; the previous conversion's rounding never produced
+///   the exact floor, the faithful `(t - 32.0) * 5.0 / 9.0` does.
 pub fn autosize_water_heater_capacities(
     specs: &mut [EquipmentSpec],
     n_bedrooms: Option<f64>,
@@ -660,13 +663,16 @@ pub fn autosize_water_heater_capacities(
     // The mains temperature is the weather's (EnergyPlus derives it from the
     // EPW; OS-HPXML reads EnergyPlus's "Site Mains Water Temperature", the
     // mains_temp_sensor of measure.rb:484). No static default exists to
-    // substitute, so a value outside cold water's range is an input defect:
-    // sizing the temperature rise from a stand-in would size every water
-    // heater the home has wrong.
-    if !mains_temp_c.is_finite() || mains_temp_c <= 0.0 || mains_temp_c >= 50.0 {
+    // substitute, so a value outside the model's own output range is an
+    // input defect: sizing the temperature rise from a stand-in would size
+    // every water heater the home has wrong. The range's floor is the
+    // Burch-Christensen clamp (32 °F converts to exactly 0 °C), so 0 °C is
+    // the weather's value, not a stand-in; negatives are below the clamp
+    // and cannot come from the weather model.
+    if !mains_temp_c.is_finite() || mains_temp_c < 0.0 || mains_temp_c >= 50.0 {
         return Err(hares_types::HaresError::Dwelling(format!(
             "water heater autosizing: the mains temperature {mains_temp_c} °C is \
-             outside cold water's range (0, 50) °C; the value comes from the \
+             outside cold water's range [0, 50) °C; the value comes from the \
              weather and no temperature may be substituted for it"
         )));
     }
@@ -3210,9 +3216,18 @@ mod tests {
             "the error names the input and its value: {shown}"
         );
 
-        // Zero and non-finite temperatures fail the same way: the weather's
-        // value is either present and sane or the input is defective.
-        for temp in [0.0, -5.0, f64::NAN, f64::INFINITY] {
+        // Negative and non-finite temperatures fail the same way: the
+        // weather's value is either present and sane or the input is
+        // defective. Exactly 0 °C no longer fails: it is the
+        // Burch-Christensen clamp floor (32 °F), the weather's own value
+        // through the faithful `(t - 32.0) * 5.0 / 9.0` conversion (the
+        // previous conversion's rounding sat an epsilon above the floor, so
+        // the exclusive bound never met the clamp). A negative cannot come
+        // from the weather model, so it stays a stand-in's signature.
+        let mut zero_specs = vec![wh_spec("Gas Water Heater", FuelType::Gas, &[])];
+        autosize_water_heater_capacities(&mut zero_specs, Some(3.0), 0.0)
+            .expect("the clamp floor 0 °C is the weather's value and sizes");
+        for temp in [-5.0, f64::NAN, f64::INFINITY] {
             let mut specs = vec![wh_spec("Gas Water Heater", FuelType::Gas, &[])];
             let err = autosize_water_heater_capacities(&mut specs, Some(3.0), temp)
                 .expect_err("an out-of-range mains temperature must fail the autosizing");

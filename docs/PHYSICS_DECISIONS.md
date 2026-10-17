@@ -254,15 +254,27 @@ Inputs", <https://openstudio-hpxml.readthedocs.io/en/latest/workflow_inputs.html
 converted in `resources/schedules.rb:1465-1484`), and HARES reads them the
 same way: the parser converts every value of a `heating_setpoint` or
 `cooling_setpoint` column from Fahrenheit to Celsius at the parse, once
-per value, with the `uom` conversion
-(`ThermodynamicTemperature::new::<degree_fahrenheit>` to
-`degree_celsius`), so every reader downstream sees one column of one
+per value, with the faithful formula `(t - 32.0) * 5.0 / 9.0` (the
+`uom` conversion reached Celsius through the kelvin base with rounded
+offset constants and landed ulps off the formula's exact value; the
+Fahrenheit setpoint test's independent bit pin found it), so every
+reader downstream sees one column of one
 unit. The conversion is unit-for-unit: OS-HPXML's `convert_setpoints`
 applies the on-off thermostat's deadband offset after its own conversion,
 and HARES's deadband is the thermostat's own configuration, not a
 schedule-column property; OCHRE converts the same columns from
 Fahrenheit at its schedule load
 (`vendors/OCHRE/ochre/utils/schedule.py:408-427`) with no offset. The
+schedule-file setpoint columns are not pair-reconciled: OS-HPXML's own
+semantics separate the sides by the on-off `offset_db` (the deadband
+offset folded into the simple-setpoint profiles,
+`hvac.rb:1809-1810`, and the thermostat's cutout difference,
+`hvac.rb:1746`; its setpoint-adjustment loop runs only when both sides
+resolve from HPXML setpoints, `hvac.rb:1690`), while OCHRE reconciles
+the schedule columns at load, clipping every step whose cooling and
+heating setpoints sit within 1 C of each other to half a degree around
+their mean (`vendors/OCHRE/ochre/utils/schedule.py:620-629`); HARES
+keeps the columns as written and records the divergence from OCHRE. The
 direction of the change: a schedule file written for the HPXML ecosystem
 (previously read as Celsius) drives cooler: a 70 F heating column reads
 21.11 C, not 70 C, so heating energy and mean zone temperature fall on

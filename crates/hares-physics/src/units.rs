@@ -261,9 +261,16 @@ pub fn volume_l_to_m3(l: f64) -> f64 {
 
 // --- Temperature (plain f64) ---
 
+/// Fahrenheit to Celsius through the faithful formula
+/// `(t - 32.0) * 5.0 / 9.0`, not the `uom` conversion: `uom` reaches
+/// Celsius through the kelvin base with its rounded offset constants
+/// (`(t + 459.67) * 5/9 - 273.15`), whose rounding leaves the result
+/// ulps off the formula's exact value (70 F converted to
+/// 21.1111111111112 instead of 21.111111111111114, 25 ulps high; found
+/// by the Fahrenheit setpoint test's independent bit pin).
 #[inline]
 pub fn temperature_f_to_c(f: f64) -> f64 {
-    UomTemperature::new::<degree_fahrenheit>(f).get::<degree_celsius>()
+    (f - 32.0) * 5.0 / 9.0
 }
 
 #[inline]

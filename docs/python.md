@@ -942,3 +942,28 @@ golden fixtures re-captured.
   setpoint column (the census), and compare-all 8 and the dst set's 1 are
   bitwise identical compared twice on the final state. No golden
   re-captured.
+
+- 2026-10-17: the Fahrenheit-to-Celsius conversion
+  (`hares_physics::units::temperature_f_to_c`) follows the faithful
+  formula `(t - 32.0) * 5.0 / 9.0` instead of the `uom` conversion: uom
+  reaches Celsius through the kelvin base with rounded offset constants
+  (`(t + 459.67) * 5/9 - 273.15`), which landed the result ulps off the
+  formula's exact value (70 F converted to 21.1111111111112 instead of
+  21.111111111111114, 25 ulps high; found by the Fahrenheit setpoint
+  test's independent bit pin, which the schedule-setpoint row's review
+  required). The water mains temperature moves at the same scale in
+  every run, so the run numbers shift in their last few digits: all
+  nine goldens re-captured (`consumer_shape_900s`, `fleet_mixed_offset`,
+  `fleet_same_offset_300s`, `full_year_hourly`,
+  `leap_year_february_900s`, `month_boundary_billing_3600s`,
+  `resstock_2025_fleet`, `weather_wrap_900s`, `full_year_900s_dst`;
+  compare-all 8 and the dst set's 1 bitwise identical after; the
+  movement is the metrics' last few digits, for example the consumer
+  shape's heating COP 39.192071398252686 to 39.192071398252665 and its
+  cooling COP 2.8742769469758733 to 2.874276946975894). The
+  water-heater autosizing's mains bound moves from the exclusive
+  (0, 50) C to [0, 50) C with it: the Burch-Christensen clamp floor
+  (32 F) converts to exactly 0 C under the faithful formula, while the
+  previous conversion's rounding sat an epsilon above the floor and
+  never met the exclusive bound; 0 C is the weather's own value, not a
+  stand-in, and negatives stay rejected.
