@@ -195,7 +195,10 @@ fn a_foundation_without_a_wall_takes_the_assumed_height() {
     let stripped = original
         .replace(&wall_block, "")
         .replace("<FoundationWalls></FoundationWalls>", "")
-        .replace("            <AttachedToFoundationWall idref='FoundationWall1'/>\n", "");
+        .replace(
+            "            <AttachedToFoundationWall idref='FoundationWall1'/>\n",
+            "",
+        );
     assert!(
         !stripped.contains("FoundationWall1"),
         "the edit removes the foundation wall and its idref"
@@ -206,12 +209,163 @@ fn a_foundation_without_a_wall_takes_the_assumed_height() {
 
     let dwelling = dwelling(path);
     let (height_m, _, _) = infiltration_record(&dwelling);
-    let expected_m = 16.75_f64 * 0.3048;
+    let expected_m = hares_physics::units::length_ft_to_m(16.75);
+    let relative = (height_m - expected_m).abs() / expected_m;
     assert!(
-        (height_m - expected_m).abs() < 1e-6,
+        relative < 1e-6,
         "the no-wall foundation contributes the assumed 8 ft plus the 9 in raise: \
          {height_m} m against {expected_m} m"
     );
+}
+
+/// The walkout drop: a conditioned basement with every conditioned floor
+/// above grade carries its height in the base term already (the base term
+/// reads the floors ABOVE GRADE), so the foundation term drops
+/// (defaults.rb:5845-5848). base.xml with its conditioned-floor count
+/// brought even with its above-grade count is the walkout shape: 8 ft
+/// against the 9.75 ft the two-floor form runs, and the drop removed runs
+/// the 9.75.
+#[test]
+fn a_walkout_basement_drops_the_foundation_term() {
+    let original =
+        std::fs::read_to_string(project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"))
+            .expect("the fixture reads");
+    assert!(
+        original.contains("<NumberofConditionedFloors>2.0"),
+        "the fixture runs two conditioned floors"
+    );
+    let walkout = original.replace(
+        "<NumberofConditionedFloors>2.0</NumberofConditionedFloors>",
+        "<NumberofConditionedFloors>1.0</NumberofConditionedFloors>",
+    );
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("base-walkout.xml");
+    std::fs::write(&path, walkout).expect("the edited HPXML writes");
+
+    let dwelling = dwelling(path);
+    let (height_m, _, _) = infiltration_record(&dwelling);
+    let expected_m = hares_physics::units::length_ft_to_m(8.0);
+    let relative = (height_m - expected_m).abs() / expected_m;
+    assert!(
+        relative < 1e-6,
+        "the walkout's height is the base term alone: {height_m} m against {expected_m} m"
+    );
+}
+
+/// The base term reads the floors above grade of a building with no
+/// attic or foundation in the volume: the dehumidifier fixture (one
+/// conditioned floor, all above grade, slab on grade, the attic outside
+/// the volume, no InfiltrationHeight) estimates 8 ft and nothing else.
+#[test]
+fn a_slab_on_grade_single_storey_estimates_its_base_term() {
+    let fixture =
+        project_root().join("tests/fixtures/hpxml/ochre_samples/base-appliances-dehumidifier.xml");
+    let xml = std::fs::read_to_string(&fixture).expect("the fixture reads");
+    assert!(
+        !xml.contains("InfiltrationHeight"),
+        "the fixture declares no InfiltrationHeight"
+    );
+    assert!(
+        xml.contains("<NumberofConditionedFloors>1.0"),
+        "one conditioned floor"
+    );
+    assert!(
+        xml.contains("<NumberofConditionedFloorsAboveGrade>1.0"),
+        "the one floor is above grade"
+    );
+    assert!(
+        xml.contains("<WithinInfiltrationVolume>false</WithinInfiltrationVolume>"),
+        "the attic sits outside the infiltration volume"
+    );
+
+    let dwelling = dwelling(fixture);
+    let (height_m, _, _) = infiltration_record(&dwelling);
+    let expected_m = hares_physics::units::length_ft_to_m(8.0);
+    let relative = (height_m - expected_m).abs() / expected_m;
+    assert!(
+        relative < 1e-6,
+        "the estimate is the base term's 8 ft: {height_m} m against {expected_m} m"
+    );
+}
+
+/// The attic term: the tallest attic within the infiltration volume adds
+/// its roof height (defaults.rb:5817-5831) to the estimate. base.xml's
+/// unvented attic is declared outside the volume; declared inside, the
+/// estimate gains the hip-roof height its own roof's area and pitch give.
+#[test]
+fn an_attic_within_the_volume_adds_its_roof_height() {
+    let original =
+        std::fs::read_to_string(project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"))
+            .expect("the fixture reads");
+    assert!(
+        original.contains("<WithinInfiltrationVolume>false</WithinInfiltrationVolume>"),
+        "the fixture's attic is declared outside the volume"
+    );
+    assert!(
+        original.contains("<Area>1509.3</Area>") && original.contains("<Pitch>6.0</Pitch>"),
+        "the roof's inputs the term reads"
+    );
+    let with_attic = original.replace(
+        "<WithinInfiltrationVolume>false</WithinInfiltrationVolume>",
+        "<WithinInfiltrationVolume>true</WithinInfiltrationVolume>",
+    );
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("base-attic-within.xml");
+    std::fs::write(&path, with_attic).expect("the edited HPXML writes");
+
+    // The term the reference computes (geometry.rb
+    // calculate_height_and_footprint_of_roofs, the square hip roof): the
+    // roof area over the pitch multiplier, its square root's half sine.
+    let foot_m = hares_physics::units::length_ft_to_m(1.0);
+    let area_m2 = 1509.3_f64 * foot_m * foot_m;
+    let slope: f64 = 6.0 / 12.0;
+    let footprint_m2 = area_m2 / (slope * slope + 1.0).sqrt();
+    let attic_height_m = 0.5 * slope.atan().sin() * footprint_m2.sqrt();
+    let expected_m = hares_physics::units::length_ft_to_m(9.75) + attic_height_m;
+
+    let dwelling = dwelling(path);
+    let (height_m, _, _) = infiltration_record(&dwelling);
+    let relative = (height_m - expected_m).abs() / expected_m;
+    assert!(
+        relative < 1e-6,
+        "the attic term joins the estimate: {height_m} m against {expected_m} m"
+    );
+}
+
+/// The per-storey rim joist: half a foot of rim joist and subfloor per
+/// added storey above the first (defaults.rb:5804). The two-storey form
+/// adds one, the three-storey form adds two: the term doubles from one
+/// added storey to the next.
+#[test]
+fn the_rim_joist_term_grows_per_added_storey() {
+    let original =
+        std::fs::read_to_string(project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"))
+            .expect("the fixture reads");
+    let dir = tempfile::tempdir().expect("temp dir");
+    for (above_grade, expected_ft) in [(2.0, 18.25), (3.0, 26.75)] {
+        let total = above_grade + 1.0;
+        let edited = original
+            .replace(
+                "<NumberofConditionedFloors>2.0</NumberofConditionedFloors>",
+                &format!("<NumberofConditionedFloors>{total}.0</NumberofConditionedFloors>"),
+            )
+            .replace(
+                "<NumberofConditionedFloorsAboveGrade>1.0</NumberofConditionedFloorsAboveGrade>",
+                &format!(
+                    "<NumberofConditionedFloorsAboveGrade>{above_grade}.0</NumberofConditionedFloorsAboveGrade>"
+                ),
+            );
+        let path = dir.path().join(format!("base-{above_grade}-storeys.xml"));
+        std::fs::write(&path, edited).expect("the edited HPXML writes");
+        let dwelling = dwelling(path);
+        let (height_m, _, _) = infiltration_record(&dwelling);
+        let expected_m = hares_physics::units::length_ft_to_m(expected_ft);
+        assert!(
+            (height_m - expected_m).abs() < 1e-6,
+            "{above_grade} floors above grade run the base term plus the rim joists plus \
+             the foundation: {height_m} m against {expected_m} m"
+        );
+    }
 }
 
 /// The flue rule over the resolved systems: at the fixture's own AFUE 0.92
