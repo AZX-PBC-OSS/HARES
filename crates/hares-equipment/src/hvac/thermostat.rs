@@ -430,12 +430,22 @@ impl ThermostatFsm {
 
     /// The runtime cross-tier deadband check: the resolved pair (the
     /// override constants and the surviving schedule tier among them)
-    /// sat below the required deadband, the collision the init's static
-    /// check cannot see because it reads the statics alone. Every such
-    /// step counts; the run's first also parks the pair for the owning
-    /// equipment to raise as a run warning naming both tiers.
+    /// sat below the pair's required deadband, the collision the init's
+    /// static check cannot see because it reads the statics alone. The
+    /// required band follows the pair's provenance: a pair the control
+    /// tier installed was required to satisfy the band it set (the
+    /// hysteresis in force after `apply_thermal_setpoint_signal`), a pair
+    /// the config or the schedule resolves answers to the init's
+    /// `2 x hysteresis` rule. Every violating step counts; the run's
+    /// first also parks the pair for the owning equipment to raise as a
+    /// run warning naming both tiers.
     fn note_cross_tier_deadband(&mut self, setpoints: &ThermalSetpoints) {
-        let required_gap_c = 2.0 * self.thermostat.hysteresis_c;
+        let hysteresis_c = self.thermostat.hysteresis_c;
+        let required_gap_c = if self.runtime_setpoints.is_some() {
+            hysteresis_c
+        } else {
+            2.0 * hysteresis_c
+        };
         if setpoints.cooling_c - setpoints.heating_c >= required_gap_c {
             return;
         }
@@ -1239,6 +1249,45 @@ pub(super) mod tests {
             price_signal: Default::default(),
             electrical: Default::default(),
         }
+    }
+
+    /// A pair the control tier installed answers to the band it set, not
+    /// to twice it: a ThermalSetpoint signal with a band installs a pair
+    /// one band wide and the runtime cross-tier check counts nothing. The
+    /// schedule-resolved pair answers to the init's 2 x hysteresis rule
+    /// and counts.
+    #[test]
+    fn the_cross_tier_check_reads_the_pair_provenance() {
+        let env = env_with_zone_temp(21.0);
+        let mut fsm = fsm_20_24();
+        // The band-setting signal: hysteresis 10 in force, the pair one
+        // band wide.
+        fsm.apply_thermal_setpoint_signal(&thermal_setpoint(Some(21.0), None, Some(10.0)))
+            .expect("the signal applies");
+        let mode = fsm.update_mode_at(&env, 21.0).expect("the mode updates");
+        assert_eq!(mode, ThermostatMode::Deadband);
+        assert_eq!(
+            fsm.cross_tier_deadband_events, 0,
+            "the signal's own pair answers to the band it set"
+        );
+
+        // The schedule-resolved pair at the configured hysteresis: the
+        // 2 x hysteresis rule, and the violation counts.
+        let mut fsm = fsm_20_24();
+        fsm.schedule_setpoints = Some(ScheduleSetpoints {
+            heating_c: Some(22.0),
+            cooling_c: Some(23.0),
+            ..ScheduleSetpoints::default()
+        });
+        fsm.update_mode_at(&env, 21.0).expect("the mode updates");
+        assert_eq!(
+            fsm.cross_tier_deadband_events, 1,
+            "the schedule's narrow pair counts"
+        );
+        let (heating, cooling, required) = fsm
+            .take_cross_tier_warning()
+            .expect("the first collision parks the pair");
+        assert_eq!((heating, cooling, required), (22.0, 23.0, 2.0));
     }
 
     #[test]
