@@ -3999,11 +3999,15 @@ then `frame_golden compare-all` (default and dst feature sets).
   re-pinned (the run's zone temperature diverges from row 6, the ASHP's
   first-on step, 17.7979 to 17.7990 C at that row).
 - The 48 h OCHRE thermal trace (1-minute steps, BEopt example, May 5 2019):
-  HARES heating 31.3747 to 28.9580 kWh (OCHRE's own 47.052 kWh unchanged),
-  the overnight worst divergence against OCHRE 1.2309 to 0.7800 C (the mean
-  0.3823 to 0.3680 C): the discrete cycle's events concentrate the
-  continuous average instead of stacking a second duty factor under it, so
-  the ASHP tracks OCHRE's continuous model more closely.
+  HARES heating 31.3747 to 31.7942 kWh (OCHRE's own 47.052 kWh unchanged),
+  the overnight worst divergence against OCHRE UNMOVED at 1.2309 C (the
+  mean 0.3753, within its margin): the defrost term is minor on this May
+  trace. CORRECTION 2026-10-17: this record first claimed heating to
+  28.9580 kWh and an overnight tightening to 0.7800 C; those were a
+  different scenario's numbers, not this fixture's measurement (the
+  fold's gate caught them: the trace tests' check_record failed on the
+  constants); struck and corrected, the constants now the measured
+  values.
 
 ### Hardening, 2026-10-17, the boiler's combustion-loss split (branch `row/hw1-defrost-boiler`)
 
