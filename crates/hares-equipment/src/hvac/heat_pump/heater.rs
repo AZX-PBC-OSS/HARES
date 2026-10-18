@@ -30,13 +30,12 @@ use super::constants::{
     DEFAULT_ER_LOCKOUT_TEMP_C, DEFAULT_ER_SETPOINT_DEADBAND_OFFSET,
     DEFAULT_ER_SETPOINT_OFFSET_MULTIPLIER, DEFAULT_HEATING_CAPACITY_W, DEFAULT_HEATING_EIR,
     DEFAULT_HP_LOCKOUT_HYSTERESIS_C, DEFAULT_HP_LOCKOUT_TEMP_C, DEFAULT_MIN_COMPRESSOR_FRACTION,
-    DEFAULT_MIN_ER_CYCLE_TIME_S, DEFROST_CAPACITY_UNIT_FACTOR, DEFROST_EIR_CURVE_TEMP_MIN_C,
-    MAX_OAT_SUPPLEMENTAL_C, MSHP_DEFAULT_STAGE_RATIOS, MSHP_PAN_HEATER_DEFAULT_KW,
-    MSHP_PAN_HEATER_DEFAULT_TEMP_C,
+    DEFAULT_MIN_ER_CYCLE_TIME_S, DEFROST_CAPACITY_MULTIPLIER_BASE, MAX_OAT_SUPPLEMENTAL_C,
+    MSHP_DEFAULT_STAGE_RATIOS, MSHP_PAN_HEATER_DEFAULT_KW, MSHP_PAN_HEATER_DEFAULT_TEMP_C,
 };
 use super::defrost::{
-    DefrostConfig, DefrostControl, DefrostCycleTracker, DefrostInputs, DefrostStrategy,
-    evaluate_defrost,
+    DefrostConfig, DefrostControl, DefrostCycleTracker, DefrostInputs, DefrostResult,
+    DefrostStrategy, evaluate_defrost, resistive_defrost_destination,
 };
 use super::heater_config::{default_heater_telemetry, heater_telemetry_fields};
 use crate::config::constructor_equipment_id;
@@ -1356,13 +1355,18 @@ impl HeatPumpHeaterCore {
         };
 
         // Advance the discrete defrost FSM BEFORE compute_step so the current
-        // state is visible during step computation.
-        self.defrost_cycle_tracker.advance(
-            dt_s,
-            defrost_conditions.1,
-            defrost_conditions.0,
-            env.weather.outdoor_temp_c,
-        )?;
+        // state is visible during step computation. The FSM runs only when
+        // the discrete frost cycle is selected; with the continuous model
+        // the tracker stays dormant and evaluate_defrost owns the
+        // multipliers.
+        if self.defrost_config.defrost_discrete_cycle {
+            self.defrost_cycle_tracker.advance(
+                dt_s,
+                defrost_conditions.1,
+                defrost_conditions.0,
+                env.weather.outdoor_temp_c,
+            )?;
+        }
 
         let step = self.compute_step(env, dt_min)?;
 
@@ -1918,79 +1922,32 @@ impl HeatPumpHeaterCore {
         let mut defrost_capacity_multiplier = 1.0;
         let mut latent_gain_w = 0.0;
 
-        // Discrete defrost: when the FSM is in Defrosting AND the compressor is
-        // running, override the continuous model with distinct capacity/EIR behavior.
-        // The FSM continues advancing (so defrost completes on elapsed time) even
-        // when the compressor is off, but the capacity/power override only applies
-        // during actual compressor operation — otherwise the equipment reports
-        // phantom draw while commanded off.
-        let is_discrete_defrosting = self.defrost_cycle_tracker.is_defrosting() && hp_on;
+        // ONE defrost model owns the per-step multipliers, selected by the
+        // defrost config. With the discrete frost cycle enabled,
+        // evaluate_defrost feeds only the frost accumulator and the cycle's
+        // phases apply the multipliers exactly once per step (full-intensity
+        // events, the bare frost derate between them). With it disabled the
+        // continuous model's average applies directly. The FSM keeps
+        // advancing (so defrost completes on elapsed time) even when the
+        // compressor is off, but the multipliers only apply during actual
+        // compressor operation, otherwise the equipment reports phantom
+        // draw while commanded off.
+        let discrete_cycle = self.defrost_config.defrost_discrete_cycle;
+        let is_discrete_defrosting =
+            discrete_cycle && self.defrost_cycle_tracker.is_defrosting() && hp_on;
 
-        if is_discrete_defrosting {
-            defrost_active = true;
-            defrost_time_fraction = 1.0; // full timestep is in defrost
-
-            match self.defrost_config.strategy {
-                DefrostStrategy::ReverseCycle => {
-                    // Reverse-cycle: compressor reverses; zone capacity = 0 (no net
-                    // heating or cooling). Indoor coil absorbs heat from zone air to
-                    // defrost outdoor coil. Electric power follows defrost EIR curve.
-                    // EnergyPlus ERM 26.1 — Coils: Single-Speed Electric DX Air Heating Coil — Defrost Operation continuous model averages this penalty;
-                    // HARES discrete model applies it at full intensity for cycle_duration_s.
-                    defrost_capacity_multiplier = 0.0;
-                    defrost_q_w = 0.0;
-                    let defrost_eir = match self.defrost_config.defrost_eir_coeffs {
-                        Some(c) => {
-                            let wb =
-                                hares_physics::psychrometrics::zone_wet_bulb_c(zone, pressure_pa)
-                                    .max(DEFROST_EIR_CURVE_TEMP_MIN_C);
-                            let db = env.weather.outdoor_temp_c.max(DEFROST_EIR_CURVE_TEMP_MIN_C);
-                            c[0] + c[1] * wb
-                                + c[2] * wb * wb
-                                + c[3] * db
-                                + c[4] * wb * db
-                                + c[5] * db * db
-                        }
-                        None => 1.0,
-                    };
-                    let max_capacity_w = self
-                        .hvac
-                        .config
-                        .heating_capacities_w
-                        .last()
-                        .copied()
-                        .unwrap_or(stage_capacity_w)
-                        .max(0.0);
-                    defrost_extra_power_w = defrost_eir
-                        * (max_capacity_w / DEFROST_CAPACITY_UNIT_FACTOR)
-                        + self.defrost_config.defrost_power_w;
-                    hp_capacity_w = 0.0;
-                    hp_electric_w = defrost_extra_power_w;
-                }
-                DefrostStrategy::Resistive => {
-                    // Compressor off; resistive element defrosts outdoor coil.
-                    // Zone receives heat from the resistive element during defrost.
-                    defrost_capacity_multiplier = 0.0;
-                    defrost_q_w = 0.0;
-                    let resistive_w = self.defrost_config.resistive_defrost_capacity_w;
-                    defrost_extra_power_w = resistive_w + self.defrost_config.defrost_power_w;
-                    hp_capacity_w = 0.0;
-                    // Resistive defrost power is tracked in defrost_extra_power_w for
-                    // telemetry; it is also included in the total electric_kw via the
-                    // Resistive er_capacity_w path (EIR=1.0 for electric resistance).
-                    hp_electric_w = 0.0;
-                }
-            }
-        } else if hp_on {
-            let max_capacity_w = self
-                .hvac
-                .config
-                .heating_capacities_w
-                .last()
-                .copied()
-                .unwrap_or(stage_capacity_w)
-                .max(0.0);
-            let defrost = evaluate_defrost(
+        // The defrost evaluation is the frost accumulator's input in both
+        // paths; only its application differs.
+        let max_capacity_w = self
+            .hvac
+            .config
+            .heating_capacities_w
+            .last()
+            .copied()
+            .unwrap_or(stage_capacity_w)
+            .max(0.0);
+        let defrost = if hp_on {
+            evaluate_defrost(
                 &self.defrost_config,
                 DefrostInputs {
                     outdoor_db_c: env.weather.outdoor_temp_c,
@@ -2001,38 +1958,124 @@ impl HeatPumpHeaterCore {
                     current_capacity_w: hp_capacity_w,
                     runtime_fraction: plr,
                 },
-            );
+            )
+        } else {
+            DefrostResult::inactive()
+        };
 
+        if is_discrete_defrosting {
+            defrost_active = true;
+            defrost_time_fraction = 1.0; // full timestep is in defrost
+
+            match self.defrost_config.strategy {
+                DefrostStrategy::ReverseCycle => {
+                    // Reverse-cycle: compressor reverses; zone capacity = 0 (no net
+                    // heating or cooling). Electric power is the defrost draw.
+                    // EnergyPlus ERM 26.1 - Coils: Single-Speed Electric DX Air
+                    // Heating Coil - Defrost Operation averages this penalty as
+                    // extra_power_w over the timestep; the discrete event
+                    // concentrates that same average into the event window: the
+                    // draw is the continuous average divided by the duty it was
+                    // averaged over, so the defrost-electric integral matches the
+                    // continuous model's exactly.
+                    defrost_capacity_multiplier = 0.0;
+                    defrost_q_w = 0.0;
+                    let duty = if defrost.active && defrost.time_fraction > 0.0 {
+                        defrost.time_fraction
+                    } else {
+                        // Conditions dried up mid-event: divide by the
+                        // accumulator's smoothed duty instead.
+                        self.defrost_cycle_tracker
+                            .ewma_time_fraction
+                            .max(f64::EPSILON)
+                    };
+                    defrost_extra_power_w = defrost.extra_power_w / duty;
+                    hp_capacity_w = 0.0;
+                    hp_electric_w = defrost_extra_power_w;
+                }
+                DefrostStrategy::Resistive => {
+                    // Compressor off; resistive element defrosts outdoor coil.
+                    defrost_capacity_multiplier = 0.0;
+                    defrost_q_w = 0.0;
+                    defrost_extra_power_w = self.defrost_config.resistive_defrost_capacity_w
+                        + self.defrost_config.defrost_power_w;
+                    hp_capacity_w = 0.0;
+                    // Resistive defrost power is tracked in defrost_extra_power_w for
+                    // telemetry; it is also included in the total electric_kw via the
+                    // Resistive er_capacity_w path (EIR=1.0 for electric resistance).
+                    hp_electric_w = 0.0;
+                }
+            }
+        } else if hp_on {
             if defrost.active {
-                defrost_active = true;
-                defrost_time_fraction = defrost.time_fraction;
-                defrost_extra_power_w = defrost.extra_power_w;
-                defrost_q_w = defrost.q_defrost_w;
-                defrost_capacity_multiplier = defrost.capacity_multiplier;
-
                 let crf = self
                     .defrost_config
                     .capacity_reduction_factor
                     .clamp(0.0, 1.0);
 
-                if self.use_ideal {
-                    // OCHRE HVAC.py:1154-1156 -- clamp to post-defrost rated ceiling.
-                    // capacity_max = rated * cap_mult - q_defrost, then
-                    // capacity = min(capacity, capacity_max * ext_capacity_frac).
-                    // In HARES ext_capacity_frac is folded into crf.
-                    let capacity_ceiling = (max_capacity_w * defrost.capacity_multiplier
-                        - defrost.q_defrost_w)
-                        .max(0.0)
-                        * crf;
-                    hp_capacity_w = hp_capacity_w.min(capacity_ceiling);
-                } else {
-                    hp_capacity_w = (hp_capacity_w * defrost.capacity_multiplier
-                        - defrost.q_defrost_w)
-                        .max(0.0)
-                        * crf;
-                }
+                if discrete_cycle {
+                    // Discrete Accumulating phase: the bare frost derate and
+                    // the melt term, without the continuous model's duty
+                    // factor, because the duty is the FSM's events, and
+                    // stacking the duty factor here would apply the penalty
+                    // twice. No average defrost power either: the event draw
+                    // carries it. The time fraction stays the
+                    // frost-conditions estimate for the defrost-recovery
+                    // latent divergence.
+                    defrost_active = true;
+                    defrost_time_fraction = defrost.time_fraction;
+                    defrost_extra_power_w = 0.0;
+                    defrost_q_w = defrost.q_defrost_w;
+                    let accumulating_multiplier = match self.defrost_config.control {
+                        DefrostControl::Timed => defrost.capacity_multiplier,
+                        DefrostControl::OnDemand | DefrostControl::Disabled => {
+                            DEFROST_CAPACITY_MULTIPLIER_BASE
+                        }
+                    };
+                    defrost_capacity_multiplier = accumulating_multiplier;
 
-                hp_electric_w = hp_electric_w * defrost.power_multiplier + defrost.extra_power_w;
+                    if self.use_ideal {
+                        // OCHRE HVAC.py:1154-1156 -- clamp to post-defrost rated ceiling.
+                        let capacity_ceiling = (max_capacity_w * accumulating_multiplier
+                            - defrost.q_defrost_w)
+                            .max(0.0)
+                            * crf;
+                        hp_capacity_w = hp_capacity_w.min(capacity_ceiling);
+                    } else {
+                        hp_capacity_w = (hp_capacity_w * accumulating_multiplier
+                            - defrost.q_defrost_w)
+                            .max(0.0)
+                            * crf;
+                    }
+
+                    hp_electric_w *= defrost.power_multiplier;
+                } else {
+                    defrost_active = true;
+                    defrost_time_fraction = defrost.time_fraction;
+                    defrost_extra_power_w = defrost.extra_power_w;
+                    defrost_q_w = defrost.q_defrost_w;
+                    defrost_capacity_multiplier = defrost.capacity_multiplier;
+
+                    if self.use_ideal {
+                        // OCHRE HVAC.py:1154-1156 -- clamp to post-defrost rated ceiling.
+                        // capacity_max = rated * cap_mult - q_defrost, then
+                        // capacity = min(capacity, capacity_max * ext_capacity_frac).
+                        // In HARES ext_capacity_frac is folded into crf.
+                        let capacity_ceiling = (max_capacity_w * defrost.capacity_multiplier
+                            - defrost.q_defrost_w)
+                            .max(0.0)
+                            * crf;
+                        hp_capacity_w = hp_capacity_w.min(capacity_ceiling);
+                    } else {
+                        hp_capacity_w = (hp_capacity_w * defrost.capacity_multiplier
+                            - defrost.q_defrost_w)
+                            .max(0.0)
+                            * crf;
+                    }
+
+                    hp_electric_w =
+                        hp_electric_w * defrost.power_multiplier + defrost.extra_power_w;
+                }
             }
 
             if er_on {
@@ -2092,25 +2135,35 @@ impl HeatPumpHeaterCore {
             er_capacity_w = 0.0;
         }
 
-        // During discrete Resistive defrost, the resistive element provides zone
-        // heating in addition to defrosting the outdoor coil. This thermal output
-        // is separate from the backup ER that the thermostat controls.
-        if is_discrete_defrosting && self.defrost_config.strategy == DefrostStrategy::Resistive {
-            er_capacity_w += self.defrost_config.resistive_defrost_capacity_w;
+        // The resistive defrost element heats the outdoor coil: the shared
+        // destination split routes the configured zone fraction (cabinet
+        // leakage) to the zone and the remainder is frost-melt loss. The
+        // same split decides the continuous path's destination (see
+        // `evaluate_defrost`'s Resistive branch).
+        let (defrost_resistive_thermal_w, _defrost_melt_loss_w) = if is_discrete_defrosting
+            && self.defrost_config.strategy == DefrostStrategy::Resistive
+        {
+            resistive_defrost_destination(
+                self.defrost_config.resistive_defrost_capacity_w,
+                self.defrost_config.resistive_defrost_zone_fraction,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        if defrost_resistive_thermal_w > 0.0 {
+            er_capacity_w += defrost_resistive_thermal_w;
         }
         // Electric power for the defrost resistive element (if Resistive strategy).
         // This is separate from the backup ER: the defrost heater's EIR is 1.0
         // (pure electric resistance), and its thermal output was added to
         // er_capacity_w above. The backup ER's electric draw uses backup_eir,
         // so we must subtract the defrost portion before computing er_power_w.
-        let (defrost_resistive_thermal_w, defrost_resistive_electric_w) = if is_discrete_defrosting
+        let defrost_resistive_electric_w = if is_discrete_defrosting
             && self.defrost_config.strategy == DefrostStrategy::Resistive
         {
-            let thermal = self.defrost_config.resistive_defrost_capacity_w;
-            let electric = thermal + self.defrost_config.defrost_power_w;
-            (thermal, electric)
+            self.defrost_config.resistive_defrost_capacity_w + self.defrost_config.defrost_power_w
         } else {
-            (0.0, 0.0)
+            0.0
         };
         let er_power_w = (er_capacity_w - defrost_resistive_thermal_w).max(0.0) * self.backup_eir;
 
@@ -7427,9 +7480,14 @@ mod tests {
             "DEFROST_CAPACITY_MULTIPLIER must be present"
         );
 
-        assert!(
-            extra_power.unwrap() > 0.0,
-            "defrost extra power must be strictly positive when active"
+        // The discrete Accumulating phase meters no average defrost power:
+        // the defrost draw belongs to the FSM's events (a forced-Defrosting
+        // step pins the event draw below).
+        assert_eq!(
+            extra_power.unwrap(),
+            0.0,
+            "defrost extra power must be zero on Accumulating steps: the \
+             continuous model's average draw must not stack under the cycle"
         );
         assert!(
             q_w.unwrap() > 0.0,
@@ -7439,6 +7497,24 @@ mod tests {
             cap_mult.unwrap() > 0.0 && cap_mult.unwrap() < 1.0,
             "defrost capacity multiplier must be in (0, 1); got {:.4}",
             cap_mult.unwrap()
+        );
+
+        // A forced-Defrosting step carries the event draw: the continuous
+        // model's average extra_power_w concentrated into the event window.
+        use crate::hvac::heat_pump::defrost::DefrostCycleState;
+        eq.core.defrost_cycle_tracker.state = DefrostCycleState::Defrosting;
+        eq.core.defrost_cycle_tracker.defrost_elapsed_s = 0.0;
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&environment);
+        eq.step(&environment, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let event_extra = eq.telemetry().get(tk::DEFROST_EXTRA_POWER_W).unwrap_or(0.0);
+        assert!(
+            event_extra > 0.0,
+            "a Defrosting step must meter the event draw, got {event_extra}"
         );
     }
 

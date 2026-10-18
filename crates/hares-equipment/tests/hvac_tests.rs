@@ -2336,111 +2336,136 @@ fn defrost_discrete_cycle_returns_to_accumulating() {
 }
 
 #[test]
-fn defrost_discrete_peak_power_exceeds_continuous_average() {
-    // During ReverseCycle defrost, the compressor draws power at a different EIR.
-    // The discrete model produces peak instantaneous power that exceeds what the
-    // continuous model would produce as an averaged value for the same timestep.
-    // We verify by comparing the Defrosting-step electric_kw against the
-    // continuous model's defrost_time_fraction-weighted average.
-    let cfg = EquipmentConfig::from_typed(
-        "ashp_defrost_peak_power".to_string(),
+fn defrost_event_draw_exceeds_the_continuous_average_defrost_power() {
+    // The discrete event concentrates the continuous model's average defrost
+    // power into the event window (the draw is that average divided by the
+    // duty it was averaged over): the event draw must exceed the continuous
+    // model's per-step average.
+    let typed = HeatPumpHeaterConfig {
+        reject_unknown_keys: RejectUnknownKeys,
+        common: HeatPumpCommonConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            heating_eir: Some(0.35),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: Some(0.0),
+            backup_eir: None,
+            fraction_heating_load_served: Some(1.0),
+            cooling_capacity_w: Some(8_000.0),
+            cooling_eir: Some(0.35),
+            stage_cooling_capacities_w: None,
+            stage_cooling_eirs: None,
+            fraction_cooling_load_served: Some(1.0),
+            number_of_speeds: 1,
+            is_mini_split: false,
+            shr: Some(0.75),
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            duct: DuctConfig::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            min_compressor_fraction: None,
+            eir_part_load_benefit: None,
+            er_stages: 1,
+            charge_defect_ratio: None,
+            ..Default::default()
+        },
+        hp_lockout_temp_c: None,
+        er_lockout_temp_c: None,
+        max_oat_supplemental_c: None,
+        er_setpoint_offset_c: None,
+        er_hard_lockout_time_s: None,
+        heating_shr: None,
+        capacity_ratio_at_17f: None,
+        defrost: DefrostConfig::default(),
+    };
+
+    let registry = EquipmentRegistry::new();
+
+    // Continuous-alone run: the per-step average defrost power.
+    let continuous_cfg = EquipmentConfig::from_typed(
+        "ashp_defrost_peak_power_continuous".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            reject_unknown_keys: RejectUnknownKeys,
-            common: HeatPumpCommonConfig {
-                equipment_id: None,
-                zone_id: Some(1),
-                heating_capacity_w: Some(10_000.0),
-                heating_eir: Some(0.35),
-                stage_heating_capacities_w: None,
-                stage_heating_eirs: None,
-                backup_fuel: None,
-                backup_capacity_w: Some(0.0),
-                backup_eir: None,
-                fraction_heating_load_served: Some(1.0),
-                cooling_capacity_w: Some(8_000.0),
-                cooling_eir: Some(0.35),
-                stage_cooling_capacities_w: None,
-                stage_cooling_eirs: None,
-                fraction_cooling_load_served: Some(1.0),
-                number_of_speeds: 1,
-                is_mini_split: false,
-                shr: Some(0.75),
-                fan_power_w: Some(0.0),
-                fan_power_w_per_cfm: None,
-                airflow_m3_s_per_w: None,
-                setpoint: HvacSetpointConfig::default(),
-                hysteresis_c: None,
-                duct: DuctConfig::default(),
-                biquadratic_x1_min: None,
-                biquadratic_x1_max: None,
-                biquadratic_x2_min: None,
-                biquadratic_x2_max: None,
-                ff_min: None,
-                ff_max: None,
-                plf_min: None,
-                plf_max: None,
-                min_compressor_fraction: None,
-                eir_part_load_benefit: None,
-                er_stages: 1,
-                charge_defect_ratio: None,
-                ..Default::default()
+            defrost: DefrostConfig {
+                defrost_discrete_cycle: false,
+                ..DefrostConfig::default()
             },
-            hp_lockout_temp_c: None,
-            er_lockout_temp_c: None,
-            max_oat_supplemental_c: None,
-            er_setpoint_offset_c: None,
-            er_hard_lockout_time_s: None,
-            heating_shr: None,
-            capacity_ratio_at_17f: None,
-            defrost: DefrostConfig::default(),
+            ..typed.clone()
         },
     )
     .unwrap();
-
-    let registry = EquipmentRegistry::new();
-    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_defrost_peak_power".to_string(),
+        "ASHP Heater".to_string(),
+        typed,
+    )
+    .unwrap();
 
     let mut env = env_with_zone_temp(18.0);
     env.weather.outdoor_temp_c = -5.0;
     env.weather.outdoor_humidity_ratio = 0.005;
     env.weather.outdoor_wet_bulb_c = -6.0;
-    eq.init(&cfg, &env).unwrap();
-
-    let mut ports = ports_for_zone1();
     let dt = Duration::from_secs(60);
 
-    // Collect first-step (continuous model) power as baseline for comparison.
-    // The Accumulating step uses the continuous defrost multiplier.
-    eq.update_control(&env);
-    eq.step(&env, dt, &mut ports).unwrap();
-    let accumulating_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-    let defrost_time_frac = eq.telemetry().get(tk::DEFROST_TIME_FRACTION).unwrap_or(0.0);
+    let mut continuous_eq = registry
+        .create("ASHP Heater", continuous_cfg.clone())
+        .unwrap();
+    continuous_eq.init(&continuous_cfg, &env).unwrap();
+    let mut ports_c = ports_for_zone1();
+    continuous_eq.update_control(&env);
+    continuous_eq.step(&env, dt, &mut ports_c).unwrap();
+    let continuous_extra_w = continuous_eq
+        .telemetry()
+        .get(tk::DEFROST_EXTRA_POWER_W)
+        .unwrap_or(0.0);
+    assert!(
+        continuous_extra_w > 0.0,
+        "the continuous model must meter defrost power at -5°C"
+    );
 
-    // The continuous model's average power for a timestep with defrost is
-    // lower than the discrete model's peak during Defrosting because the
-    // continuous model spreads the penalty. We verify this by running until
-    // Defrosting and checking that peak power exceeds the continuous average.
-    let mut defrosting_kw = None;
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    eq.init(&cfg, &env).unwrap();
+
+    // Run until Defrosting and read the event draw.
+    let mut defrosting_extra_w = None;
     for _ in 0..200 {
+        let mut ports = ports_for_zone1();
         eq.update_control(&env);
         eq.step(&env, dt, &mut ports).unwrap();
         let cycle_state = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0);
         if cycle_state == 1.0 {
-            defrosting_kw = Some(eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0));
+            defrosting_extra_w = Some(eq.telemetry().get(tk::DEFROST_EXTRA_POWER_W).unwrap_or(0.0));
             break;
         }
     }
 
-    let peak_kw = defrosting_kw.expect("must reach Defrosting state within 200 steps");
-    // The continuous model estimates average power = base_power * power_multiplier + extra.
-    // The discrete model applies this at full intensity. Peak must exceed the
-    // continuous average by a meaningful margin.
-    // A conservative check: peak > accumulating_step_power (which has the continuous penalty applied).
+    let event_extra_w = defrosting_extra_w.expect("must reach Defrosting state within 200 steps");
+    // The event draw is the continuous average concentrated into the event
+    // window: it must exceed the per-step average (the concentration is
+    // 1/duty, about 5x here) while staying in the same order of magnitude.
     assert!(
-        peak_kw > accumulating_kw,
-        "discrete defrost peak power ({peak_kw:.3} kW) must exceed continuous-averaged \
-         power ({accumulating_kw:.3} kW) at defrost_time_fraction={defrost_time_frac:.4}"
+        event_extra_w > continuous_extra_w * 2.0,
+        "the discrete event draw ({event_extra_w:.1} W) must exceed the continuous \
+         model's per-step average defrost power ({continuous_extra_w:.1} W): the event \
+         concentrates the average by 1/duty"
+    );
+    assert!(
+        event_extra_w < continuous_extra_w * 50.0,
+        "the discrete event draw ({event_extra_w:.1} W) must stay within one order \
+         of magnitude plus the duty of the continuous average ({continuous_extra_w:.1} W)"
     );
 }
 
@@ -3413,6 +3438,8 @@ fn defrost_typed_config_propagates_to_heater_init() {
                 defrost_power_w: 0.0,
                 defrost_eir_coeffs: None,
                 resistive_defrost_capacity_w: 0.0,
+                resistive_defrost_zone_fraction: 0.0,
+                defrost_discrete_cycle: true,
             },
         },
     )
@@ -3526,6 +3553,8 @@ fn defrost_config_serde_round_trip() {
             defrost_power_w: 150.0,
             defrost_eir_coeffs: Some([1.0, 0.02, -0.001, 0.005, -0.0003, 0.0001]),
             resistive_defrost_capacity_w: 0.0,
+            resistive_defrost_zone_fraction: 0.0,
+            defrost_discrete_cycle: true,
         },
         ..Default::default()
     };

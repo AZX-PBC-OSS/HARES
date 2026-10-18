@@ -2035,3 +2035,253 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
     );
     assert!(cold_step.sensible_w > 0.0);
 }
+
+// ---------------------------------------------------------------------------
+// Defrost model consolidation: one model owns the penalty.
+//
+// The discrete frost cycle (DefrostCycleTracker) resolves the continuous
+// EnergyPlus ERM 26.1 on-demand model into explicit events. Its documented
+// contract (defrost.rs) is "the same average time-in-defrost as the
+// continuous model": the FSM's Defrosting fraction must equal the continuous
+// time fraction, and the continuous model's average multipliers must not be
+// applied on top of the FSM's phases.
+//
+// The probe conditions mirror the composed-run probe: an ASHP held at a
+// static operating point (constant environment, always calling, no fan, no
+// backup) for 48 h at 60 s steps, 1 C and RH 85 percent (humidity ratio
+// 0.003447), with a 10 h warm-up so the frost EWMA reaches steady state.
+// ---------------------------------------------------------------------------
+
+use hares_equipment::hvac::heat_pump::constants::DEFROST_CAPACITY_MULTIPLIER_BASE;
+
+/// Static winter environment at 1 C / RH 85 percent for the defrost probe.
+fn defrost_probe_env() -> EnvironmentState {
+    let mut env = make_env(18.0, 1.0, 0.3);
+    env.weather.outdoor_humidity_ratio = 0.003_447;
+    env.weather.outdoor_wet_bulb_c = 0.3;
+    env.time_res = chrono::Duration::seconds(10);
+    env
+}
+
+/// Full ASHP configuration for the defrost probe (10 kW, EIR 0.35, no backup).
+fn defrost_probe_config(defrost: DefrostConfig) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        "defrost_probe".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                backup_capacity_w: Some(0.0),
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(0.35),
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.85),
+                fan_power_w: Some(0.0),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: Some(27.0),
+                    ..Default::default()
+                },
+                er_stages: 1,
+                ..Default::default()
+            },
+            defrost,
+            ..Default::default()
+        },
+    )
+    .expect("typed ASHP config for the defrost probe")
+}
+
+struct DefrostProbeRun {
+    n_steps: usize,
+    n_warmup: usize,
+    n_defrosting: usize,
+    n_accumulating: usize,
+    /// Sum of the defrost capacity multiplier over Accumulating steps.
+    capmult_sum: f64,
+    /// Sum of the defrost extra power over Accumulating steps (W).
+    accumulating_extra_w: f64,
+    /// Sum of the defrost extra power over all measured steps (W).
+    total_extra_w: f64,
+    /// Sum of the delivered thermal output over all measured steps (W).
+    total_thermal_w: f64,
+    /// Sum of the defrost time fraction over Accumulating steps.
+    tf_sum: f64,
+    /// Sum of the defrost extra power over Defrosting steps (W).
+    defrosting_extra_w: f64,
+}
+
+impl DefrostProbeRun {
+    fn measured_steps(&self) -> usize {
+        self.n_steps - self.n_warmup
+    }
+}
+
+/// Run the defrost probe: 48 h at 10 s steps with a 100 min warm-up at a
+/// static operating point, accumulating the defrost telemetry after the
+/// warm-up. The 10 s timestep resolves the 210 s defrost event into 21 whole
+/// steps and keeps the trigger's step-boundary overshoot under half a
+/// percent of the duty; coarser steps quantize the event upward and wobble
+/// the realized duty by O(period/window).
+fn defrost_probe_run(defrost: DefrostConfig) -> DefrostProbeRun {
+    use hares_types::telemetry_keys as tk;
+
+    let env = defrost_probe_env();
+    let dt = Duration::from_secs(10);
+    let n_steps = 17_280_usize;
+    let n_warmup = 600_usize;
+
+    let registry = EquipmentRegistry::new();
+    let cfg = defrost_probe_config(defrost);
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    eq.init(&cfg, &env).unwrap();
+
+    let mut run = DefrostProbeRun {
+        n_steps,
+        n_warmup,
+        n_defrosting: 0,
+        n_accumulating: 0,
+        capmult_sum: 0.0,
+        accumulating_extra_w: 0.0,
+        total_extra_w: 0.0,
+        total_thermal_w: 0.0,
+        tf_sum: 0.0,
+        defrosting_extra_w: 0.0,
+    };
+    for step_index in 0..n_steps {
+        let mut ports = make_ports();
+        eq.update_control(&env);
+        eq.step(&env, dt, &mut ports).unwrap();
+        if step_index < n_warmup {
+            continue;
+        }
+        let tel = eq.telemetry();
+        let state = tel.get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0);
+        let extra = tel.get(tk::DEFROST_EXTRA_POWER_W).unwrap_or(0.0);
+        run.total_extra_w += extra;
+        run.total_thermal_w += tel.get("thermal_output_w").unwrap_or(0.0);
+        if state == 1.0 {
+            run.n_defrosting += 1;
+            run.defrosting_extra_w += extra;
+        } else {
+            run.n_accumulating += 1;
+            run.capmult_sum += tel.get(tk::DEFROST_CAPACITY_MULTIPLIER).unwrap_or(1.0);
+            run.accumulating_extra_w += extra;
+            run.tf_sum += tel.get(tk::DEFROST_TIME_FRACTION).unwrap_or(0.0);
+        }
+    }
+    run
+}
+
+/// The FSM's Defrosting fraction must equal the continuous model's time
+/// fraction (the documented duty). The old trigger divided the cycle duration
+/// by the time fraction while frost accumulated at dt x tf per step, so the
+/// FSM under-fired its own documented duty by about 1/tf (duty tf^2, not tf).
+#[test]
+fn defrost_fsm_duty_matches_documented_time_fraction() {
+    let run = defrost_probe_run(DefrostConfig::default());
+    assert!(
+        run.n_defrosting > 0,
+        "the discrete frost cycle must fire at 1 C / RH 85 percent for this probe to be meaningful"
+    );
+    let f_disc = run.n_defrosting as f64 / run.measured_steps() as f64;
+    let tf_avg = run.tf_sum / run.n_accumulating as f64;
+    assert!(
+        (f_disc - tf_avg).abs() < 0.05 * tf_avg,
+        "the FSM duty {f_disc:.5} must match the documented duty (the continuous \
+         time fraction {tf_avg:.5}); a trigger that under-fires stacks a second \
+         duty factor on the continuous model's own",
+    );
+}
+
+/// On Accumulating steps no continuous-model multipliers may apply on top of
+/// the frost cycle: the capacity multiplier is the bare frost derate (the
+/// duty factor belongs to the FSM's events) and no average defrost power is
+/// metered (the defrost draw belongs to the events).
+#[test]
+fn defrost_accumulating_steps_apply_the_frost_derate_once() {
+    let run = defrost_probe_run(DefrostConfig::default());
+    assert!(
+        run.n_accumulating > 0,
+        "the probe must see Accumulating steps for this pin to be meaningful"
+    );
+    let capmult_avg = run.capmult_sum / run.n_accumulating as f64;
+    assert_eq!(
+        run.accumulating_extra_w, 0.0,
+        "Accumulating steps must meter no average defrost power; the defrost \
+         draw belongs to the FSM's events, not stacked under them"
+    );
+    assert!(
+        (capmult_avg - DEFROST_CAPACITY_MULTIPLIER_BASE).abs() < 1e-9,
+        "Accumulating steps must carry the bare frost derate \
+         {DEFROST_CAPACITY_MULTIPLIER_BASE} (the duty factor is the FSM's), \
+         got {capmult_avg:.5}"
+    );
+}
+
+/// The plan's accumulated-energy pin: with the discrete frost cycle enabled,
+/// 48 h at 0-2 C / RH 85 percent delivers the same total heating energy as
+/// the continuous model alone (within 1 percent), because the FSM resolves
+/// the continuous model's average penalty into events of the same cycle
+/// average instead of stacking a second duty factor under it.
+#[test]
+fn defrost_accumulated_energy_discrete_matches_continuous() {
+    let continuous = defrost_probe_run(DefrostConfig {
+        defrost_discrete_cycle: false,
+        ..DefrostConfig::default()
+    });
+    let discrete = defrost_probe_run(DefrostConfig::default());
+
+    assert!(
+        continuous.n_defrosting == 0,
+        "the continuous run's tracker must stay dormant"
+    );
+    assert!(
+        discrete.n_defrosting > 0,
+        "the discrete run's frost cycle must fire at 1 C / RH 85 percent"
+    );
+
+    let heat_ratio = discrete.total_thermal_w / continuous.total_thermal_w;
+    assert!(
+        (heat_ratio - 1.0).abs() < 0.01,
+        "the discrete cycle's delivered heat must match the continuous model \
+         alone within 1 percent, got a ratio of {heat_ratio:.4} \
+         (discrete {:.1} W vs continuous {:.1} W over {} steps)",
+        discrete.total_thermal_w,
+        continuous.total_thermal_w,
+        discrete.measured_steps()
+    );
+}
+
+/// The discrete run's defrost-electric integral must equal the continuous
+/// model's extra_power_w integral (within 1 percent): the event draw is the
+/// continuous average concentrated into the event window.
+#[test]
+fn defrost_discrete_defrost_electric_matches_continuous_integral() {
+    let continuous = defrost_probe_run(DefrostConfig {
+        defrost_discrete_cycle: false,
+        ..DefrostConfig::default()
+    });
+    let discrete = defrost_probe_run(DefrostConfig::default());
+
+    assert!(
+        continuous.total_extra_w > 0.0,
+        "the continuous model must meter defrost power at these conditions"
+    );
+    let ratio = discrete.total_extra_w / continuous.total_extra_w;
+    assert!(
+        (ratio - 1.0).abs() < 0.01,
+        "the discrete cycle's defrost-electric integral must match the continuous \
+         model's extra_power_w integral within 1 percent, got a ratio of {ratio:.4} \
+         (discrete {:.1} W vs continuous {:.1} W)",
+        discrete.total_extra_w,
+        continuous.total_extra_w
+    );
+}

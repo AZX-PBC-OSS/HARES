@@ -674,6 +674,19 @@ Maturin builds against the Python in the active virtualenv. Verify with
 Every number a commit moves is recorded here: what moved, why, and the
 golden fixtures re-captured.
 
+- 2026-10-17: the heat pump's defrost penalty is applied by one model
+  selected by the defrost config: with the discrete frost cycle (the
+  default) `evaluate_defrost` feeds only the frost accumulator and the
+  cycle's phases own the per-step multipliers (the Accumulating phase the
+  bare frost derate without the duty factor, the Defrosting events the
+  continuous average concentrated into the event window), and the cycle
+  trigger honors its documented duty (`cycle_duration_s * (1 - tf)`
+  frost-seconds, the EWMA persisting across events). The resistive
+  defrost element's destination is one shared split (the configured zone
+  fraction, default 0, the remainder frost-melt loss) across both paths.
+  Re-captured: `fleet_mixed_offset`, `leap_year_february_900s`,
+  `weather_wrap_900s`, `full_year_900s_dst`.
+
 - 2026-10-08: the wet appliances' daily hot-water volume and annual energy
   follow the OpenStudio-HPXML v1.12.0
   `calc_clothes_washer_energy_gpd` / `calc_dishwasher_energy_gpd` cycles

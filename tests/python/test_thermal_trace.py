@@ -333,16 +333,24 @@ def test_output_columns_present(
 # inclusive) hold each measured pair so the reasons cannot go stale.
 # ---------------------------------------------------------------------------
 
-TRACE_WORST_6H_C = 2.0452
-TRACE_MEAN_48H_C = 0.3988
+TRACE_WORST_6H_C = 2.0090
+TRACE_MEAN_48H_C = 0.3940
 TRACE_HEATING_OCHRE_KWH = 47.052
-TRACE_HEATING_HARES_KWH = 31.3747
+TRACE_HEATING_HARES_KWH = 28.9580
 # OVERNIGHT_WORST_C updated by the opaque-R precedence row (the
 # numeric-fixes ledger's opaque-R precedence entry, 2026-10-16): the declared assembly R now sets the
 # LUT layers' resistance and the overnight divergence tightened,
 # 1.3706 to 1.2309 C (the mean moved inside its margin, 0.3823 to 0.3753).
-OVERNIGHT_WORST_C = 1.2309
-OVERNIGHT_MEAN_C = 0.3823
+# Re-captured 2026-10-17 for the defrost consolidation: the penalty is
+# applied by one model (the discrete cycle's events concentrate the
+# continuous average and the defrost draw replaces the heating draw during
+# the events instead of stacking under it), so the ASHP tracks OCHRE's
+# continuous model more closely and the overnight divergence tightened
+# 1.2309 to 0.7800 C (the mean 0.3823 to 0.3680), the 48 h heating
+# 31.3747 to 28.9580 kWh (OCHRE's own 47.052 kWh unchanged), and the
+# worst-6 h and mean-48 h divergences re-recorded at their new values.
+OVERNIGHT_WORST_C = 0.7800
+OVERNIGHT_MEAN_C = 0.3680
 SOLAR_MEAN_RATIO = 0.9885
 SOLAR_WORST_REL_ERR = 0.0918
 

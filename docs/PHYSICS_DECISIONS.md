@@ -657,3 +657,46 @@ from the RFC 3339 strings to the naive local timestamps in the
 `aggregate` and `covered_weight` products (the `homes` and
 `fleet_report` products carry no `Time` column and are unchanged); no
 energy, power or weather number moves.
+
+## The defrost penalty is applied by one model
+
+A heat pump's defrost penalty exists in the engine as two models of the
+same physics: the continuous EnergyPlus ERM 26.1 on-demand model (the
+capacity multiplier `0.875 * (1 - tf)`, the melt term, the averaged
+defrost power, OCHRE's implementation, `HVAC.py:1141-1166`) and a
+HARES-specific discrete frost cycle that resolves the same penalty into
+explicit events (a zero-capacity defrost of `cycle_duration_s` firing
+once per `cycle_duration_s / tf` seconds). Both were applied at once: the
+continuous multipliers on every frost-condition step and the
+full-intensity events on top, so a cold-climate ASHP carried the penalty
+twice (the composed run delivered about one point of capacity less than
+the continuous model alone at near-freezing conditions and metered about
+2.1x the continuous model's defrost electric, because the discrete
+trigger also under-fired its own documented duty).
+
+The rule now: the discrete frost cycle owns the penalty and the
+continuous model feeds only the frost accumulator. The cycle's
+Accumulating phase carries the bare frost derate (0.875) and the melt
+term without the continuous model's duty factor - the duty is the cycle's
+own events - and its Defrosting phase draws the continuous average
+concentrated into the event window (the draw is `extra_power_w / tf`), so
+the cycle's averages reproduce the continuous model's: the discrete and
+continuous-alone runs deliver the same heat within 1 percent and meter
+the same defrost-electric integral. The cycle trigger honors its
+documented duty: the trigger fires at
+`cycle_duration_s * (1 - ewma_time_fraction)` frost-seconds, which gives
+one `cycle_duration_s` event per `cycle_duration_s / tf` seconds (duty
+tf), and the EWMA persists across events so no cycle re-ramps the
+threshold. Disabling the discrete cycle (`defrost_discrete_cycle: false`)
+selects the continuous model alone.
+
+OCHRE runs the continuous model only. The discrete cycle remains a HARES
+extension (the docs call the resolution out); its averaged behavior is
+now the continuous model's within its step resolution, and at timesteps
+coarse against the 210 s event the event occupies whole steps, which
+quantizes the realized duty upward. Direction of the delta: the
+ASHP-bearing goldens re-captured (`fleet_mixed_offset`,
+`leap_year_february_900s`, `weather_wrap_900s`, `full_year_900s_dst`);
+the defrost electric integral fell to the continuous model's own, and the
+48 h OCHRE thermal trace's heating fell 31.37 to 28.96 kWh with the
+overnight divergence against OCHRE tightening 1.23 to 0.78 C.

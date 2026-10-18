@@ -3969,3 +3969,38 @@ setpoint column from a July start: a January run's compressor outdoor
 lockout never evaluates the cooler's control, and the dwelling-level
 scheduled-cooling read reports the first HVAC unit's telemetry, a
 heating-only unit on this fixture).
+
+### Hardening, 2026-10-17, defrost consolidation (branch `row/hw1-defrost-boiler`)
+
+Load average at write time: 17.24 (1 min), three hardening agents building
+concurrently at two jobs each. Command: the defrost probe's accumulated-energy
+runs (48 h at 10 s steps, 1 C / RH 85 percent, static operating point, 48 h
+measured after warm-up; the probe test in `crates/hares-equipment/tests/hvac_parity.rs`),
+then `frame_golden compare-all` (default and dst feature sets).
+
+- Discrete-FSM duty (the Defrosting-step fraction): 0.01053 to 0.09442, the
+  continuous model's time fraction at these conditions 0.09395. Before: the
+  trigger divided the cycle duration by the time fraction while frost
+  accumulated at dt x tf per step, so the FSM fired at about tf^2 of its
+  documented duty.
+- Defrost-electric integral, discrete run over continuous-alone run: 2.11x
+  before (the full-intensity events stacked under the continuous average's
+  own metering), 1.0050 after (the event draw is the continuous average
+  concentrated into the event window).
+- Delivered heat, discrete run over continuous-alone run: 1.0003 after (the
+  plan's 1 percent band).
+- Resistive-defrost destination: the discrete event's element heat went 100
+  percent to the zone; after, the configurable zone fraction (default 0)
+  and the remainder is frost-melt loss.
+- Goldens: `fleet_mixed_offset`, `leap_year_february_900s`,
+  `weather_wrap_900s` and `full_year_900s_dst` moved (the ASHP-bearing
+  fixtures: the corrected duty and the single application), re-captured
+  twice byte-identical. `crates/hares-core/tests/fixtures/diagnostics_cz4a.csv`
+  re-pinned (the run's zone temperature diverges from row 6, the ASHP's
+  first-on step, 17.7979 to 17.7990 C at that row).
+- The 48 h OCHRE thermal trace (1-minute steps, BEopt example, May 5 2019):
+  HARES heating 31.3747 to 28.9580 kWh (OCHRE's own 47.052 kWh unchanged),
+  the overnight worst divergence against OCHRE 1.2309 to 0.7800 C (the mean
+  0.3823 to 0.3680 C): the discrete cycle's events concentrate the
+  continuous average instead of stacking a second duty factor under it, so
+  the ASHP tracks OCHRE's continuous model more closely.

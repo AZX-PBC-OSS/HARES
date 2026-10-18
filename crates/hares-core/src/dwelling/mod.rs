@@ -21041,8 +21041,9 @@ latent_gain_fraction = 0.08
     }
 
     /// The minimum-day-count test's candidate is the leap fixture (it
-    /// converges on day 2 under the defaults): min_days = 3 runs exactly
-    /// three days.
+    /// converges on day 4 under the defaults: the corrected defrost duty's
+    /// zero-capacity events lengthen the ASHP's warm-up transient):
+    /// min_days = 5 runs exactly five days.
     #[test]
     fn warmup_min_days_is_honoured() {
         let default_days = {
@@ -21060,20 +21061,20 @@ latent_gain_fraction = 0.08
                     ..
                 } => {
                     assert!(converged);
-                    assert_eq!(*days_run, 2, "the leap candidate converges on day 2");
+                    assert_eq!(*days_run, 4, "the leap candidate converges on day 4");
                     *days_run
                 }
                 other => panic!("expected Ran, got {other:?}"),
             }
         };
-        assert_eq!(default_days, 2);
+        assert_eq!(default_days, 4);
 
         let config = parity_candidate(
             "cz4a_ashp_hpwh",
             "2024-02-27T00:00:00-07:00",
             900,
             hares_io::Warmup::Converge(hares_io::WarmupConfig {
-                min_days: 3,
+                min_days: 5,
                 ..hares_io::WarmupConfig::default()
             }),
         );
@@ -21084,8 +21085,8 @@ latent_gain_fraction = 0.08
                 converged,
                 ..
             } => {
-                assert_eq!(*days_run, 3, "min_days = 3 runs exactly three days");
-                assert!(converged, "day 3's checks pass");
+                assert_eq!(*days_run, 5, "min_days = 5 runs exactly five days");
+                assert!(converged, "day 5's checks pass");
             }
             other => panic!("expected Ran, got {other:?}"),
         }

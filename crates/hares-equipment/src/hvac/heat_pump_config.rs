@@ -797,6 +797,26 @@ impl hares_types::DescribeFields for HeatPumpHeaterConfig {
                     ..Default::default()
                 },
             ),
+            (
+                "resistive_defrost_zone_fraction",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the resistive defrost element's share of heat reaching the zone; \
+                         the remainder is frost-melt loss outdoors",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_discrete_cycle",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "whether the discrete frost cycle resolves the defrost penalty \
+                         into explicit events owning the per-step multipliers",
+                    ),
+                    ..Default::default()
+                },
+            ),
         ])
     }
 }

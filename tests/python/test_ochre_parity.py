@@ -361,7 +361,10 @@ def test_parity(
 #   40.6 C delivery temperature is 8.1 kWh of delivered enthalpy, plus the
 #   tank's standby and the appliances' draws (whose daily volumes follow
 #   OpenStudio-HPXML's cycles rule, not OCHRE's older equations).
-# - HVAC Heating: HARES 32.504 kWh against OCHRE's 30.997 kWh (+4.9%). The
+# - HVAC Heating: HARES 28.070 kWh against OCHRE's 30.997 kWh (-9.4%). The
+#   defrost penalty is applied by one model (the discrete cycle resolves
+#   the continuous average into events, and the defrost draw replaces the
+#   heating draw during the events instead of stacking under it), and the
 #   two envelope models put the same constructions' capacitance in
 #   different places (DIVERGENCES D-012's class), so the thermostat's
 #   duty integrates differently over a day.
@@ -372,18 +375,27 @@ def test_parity(
 #   adjusted bedroom count; the columns' shapes are the same schedule.
 # ---------------------------------------------------------------------------
 
-# Measured 2026-10-08, both sides seeded 42 (kWh).
+# Measured 2026-10-08, both sides seeded 42 (kWh); the HVAC and Total
+# HARES records re-captured 2026-10-17 for the defrost consolidation (the
+# penalty applied by one model: the discrete cycle's events concentrate the
+# continuous average and the defrost draw replaces the heating draw during
+# the events, so the heating draw fell 32.5037 to 28.0696 kWh and the total
+# 55.0445 to 50.6104 kWh).
 PARITY_24H_HEATING_OCHRE_KWH = 30.9974
-PARITY_24H_HEATING_HARES_KWH = 32.5037
+PARITY_24H_HEATING_HARES_KWH = 28.0696
 PARITY_24H_WATER_HEATING_OCHRE_KWH = 1.0083
 PARITY_24H_WATER_HEATING_HARES_KWH = 11.5501
 PARITY_24H_TOTAL_OCHRE_KWH = 43.0500
-PARITY_24H_TOTAL_HARES_KWH = 55.0445
+PARITY_24H_TOTAL_HARES_KWH = 50.6104
 
 PARITY_24H_XFAILS: dict[str, str] = {
     "HVAC Heating Electric Power (kW)": (
-        "OCHRE 30.997 kWh against HARES 32.504 kWh over 24 h (+4.9%): the two "
-        "envelope models' capacitance placement differs (DIVERGENCES D-012's class)"
+        "OCHRE 30.997 kWh against HARES 28.070 kWh over 24 h (-9.4%): the "
+        "defrost penalty is applied by one model (the discrete cycle's events "
+        "concentrate the continuous average, and the defrost draw replaces "
+        "the heating draw during the events instead of stacking under it) "
+        "and the two envelope models' capacitance placement differs "
+        "(DIVERGENCES D-012's class)"
     ),
     "Water Heating Electric Power (kW)": (
         "OCHRE 1.008 kWh against HARES 11.550 kWh over 24 h (11.5x): OCHRE's tank "
@@ -398,7 +410,7 @@ PARITY_24H_XFAILS: dict[str, str] = {
         "adjusted bedroom count"
     ),
     "Total Electric Power (kW)": (
-        "OCHRE 43.050 kWh against HARES 55.044 kWh over 24 h: the sum of the "
+        "OCHRE 43.050 kWh against HARES 50.610 kWh over 24 h: the sum of the "
         "three declared end-use divergences above"
     ),
 }

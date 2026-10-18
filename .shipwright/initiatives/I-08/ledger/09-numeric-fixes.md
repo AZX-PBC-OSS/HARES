@@ -4301,3 +4301,113 @@ defaults, the F-002 flake filing, and the dead `draws_dhw_load`
 parameter deleted. The goldens re-captured for the changed volumes;
 identical at the fold gates (nextest 7537 at the fold, 7575 at the
 final head with the later rows).
+
+## Hardening 1: the defrost penalty is applied by one model
+
+**Kind:** numeric fix (the post-initiative hardening phase's first
+equipment entry: the defrost consolidation, with the discrete cycle's
+trigger defect and the resistive destination defect fixed in the same
+path).
+
+**Problem:** the heat pump's defrost penalty was applied twice. The
+discrete frost cycle's tracker is unconditionally active
+(`heater.rs:664`, advanced at `:1360`), and while the tracker
+Accumulates, the continuous model still multiplies capacity by
+`0.875*(1-tf)` and adds `extra_power_w` (`heater.rs:1927-2036` at the
+parent); while the tracker Defrosts, the FSM's full-intensity override
+zeroes capacity and draws the defrost power. The tracker's own trigger
+also under-fired its documented duty: frost accumulates at `dt * tf` per
+step (`defrost.rs:300`) but the trigger compared the accumulator against
+`cycle_duration_s / ewma_tf` (`defrost.rs:300-302`), so the FSM fired
+about `tf^2` of its documented duty (the docstring at `defrost.rs:229-233`
+claims the same average time-in-defrost as the continuous model, whose
+duty is tf). And the resistive-defrost destination disagreed between the
+paths: the discrete event delivered 100 percent of the element's heat to
+the zone (`heater.rs:2095-2115`), the continuous path 0 percent
+(`defrost.rs:560-565`). Measured at a static operating point (48 h at
+10 s steps, 1 C / RH 85 percent): the discrete FSM fired at duty 0.01053
+against the continuous time fraction 0.09395, the composed defrost
+electric ran 2.11x the continuous model's integral, and the composed
+heat ran about one point of capacity under the continuous model alone.
+The parity test only asserted a positive average output
+(`tests/hvac_parity.rs`), which cannot see any of this.
+
+**Change:** one defrost code path selected by `DefrostConfig`. The new
+`defrost_discrete_cycle` flag (default true, the status quo) selects the
+discrete frost cycle: `evaluate_defrost` then feeds only the frost
+accumulator and the cycle's phases own the per-step multipliers, applied
+exactly once per step. The Accumulating phase applies the bare frost
+derate `0.875` and the melt term without the continuous model's duty
+factor (the duty is the cycle's own events; stacking the duty factor
+here is the double application), meters no average defrost power, and
+keeps the frost-conditions time fraction for the defrost-recovery latent
+divergence (D-030). The Defrosting event draws the continuous average
+concentrated into the event window (`extra_power_w / tf`), so the
+defrost-electric integral equals the continuous model's; the drawn-down
+reverse-cycle event draw replaces the E+ full-rated-shaped draw the
+discrete branch invented (the OnDemand model's defrost draw is
+`0.1528` per unit of post-defrost capacity, not the rated capacity at
+unit EIR). The trigger fires at
+`cycle_duration_s * (1 - ewma_time_fraction)` frost-seconds: the
+accumulation phase then lasts `cycle_duration_s * (1 - tf) / tf` seconds
+and one `cycle_duration_s` event per `cycle_duration_s / tf` cycle gives
+the documented duty tf exactly (verified over many cycles). The EWMA
+persists across the Defrosting-to-Accumulating transition (resetting it
+per event re-ramped the threshold and re-under-fired the duty); frost
+and elapsed time still reset, and the warm-OAT frost decay still clears
+a hiatus. The resistive destination is decided once:
+`resistive_defrost_destination(element_w, zone_fraction)` (in
+`defrost.rs`, shared by both paths) routes the new
+`resistive_defrost_zone_fraction` (default 0, [0,1]-validated) of the
+element's heat to the zone and the remainder is frost-melt loss; the
+continuous Resistive path carries its zone share as a negative
+`q_defrost_w` in the same helper. `defrost_discrete_cycle: false`
+selects the continuous model alone, and the tracker stays dormant.
+
+**Acceptance test:** `defrost_accumulated_energy_discrete_matches_continuous`
+(`crates/hares-equipment/tests/hvac_parity.rs`): 48 h at 1 C / RH 85
+percent (humidity ratio 0.003447), 10 s steps, a 10 s-step warm-up, a
+static always-calling operating point with no fan and no backup: the
+discrete run's delivered heat equals the continuous-alone run's within 1
+percent (measured 1.0003). `defrost_discrete_defrost_electric_matches_continuous_integral`:
+the discrete run's defrost-electric integral equals the continuous
+model's `extra_power_w` integral within 1 percent (measured 1.0050).
+`defrost_fsm_duty_matches_documented_time_fraction`: the FSM's
+Defrosting-step fraction equals the continuous time fraction within 5
+percent (measured 0.09442 against 0.09395).
+`defrost_accumulating_steps_apply_the_frost_derate_once`: Accumulating
+steps meter no average defrost power and carry the bare 0.875 multiplier.
+Unit tests in `defrost.rs`: the duty over many cycles, the trigger
+timing under an oscillating time fraction, the destination split, and
+the continuous Resistive zone share as a negative q. RED first: the duty
+(0.01053), the stacked average defrost power on Accumulating steps
+(209159 W summed), and the boiler-independent heater tests at the parent.
+
+**Verification:** the defrost probe numbers above; `frame_golden
+compare-all` twice byte-identical on the default and dst feature sets,
+`fleet_mixed_offset`, `leap_year_february_900s`, `weather_wrap_900s` and
+`full_year_900s_dst` re-captured deliberately (the ASHP-bearing
+fixtures; the causes in this entry and in `docs/python.md`'s Numeric
+changes list); the diagnostics pin `crates/hares-core/tests/fixtures/diagnostics_cz4a.csv`
+re-pinned with the cause; the 48 h OCHRE thermal trace's records
+re-captured (heating 31.3747 to 28.9580 kWh, the overnight worst
+divergence 1.2309 to 0.7800 C, both toward OCHRE); the warm-up
+convergence test's leap candidate re-pinned (day 2 to day 4: the
+corrected duty's zero-capacity events lengthen the ASHP's warm-up
+transient); fmt, clippy `--workspace --all-targets --all-features -D
+warnings` clean; nextest `--workspace --all-features -j 2` 8158/8158 (8
+skipped); `pytest -m ''` and pyright green on the wave's combined tree.
+
+**Commit:** `fix: the defrost penalty is applied by one model, not stacked`
+
+**Dependencies:** none outside the equipment crate.
+
+**State:** landed on `row/hw1-defrost-boiler` (worktree
+`hw1-defrost-boiler`, cut from `7e78923d`). The step-quantization note:
+at timesteps coarse against the 210 s event the event occupies whole
+steps and the realized duty quantizes upward (the discrete model's
+resolution limit; the acceptance tests run at 10 s steps where the event
+resolves). The defrost EIR curve coefficients now feature in the discrete
+event draw only through the Timed control's continuous model (the
+OnDemand model has no curve input, matching OCHRE), where the old
+discrete branch read them for both controls.
