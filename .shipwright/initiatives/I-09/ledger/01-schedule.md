@@ -19,7 +19,7 @@ Columns: # | axis | row | title | size | spec | depends on | state
 | # | axis | row | title | size | spec | depends on | state |
 |---|---|---|---|---|---|---|---|
 | 1 | E | E2 | the whole-step allocation assertion | S | 12-axis-d-e.md | none | draft |
-| 2 | E | E5 | CHANGELOG and the version contract | S | 12-axis-d-e.md | none | draft |
+| 2 | E | E5 | CHANGELOG and the version contract | S | 12-axis-d-e.md | none | review |
 | 3 | E | E6 | the submodule and reproducibility posture | S | 12-axis-d-e.md | none | draft |
 | 4 | E | E3 | the checkpoint bench and the CI bench gate set | S | 12-axis-d-e.md | none | draft |
 | 5 | A | A8 | the HELICS wheel-workaround watchdog | S | 10-axis-a-cosim.md | none | draft |

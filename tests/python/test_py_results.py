@@ -405,9 +405,9 @@ def test_stubs_cover_every_binding() -> None:
 
 def test_stub_changes_are_listed() -> None:
     """Every name added to or removed from _hares.pyi against the committed
-    ebdb1a17 stub, compared by ast, appears in the "Changes in this
-    release" section, and every name the section lists as added or removed
-    is such a name."""
+    ebdb1a17 stub, compared by ast, appears in the changelog's "Changes in
+    this release" section, and every name the section lists as added or
+    removed is such a name."""
     baseline = ast.parse((ROOT / "tests/python/fixtures/_hares_ebdb1a17.pyi").read_text())
     current = ast.parse((ROOT / "python/hares/_hares.pyi").read_text())
 
@@ -419,8 +419,8 @@ def test_stub_changes_are_listed() -> None:
     added = current_names - baseline_names
     removed = baseline_names - current_names
 
-    docs = (ROOT / "docs/python.md").read_text()
-    section = docs.split("## Changes in this release", 1)[1]
+    changelog = (ROOT / "CHANGELOG.md").read_text()
+    section = changelog.split("## Changes in this release", 1)[1]
     listed = set()
     for line in section.splitlines():
         stripped = line.strip(" -*")
