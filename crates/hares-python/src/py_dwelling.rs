@@ -2596,8 +2596,6 @@ fn reentry_refusal() -> PyErr {
     to_py_err(reentry_hares_error())
 }
 
-/// The boundary kind's spelling in the read-back dict: the plan's kind
-/// names, lowercased, the parser's `Other` kind carrying its own text.
 /// The shielding class's provenance label, in the form the read-back
 /// records (the class's own spelling).
 fn shielding_label(shielding: hares_physics::infiltration::ShieldingClass) -> String {
@@ -2608,6 +2606,8 @@ fn shielding_label(shielding: hares_physics::infiltration::ShieldingClass) -> St
     }
 }
 
+/// The boundary kind's spelling in the read-back dict: the plan's kind
+/// names, lowercased, the parser's `Other` kind carrying its own text.
 fn boundary_kind_label(kind: &hares_io::hpxml::BoundaryType) -> String {
     match kind {
         hares_io::hpxml::BoundaryType::Wall => "wall".to_string(),
