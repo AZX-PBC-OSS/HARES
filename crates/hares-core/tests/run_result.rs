@@ -344,17 +344,19 @@ fn gym_drain_sees_warnings_past_run_capacity() {
     }
 
     let result = dwelling.finish().expect("finish runs");
-    // The fixture's two construction-time envelope warnings precede the
-    // actor's 1 100 rejected-signal warnings: the record keeps its first
-    // 1 000 and counts 102 dropped past it. The per-step drains above are
-    // the pinned semantics: every step's warning reached its step's drain,
-    // the 1 001st included.
+    // The fixture's one construction-time envelope warning (the site
+    // type's; the shielding's warning carries the resolved default's
+    // class and the synthetic building names no facility type for the
+    // default to read) precedes the actor's 1 100 rejected-signal
+    // warnings: the record keeps its first 1 000 and counts 101 dropped
+    // past it. The per-step drains above are the pinned semantics: every
+    // step's warning reached its step's drain, the 1 001st included.
     assert_eq!(
         result.warnings.len(),
         1_000,
         "the run record holds its first 1 000 warnings"
     );
-    assert_eq!(result.warnings_dropped, 102, "the drop count is the rest");
+    assert_eq!(result.warnings_dropped, 101, "the drop count is the rest");
 }
 
 /// `engine_run_preserves_invariant_violation_type` (through the engine

@@ -798,6 +798,11 @@ pub(crate) struct SolverBundle {
     /// build profile already makes, read by `Dwelling::resolved_model` and
     /// `DwellingBlueprint::validate`.
     pub resolved_envelope: crate::resolved::ResolvedEnvelope,
+    /// The infiltration read-back: the measurement the AIM-2 model ran
+    /// from and the evaluated defaults (the height and flue the model ran
+    /// at, the shielding every method read), `None` where the declared
+    /// input stood.
+    pub resolved_infiltration: crate::resolved::ResolvedInfiltration,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     pub envelope_diagnostics: EnvelopeDiagnostics,
 }
@@ -1381,6 +1386,30 @@ pub(crate) fn build_default_solvers(
         }
     }
 
+    // --- Site-level terrain and shielding ---
+    // These drive terrain-corrected wind coefficients for all ELA
+    // infiltration (the conditioned zone uses them via
+    // aim2_coefficients_from_ach50; attic and garage via the
+    // parameterized convenience functions). A missing site type or
+    // shielding takes OS-HPXML's default;
+    // `conversions::envelope_input_warnings` reports it. The parser rejects
+    // any value outside each element's allowed list. The shielding
+    // resolves where a method consumes it: a dwelling whose infiltration
+    // reads no shielding (a constant ACH) never needs the facility type
+    // the default reads.
+    let terrain = site_type_to_terrain(building.site.site_type.as_ref());
+    let shielding_of = || {
+        shielding_to_class(
+            building.site.shielding_of_home.as_ref(),
+            building.residential_facility_type.as_deref(),
+        )
+    };
+
+    // The AIM-2's evaluated defaults, recorded on the bundle when the
+    // conditioned zone's AIM-2 path runs: the height and flue the model
+    // actually ran at, and the shielding it read.
+    let mut aim2_record: Option<crate::resolved::Aim2Defaults> = None;
+
     // --- Per-zone infiltration (Walker-Wilson 1998 / ASHRAE HOF Ch. 16) ---
     // Each zone gets a physics-appropriate infiltration method.
     // Conditioned zone uses AIM-2 model when ACH50 (or a convertible metric) is available.
@@ -1397,22 +1426,6 @@ pub(crate) fn build_default_solvers(
         let height_above_grade = |height: std::result::Result<f64, hares_io::hpxml::HpxmlError>| {
             height.map_err(|err| HaresError::Dwelling(format!("height above grade: {err}")))
         };
-        let ceiling_height_m = building_ceiling_height_m(building)?;
-
-        // --- Site-level terrain and shielding ---
-        // Extracted once before the zone loop to avoid recomputation per-zone.
-        // These drive terrain-corrected wind coefficients for all ELA infiltration
-        // (conditioned zone uses them via aim2_coefficients_from_ach50; attic, garage,
-        // and foundation use them via the parameterized convenience functions).
-        // A missing site type or shielding takes OS-HPXML's default;
-        // `conversions::envelope_input_warnings` reports it. The parser
-        // rejects any value outside each element's allowed list.
-        let terrain = site_type_to_terrain(building.site.site_type.as_ref());
-        let shielding = shielding_to_class(
-            building.site.shielding_of_home.as_ref(),
-            building.residential_facility_type.as_deref(),
-        );
-
         for (zone_idx, bz) in building.zones.iter().enumerate() {
             let zone_id = env.zones.get(zone_idx).map(|z| z.id).ok_or_else(|| {
                 HaresError::Dwelling(format!(
@@ -1432,9 +1445,48 @@ pub(crate) fn build_default_solvers(
                         } else {
                             FoundationLeakageClass::Other
                         };
-                        let h = building
-                            .infiltration_height_m
-                            .unwrap_or(ceiling_height_m * building.floors_above_grade);
+                        // The infiltration height the AIM-2 model runs at:
+                        // the declared `<InfiltrationHeight>`, else
+                        // OS-HPXML's estimate (defaults.rb:5789-5856,
+                        // `get_infiltration_height_and_volume`).
+                        let h = match building.infiltration_height_m {
+                            Some(height_m) => height_m,
+                            None => {
+                                let estimated = hares_io::hpxml::infiltration_geometry::infiltration_height_estimate_m(building).map_err(|err| {
+                                    HaresError::Dwelling(format!("infiltration height: {err}"))
+                                })?;
+                                tracing::debug!(
+                                    infiltration_height_m = estimated,
+                                    "the HPXML declares no InfiltrationHeight; the AIM-2 height is the OpenStudio-HPXML estimate"
+                                );
+                                estimated
+                            }
+                        };
+                        // The flue flag the AIM-2 model runs at: the
+                        // declared element, else OS-HPXML's rule
+                        // (defaults.rb:5096-5132).
+                        let flue = match building.has_flue_or_chimney {
+                            Some(has_flue) => has_flue,
+                            None => {
+                                let has_flue =
+                                    super::conversions::flue_or_chimney_in_conditioned_space(
+                                        env,
+                                        building,
+                                        equipment_specs,
+                                    );
+                                tracing::debug!(
+                                    has_flue,
+                                    "the HPXML declares no HasFlueOrChimneyInConditionedSpace; the AIM-2 flue flag is the OpenStudio-HPXML rule over the resolved heating systems and water heaters"
+                                );
+                                has_flue
+                            }
+                        };
+                        let shielding = shielding_of()?;
+                        aim2_record = Some(crate::resolved::Aim2Defaults {
+                            height_m: h,
+                            has_flue: flue,
+                            shielding,
+                        });
                         let coeffs = aim2_coefficients_from_ach50(&Aim2Params {
                             ach50,
                             volume_m3: building.conditioned_volume_m3,
@@ -1442,7 +1494,7 @@ pub(crate) fn build_default_solvers(
                             foundation,
                             shielding,
                             terrain,
-                            has_flue: building.has_flue_or_chimney.unwrap_or(false),
+                            has_flue: flue,
                             n_i: N_I_DEFAULT,
                             floors_above_grade: building.floors_above_grade,
                         });
@@ -1482,7 +1534,7 @@ pub(crate) fn build_default_solvers(
                     bz,
                     || height_above_grade(walls_top_m(building)),
                     weather_avgs.wsf,
-                    shielding,
+                    shielding_of()?,
                     terrain,
                     zone_idx,
                 )?,
@@ -1490,7 +1542,7 @@ pub(crate) fn build_default_solvers(
                     bz,
                     exterior_ach50,
                     height_above_grade(foundation_top_m(building))?,
-                    shielding,
+                    shielding_of()?,
                     terrain,
                     zone_idx,
                 )?,
@@ -1669,12 +1721,16 @@ pub(crate) fn build_default_solvers(
         &thermal_solver.config().window_ids_sorted,
     );
 
+    let resolved_infiltration =
+        crate::resolved::resolved_infiltration(building, aim2_record.as_ref(), shielding_of().ok());
+
     Ok(SolverBundle {
         thermal: thermal_solver,
         humidity: humidity_solver,
         electrical: electrical_solver,
         zone_capacitances_j_k: zone_caps,
         resolved_envelope,
+        resolved_infiltration,
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         envelope_diagnostics,
     })
@@ -1974,7 +2030,7 @@ mod tests {
             has_flue_or_chimney: None,
             foundation_name: None,
             conditioned_foundation_merged: false,
-            residential_facility_type: None,
+            residential_facility_type: Some("single-family detached".to_string()),
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,

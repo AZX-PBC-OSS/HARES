@@ -1809,14 +1809,23 @@ pub(crate) fn envelope_input_warnings(building: &Building) -> Result<Vec<hares_t
         ));
     }
     if building.site.shielding_of_home.is_none() {
-        let shielding = shielding_to_class(None, building.residential_facility_type.as_deref());
-        warnings.push(hares_types::Warning::new(
-            "envelope",
-            format!(
-                "the building gives no ShieldingofHome; the shielding is {shielding:?}, OS-HPXML's \
-                 default for this facility type (defaults.rb:822-830)"
-            ),
-        ));
+        // The warning carries the resolved default's class, so it fires
+        // only where the default resolves: a building with neither
+        // ShieldingofHome nor ResidentialFacilityType is the infiltration
+        // methods' error (they name the facility type when one of them
+        // reads the shielding); a dwelling whose infiltration reads no
+        // shielding needs neither.
+        if let Ok(shielding) =
+            shielding_to_class(None, building.residential_facility_type.as_deref())
+        {
+            warnings.push(hares_types::Warning::new(
+                "envelope",
+                format!(
+                    "the building gives no ShieldingofHome; the shielding is {shielding:?}, \
+                     OS-HPXML's default for this facility type (defaults.rb:822-830)"
+                ),
+            ));
+        }
     }
     Ok(warnings)
 }
@@ -1827,24 +1836,175 @@ pub(crate) fn envelope_input_warnings(building: &Building) -> Result<Vec<hares_t
 /// A file without one takes OS-HPXML v1.12.0's default (defaults.rb:822-830):
 /// well-shielded for an apartment unit or single-family attached home,
 /// normal otherwise; [`envelope_input_warnings`] reports it. The parser
-/// rejects any other value.
+/// rejects any other value. The default reads the residential facility
+/// type; a building with no `ShieldingofHome` and no
+/// `ResidentialFacilityType` either is a `MissingField` naming the
+/// facility type: the element is a required input of the reference
+/// (workflow_inputs.rst:622, "Yes" in the required column), and its
+/// absence leaves the default unevaluable.
+///
+/// # Errors
+///
+/// [`HaresError::Dwelling`] naming `ResidentialFacilityType` when neither
+/// element is present.
 pub(crate) fn shielding_to_class(
     shielding: Option<&hares_io::hpxml::ShieldingOfHome>,
     residential_facility_type: Option<&str>,
-) -> hares_physics::infiltration::ShieldingClass {
+) -> Result<hares_physics::infiltration::ShieldingClass> {
     use hares_io::hpxml::ShieldingOfHome;
     use hares_physics::infiltration::ShieldingClass;
     match shielding {
-        Some(ShieldingOfHome::Exposed) => ShieldingClass::Exposed,
-        Some(ShieldingOfHome::WellShielded) => ShieldingClass::WellShielded,
-        Some(ShieldingOfHome::Normal) => ShieldingClass::Normal,
+        Some(ShieldingOfHome::Exposed) => Ok(ShieldingClass::Exposed),
+        Some(ShieldingOfHome::WellShielded) => Ok(ShieldingClass::WellShielded),
+        Some(ShieldingOfHome::Normal) => Ok(ShieldingClass::Normal),
         None => match residential_facility_type {
-            Some("apartment unit" | "single-family attached") => ShieldingClass::WellShielded,
-            _ => ShieldingClass::Normal,
+            Some("apartment unit" | "single-family attached") => Ok(ShieldingClass::WellShielded),
+            Some(_) => Ok(ShieldingClass::Normal),
+            None => Err(HaresError::Dwelling(
+                "BuildingSummary/BuildingConstruction/ResidentialFacilityType: the building \
+                 declares no ShieldingofHome, whose default reads the residential facility \
+                 type (OS-HPXML v1.12.0 defaults.rb:822-830: well-shielded for an apartment \
+                 unit or single-family attached home, normal otherwise), and declares no \
+                 facility type either; name the facility type or declare the shielding"
+                    .to_string(),
+            )),
         },
     }
 }
 
+/// The flue-or-chimney flag OpenStudio-HPXML defaults when the HPXML's air
+/// infiltration measurement declares none (v1.12.0
+/// `HPXMLtoOpenStudio/resources/defaults.rb:5096-5132`,
+/// `get_flue_or_chimney_in_conditioned_space`, applied at
+/// defaults.rb:3418-3421): true when a non-electric heating system of the
+/// atmospheric types (furnace, boiler, wall furnace, floor furnace, stove,
+/// space heater; HARES resolves the wall furnace, floor furnace and stove
+/// into its furnace class) sits in conditioned space with an AFUE or
+/// percent efficiency below 0.89; true when a non-electric fireplace sits
+/// in conditioned space (a type HARES does not resolve, so no spec reaches
+/// that arm); true when a non-electric water heater sits in conditioned
+/// space whose energy factor, or the equivalent calculated from its
+/// uniform energy factor (`resources/waterheater.rb:1557-1577`
+/// `calc_ef_from_uef`), is below 0.63; false otherwise. The combi tank
+/// types are excluded: their boiler is the heating system checked above
+/// (defaults.rb:5119-5120), so HARES's indirect tank is not a water heater
+/// arm here either. A non-electric water heater in conditioned space with
+/// no efficiency declared falls to true, the reference's own fall-through.
+///
+/// "In conditioned space" reads the spec's resolved zone: the zone it
+/// serves is the conditioned zone (the merged conditioned foundation is
+/// part of it); a system serving no declared zone is resolved to the
+/// conditioned zone at init and reads conditioned here.
+pub(crate) fn flue_or_chimney_in_conditioned_space(
+    env: &EnvironmentState,
+    building: &Building,
+    specs: &[hares_io::EquipmentSpec],
+) -> bool {
+    use hares_types::FuelType;
+
+    // The spec's zone_id is the environment zone's id (one past the
+    // building zone's index, environment.rs's ZoneId(idx + 1)); the
+    // conditioned-space test reads the building zone it names. A spec
+    // serving no declared zone resolves to the conditioned zone at init
+    // and reads conditioned here.
+    let zone_is_conditioned = |spec: &hares_io::EquipmentSpec| {
+        let Some(zone_id) = spec_zone_id(spec) else {
+            return true;
+        };
+        match env
+            .zones
+            .iter()
+            .position(|zone| zone.id.0 as usize == zone_id)
+        {
+            Some(index) => building
+                .zones
+                .get(index)
+                .is_some_and(|zone| zone.zone_type == hares_io::hpxml::ZoneType::Conditioned),
+            None => true,
+        }
+    };
+    for spec in specs {
+        let atmospheric_heating = matches!(spec.name.as_str(), "Gas Furnace" | "Gas Boiler");
+        if !atmospheric_heating
+            && spec.name != "Gas Water Heater"
+            && spec.name != "Tankless Water Heater"
+            && spec.name != "Gas Tankless Water Heater"
+            && spec.name != "Heat Pump Water Heater"
+        {
+            continue;
+        }
+        if spec.fuel_type == FuelType::Electric {
+            continue;
+        }
+        if !zone_is_conditioned(spec) {
+            continue;
+        }
+        if atmospheric_heating {
+            // The AFUE or percent efficiency, typed payload first, then
+            // the raw parameter bag a spec pending autosizing carries
+            // (the units are read beside it and both thresholds are
+            // 0.89, the rule's "AFUE/Percent").
+            let afue = spec_payload_f64(spec, "afue")
+                .or_else(|| spec_payload_f64(spec, "heating_efficiency"));
+            if afue.is_none_or(|afue| afue < 0.89) {
+                return true;
+            }
+            continue;
+        }
+        let energy_factor = spec_payload_f64(spec, "energy_factor");
+        let effective = energy_factor.or_else(|| {
+            spec_payload_f64(spec, "uniform_energy_factor")
+                .map(|uef| calc_ef_from_uef(&spec.name, uef))
+        });
+        if effective.is_none_or(|ef| ef < 0.63) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The `zone_id` a spec's typed payload or raw parameters carry.
+fn spec_zone_id(spec: &hares_io::EquipmentSpec) -> Option<usize> {
+    if let Some(typed) = &spec.typed_config
+        && let ConfigPayload::Typed { data, .. } = &typed.payload
+        && let Some(zone_id) = data.get("zone_id").and_then(Value::as_u64)
+    {
+        return usize::try_from(zone_id).ok();
+    }
+    spec.parameters
+        .get("zone_id")
+        .and_then(Value::as_u64)
+        .map(|zone_id| zone_id as usize)
+}
+
+/// The `f64` a spec's typed payload or raw parameters carry at `key`.
+fn spec_payload_f64(spec: &hares_io::EquipmentSpec, key: &str) -> Option<f64> {
+    if let Some(typed) = &spec.typed_config
+        && let ConfigPayload::Typed { data, .. } = &typed.payload
+        && let Some(value) = data.get(key).and_then(Value::as_f64)
+    {
+        return Some(value);
+    }
+    spec.parameters.get(key).and_then(Value::as_f64)
+}
+
+/// The energy factor equivalent of a uniform energy factor
+/// (`resources/waterheater.rb:1557-1577`, `calc_ef_from_uef`), by the
+/// water heater's class: a fuel storage tank's
+/// `0.9066 * uef + 0.0711`, a tankless water heater's UEF itself. (The
+/// electric and heat-pump forms are unreachable here: an electric water
+/// heater is skipped by fuel before the efficiency reads.)
+fn calc_ef_from_uef(class: &str, uef: f64) -> f64 {
+    if class.contains("Tankless") {
+        uef
+    } else {
+        0.9066 * uef + 0.0711
+    }
+}
+
+/// Check if any Foundation zone has `vented == true` (vented crawlspace).
+///
+/// Used to select [`FoundationLeakageClass`] for AIM-2 leakage distribution.
 pub(crate) fn has_vented_crawlspace(building: &Building) -> bool {
     use hares_io::hpxml::ZoneType;
     building

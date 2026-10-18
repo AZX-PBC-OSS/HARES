@@ -2598,6 +2598,16 @@ fn reentry_refusal() -> PyErr {
 
 /// The boundary kind's spelling in the read-back dict: the plan's kind
 /// names, lowercased, the parser's `Other` kind carrying its own text.
+/// The shielding class's provenance label, in the form the read-back
+/// records (the class's own spelling).
+fn shielding_label(shielding: hares_physics::infiltration::ShieldingClass) -> String {
+    match shielding {
+        hares_physics::infiltration::ShieldingClass::Normal => "normal".to_string(),
+        hares_physics::infiltration::ShieldingClass::Exposed => "exposed".to_string(),
+        hares_physics::infiltration::ShieldingClass::WellShielded => "well-shielded".to_string(),
+    }
+}
+
 fn boundary_kind_label(kind: &hares_io::hpxml::BoundaryType) -> String {
     match kind {
         hares_io::hpxml::BoundaryType::Wall => "wall".to_string(),
@@ -2687,6 +2697,12 @@ fn resolved_model_to_py(py: Python<'_>, model: &hares_core::ResolvedModel) -> Py
     infiltration.set_item("ach50", model.infiltration.ach50)?;
     infiltration.set_item("ela_m2", model.infiltration.ela_m2)?;
     infiltration.set_item("constant_ach", model.infiltration.constant_ach)?;
+    infiltration.set_item("height_m", model.infiltration.height_m)?;
+    infiltration.set_item("has_flue", model.infiltration.has_flue)?;
+    infiltration.set_item(
+        "shielding",
+        model.infiltration.shielding.map(shielding_label),
+    )?;
     dict.set_item("infiltration", infiltration)?;
 
     let site = PyDict::new(py);

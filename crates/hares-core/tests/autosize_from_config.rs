@@ -96,6 +96,7 @@ fn furnace_without_heating_capacity_hpxml() -> &'static str {
       <BuildingSummary>
         <Site>
           <SiteType>suburban</SiteType>
+          <ShieldingofHome>normal</ShieldingofHome>
           <Latitude>39.74</Latitude>
           <Longitude>-104.99</Longitude>
         </Site>

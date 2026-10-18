@@ -4128,7 +4128,7 @@ fn assemble_from_blueprint_with_seed(
             equipment: equipment_read_back,
             boundaries: resolved_boundaries,
             windows: resolved_windows,
-            infiltration: crate::resolved::resolved_infiltration(&bp.building),
+            infiltration: solvers.resolved_infiltration.clone(),
             site: bp.site_location,
             clock: crate::resolved::ResolvedClock {
                 start: local_start.naive_local(),

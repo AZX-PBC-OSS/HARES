@@ -160,9 +160,28 @@ fn resolved_model_reflects_hpxml_efficiency_edit() {
     assert_eq!(afue.value, 0.80, "the AFUE reads back the edited value");
     assert_eq!(before.boundaries, after.boundaries, "boundaries unchanged");
     assert_eq!(before.windows, after.windows, "windows unchanged");
+    // The infiltration's measurement is untouched by the edit; the flue
+    // flag follows the OpenStudio-HPXML rule over the resolved systems
+    // (defaults.rb:5096-5132), so the AFUE 0.80 furnace in conditioned
+    // space is atmospheric where the 0.92 furnace was not.
+    assert_eq!(before.infiltration.ach50, after.infiltration.ach50);
+    assert_eq!(before.infiltration.ela_m2, after.infiltration.ela_m2);
     assert_eq!(
-        before.infiltration, after.infiltration,
-        "infiltration unchanged"
+        before.infiltration.constant_ach,
+        after.infiltration.constant_ach
+    );
+    assert_eq!(before.infiltration.height_m, after.infiltration.height_m);
+    assert_eq!(before.infiltration.shielding, after.infiltration.shielding);
+    assert_eq!(
+        before.infiltration.has_flue,
+        Some(false),
+        "the unedited systems carry no flue: the AFUE 0.92 furnace clears the rule"
+    );
+    assert_eq!(
+        after.infiltration.has_flue,
+        Some(true),
+        "the flue flag follows the rule over the edited systems: the AFUE 0.80 \
+         furnace in conditioned space is atmospheric"
     );
 }
 
@@ -474,6 +493,7 @@ fn furnace_without_heating_capacity_hpxml() -> &'static str {
       <BuildingSummary>
         <Site>
           <SiteType>suburban</SiteType>
+          <ShieldingofHome>normal</ShieldingofHome>
           <Latitude>39.74</Latitude>
           <Longitude>-104.99</Longitude>
         </Site>

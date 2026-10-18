@@ -311,3 +311,135 @@ pub fn walls_top_m(building: &Building) -> Result<f64, HpxmlError> {
     )?;
     Ok(foundation_top_in(details)? + ceiling_m * floors)
 }
+
+/// The infiltration height OS-HPXML defaults when the air infiltration
+/// measurement declares none, in metres (OpenStudio-HPXML v1.12.0
+/// `HPXMLtoOpenStudio/resources/defaults.rb:5789-5856`,
+/// `get_infiltration_height_and_volume`, ported term for term): the
+/// average ceiling height per conditioned floor above grade, plus half a
+/// foot of rim joist and subfloor per added storey above the first (a 2x6
+/// rim joist at 5.5 in plus a half-inch subfloor, defaults.rb:5804), plus
+/// the tallest attic within the infiltration volume, plus the tallest
+/// above-grade foundation height over the foundations within the volume,
+/// raised by their rim joist and sill plate (9 in, a 2x8 rim joist at
+/// 7.5 in plus a 1.5 in sill plate, per ASHRAE 140,
+/// defaults.rb:5834-5835). The foundation term drops for a walkout
+/// basement, whose height the base term already carries
+/// (defaults.rb:5845-5848: a conditioned basement with every conditioned
+/// floor above grade). The arithmetic is SI-native (the heights HARES
+/// stores are metres; only the ported inch constants convert), so a
+/// building whose terms are all zero keeps the height the previous
+/// fallback computed, on bits.
+///
+/// The attic term reads the same roof height the attic zone's geometry
+/// carries (`calculate_height_and_footprint_of_roofs`), so the estimate
+/// and the model agree on one attic.
+///
+/// # Errors
+///
+/// [`HpxmlError::MissingField`] or a parse error naming the element when an
+/// input the estimate reads is missing or malformed: the conditioned floor
+/// area the average ceiling height derives from, a foundation wall without
+/// a height.
+pub fn infiltration_height_estimate_m(building: &Building) -> Result<f64, HpxmlError> {
+    use super::zone_geometry::roof_height_and_footprint_m;
+    use crate::hpxml::ZoneType;
+
+    const RIM_JOIST_PER_STORY_FT: f64 = 0.5; // a 2x6 rim joist at 5.5 in plus a half-inch subfloor
+    const RIM_JOIST_SILL_PLATE_FT: f64 = 9.0 / 12.0; // a 2x8 rim joist at 7.5 in plus a 1.5 in sill plate, ASHRAE 140
+
+    let details = &building.details_xml;
+    let construction = details.path(&[&BUILDING_SUMMARY, &BUILDING_CONSTRUCTION]);
+    // The ceiling the engine's own geometry carries: the same value the
+    // previous fallback ran, so a building whose estimate terms are all
+    // zero keeps its height on bits. (OS-HPXML's port reads its model's
+    // average ceiling height the same way: the defaulted, rounded value
+    // the geometry uses, not a re-derivation.)
+    let ceiling_m = building.ceiling_height_m;
+    if !(ceiling_m.is_finite() && ceiling_m > 0.0) {
+        return Err(HpxmlError::Parse(
+            format!(
+                "the building gives no usable ceiling height ({ceiling_m} m); the infiltration \
+             height estimate derives from it"
+            )
+            .into(),
+        ));
+    }
+    let floors_above_grade = building.floors_above_grade;
+    let total_floors = parse_value_with_units(
+        construction.and_then(|c| c.child(&NUMBEROF_CONDITIONED_FLOORS)),
+        ValueKind::Raw,
+    )?;
+
+    // The base height, excluding foundations and attics
+    // (defaults.rb:5801-5806).
+    let mut height_m = ceiling_m * floors_above_grade;
+    if floors_above_grade > 1.0 {
+        height_m += (floors_above_grade - 1.0) * conv::length_ft_to_m(RIM_JOIST_PER_STORY_FT);
+    }
+
+    let within_locations = infiltration_volume_locations(details);
+
+    // The attics within the infiltration volume: the tallest zone height
+    // (defaults.rb:5817-5831). HARES builds one attic zone, so its roof
+    // height is the term.
+    if within_locations
+        .iter()
+        .any(|location| location.starts_with("attic"))
+        && let Some((attic_height_m, _)) =
+            roof_height_and_footprint_m(details, &ZoneType::Attic, &mut Vec::new())?
+    {
+        height_m += attic_height_m;
+    }
+
+    // The foundations within the infiltration volume: the tallest
+    // above-grade height, raised by the rim joist and sill plate
+    // (defaults.rb:5833-5843). The above-grade height is the tallest
+    // foundation wall's height less its depth below grade
+    // (geometry.rb:1347-1348); with no foundation wall, OS-HPXML's assumed
+    // zone height (geometry.rb:1352-1359).
+    let mut foundation_height_m = 0.0_f64;
+    let mut foundation_locations: Vec<(String, f64)> = Vec::new();
+    for (location, wall) in surfaces(details, &FOUNDATION_WALLS, &FOUNDATION_WALL) {
+        let height =
+            parse_value_with_units(wall.child(&HEIGHT), ValueKind::Length)?.ok_or_else(|| {
+                HpxmlError::Parse(format!("foundation wall in '{location}' has no Height").into())
+            })?;
+        let depth = parse_value_with_units(wall.child(&DEPTH_BELOW_GRADE), ValueKind::Length)?;
+        let above_grade_m = (height - depth.unwrap_or(0.0)).max(0.0);
+        let canonical = canonical(&location).to_string();
+        let entry = foundation_locations
+            .iter_mut()
+            .find(|(known, _)| *known == canonical);
+        match entry {
+            Some((_, tallest)) => *tallest = tallest.max(above_grade_m),
+            None => foundation_locations.push((canonical, above_grade_m)),
+        }
+    }
+    for location in within_locations.iter() {
+        let Some((_, above_grade_m)) = foundation_locations
+            .iter()
+            .find(|(known, _)| known == location)
+        else {
+            continue;
+        };
+        let raised_m = *above_grade_m + conv::length_ft_to_m(RIM_JOIST_SILL_PLATE_FT);
+        foundation_height_m = foundation_height_m.max(raised_m);
+    }
+    let has_conditioned_basement = details
+        .path(&[&ENCLOSURE, &FOUNDATIONS])
+        .into_iter()
+        .flat_map(|foundations| foundations.children_named(&FOUNDATION))
+        .any(|foundation| {
+            space_location(foundation, &FOUNDATION_TYPE)
+                .is_some_and(|location| location == "basement - conditioned")
+        });
+    if has_conditioned_basement && total_floors.is_some_and(|total| total == floors_above_grade) {
+        // A walkout basement: its height is already in the base term
+        // (defaults.rb:5845-5848).
+        foundation_height_m = 0.0;
+    }
+    height_m += foundation_height_m;
+
+    Ok(height_m)
+}

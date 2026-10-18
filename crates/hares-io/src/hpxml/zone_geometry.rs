@@ -162,7 +162,7 @@ pub(super) fn slab_space_geometry(
 /// flat roof over an attic is 2 ft high. `None` when no roof covers such a
 /// location; a roof with no `Pitch` (which OS-HPXML requires) is recorded
 /// as a warning and also gives `None`.
-fn roof_height_and_footprint_m(
+pub(super) fn roof_height_and_footprint_m(
     details: &XmlNode,
     zone_type: &ZoneType,
     warnings: &mut Vec<Warning>,

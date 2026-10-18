@@ -33,12 +33,71 @@ A `<SiteType>` carrying a value outside `rural`, `suburban` or `urban` is
 a parse error naming the element, the value and the allowed values; no
 value is silently kept as something else.
 
-## Missing ShieldingOfHome
+## Shielding follows the facility type
 
-A missing `<ShieldingOfHome>` resolves to the normal shielding class
-(today's value). The element's allowed values are `normal`, `exposed`
-and `well-shielded`; a value outside that list is a parse error naming
-the element, the value and the allowed values.
+When the HPXML declares no `<ShieldingofHome>`, the shielding class is
+OpenStudio-HPXML v1.12.0's facility-type default
+(`defaults.rb:822-830` `apply_site`, documented at
+workflow_inputs.rst:480): well-shielded for an apartment unit or
+single-family attached home, normal for single-family detached,
+manufactured and anything else. The element's allowed values are
+`normal`, `exposed` and `well-shielded`; a value outside that list is a
+parse error naming the element, the value and the allowed values. The
+building with neither `ShieldingofHome` nor `ResidentialFacilityType` is
+an error naming `ResidentialFacilityType`: the element is a required
+input of the reference (workflow_inputs.rst:622, "Yes" in the required
+column), and OS-HPXML's own code path for the missing facility type (its
+`else` branch, normal) is one its input validation prevents. The
+direction of the delta: none on the committed runs (the facility-type
+rule has run since the phase-1 fold carried it; the error arm moves no
+run that built before).
+
+## The infiltration height follows the OpenStudio-HPXML estimate
+
+When the HPXML's air infiltration measurement declares no
+`<InfiltrationHeight>`, the AIM-2 model runs at OpenStudio-HPXML v1.12.0's
+estimate, ported from `HPXMLtoOpenStudio/resources/defaults.rb:5789-5856`
+`get_infiltration_height_and_volume` (applied at `defaults.rb:1171-1174`,
+documented at workflow_inputs.rst:1023, "estimated from other inputs
+(e.g., ConditionedFloorArea, NumberofConditionedFloorsAboveGrade,
+attics/foundations with WithinInfiltrationVolume=true, etc.)"): the
+average ceiling height per conditioned floor above grade, plus half a
+foot of rim joist and subfloor per added storey above the first
+(defaults.rb:5804), plus the tallest attic and the tallest above-grade
+foundation height within the infiltration volume, the foundation term
+raised by its rim joist and sill plate (9 in, ASHRAE 140,
+defaults.rb:5834-5835) and dropped for a walkout basement
+(defaults.rb:5845-5848). HARES's previous default was the average ceiling
+height times the floors above grade, which drops the foundation and
+attic terms. The estimate reads the engine's own ceiling height, so a
+building whose terms are all zero keeps its height on bits. The
+direction of the delta: up on the fixtures that lack the element
+(base.xml 2.4384 to 2.9718 m, the estimate's 9.75 ft, the value OS-HPXML
+v1.12.0 defaults for the same file,
+`HPXMLtoOpenStudio/tests/test_defaults.rb`
+`test_infiltration_height_and_volume`); every golden's HPXML declares
+`InfiltrationHeight`, so no golden moved. OCHRE takes the height the
+HPXML carries (its `hpxml.py` infiltration section) and adds none of its
+own; the estimate is OS-HPXML's defaults rule, which HARES now follows.
+
+## The flue flag follows the OpenStudio-HPXML rule
+
+When the HPXML's air infiltration measurement declares no
+`<HasFlueOrChimneyInConditionedSpace>`, the flag is OpenStudio-HPXML
+v1.12.0's rule, ported from `defaults.rb:5096-5132`
+`get_flue_or_chimney_in_conditioned_space` (applied at
+`defaults.rb:3418-3421`, documented at workflow_inputs.rst:1147-1155):
+true when a non-electric heating system of the atmospheric types
+(Furnace, Boiler, WallFurnace, FloorFurnace, Stove, SpaceHeater) sits in
+conditioned space with an AFUE or percent efficiency below 0.89; true
+when a non-electric fireplace sits in conditioned space; true when a
+non-electric water heater sits in conditioned space whose energy factor,
+or the equivalent calculated from its uniform energy factor
+(`resources/waterheater.rb:1557-1577` `calc_ef_from_uef`), is below
+0.63; false otherwise. HARES's previous default was false always. The
+direction of the delta: the flag can only rise, and only on homes whose
+atmospheric systems or non-electric water heaters qualify; every
+committed golden's HPXML declares the element, so no golden moved.
 
 ## xsd:boolean lexical space
 

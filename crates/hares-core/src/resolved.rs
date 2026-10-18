@@ -162,6 +162,32 @@ pub struct ResolvedInfiltration {
     pub ach50: Option<f64>,
     pub ela_m2: Option<f64>,
     pub constant_ach: Option<f64>,
+    /// The infiltration height the AIM-2 model runs at, in metres, when the
+    /// model runs: the declared `<InfiltrationHeight>`, else the
+    /// OpenStudio-HPXML estimate (the defaults code the infiltration
+    /// default entry ports). `None` when the run takes no AIM-2 path (a
+    /// constant ACH, or no infiltration measurement).
+    pub height_m: Option<f64>,
+    /// The flue-or-chimney flag the AIM-2 model runs at: the declared
+    /// `<HasFlueOrChimneyInConditionedSpace>`, else the OpenStudio-HPXML
+    /// rule over the resolved heating systems and water heaters. `None`
+    /// when the run takes no AIM-2 path.
+    pub has_flue: Option<bool>,
+    /// The shielding class the infiltration methods read: the declared
+    /// `<ShieldingofHome>`, else the facility type's default; `None` when
+    /// the resolution never had what it needs (no method read one).
+    pub shielding: Option<hares_physics::infiltration::ShieldingClass>,
+}
+
+/// The AIM-2 model's evaluated defaults, recorded as the solver built them:
+/// the height the coefficients ran at and the flue flag they ran with, the
+/// declared inputs when given and the OpenStudio-HPXML rules' outcomes
+/// otherwise, with the shielding class every infiltration method read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Aim2Defaults {
+    pub height_m: f64,
+    pub has_flue: bool,
+    pub shielding: hares_physics::infiltration::ShieldingClass,
 }
 
 /// The envelope half of the read-back, from the assembled RC network: the
@@ -369,11 +395,18 @@ fn same_zone_fin_chain(path: RCPath, layers: &[ResolvedLayer]) -> f64 {
 /// The infiltration inputs as the assembly resolved them, from the parsed
 /// building's values (the ACH50 the leakage conversion produced, the ELA
 /// converted from cm², the constant rate the synthetic inputs fix).
-pub(crate) fn resolved_infiltration(building: &hares_io::hpxml::Building) -> ResolvedInfiltration {
+pub(crate) fn resolved_infiltration(
+    building: &hares_io::hpxml::Building,
+    aim2: Option<&Aim2Defaults>,
+    shielding: Option<hares_physics::infiltration::ShieldingClass>,
+) -> ResolvedInfiltration {
     ResolvedInfiltration {
         ach50: building.infiltration_ach50,
         ela_m2: building.infiltration_ela_cm2.map(|cm2| cm2 / 10_000.0),
         constant_ach: building.infiltration_constant_ach,
+        height_m: aim2.map(|defaults| defaults.height_m),
+        has_flue: aim2.map(|defaults| defaults.has_flue),
+        shielding,
     }
 }
 

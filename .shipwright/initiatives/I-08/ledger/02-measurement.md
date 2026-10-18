@@ -4134,3 +4134,82 @@ override, so none is expected to move and none is re-captured. The
 resolved product: the golden tool at this base carries no resolved
 product (B-14's first commit, row 94c, adds it); the run above's own
 read-back is recorded instead, unchanged outside the overridden side.
+### The infiltration defaults row, 2026-10-17 (the worktree `r94ef`, branch `row/r94ef`, based on the commit `e6c29015`)
+
+The OD-10 numeric-commit delta: the three infiltration defaults take the
+OpenStudio-HPXML rules. The delta runs are the entry's own (base.xml and
+the two `base-bldgtype-multifamily*` files, 7 d at 900 s with
+`data/examples/BEopt_example_schedule.csv` and
+`USA_CO_Denver.Intl.AP.725650_TMY3.epw`, no warm-up, one verbosity-8
+frame report), dumped every report column's every step to parquet once at
+the parent `e6c29015` (the tree plus only the dump harness, an untracked
+scratch test since deleted) and once at the row's final state.
+
+RED, at the parent state (the row's source changes stashed, the
+acceptance tests present): `missing_infiltration_height_follows_openstudio_hpxml`,
+`missing_flue_follows_openstudio_hpxml` and
+`missing_shielding_follows_facility_type` are RED as compile failures
+(the read-back record's `height_m`, `has_flue` and `shielding` fields do
+not exist at the parent); the behavioral movement is the delta below.
+
+GREEN at the row: all three pass, with the fixture-input assertions
+first (the entry's premise: base.xml's 2700 ft2, two conditioned floors
+with one above grade, the 8 ft average ceiling, the conditioned basement,
+the unvented attic declared outside the infiltration volume; the
+multifamily fixture's apartment-unit facility type and absent
+ShieldingofHome), and the neither-element pin: a multifamily fixture
+with its `ResidentialFacilityType` removed fails construction naming
+`ResidentialFacilityType`.
+
+The delta, per fixture:
+
+- `base.xml`: 33 of 165 report columns move, 132 identical. The cause is
+  the estimate's foundation term: the AIM-2's height runs 2.4384 m
+  (the old fallback, the average ceiling height times the one floor above
+  grade) to 2.9718 m (9.75 ft: the base term's 8 ft plus the conditioned
+  basement's 1 ft above grade plus its 9 in rim joist and sill plate),
+  the value OS-HPXML v1.12.0 defaults for the same file
+  (`HPXMLtoOpenStudio/tests/test_defaults.rb`,
+  `test_infiltration_height_and_volume`, relative 0.01). As means over
+  the 672 steps (before to after): `Infiltration Heat Gain - Indoor (W)`
+  -345.216 to -389.123 (the taller column's stack term pulls harder);
+  `HVAC Heating Delivered (W)` and `Gas Furnace Capacity (W)` 2342.75 to
+  2392.05; `Gas Furnace Gas Power (therms/hour)` and `Total Gas Power
+  (therms/hour)` 0.106644 to 0.108888; `Gas Furnace Main Power (kW)`
+  3.12542 to 3.19118; `Gas Furnace Energy (kWh)` 0.0261122 to 0.0266616;
+  `Gas Furnace Runtime Fraction (-)` 0.272534 to 0.278269;
+  `Temperature - Indoor (C)` 20.305 to 20.2998; `HVAC Duct Losses (W)`
+  614.752 to 627.687; the envelope and balance columns follow at the
+  same scale (`Net Sensible Heat Gain - Indoor (W)` 3179.39 to 3173.19,
+  `Opaque Surface Heat Gain - Indoor (W)` -976.65 to -974.182, the
+  window, wall, roof, floor and internal-mass gains within 2.5 W,
+  `Zone Air Heat Balance Residual (W)` -297.764 to -296.927);
+  `Electric Resistance Water Heater Electric Power (kW)` 0.397748 to
+  0.397752; `Gas Furnace Mode (-)` and `Gas Furnace Schedule (-)`: one
+  step crosses its mode boundary (mean 0 to 1 over the run's steps); the
+  furnace's reactive power and power factor and the fan and end-use
+  electric power follow the delivery. The flue flag evaluates false at
+  the fixture's own systems (the gas furnace's AFUE 0.92 clears 0.89,
+  the water heater is electric), the same value the parent's constant
+  false ran at, so the flag's rule moves nothing here.
+- `base-bldgtype-multifamily` and
+  `base-bldgtype-multifamily-shared-boiler-only-baseboard`: 0 columns
+  move, bitwise. The shielding default's facility-type rule (an apartment
+  unit is well-shielded) has run since the phase-1 fold carried it, the
+  flue rule evaluates false (the boiler's AFUE 0.92; the electric water
+  heater is skipped by fuel), and the estimate's SI-native arithmetic
+  returns the declared-terms-zero height on the bits the old fallback
+  ran, so the runs are untouched and only the read-back's new fields
+  appear.
+
+Goldens: compare-all 8 (`consumer_shape_900s`, `fleet_mixed_offset`,
+`fleet_same_offset_300s`, `full_year_hourly`, `leap_year_february_900s`,
+`month_boundary_billing_3600s`, `resstock_2025_fleet`,
+`weather_wrap_900s`) and the dst set's `full_year_900s_dst` are bitwise
+identical, compared twice (on the staged change and on the commit). Every
+golden's HPXML declares `InfiltrationHeight`,
+`HasFlueOrChimneyInConditionedSpace` and `ShieldingofHome`, so no golden
+is expected to move and none is re-captured. The resolved product: the
+golden tool at this base carries no resolved product (B-14's first
+commit, row 94c, adds it); the read-back's own new fields are recorded
+above, none moving on the goldens' fixtures.

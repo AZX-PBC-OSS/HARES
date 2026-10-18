@@ -998,3 +998,19 @@ golden fixtures re-captured.
   golden re-captured: no golden sets a setpoint override and every golden
   compares bitwise (compare-all 8 identical, the dst set identical); the
   override's own delta is in the measurement log.
+
+- 2026-10-17: the infiltration set-up's three defaults follow the
+  OpenStudio-HPXML v1.12.0 rules instead of HARES's own: a missing
+  `InfiltrationHeight` takes the estimate ported from
+  `defaults.rb:5789-5856` (`get_infiltration_height_and_volume`), a
+  missing `HasFlueOrChimneyInConditionedSpace` the rule over the resolved
+  heating systems and water heaters (`defaults.rb:5096-5132`, the AFUE
+  and energy-factor thresholds 0.89 and 0.63), a missing
+  `ShieldingofHome` the facility type's default (`defaults.rb:822-830`),
+  and a building with neither `ShieldingofHome` nor
+  `ResidentialFacilityType` is an error naming the facility type. The
+  read-back's infiltration record carries the evaluated height, flue flag
+  and shielding class beside the measurement. No golden re-captured:
+  every golden's HPXML declares all three elements and every golden
+  compares bitwise (compare-all 8 identical, the dst set identical); the
+  delta on the fixtures that lack them is in the measurement log.

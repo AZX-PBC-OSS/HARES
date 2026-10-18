@@ -1013,6 +1013,57 @@ expected since neither commit touches an equipment parameter.
 numeric (row 94f in the numeric block, after the consumer block),
 `fix: default infiltration height, flue and shielding by the OpenStudio-HPXML rules`.
 
+**State:** FIXED for both commits: the structural commit as row 24a
+(folded as `18fbf72e`), the numeric commit FIXED (2026-10-17, branch
+`row/r94ef`, worktree `r94ef`, based on the row 94e commit `e6c29015`).
+The numeric commit: a missing `InfiltrationHeight` takes the estimate
+ported from OpenStudio-HPXML v1.12.0 `defaults.rb:5789-5856`
+(`get_infiltration_height_and_volume`, the citation verified against the
+tag's sources: the base term, the per-storey rim joist, the tallest
+attic and above-grade foundation within the infiltration volume, the
+walkout drop), reading the engine's own ceiling height so a building
+whose terms are all zero keeps its height on bits; a missing
+`HasFlueOrChimneyInConditionedSpace` takes the rule ported from
+`defaults.rb:5096-5132`, evaluated over the resolved heating systems and
+water heaters (fuel, the resolved zone, the AFUE-or-percent efficiency
+at 0.89, the energy factor or the UEF's equivalent at 0.63, the combi
+tank excluded, the fall-through true when no efficiency is declared);
+a missing `ShieldingofHome` takes the facility type's default
+(`defaults.rb:822-830`) and a building with neither element is a
+construction error naming `ResidentialFacilityType`. One premise
+correction, recorded: the entry's water-heater threshold, quoted from
+the documentation as 0.59, is 0.63 in both the v1.12.0 code
+(`defaults.rb:5124, 5126`) and the v1.12.0 documentation
+(workflow_inputs.rst:1155); the port follows the sources. The evaluated
+defaults are recorded in the read-back (`ResolvedInfiltration`'s
+`height_m`, `has_flue` and `shielding`, the SolverBundle's record of the
+values the AIM-2 ran at) and each rule is cited in the code and in
+`docs/PHYSICS_DECISIONS.md`. RED first: the three acceptance tests are
+RED at the parent as compile failures (the read-back's fields did not
+exist; the behavioral movement is the delta below); GREEN at the row
+with the fixture-input assertions and the neither-element pin.
+Movement: base.xml's delta, 33 of 165 report columns (the estimate's
+foundation term: the height 2.4384 to 2.9718 m, 9.75 ft, the value
+OS-HPXML v1.12.0 defaults for the same file; the infiltration heat gain
+-345.2 to -389.1 W, the heating delivered 2342.75 to 2392.05 W), and
+the two multifamily fixtures bitwise unchanged (the facility-type
+shielding rule has run since the phase-1 fold carried it, the flue rule
+evaluates false, and the SI-native estimate returns the old height on
+bits), all in `02-measurement.md`'s log; the goldens bitwise (compare-all
+8 + dst 1, every golden's HPXML declares all three elements), none
+re-captured. Two pins' premises moved with the numbers and were
+migrated: the OD-39 conditioned-basement pin read the ideal HVAC's
+delivered-energy sum, whose saturated-step count tied under the taller
+column's larger infiltration load, so the pin reads the two variants'
+zone temperatures now (the models are not identical); and
+`resolved_model_reflects_hpxml_efficiency_edit`'s "infiltration
+unchanged" premise yields to the flue flag following the edited AFUE
+(the rule over the resolved systems is the point), pinned both ways.
+Gates: fmt clean; clippy `--workspace --all-targets --all-features -D
+warnings` clean; nextest `--workspace --all-features` 8163/8163 (8
+skipped); `pytest -m ''` 1766 passed + 6 xfailed, 0 failed, 0 errors;
+pyright 0.
+
 **Dependencies:** M-2 (the goldens that prove no fixture relied on a
 default). The numeric commit follows `06-runtime-memory.md` RT-6 (the
 read-back it records into) and the consumer block, under
