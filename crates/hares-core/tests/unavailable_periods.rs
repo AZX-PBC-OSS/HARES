@@ -389,3 +389,71 @@ fn power_outage_keeps_pv_and_holds_the_water_heater_at_2c() {
     }
     let _ = plain_wh_element; // the freeze proof is the unit test's (below)
 }
+
+/// A built `base-appliances-dehumidifier.xml` dwelling with a test-made
+/// two-day `Power Outage` period, over a live June window (Texas weather:
+/// the unit runs the day before the period and the humidistat calls it
+/// back the day after): the dehumidifier draws nothing on every flagged
+/// step.
+#[test]
+fn power_outage_stops_the_dehumidifier() {
+    let root = repo_root();
+    let xml = std::fs::read_to_string(
+        root.join("tests/fixtures/hpxml/ochre_samples/base-appliances-dehumidifier.xml"),
+    )
+    .expect("base-appliances-dehumidifier.xml reads");
+    let period = "  <SoftwareInfo>\n    <extension>\n      <UnavailablePeriods>\n        <UnavailablePeriod>\n          <ColumnName>Power Outage</ColumnName>\n          <BeginMonth>6</BeginMonth>\n          <BeginDayOfMonth>2</BeginDayOfMonth>\n          <BeginHourOfDay>0</BeginHourOfDay>\n          <EndMonth>6</EndMonth>\n          <EndDayOfMonth>3</EndDayOfMonth>\n          <EndHourOfDay>24</EndHourOfDay>\n        </UnavailablePeriod>\n      </UnavailablePeriods>\n";
+    let outaged = xml.replacen("  <SoftwareInfo>\n    <extension>\n", period, 1);
+    assert!(outaged.contains("Power Outage"), "the made period is in");
+
+    let config = dwelling_config(
+        "outage-dehum",
+        &outaged,
+        Some(root.join("data/examples/BEopt_example_schedule.csv")),
+        root.join("tests/fixtures/resstock/2025.1/weather/G4803030_2018.csv"),
+        "2018-06-01T00:00:00-05:00",
+        4 * 86400,
+        900,
+    );
+    let mut dwelling = Dwelling::from_config(config).expect("builds");
+    let dehum = dwelling
+        .equipment()
+        .iter()
+        .find(|eq| eq.descriptor().name.as_str() == "Dehumidifier")
+        .expect("the home has a dehumidifier")
+        .descriptor()
+        .name
+        .clone();
+    // 384 steps: the outage flags 96 (06-02 00:00) through 287 (06-03
+    // 23:45); 0..96 is the day before, 288..384 the day after.
+    let mut power: Vec<f64> = Vec::with_capacity(384);
+    for _ in 0..384 {
+        dwelling.step().expect("steps");
+        let eq = dwelling
+            .equipment()
+            .iter()
+            .find(|eq| eq.descriptor().name == dehum)
+            .expect("the unit");
+        power.push(
+            eq.core_output()
+                .flows
+                .electric_kw
+                .map_or(0.0, |e| e.net_consumption_kw()),
+        );
+    }
+
+    // The window is live: the unit runs the day before the period and
+    // again the day after (the humidistat control resumes).
+    assert!(
+        power[..96].iter().any(|p| *p > 0.0),
+        "the dehumidifier runs the day before the period"
+    );
+    assert!(
+        power[288..].iter().any(|p| *p > 0.0),
+        "the dehumidifier runs again after the period"
+    );
+    // Not one flagged step draws power: the outage stops the unit.
+    for (step, p) in power.iter().enumerate().skip(96).take(192) {
+        assert_eq!(*p, 0.0, "step {step}: the outage stops the dehumidifier");
+    }
+}

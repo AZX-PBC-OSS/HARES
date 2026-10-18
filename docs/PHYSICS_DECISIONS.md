@@ -925,7 +925,10 @@ flags, beside `bus_energized`: space heating and cooling duty forced to
 held at 2 C for the step, freeze protection and not off, so standby
 losses continue (`schedules.rb:673-676, 1452-1454`,
 `resources/waterheater.rb:18, 183-188, 2053`); a battery or an EV idle
-through the step; mechanical ventilation off under its row. The loads
+through the step; mechanical ventilation off under its row; the
+dehumidifier off under its row (`dehumidifier`, a `Power Outage` only:
+the zeroed availability schedule stops the unit, the humidistat
+setpoints untouched and its control resumed after the step). The loads
 that follow a schedule column or a profile are gated by the table row
 their class declares, so a profile the columns cannot reach stops with
 them. PV and generators are in no row and keep running: an HPXML

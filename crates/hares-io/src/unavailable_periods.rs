@@ -259,7 +259,8 @@ pub fn row_zeroed_by(schedule_name: &str, kind: UnavailableKind) -> Option<bool>
 /// flags the row, and 0 exactly otherwise. A difference, including a
 /// nonzero column with no HPXML period, fails construction naming the
 /// column, the first differing row and the periods: HARES reads the
-/// column and ignores nothing.
+/// column and ignores nothing. Each checked column's verdict is traced
+/// at debug.
 pub fn check_schedule_flag_columns(
     schedule: &ScheduleTimeSeries,
     periods: &[UnavailablePeriod],
@@ -293,6 +294,15 @@ pub fn check_schedule_flag_columns(
                 1.0 => true,
                 0.0 => false,
                 other => {
+                    tracing::debug!(
+                        column = %key,
+                        kind = column.column_name(),
+                        row,
+                        value = *other,
+                        verdict = "differs",
+                        "schedule flag column checked against the \
+                         unavailable periods"
+                    );
                     return Err(HaresError::Dwelling(format!(
                         "schedule column '{}' row {row}: the value {other} is \
                          neither 0 nor 1; the column records the unavailable \
@@ -303,6 +313,16 @@ pub fn check_schedule_flag_columns(
                 }
             };
             if flagged != expected {
+                tracing::debug!(
+                    column = %key,
+                    kind = column.column_name(),
+                    row,
+                    file_flag = flagged,
+                    period_flag = expected,
+                    verdict = "differs",
+                    "schedule flag column checked against the \
+                     unavailable periods"
+                );
                 return Err(HaresError::Dwelling(format!(
                     "schedule column '{}' row {row}: the file's flag is \
                      {flagged} where the HPXML periods give {expected}; the \
@@ -312,6 +332,13 @@ pub fn check_schedule_flag_columns(
                 )));
             }
         }
+        tracing::debug!(
+            column = %key,
+            kind = column.column_name(),
+            rows = schedule.columns[idx].len(),
+            verdict = "matches",
+            "schedule flag column checked against the unavailable periods"
+        );
     }
     Ok(())
 }

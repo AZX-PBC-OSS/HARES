@@ -4259,7 +4259,9 @@ this replaces); `12-inputs.md` IN-3 (`HPXML_ELEMENTS`); `11-other-defects.md`
 OD-2 (strict inputs); B-1c (the calendar of the simulated year).
 
 **State:** FIXED (2026-10-18, branch `row/r94ij`, worktree `r94ij`,
-based on `6a5d9769`, one commit; the schedule-side slice the entry's
+based on `6a5d9769`, one commit plus the fixes commit (the
+dehumidifier gate, the flag-column trace and the file-order sentence
+below); the schedule-side slice the entry's
 parser, table, calendar flags, column zeroing and pre-period design
 levels already carried at that base, re-verified by this entry's tests).
 
@@ -4269,8 +4271,12 @@ The commit adds what the entry's remaining surface names:
 availability the flagged periods set, the last non-regular option
 winning), computed by the environment manager once per construction
 over the run's calendar schedule rows and set per step beside
-`schedule_row`; the equipment classes' declaration of the table rows
-they answer to, one exhaustive match (`hares-equipment`'s
+`schedule_row`. The last non-regular option is the periods' file
+order: the flags apply period by period in the HPXML document order
+the parser returns, so two flagged periods that each carry a
+non-regular option leave the later period's availability. The
+equipment classes' declaration of the table rows they answer to, one
+exhaustive match (`hares-equipment`'s
 `unavailable_period_rows`, the multi-instance "Class #N" spelling
 through its class), pinned against the reference table by the
 cross-check test; and the gates that close on it the same way an
@@ -4281,10 +4287,13 @@ heater's control setpoint 2 C for the step (the freeze protection,
 `step_setpoint_c` in every water-heater type; the unit test fires a
 tank the period caught below 2 C, so the protection is not an off), a
 battery idle, an EV idle, mechanical ventilation off under its row,
-and the schedule- and profile-driven loads zeroed by the row their
-class declares (the profile-driven loads are the point: the columns'
-zeroing cannot reach them, which the vacant home's exterior lighting
-witnessed at the parent). The four schedule flag columns stop being
+the dehumidifier off under its row (`zeroes_dehumidifier` beside the
+unit's outage gate, the unit's power 0 through the period and the
+humidistat control resumed after it), and the schedule- and
+profile-driven loads zeroed by the row their class declares (the
+profile-driven loads are the point: the columns' zeroing cannot reach
+them, which the vacant home's exterior lighting witnessed at the
+parent). The four schedule flag columns stop being
 `NotUsed`: `check_schedule_flag_columns` runs at the blueprint freeze
 on the file's own resolution, and a column that disagrees with the
 periods fails construction naming the column, the first differing row
@@ -4300,7 +4309,10 @@ their gates (heating delivered through the period; no freeze setpoint
 channel), and `schedule_flag_column_must_match_the_periods` failed on
 the check's absence. GREEN at the row; `design_level_ignores_flagged_steps`
 and `natural_ventilation_option_applies_to_every_period` pin the
-pre-period design level and the availability option.
+pre-period design level and the availability option. The dehumidifier
+gate's probe (`power_outage_stops_the_dehumidifier`) ran RED at the
+fixes' parent (the unit drew power on the flagged steps, 0.0797 kW at
+the first) and GREEN at the fixes commit.
 
 Movement: no golden moves. The only golden whose home carries a period
 in its window is `consumer_shape_900s` (bldg0176227's No Space Heating

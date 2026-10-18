@@ -543,6 +543,13 @@ impl UnavailablePeriodState {
         self.power_outage
     }
 
+    /// Whether the step zeroes the `dehumidifier` row: a `Power Outage`
+    /// period.
+    #[must_use]
+    pub fn zeroes_dehumidifier(self) -> bool {
+        self.power_outage
+    }
+
     /// Whether the step zeroes the battery's rows (`battery_charging`,
     /// `battery_discharging`): a `Power Outage` period.
     #[must_use]

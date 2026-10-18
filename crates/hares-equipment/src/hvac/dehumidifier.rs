@@ -592,6 +592,24 @@ impl Equipment for Dehumidifier {
             self.operating_mode = OperatingMode::Off;
             return OperatingMode::Off;
         }
+        // Unavailable period: an HPXML period whose table row zeroes the
+        // dehumidifier (a `Power Outage`, row `dehumidifier` of
+        // `unavailable_periods.csv`) stops the unit for the flagged step,
+        // beside the outage gate: OpenStudio-HPXML zeroes the
+        // dehumidifier's availability schedule through the period
+        // (`resources/schedules.rb` `set_unavailable_periods`). The
+        // humidistat setpoints are untouched and its control resumes once
+        // the step passes.
+        if env.unavailable_periods.zeroes_dehumidifier() {
+            tracing::debug!(
+                dehumidifier = %self.descriptor.name,
+                "the step's unavailable periods zero the dehumidifier row: \
+                 the unit is off for the step"
+            );
+            self.is_on = false;
+            self.operating_mode = OperatingMode::Off;
+            return OperatingMode::Off;
+        }
         let pressure_pa = env.weather.pressure_pa();
         let zone = self
             .zone_id
@@ -674,7 +692,12 @@ impl Equipment for Dehumidifier {
         // update_control already forces is_on=false when the bus is
         // de-energized; this guard zeroes the parasitic contribution that
         // performance_snapshot would otherwise return for the off-cycle case.
-        let snapshot = if !env.grid.bus_energized() {
+        // A step whose unavailable periods zero the dehumidifier's table row
+        // (a `Power Outage`) is forced off the same way by update_control,
+        // and the guard here zeroes the parasitic with it: the unit draws
+        // nothing on a flagged step.
+        let snapshot = if !env.grid.bus_energized() || env.unavailable_periods.zeroes_dehumidifier()
+        {
             PerformanceSnapshot {
                 electric_power_w: 0.0,
                 sensible_gain_w: 0.0,
