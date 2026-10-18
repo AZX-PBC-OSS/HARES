@@ -39,6 +39,15 @@ equity, stability and reliability.
 5. **Flexibility**: custom equipment, schedules (filed, generated,
    stochastic), actors and tariffs all first-class; co-simulation
    interfaces maintained; Monte Carlo at fleet scale a documented path.
+6. **External verification**: every physics constant, curve and model
+   form carries its authoritative lineage (the EnergyPlus source, the
+   OS-HPXML source, the OCHRE source, the paper or standard), verified
+   against the UPSTREAM source by web fetch or the vendored tree, never
+   against HARES's own comment; a constant whose citation over-claims
+   (as `0.1528` was sourced from OCHRE, not EnergyPlus) is corrected to
+   name its true origin; a periodic external-audit sweep re-checks the
+   cited corpus against upstream heads and new publications, and its
+   findings become rows.
 
 ## Non-goals
 
