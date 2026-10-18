@@ -1206,7 +1206,7 @@ impl hares_types::DescribeFields for HeatPumpCoolerConfig {
             (
                 "crankcase_heater_w",
                 hares_types::FieldMeta {
-                    description: Some("the crankcase heater's power, kilowatts"),
+                    description: Some("the crankcase heater's power, watts"),
                     ..Default::default()
                 },
             ),

@@ -746,7 +746,6 @@ from the RFC 3339 strings to the naive local timestamps in the
 `fleet_report` products carry no `Time` column and are unchanged); no
 energy, power or weather number moves.
 
-<<<<<<< HEAD
 ## The defrost penalty is applied by one model
 
 A heat pump's defrost penalty exists in the engine as two models of the
@@ -810,7 +809,6 @@ stack to its air node; the gas water heater's split
 the pattern the helper extracts. Direction of the delta: the heating gas
 in boiler-bearing fixtures rises (the flue share is no longer free zone
 heat) and the zone's free heat falls; `fleet_mixed_offset` re-captured.
-=======
 ## Equipment configuration fields are stored in SI
 
 Every equipment config field that carries a power, an energy or an
@@ -838,4 +836,3 @@ The rule removes the per-equipment hand-written conversion factors and
 the caller's need to know which fields are not SI: every config a caller
 builds or reads is SI, and the read-back reports the resolved parameters
 directly from the SI fields.
->>>>>>> b847aedf (fix: store equipment power, energy and apparent-power config fields in SI units)

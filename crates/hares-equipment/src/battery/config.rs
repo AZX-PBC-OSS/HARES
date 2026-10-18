@@ -254,21 +254,21 @@ impl hares_types::DescribeFields for BatteryConfig {
             (
                 "capacity_j",
                 hares_types::FieldMeta {
-                    description: Some("the pack's capacity, kWh"),
+                    description: Some("the pack's capacity, J"),
                     ..Default::default()
                 },
             ),
             (
                 "max_charge_w",
                 hares_types::FieldMeta {
-                    description: Some("the maximum charge power, kW"),
+                    description: Some("the maximum charge power, watts"),
                     ..Default::default()
                 },
             ),
             (
                 "max_discharge_w",
                 hares_types::FieldMeta {
-                    description: Some("the maximum discharge power, kW"),
+                    description: Some("the maximum discharge power, watts"),
                     ..Default::default()
                 },
             ),
@@ -471,7 +471,7 @@ impl hares_types::DescribeFields for BatteryConfig {
             (
                 "inverter_capacity_va",
                 hares_types::FieldMeta {
-                    description: Some("the inverter's capacity, kVA"),
+                    description: Some("the inverter's capacity, volt-amperes"),
                     ..Default::default()
                 },
             ),

@@ -4068,7 +4068,7 @@ zone-capacitance, plug-load EV and payload cases),
 `battery_catalogue_fill_converts_with_uom`,
 `ev_fuel_economy_converts_to_joules_per_metre`),
 `numeric_changes_name_existing_goldens` passing with this commit's
-line; `si_census` 8751 lines with all four witnesses.
+line; `si_census` 8715 lines at this commit with all four witnesses.
 
 ## B-15: OpenStudio-HPXML unavailable periods are applied
 

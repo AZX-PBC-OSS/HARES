@@ -707,7 +707,7 @@ impl hares_types::DescribeFields for CentralAirConditionerConfig {
             (
                 "crankcase_heater_w",
                 hares_types::FieldMeta {
-                    description: Some("the crankcase heater's power, kilowatts"),
+                    description: Some("the crankcase heater's power, watts"),
                     ..Default::default()
                 },
             ),
@@ -948,7 +948,7 @@ impl hares_types::DescribeFields for RoomAcConfig {
             (
                 "crankcase_heater_w",
                 hares_types::FieldMeta {
-                    description: Some("the crankcase heater's power, kilowatts"),
+                    description: Some("the crankcase heater's power, watts"),
                     ..Default::default()
                 },
             ),

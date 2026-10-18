@@ -6013,6 +6013,16 @@ mod tests {
                 "WetAppliance.active_power_w (W)",
             ),
             (
+                "Clothes Washer",
+                json!({"phase_2_power_kw": 1.0}),
+                "WetAppliance.phase_<n>_power_w (W)",
+            ),
+            (
+                "Clothes Washer",
+                json!({"cycle_phase_2_power_kw": 1.0}),
+                "WetAppliance.cycle_phase_<n>_power_w (W)",
+            ),
+            (
                 "Lighting",
                 json!({"power_constant_kw": 1.0}),
                 "ScheduledLoad.power_constant_w (W)",

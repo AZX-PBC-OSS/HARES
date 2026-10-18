@@ -249,7 +249,7 @@ impl hares_types::DescribeFields for PvConfig {
             (
                 "capacity_w",
                 hares_types::FieldMeta {
-                    description: Some("the array's rated capacity, kW"),
+                    description: Some("the array's rated capacity, watts"),
                     ..Default::default()
                 },
             ),
@@ -305,7 +305,7 @@ impl hares_types::DescribeFields for PvConfig {
             (
                 "inverter_capacity_w",
                 hares_types::FieldMeta {
-                    description: Some("the inverter's capacity, kW"),
+                    description: Some("the inverter's capacity, watts"),
                     ..Default::default()
                 },
             ),

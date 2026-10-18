@@ -350,6 +350,70 @@ mod tests {
         );
     }
 
+    /// The unit tokens a field name's suffix forbids in its description:
+    /// the suffix names the field's unit (the SI rename made the names
+    /// true), so a description claiming another scaled or
+    /// wrong-dimension unit contradicts the field. Tokens are compared
+    /// case-insensitively after splitting the description on
+    /// non-alphanumeric characters, so "kWh/mi" yields the `kwh` token
+    /// and "kilowatt-hour" the `kilowatt` one.
+    fn forbidden_unit_tokens(name: &str) -> &'static [&'static str] {
+        if name.ends_with("_w") {
+            &["kw", "kwh", "kva", "kilowatt", "kilowatts"]
+        } else if name.ends_with("_j") {
+            &["kw", "kwh", "kilowatt", "kilowatts"]
+        } else if name.ends_with("_va") {
+            &["kw", "kwh", "kva", "kilowatt", "kilowatts"]
+        } else if name.ends_with("_kwh") {
+            &["kw", "kva", "joule", "joules"]
+        } else {
+            &[]
+        }
+    }
+
+    /// The published descriptions state the field's own unit: a field
+    /// whose name ends `_w` never claims kW in its description, and the
+    /// `_j`, `_va` and `_kwh` names likewise. The walk covers every
+    /// published section, the override classes included.
+    #[test]
+    fn published_descriptions_state_the_fields_own_unit() {
+        let schema = schema();
+        let mut failures = Vec::new();
+        let mut walk = |section: &str, fields: &[hares_types::FieldSchema]| {
+            for field in fields {
+                let Some(description) = &field.description else {
+                    continue;
+                };
+                let forbidden = forbidden_unit_tokens(&field.name);
+                if forbidden.is_empty() {
+                    continue;
+                }
+                let claimed: Vec<&str> = description
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .filter(|token| forbidden.contains(&token.to_ascii_lowercase().as_str()))
+                    .collect();
+                if !claimed.is_empty() {
+                    failures.push(format!(
+                        "{section}.{}: the description names {:?} but the field's unit is its \
+                         suffix: {description:?}",
+                        field.name, claimed
+                    ));
+                }
+            }
+        };
+        walk("config_fields", &schema.config_fields);
+        walk("dwelling_fields", &schema.dwelling_fields);
+        walk("settings_fields", &schema.settings_fields);
+        for class in &schema.override_classes {
+            walk(&format!("override_classes.{}", class.name), &class.fields);
+        }
+        assert!(
+            failures.is_empty(),
+            "a published description must not contradict its field's unit:\n{}",
+            failures.join("\n")
+        );
+    }
+
     /// Two calls serialise to the same JSON bytes.
     #[test]
     fn input_schema_json_is_deterministic() {

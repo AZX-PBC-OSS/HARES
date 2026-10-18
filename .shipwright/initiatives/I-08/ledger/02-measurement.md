@@ -4273,3 +4273,64 @@ foundation term (the conditioned basements), the same cause base.xml's
 recorded delta runs. The battery fixtures build with a `bms_mode`
 override in the census harness (the battery rule's own requirement);
 the runs are otherwise the fixtures'.
+### Row 94c, 2026-10-18, the SI config move's golden movement and the EV cold-snap delta (branch `row/r94c-b14`, worktree `r94c-b14`, commits `a776983b` + `b847aedf`)
+
+The record of rows 94c, 94g and 94h that the schedule requires, the 94c
+part: B-14's commit 2 (`b847aedf`, the SI config move) against its parent
+`a776983b`. The probes' raw data lives beside this file in
+`ledger/94c-probes/` so the record is self-contained: the ten goldens'
+before and after dump documents (`old_<name>.json`, `new_<name>.json`,
+the before side the parent's committed goldens, the after side the fix
+commit's, byte-equal to them) and the two cold-snap full frames
+(`coldsnap_frame_old.csv`, `coldsnap_frame_new.csv`, 4320 rows x 90
+columns each). Load average at the captures: 1 to 2 (1 min).
+
+Per-golden movement, compared field by field on bits (the dumps'
+`git_head`/`git_dirty` provenance fields excluded; both sides captured on
+a dirty tree, the before side at `ff39b24b` with commit 1 staged, the
+after side at `a776983b` with the fix staged, and each side byte-equal to
+the golden committed at its commit): four goldens bitwise outright and
+seven with movement, every moved value in the last bits:
+
+| Golden | Movement | Largest relative difference | The conversion that explains it |
+|---|---|---|---|
+| `leap_year_february_900s` | bitwise | none | no renamed field's value on this input passes an inexact pair |
+| `month_boundary_billing_3600s` | bitwise | none | as above |
+| `resstock_2025_fleet` | bitwise | none | as above |
+| `weather_wrap_900s` | bitwise | none | as above |
+| `der_pv_battery_900s` | the Clothes Washer's and the Other End Use's electric power, 4 cells each (the State's counts) | one ulp | the event load's kW working value: the schedule resolver's x1000 write and the load's /1000 construction read |
+| `der_pv_battery_ev_900s` | the EV's power and end use (3 cells), the BMS actor's `load_kw` (2), the EV driver's `charge_kw` (3) and `soc` (120), the Total Electric Power column, and four metrics: renewable fraction 2 ulp, gross consumption 2 ulp, net energy 3 ulp, EV end use 1 ulp | 5.4e-16 (net energy 79.3022132717606 to ...56) | the EV fuel economy's J/m round trip (0.325 kWh/mi is not binary-exact in J/m), beside the x1000//1000 pair |
+| `consumer_shape_900s` | the total electric (6695 cells), the total and water-heater gas power (5), the total reactive (10781), the Refrigerator #2 and refrigeration end-use power, one indoor and 1779 zone-2 temperature cells, and four metrics: the 30-min rolling peak 1 ulp, the renewable fraction 2 ulp, the gross 2 ulp, the net 2 ulp (the State's frame counts, the metrics' distances from the dumps) | 4.0e-16 (gross consumption 9154.879909050913 to ...916) | the x1000//1000 pair on the schedule resolver's write and the loads' read |
+| `fleet_mixed_offset` | the aggregates' Cooking Range, Other, Refrigeration, Refrigerator #2, Zone 2 temperature, Total Electric and Total Reactive columns and the homes' energies; home 2's metrics: the refrigeration peak 1 ulp, the net 1 ulp, the refrigeration energy 4 ulp | 4.6e-16 (home 2's refrigeration energy 30.796765985629122 to ...136) | the same pair |
+| `fleet_same_offset_300s` | the aggregates' Refrigeration, Refrigerator #2, Zone 2 temperature, Total Electric and Total Reactive columns and the homes' energies; home 0's renewable fraction 2 ulp, gross 2 ulp, net 1 ulp, the three homes' refrigeration peak 1 ulp and refrigeration energy 1 ulp each | 2.8e-16 (home 0's gross consumption 50.310569621864964 to ...98) | the same pair |
+| `full_year_hourly` | nine frame columns (the total electric and reactive, the total and gas-furnace gas power, the Cooking Range, Dishwasher, Gas Furnace, HVAC heating end use and Other powers); metrics bitwise | one-ulp cells (the State: every difference last-bit) | the same pair |
+| `full_year_900s_dst` | eight frame columns (the total electric and reactive, the ASHP Heater, Clothes Washer, Cooking Range, HVAC heating end use and Other powers, the indoor temperature); metrics bitwise | one-ulp cells (as above) | the same pair |
+
+The resolved products of every golden compare bitwise (the guard's
+expectation: no resolved equipment parameter moved). The committed goldens
+were re-captured in `b847aedf` itself and compare-all is green at it (10
+default + `full_year_900s_dst` on the dst build).
+
+The 45-day EV cold-snap run (the Measurement section's EV dwelling: the
+`bldg0000007` ResStock home with its EV under the Nightly strategy,
+constant -7.0 C weather, 45 days at 900 s, warm-up disabled, seed 0; the
+manifest in the worktree's `target/ev45/`), the full frame compared cell
+by cell, per variable:
+
+| Variable | Differing cells | Movement |
+|---|---|---|
+| `EV SOC (-)`, `actor:EvDriver:EV:soc` | 304 each | 245 cells at one f64 ulp and 59 at two ulps, the max absolute 2.2e-16 |
+| `EV Electric Power (kW)`, `EV End Use Electric Power (kW)`, `EV Energy (kWh)`, `actor:EvDriver:EV:charge_kw` | 4 each | max relative 6.557e-15 (37 ulps at the first cell) |
+| `Total Electric Power (kW)` | 4 | max relative 6.445e-15 |
+| every other of the 90 columns | 0 | bitwise |
+
+The SOC's differing cells run in five spans (rows 227 to 287, 323 to 379,
+418 to 479, 2338 to 2399 and 4162 to 4223; the first at 2018-01-03
+08:30), the drive and charge spans where the fuel economy's J/m round
+trip moves the SOC's energy integral by its last bit; the power columns'
+four cells are the charge-taper steps against the 0.90 target (rows 288,
+480, 2400 and 4224, the actor's `charge_kw` column one row later each),
+where one ulp of SOC is worth 37 ulps of power. The first differing rows
+match `frame_golden`'s diff (226 to 288). No scaled difference above
+1e-9 and no scale ratio near a unit factor anywhere: the movement is the
+conversion pairs, and nothing else.

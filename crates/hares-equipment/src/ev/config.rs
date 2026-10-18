@@ -734,7 +734,7 @@ impl hares_types::DescribeFields for EvConfig {
             (
                 "fuel_economy_j_per_m",
                 hares_types::FieldMeta {
-                    description: Some("the vehicle's consumption, kWh per mile"),
+                    description: Some("the vehicle's consumption, J/m"),
                     ..Default::default()
                 },
             ),

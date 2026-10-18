@@ -133,7 +133,7 @@ fn battery_config_fields_are_unit_invariant() {
     let parent_j = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(parent_capacity_kwh)
         .get::<uom::si::energy::joule>();
     assert!(
-        (capacity_j / parent_j - 1.0).abs() < 1e-6,
+        within_2_ulp(capacity_j, parent_j),
         "capacity_j {capacity_j} must equal the fixture's capacity in J ({parent_j})"
     );
     // The parent stored the rated power in kW (W/1000), converted back at
