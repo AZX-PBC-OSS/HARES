@@ -104,8 +104,11 @@ impl PyRoofPlane {
         self.inner.material.clone()
     }
 
-    /// Index into Building.boundaries for this roof surface. Pass as
-    /// `attached_boundary_id` when creating PV equipment from this plane.
+    /// Index into Building.boundaries for this roof surface. The dwelling's
+    /// assembly decides the attachment itself: a PV built through Python
+    /// cannot pass `attached_boundary_id` (the Python PV config builder
+    /// always leaves it unset), and a preset that disagrees with the roof
+    /// the assembly matches is an assembly error.
     #[getter]
     fn boundary_index(&self) -> Option<u32> {
         self.inner.boundary_index
@@ -176,8 +179,11 @@ impl PyPvCandidate {
         self.inner.roof_shape.into()
     }
 
-    /// Index into Building.boundaries for the source roof surface.
-    /// Pass as `attached_boundary_id` when creating PV equipment.
+    /// Index into Building.boundaries for the source roof surface. The
+    /// dwelling's assembly decides the attachment itself: a PV built through
+    /// Python cannot pass `attached_boundary_id` (the Python PV config
+    /// builder always leaves it unset), and a preset that disagrees with
+    /// the roof the assembly matches is an assembly error.
     #[getter]
     fn boundary_index(&self) -> Option<u32> {
         self.inner.boundary_index

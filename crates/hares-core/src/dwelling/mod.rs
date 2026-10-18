@@ -2263,6 +2263,9 @@ pub const COLLECTOR_AREA_PER_W: f64 = 2.0 / 420.0;
 ///
 /// Matching rule: a roof with an azimuth matches a PV within 15° of
 /// azimuth and 10° of tilt, the closest by summed difference. An
+/// equidistant match picks the first roof in boundary order: the
+/// candidates scan in the building's boundary order and a running best
+/// is replaced only on a strictly smaller sum. An
 /// omnidirectional roof (no azimuth) has no azimuth to compare, because
 /// the envelope averages its solar gain over every azimuth, so it matches
 /// by tilt alone: every PV within 10° of its tilt attaches to it, whatever

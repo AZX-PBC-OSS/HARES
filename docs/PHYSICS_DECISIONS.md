@@ -848,7 +848,10 @@ roof (the envelope registers an exterior roof with no azimuth as
 omnidirectional, azimuth-averaged Perez irradiance) has no azimuth to
 compare, so it matches by tilt alone, every PV within 10° of its tilt
 attaching whatever the PV's azimuth, and the arrays' coverages sum on
-that roof. A PV without a tilt or an azimuth is an assembly error naming
+that roof. An equidistant match picks the first roof in boundary
+order: the candidates scan in the building's boundary order and a
+running best is replaced only on a strictly smaller sum. A PV without
+a tilt or an azimuth is an assembly error naming
 the PV and the HPXML element (`ArrayTilt`, `ArrayAzimuth`): OpenStudio-
 HPXML requires both (`EPvalidator.sch`, through
 `defaults.rb` `apply_pv_systems`). A PV that matches no roof attaches to
@@ -858,11 +861,24 @@ none, and the run's warning log names it and the nearest roof's azimuth
 The coverage an attached array registers on the roof is its collector
 area over the roof's area, and the collector area per watt of DC
 nameplate is a named constant, `COLLECTOR_AREA_PER_W` = 2/420 m²/W: a
-420 W panel presents about 2 m² of collector, the area of a
-20 %-efficient module at standard test conditions (1000 W/m²), the
-module efficiency PVWatts assumes for its area-free capacity form. A
-roof whose summed coverage exceeds 1 is an assembly error naming the
-roof, its area and the PVs on it; nothing clamps it silently.
+420 W panel presents 2 m² of collector: a 21 %-efficient module at
+standard test conditions (1000 W/m²; 420 W over 0.21 × 1000 W/m² is
+2.0 m²). The efficiency is PVWatts v8's Premium
+module assumption, not an assumption of 20 % and not PVWatts's
+default: the PVWatts v8 area-free capacity form divides the DC
+nameplate by the module's STC efficiency (SSC `cmod_pvwattsv8.cpp`,
+`module_m2 = dc_nameplate / stc_eff / 1000`), and its `module_type`
+defaults to 0, Standard, at 19 %, under which a 420 W module presents
+2.21 m²; the three assumptions in the source are Standard 0.19,
+Premium 0.21 and thin film 0.18, and no 20 % is among them. The
+constant is HARES's own pairing of a 420 W module with the 2 m² its
+premium efficiency needs. A roof whose summed coverage exceeds 1 is
+an assembly error naming the roof, its area and the PVs on it;
+nothing clamps it silently. The boundary is on bits: the check
+compares the sum against 1 with no tolerance, so a summed coverage of
+exactly 1 assembles and a sum a single ulp above 1 fails, the
+fail-fast error naming the roof, its area, the PVs on it and their
+summed coverage.
 
 OCHRE does not couple its PV to the roof's solar gains at all: the
 envelope model carries no PV shading, and a PV without a tilt or an
