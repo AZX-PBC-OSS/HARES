@@ -68,7 +68,7 @@ fn dwelling_config(hpxml: &Path) -> DwellingConfig {
 
 fn probe_spec(class: &str) -> hares_io::EquipmentSpec {
     let parameters = json!({
-        "active_power_kw": 1.0,
+        "active_power_w": 1000.0,
         "active_duration_s": 1800.0,
         "cooldown_duration_s": 900.0,
         "event_window_source": "constant",
@@ -127,7 +127,7 @@ fn named_probe(class: &str, instance_name: &str) -> hares_io::EquipmentSpec {
 fn hpxml_microwave(id: &str) -> String {
     format!(
         "<Microwave><SystemIdentifier id='{id}'/><extension>\
-         <active_power_kw>1.0</active_power_kw>\
+         <active_power_w>1000.0</active_power_w>\
          <active_duration_s>1800</active_duration_s>\
          <cooldown_duration_s>900</cooldown_duration_s>\
          <event_window_source>constant</event_window_source>\

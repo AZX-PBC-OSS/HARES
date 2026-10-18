@@ -401,7 +401,7 @@ class TestDefaultStrategyEv:
             duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
         dw.set_electric_tariff(tariff)
         df = dw.simulate().reports[0].table()
 
@@ -425,7 +425,7 @@ class TestDefaultStrategyEv:
             duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
         df = dw.simulate().reports[0].table()
 
         col = _ev_power_col(df, "EV1")
@@ -480,8 +480,8 @@ class TestDefaultStrategyEv:
             duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
-        dw.add_ev(EV("EV2", capacity_kwh=60.0, max_charging_kw=7.2))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
+        dw.add_ev(EV("EV2", capacity_j=216000000, max_charging_power_w=7200))
         dw.step()
 
         actors = dw.telemetry().actors()
@@ -521,7 +521,7 @@ class TestDefaultStrategyEv:
             EvArchetypeId.daily_commuter_l2(),
             seed=42,
         )
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
         dw.set_electric_tariff(tariff)
         dw.step()
 
@@ -556,7 +556,7 @@ class TestDefaultStrategyEv:
         )
         dw.initialize()
         dw.step()  # simulation is now in progress
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
 
         soc_values = []
         for _ in range(2 * 96):  # two days of 15-min steps
@@ -600,7 +600,7 @@ class TestDefaultStrategyEv:
             duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
 
         total_steps = 3 * 96  # quarter-hour steps in 3 days
 
@@ -696,7 +696,7 @@ class TestDefaultStrategyEv:
                 duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
             )
             dw.initialize()
-            dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+            dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
 
             socs = []
             prev = None
@@ -751,9 +751,9 @@ class TestDefaultStrategyEv:
             duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
         dw.remove_equipment("EV1")
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
 
         soc_values = []
         for _ in range(2 * 96):  # two days of 15-min steps

@@ -1,0 +1,534 @@
+engine_version: 2
+kind: feature
+description: "Build a new capability or enhancement through a disciplined engineering process"
+recipe_summary: "clarify, explore, research, spec, design, architecture, check-consistency, decompose, plan-critique, implement, round-out-coverage, coverage-triage, red-team, review, remediate, commit"
+start:
+  next: clarify
+
+steps:
+  - id: clarify
+    label: Clarify
+    description: "Interrogate the feature description: surface unknowns, challenge assumptions, ask the operator targeted questions until scope is bounded and nothing significant remains ambiguous"
+    required: true
+    skippable: true
+    type: agent
+    agent_role: clarify
+    charter: clarify
+    challenge: clarify
+    includes: [reflection-scaffold, artifact-alignment, interactive-protocol]
+    output:
+      file: clarifications.md
+      schema:
+        type: object
+        additionalProperties: false
+    default_next: explore
+
+  - id: explore
+    label: Explore
+    description: "Bootstrap context about the local codebase: what exists, where, why, project configuration, prior initiatives, relevant code surfaces — the knowledge a new dev would need before deciding what to do"
+    required: true
+    skippable: true
+    type: agent
+    agent_role: explore
+    charter: explore
+    challenge: explore
+    includes: [reflection-scaffold, artifact-alignment]
+    concerns: [testing]
+    output:
+      file: explore.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [passing_commands]
+        properties:
+          passing_commands:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              properties:
+                command: { type: string }
+              required: [command]
+            description: "Verification commands discovered from project configuration (test, typecheck, lint, format-check, build)"
+    default_next: research
+
+  - id: research
+    label: Research
+    description: "Investigate external prior art, libraries, patterns, and practices; survey approaches used elsewhere that could inform the design"
+    required: true
+    skippable: true
+    type: agent
+    agent_role: research
+    charter: research
+    challenge: research
+    includes: [reflection-scaffold, artifact-alignment]
+    output:
+      file: research.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [passing_commands]
+        properties:
+          passing_commands:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              properties:
+                command: { type: string }
+              required: [command]
+            description: "Verification commands discovered from project configuration (test, typecheck, lint, format-check, build)"
+    default_next: spec
+
+  - id: spec
+    label: Specification
+    description: "Write a specification that confirms what is known from the initiative and codebase, and surfaces every unresolved design choice as a question for the operator — never guess"
+    required: true
+    skippable: true
+    type: agent
+    agent_role: spec
+    charter: spec
+    challenge: spec
+    includes: [reflection-scaffold, artifact-alignment, interactive-protocol]
+    output:
+      file: spec.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [spec_outcome]
+        properties:
+          spec_outcome:
+            type: string
+            enum: [complete, needs_clarification]
+            description: "Routing key — spec complete or needs more clarification/exploration"
+    edges:
+      - when: { field: spec_outcome, eq: needs_clarification }
+        next: clarify
+        max_traversals: 5
+        inject: "spec.md marked spec_outcome: needs_clarification — it lists the open questions blocking the spec. Resolve them with the operator before re-drafting."
+    default_next: design
+
+  - id: design
+    label: Design
+    description: "Translate confirmed requirements into component hierarchy, interaction states, data flow, and accessibility structure; surface gaps the spec glossed over as questions"
+    required: true
+    skippable: true
+    type: agent
+    agent_role: design
+    charter: design
+    challenge: design
+    includes: [reflection-scaffold, artifact-alignment, interactive-protocol]
+    output:
+      file: design.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [design_outcome]
+        properties:
+          design_outcome:
+            type: string
+            enum: [complete, spec_gap]
+            description: "Routing key — design complete or spec has gaps the design cannot resolve"
+    edges:
+      - when: { field: design_outcome, eq: spec_gap }
+        next: spec
+        max_traversals: 5
+        inject: "design.md marked design_outcome: spec_gap — it describes what the spec left unresolved that design could not proceed past. Close those gaps in spec.md."
+    default_next: architecture
+
+  - id: architecture
+    label: Architecture
+    description: "Identify cross-module boundaries, new service/API seams, and structural decisions; document ADRs where reasonable people could disagree"
+    required: true
+    skippable: true
+    type: agent
+    agent_role: architect
+    charter: architecture
+    challenge: architecture
+    includes: [reflection-scaffold, artifact-alignment, interactive-protocol]
+    output:
+      file: architecture.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [arch_outcome]
+        properties:
+          arch_outcome:
+            type: string
+            enum: [complete, design_gap]
+            description: "Routing key — architecture complete or design has gaps the architecture cannot resolve"
+    edges:
+      - when: { field: arch_outcome, eq: design_gap }
+        next: design
+        max_traversals: 5
+        inject: "architecture.md marked arch_outcome: design_gap — it describes what the design left unresolved that architecture could not proceed past. Close those gaps in design.md."
+    default_next: check-consistency
+
+  - id: check-consistency
+    label: Check consistency
+    description: "Verify all prior artifacts are aligned: no contradictions, no drifted duplications, no gaps between artifacts. Resolve conflicts with the operator and update artifacts to cede authority."
+    required: true
+    skippable: true
+    type: agent
+    agent_role: check-consistency
+    challenge: check-consistency
+    includes: [reflection-scaffold, artifact-alignment, interactive-protocol]
+    output:
+      file: consistency-report.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [consistency_outcome]
+        properties:
+          consistency_outcome:
+            type: string
+            enum: [aligned, contradictions_found]
+            description: "Routing key — artifacts aligned or contradictions requiring resolution"
+    edges:
+      - when: { field: consistency_outcome, eq: contradictions_found }
+        next: spec
+        max_traversals: 5
+        inject: "consistency-report.md marked consistency_outcome: contradictions_found — it lists where prior artifacts disagree. Resolve each contradiction and update the artifact that should cede authority."
+    default_next: decompose
+
+  - id: decompose
+    label: Decompose
+    description: "Break the specification into INVEST-scoped implementation tickets with dependencies, validation hooks, and concern mapping"
+    required: true
+    skippable: true
+    type: agent
+    agent_role: decompose
+    charter: decompose
+    challenge: decompose
+    includes: [reflection-scaffold, artifact-alignment, interactive-protocol]
+    concerns: [wiring]
+    output:
+      - file: decompose.md
+        schema:
+          type: object
+          additionalProperties: false
+          required: [decompose_outcome]
+          properties:
+            decompose_outcome:
+              type: string
+              enum: [complete, spec_gap]
+              description: "Routing key — decomposition complete or spec has gaps the ticket set cannot cover"
+      - pattern: 'tickets/*/ticket.md'
+        schema: &ticket-frontmatter-contract
+          type: object
+          additionalProperties: false
+          x-code-contract: ticket-frontmatter
+          required: [id, title, kind, status, initiative_id, depends_on, created_at, created_by]
+          properties:
+            id:
+              type: string
+              description: "Ticket identifier unique within the initiative (e.g. T-0001) — sequential; skip IDs that already exist in the tickets directory"
+            title:
+              type: string
+              description: "One-line summary of the ticket's scope"
+            kind:
+              type: string
+              enum: [implement, fix, review, research, spec]
+              description: "Ticket type — determines which flow the ticket runs through"
+            status:
+              type: string
+              enum: [draft, pending, in_progress, done, failed, skipped]
+              description: "Lifecycle state of the ticket — the agent writes `draft` at creation; the engine manages transitions thereafter"
+            initiative_id:
+              type: string
+              description: "Identifier of the parent initiative (e.g. I-01)"
+            depends_on:
+              type: array
+              items: { type: string }
+              description: "Ticket ids that must complete before this one can start"
+            created_at:
+              type: string
+              description: "ISO 8601 timestamp of ticket creation"
+            created_by:
+              type: string
+              description: "Identifier of the agent or operator that created the ticket — the decomposition agent writes `shipwright-decomposition`"
+            complexity:
+              type: string
+              enum: [trivial, simple, moderate, complex]
+              description: "Not a routing key — but the ticket's own per-ticket subflow reads it to select the matching role tier (CLI/model/reasoning effort) for every step in that ticket's implementation, when the resolved role declares one"
+            area_name:
+              type: string
+              description: "Human-readable label for the area of the codebase the ticket touches"
+            validation_hooks:
+              type: array
+              items:
+                oneOf:
+                  - type: string
+                  - type: object
+                    additionalProperties: false
+                    required: [name, command]
+                    properties:
+                      name: { type: string }
+                      command: { type: string }
+                      timeout_seconds: { type: number, description: "seconds; defaults to 900 if omitted" }
+              description: "Commands to run after implementation; a bare string is a shell command, an object carries a name and optional timeout — empty list for tickets that touch no code"
+            stack_hint:
+              type: string
+              description: "Non-binding hint about the technology stack the ticket involves"
+            rationale:
+              type: string
+              description: "Why the ticket exists — the design decision or spec gap it addresses"
+            concern_paths:
+              type: array
+              items: { type: string }
+              description: "Concern files relevant to this ticket's implementation — bare concern IDs or filesystem paths; the resolver accepts both"
+    edges:
+      - when: { field: decompose_outcome, eq: spec_gap }
+        next: spec
+        max_traversals: 5
+        inject: "decompose.md marked decompose_outcome: spec_gap — decomposition found work the spec does not scope. Close those gaps in spec.md so the ticket set can cover the full change."
+    default_next: plan-critique
+
+  - id: plan-critique
+    label: Plan critique
+    description: "Adversarial review of the ticket set: INVEST compliance, cross-ticket coherence, spec coverage, missing shared infrastructure, dependency graph correctness"
+    required: true
+    skippable: true
+    type: agent
+    agent_role: plan-critique
+    challenge: plan-critique
+    includes: [reflection-scaffold, severity-ladder]
+    output:
+      file: plan-critique.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [critique_outcome]
+        properties:
+          critique_outcome:
+            type: string
+            enum: [clean, findings, halt]
+            description: "Routing key — plan critique verdict"
+    edges:
+      - when: { field: critique_outcome, eq: findings }
+        next: decompose
+        max_traversals: 5
+        inject: "plan-critique.md marked critique_outcome: findings — it lists INVEST, coherence, or coverage problems in the ticket set. Address each finding in the tickets it names."
+      - when: { field: critique_outcome, eq: halt }
+        next: halt
+    default_next: implement
+
+  - id: implement
+    label: Implement
+    description: "Run every runnable ticket through the ticket child flow — implement, coverage, triage, red-team, review, and commit per ticket, one at a time over the shared working tree"
+    required: true
+    type: subflow
+    subflow:
+      recipe: ticket
+      for_each:
+        pattern: 'tickets/*/ticket.md'
+        schema: *ticket-frontmatter-contract
+      max_concurrency: 1
+      on_child_failure: fail_fast
+      allow_empty: false
+    output:
+      - pattern: 'tickets/*/review.md'
+        schema:
+          type: object
+          additionalProperties: false
+          required: [review_outcome]
+          properties:
+            review_outcome:
+              type: string
+              enum: [clean, findings, test_gaps, halt, clean_with_nits_applied]
+              description: "Per-ticket review verdict — every non-skipped ticket must produce its review artifact"
+    default_next: round-out-coverage
+
+  - id: round-out-coverage
+    label: Round out coverage
+    description: "Add regression tests and shore up related test coverage"
+    required: true
+    type: agent
+    agent_role: coverage-round
+    challenge: coverage-round
+    output:
+      file: coverage-note.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [coverage_note_outcome]
+        properties:
+          coverage_note_outcome:
+            type: string
+            enum: [written, skipped]
+            description: "Whether a coverage note was written"
+    default_next: coverage-triage
+
+  - id: coverage-triage
+    label: Coverage triage
+    description: "Judge whether the test coverage is adequate or tests are missing"
+    required: true
+    type: agent
+    agent_role: triage
+    challenge: triage
+    includes: [reflection-scaffold, prove-with-test]
+    output:
+      file: coverage-note-quality.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [coverage_outcome, failing_tests]
+        properties:
+          coverage_outcome:
+            type: string
+            enum: [adequate, tests_missing, defect_found]
+            description: "Routing key — coverage adequate, tests missing, or coverage work surfaced a real defect in the implementation (not just a test gap)"
+          new_test_paths:
+            type: array
+            items: { type: string }
+            description: "Non-routing metadata: new test paths to track as regression tests"
+          failing_tests:
+            type: array
+            items:
+              type: object
+              properties:
+                command: { type: string }
+                path: { type: string }
+                name: { type: string }
+              required: [command]
+            description: "Well-known gate key: commands proving a claimed defect_found genuinely fails; empty for adequate/tests_missing"
+    must_fail:
+      - { from_key: failing_tests }
+    side_effects:
+      - action: append_initiative_frontmatter
+        field: regression_tests
+        from: new_test_paths
+      - when:
+          - field: coverage_outcome
+            eq: defect_found
+          - field: failing_tests
+            empty: true
+        action: append_decision_log
+        action_name: coverage_triage_defect_without_tests
+        note: "coverage_outcome is defect_found but failing_tests is empty — the claim carries no failing-test evidence and the must_fail gate had nothing to run"
+    edges:
+      - when:
+          field: coverage_outcome
+          eq: tests_missing
+        next: round-out-coverage
+        max_traversals: 5
+        inject: "coverage-note-quality.md marked coverage_outcome: tests_missing — it names the untested paths. Write tests covering exactly those paths; do not re-scope beyond what it flagged."
+      - when:
+          field: coverage_outcome
+          eq: defect_found
+        next: remediate
+        max_traversals: 5
+        inject: "coverage-note-quality.md lists failing_tests — each is a reproducible defect, not a test artifact. Fix the underlying code so every listed test passes; never edit or delete the test to make it pass. round-out-coverage re-runs afterward to add the regression test once the fix lands."
+    default_next: red-team
+
+  - id: red-team
+    label: Red team
+    description: "Actively try to break what was just implemented with adversarial tests"
+    required: true
+    type: agent
+    agent_role: red-team
+    charter: red-team
+    challenge: red-team
+    includes: [reflection-scaffold, prove-with-test]
+    concerns: [red-teaming, test-quality, testing]
+    output:
+      file: red-team-note.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [red_team_outcome, failing_tests]
+        properties:
+          red_team_outcome:
+            type: string
+            enum: [clean, issues_found]
+            description: "Routing key — no adversarial gaps found, or genuine issues found"
+          failing_tests:
+            type: array
+            items:
+              type: object
+              properties:
+                command: { type: string }
+                path: { type: string }
+                name: { type: string }
+              required: [command]
+            description: "Well-known gate key: commands proving the red-team's findings genuinely fail"
+    must_fail:
+      - { from_key: failing_tests }
+    side_effects:
+      - when:
+          - field: red_team_outcome
+            eq: issues_found
+          - field: failing_tests
+            empty: true
+        action: append_decision_log
+        action_name: red_team_findings_without_tests
+        note: "red_team_outcome is issues_found but failing_tests is empty — the findings carry no failing-test evidence and the must_fail gate had nothing to run"
+    edges:
+      - when:
+          field: red_team_outcome
+          eq: issues_found
+        next: remediate
+        max_traversals: 5
+        inject: "red-team-note.md lists failing_tests — each is a reproducible defect, not a test artifact. Fix the underlying code so every listed test passes; never edit or delete the test to make it pass."
+    default_next: review
+
+  - id: review
+    label: Review
+    description: "Adversarial review of the implementation against the specification and tickets: completeness, correctness, code quality, architecture fit"
+    required: true
+    type: agent
+    agent_role: review
+    charter: review-findings
+    challenge: review
+    includes: [reflection-scaffold, prove-with-test, severity-ladder]
+    concerns: [test-quality, security]
+    must_pass:
+      - { from_key: passing_commands }
+    output:
+      file: review.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [review_outcome]
+        properties:
+          review_outcome:
+            type: string
+            enum: [clean, findings, test_gaps, halt, clean_with_nits_applied]
+            description: "Routing key — review verdict"
+    edges:
+      - when: { field: review_outcome, eq: findings }
+        next: remediate
+        max_traversals: 5
+        inject: "review.md carries severity-laddered findings. Address every finding at the severity the ladder assigns — critical and major findings must be fixed; a minor finding may be deferred only with the justification recorded."
+      - when: { field: review_outcome, eq: test_gaps }
+        next: round-out-coverage
+        max_traversals: 5
+        inject: "review.md flagged test_gaps — it names the coverage review found missing. Add tests covering exactly what it named."
+      - when: { field: review_outcome, eq: halt }
+        next: halt
+    default_next: commit
+
+  - id: remediate
+    label: Remediate
+    description: "Fix the defects red-team, review, or coverage-triage found in the implemented work"
+    required: true
+    type: agent
+    agent_role: fix
+    charter: implement
+    challenge: fix
+    includes: [reflection-scaffold, prove-with-test]
+    concerns: [wiring, test-quality, testing]
+    must_pass:
+      - { from_key: failing_tests }
+      - { from_key: passing_commands }
+    default_next: round-out-coverage
+
+  - id: commit
+    label: Commit
+    description: "Write a commit message and commit the reviewed, verified changes"
+    required: true
+    skippable: true
+    type: agent
+    agent_role: commit
+    challenge: true
+    default_next: done

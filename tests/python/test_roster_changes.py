@@ -19,11 +19,11 @@ def test_duplicate_equipment_name_raises_equipment_error():
     from hares._hares import HaresEquipmentError
 
     dw = make_dwelling()
-    dw.add_battery(Battery("Bat", 10.0))
+    dw.add_battery(Battery("Bat", capacity_j=36000000))
     names = dw.equipment_names()
 
     with pytest.raises(HaresEquipmentError, match="duplicate equipment name 'Bat'"):
-        dw.add_battery(Battery("Bat", 12.0))
+        dw.add_battery(Battery("Bat", capacity_j=43200000))
 
     assert dw.equipment_names() == names
 
@@ -36,7 +36,7 @@ def test_replacing_missing_equipment_raises_config_error():
     names = dw.equipment_names()
 
     with pytest.raises(HaresConfigError, match="not found"):
-        dw.replace_equipment("No Such Equipment", Battery("Bat", 10.0))
+        dw.replace_equipment("No Such Equipment", Battery("Bat", capacity_j=36000000))
 
     assert dw.equipment_names() == names
 
@@ -46,11 +46,11 @@ def test_rejected_add_pv_registers_no_irradiance_surface():
     from hares._hares import HaresEquipmentError
 
     dw = make_dwelling()
-    dw.add_pv(PV("PV1", 5.0, 30.0, 180.0))
+    dw.add_pv(PV("PV1", capacity_w=5000, tilt=30.0, azimuth=180.0))
     surfaces = dw.surface_ids()
 
     with pytest.raises(HaresEquipmentError):
-        dw.add_pv(PV("PV1", 5.0, 45.0, 90.0))
+        dw.add_pv(PV("PV1", capacity_w=5000, tilt=45.0, azimuth=90.0))
 
     assert dw.surface_ids() == surfaces
 
@@ -79,11 +79,11 @@ def test_adding_an_ev_leaves_the_existing_drivers_trajectory_unchanged():
 
     def ev1_soc(add_second: bool) -> list[float]:
         dw = make_dwelling(duration_s=3 * 86400, time_res_s=900, seed=42)
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
         for _ in range(50):
             dw.step()
         if add_second:
-            dw.add_ev(EV("EV2", capacity_kwh=60.0, max_charging_kw=7.2))
+            dw.add_ev(EV("EV2", capacity_j=216000000, max_charging_power_w=7200))
         trajectory = []
         for _ in range(2 * 96):
             dw.step()

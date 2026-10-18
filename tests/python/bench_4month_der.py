@@ -54,6 +54,8 @@ PV_INVERTER_EFFICIENCY = 96.0  # SAM expects percentage, not fraction
 
 BATTERY_CAPACITY_KWH = 10.0
 BATTERY_CAPACITY_KW = 5.0
+BATTERY_CAPACITY_J = BATTERY_CAPACITY_KWH * 3.6e6
+BATTERY_CAPACITY_W = BATTERY_CAPACITY_KW * 1000.0
 
 OCHRE_TO_HARES: dict[str, list[str]] = {
     "HVAC Heating Electric Power (kW)": [
@@ -151,9 +153,9 @@ def _run_hares(output_dir: Path) -> tuple[dict[str, float], float, float]:
     dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, verbosity=6, master_seed=42, csv_path=str(output_dir / "hares_bench_4month_der.csv")))
     dwelling.initialize()
 
-    dwelling.add_pv(PV("PV", PV_CAPACITY_KW, PV_TILT_DEG, PV_AZIMUTH_HARES))
+    dwelling.add_pv(PV("PV", capacity_w=PV_CAPACITY_KW * 1000.0, tilt=PV_TILT_DEG, azimuth=PV_AZIMUTH_HARES))
     dwelling.add_battery(
-        Battery("Battery", capacity_kwh=BATTERY_CAPACITY_KWH, max_charge_kw=BATTERY_CAPACITY_KW, max_discharge_kw=BATTERY_CAPACITY_KW)
+        Battery("Battery", capacity_j=BATTERY_CAPACITY_J, max_charge_w=BATTERY_CAPACITY_W, max_discharge_w=BATTERY_CAPACITY_W)
     )
     dwelling.add_actor_by_name(
         "BatteryManagement",

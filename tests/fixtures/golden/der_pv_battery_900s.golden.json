@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "a66ffa8a583739eeb3924cf9db8bb6480e15e257",
+  "git_head": "d12a8c38aa7736089fea3d9b032f3b6e3609f56a",
   "git_dirty": true,
   "metrics": [
     {
@@ -593,13 +593,13 @@
         },
         {
           "name": "Clothes Washer Electric Power (kW)",
-          "digest": "57aad014d25b580964119355b56ff0f339148b732a3e08cdf65805c8147c14f3",
+          "digest": "c2c0d15604c3f65bfbf00800a7f9d4186ec5c64190d0f5df31f2029633b1e023",
           "blocks": [
             "763d04c917dc9f2a90c82e705c1b24f8d940704f276a568012c3df1e1d088286",
             "c347e71560294be23cbb14cba75cf1ee5251fa7bda6e310eb060cac0672aee93",
             "763d04c917dc9f2a90c82e705c1b24f8d940704f276a568012c3df1e1d088286",
             "763d04c917dc9f2a90c82e705c1b24f8d940704f276a568012c3df1e1d088286",
-            "55d9fa1a9e2686e0b57dc065479a4ff84c050d8b25d37023434f64574b72d0de",
+            "e73c61dc583f225a0e6d678420f9babab37c1c7e296a31b0059e9b2967527bc9",
             "6aa3e5c7ea6b0b3a2c1a31cd7f5237d32713dfdc107dbc16e2928e8f30b3a315",
             "763d04c917dc9f2a90c82e705c1b24f8d940704f276a568012c3df1e1d088286"
           ]
@@ -775,13 +775,13 @@
         },
         {
           "name": "Other End Use Electric Power (kW)",
-          "digest": "0c6d7faba5ddc21ec5cbef3fd2e48633461f8c7394d07e008522d979d6b7771d",
+          "digest": "a2debf1c91688345414fc850c6f40d4dda192441b71420d33742c45b88878674",
           "blocks": [
             "763d04c917dc9f2a90c82e705c1b24f8d940704f276a568012c3df1e1d088286",
             "c81185af1e82d7e3b07c31764b38f22b60e1ddf67e94a6d3aafc9149cce95af0",
             "6b6ab049949f7d2bbef96cf0c36cf48cc9169ac3c1307327f43064c99e9e5d6f",
             "812cc36a0e002df8d57e5514e14d767adf04f581529159b9c9cfedcf2eb75bf5",
-            "53f6a3f27d72ce958225dafb795cd01f85c6b6b1da11888e1adee663fdfe71f6",
+            "58b534afe8882eb3e34447625c7d84ce300e71fb041eee14688f9fc4af72d7a6",
             "a27b188e7c26cafe4699c6a372745783144bd1873ea33d9105497f7b8e172cb4",
             "d2a69c598792c18e710d143db6b50676d5760991bcfe1b3b996123a6999b462b"
           ]

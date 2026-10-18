@@ -27,11 +27,11 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 const KEY_GAS_SCHEDULE_IS_W: &str = "gas_schedule_is_w";
 const KEY_POWER_SCHEDULE_SOURCE: &str = "power_schedule_source";
 const KEY_POWER_SCHEDULE_COL: &str = "power_schedule_col";
-const KEY_POWER_PROFILE_MAX_KW: &str = "power_profile_max_kw";
+const KEY_POWER_PROFILE_MAX_W: &str = "power_profile_max_w";
 const KEY_POWER_PROFILE_WEEKDAY: &str = "power_profile_weekday";
 const KEY_POWER_PROFILE_WEEKEND: &str = "power_profile_weekend";
 const KEY_POWER_PROFILE_MONTH: &str = "power_profile_month";
-const KEY_POWER_CONSTANT_KW: &str = "power_constant_kw";
+const KEY_POWER_CONSTANT_W: &str = "power_constant_w";
 const KEY_GAS_SCHEDULE_SOURCE: &str = "gas_schedule_source";
 const KEY_GAS_SCHEDULE_COL: &str = "gas_schedule_col";
 const KEY_GAS_PROFILE_MAX: &str = "gas_profile_max";
@@ -46,11 +46,11 @@ pub(crate) const SCHEDULE_PARAMS: &[RawParam] = &[
     RawParam::key(KEY_GAS_SCHEDULE_IS_W, ParamKind::Bool),
     RawParam::key(KEY_POWER_SCHEDULE_SOURCE, ParamKind::Text),
     RawParam::key(KEY_POWER_SCHEDULE_COL, ParamKind::Number),
-    RawParam::key(KEY_POWER_PROFILE_MAX_KW, ParamKind::Number),
+    RawParam::key(KEY_POWER_PROFILE_MAX_W, ParamKind::Number),
     RawParam::key(KEY_POWER_PROFILE_WEEKDAY, ParamKind::NumberList),
     RawParam::key(KEY_POWER_PROFILE_WEEKEND, ParamKind::NumberList),
     RawParam::key(KEY_POWER_PROFILE_MONTH, ParamKind::NumberList),
-    RawParam::key(KEY_POWER_CONSTANT_KW, ParamKind::Number),
+    RawParam::key(KEY_POWER_CONSTANT_W, ParamKind::Number),
     RawParam::key(KEY_GAS_SCHEDULE_SOURCE, ParamKind::Text),
     RawParam::key(KEY_GAS_SCHEDULE_COL, ParamKind::Number),
     RawParam::key(KEY_GAS_PROFILE_MAX, ParamKind::Number),
@@ -836,9 +836,18 @@ fn parse_power_schedule_source(config: &EquipmentConfig) -> crate::Result<Schedu
             })
         }
         "daily_profile" => {
-            let max_value = config.get_f64(KEY_POWER_PROFILE_MAX_KW).ok_or_else(|| {
+            // One conversion at the read: the raw key enters in W (SI);
+            // the schedule source still works in kW until the run-state
+            // commit.
+            let max_value = config
+                .get_f64(KEY_POWER_PROFILE_MAX_W)
+                .map(|w| {
+                    uom::si::f64::Power::new::<uom::si::power::watt>(w)
+                        .get::<uom::si::power::kilowatt>()
+                })
+                .ok_or_else(|| {
                 HaresError::Equipment(format!(
-                    "missing required key `{KEY_POWER_PROFILE_MAX_KW}` for daily_profile power schedule"
+                    "missing required key `{KEY_POWER_PROFILE_MAX_W}` for daily_profile power schedule"
                 ))
             })?;
             let weekday = config
@@ -873,9 +882,13 @@ fn parse_power_schedule_source(config: &EquipmentConfig) -> crate::Result<Schedu
             })
         }
         "constant" => {
-            let Some(v) = config.get_f64(KEY_POWER_CONSTANT_KW) else {
+            // One conversion at the read: the raw key enters in W (SI).
+            let Some(v) = config.get_f64(KEY_POWER_CONSTANT_W).map(|w| {
+                uom::si::f64::Power::new::<uom::si::power::watt>(w)
+                    .get::<uom::si::power::kilowatt>()
+            }) else {
                 return Err(HaresError::Equipment(format!(
-                    "missing required key `{KEY_POWER_CONSTANT_KW}` for constant power schedule"
+                    "missing required key `{KEY_POWER_CONSTANT_W}` for constant power schedule"
                 )));
             };
             Ok(ScheduleSource::Constant(v))
@@ -1056,7 +1069,7 @@ mod tests {
 
     use super::{
         GAS_THERMS_PER_HOUR_TO_W, KEY_GAS_CONSTANT, KEY_GAS_SCHEDULE_IS_W, KEY_GAS_SCHEDULE_SOURCE,
-        KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE, ScheduledLoad,
+        KEY_POWER_CONSTANT_W, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE, ScheduledLoad,
     };
     use crate::gain_fractions::{
         KEY_LATENT as KEY_LATENT_GAIN_FRACTION, KEY_RADIANT as KEY_RADIATIVE_GAIN_FRACTION,
@@ -1113,9 +1126,11 @@ mod tests {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+        // The tests' schedule values are the kW working values they
+        // reason in; the raw key enters in W.
         raw.insert(
-            KEY_POWER_CONSTANT_KW.to_string(),
-            schedule.first().copied().unwrap_or(0.0).into(),
+            KEY_POWER_CONSTANT_W.to_string(),
+            (schedule.first().copied().unwrap_or(0.0) * 1000.0).into(),
         );
         raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
         EquipmentConfig::raw(name.to_string(), ochre_class.to_string(), raw)
@@ -1130,9 +1145,11 @@ mod tests {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+        // The tests' schedule values are the kW working values they
+        // reason in; the raw key enters in W.
         raw.insert(
-            KEY_POWER_CONSTANT_KW.to_string(),
-            schedule.first().copied().unwrap_or(0.0).into(),
+            KEY_POWER_CONSTANT_W.to_string(),
+            (schedule.first().copied().unwrap_or(0.0) * 1000.0).into(),
         );
         for (k, v) in extras {
             raw.insert(k.to_string(), v.clone());
@@ -1143,9 +1160,11 @@ mod tests {
     fn config_no_zone(name: &str, ochre_class: &str, schedule: &[f64]) -> EquipmentConfig {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+        // The tests' schedule values are the kW working values they
+        // reason in; the raw key enters in W.
         raw.insert(
-            KEY_POWER_CONSTANT_KW.to_string(),
-            schedule.first().copied().unwrap_or(0.0).into(),
+            KEY_POWER_CONSTANT_W.to_string(),
+            (schedule.first().copied().unwrap_or(0.0) * 1000.0).into(),
         );
         EquipmentConfig::raw(name.to_string(), ochre_class.to_string(), raw)
     }
@@ -1230,7 +1249,7 @@ mod tests {
             std::collections::HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
-        raw.insert(KEY_POWER_CONSTANT_KW.to_string(), 1.0.into());
+        raw.insert(KEY_POWER_CONSTANT_W.to_string(), 1000.0.into());
         // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
         let config = crate::EquipmentConfig::raw("s".to_string(), "Lighting".to_string(), raw);
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
@@ -1248,7 +1267,7 @@ mod tests {
             std::collections::HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
-        raw.insert(KEY_POWER_CONSTANT_KW.to_string(), 1.0.into());
+        raw.insert(KEY_POWER_CONSTANT_W.to_string(), 1000.0.into());
         raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 1.5.into());
 
         let config = crate::EquipmentConfig::raw("s".to_string(), "Lighting".to_string(), raw);
@@ -1789,7 +1808,7 @@ mod tests {
         let config = |name: &str| {
             let mut raw: HashMap<String, ConfigValue> = HashMap::new();
             raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
-            raw.insert(KEY_POWER_CONSTANT_KW.to_string(), 1.0.into());
+            raw.insert(KEY_POWER_CONSTANT_W.to_string(), 1000.0.into());
             raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 1.0.into());
             EquipmentConfig::raw(name.to_string(), name.to_string(), raw)
         };
@@ -2561,9 +2580,11 @@ mod tests {
     fn base_config_for_zone_test(name: &str, schedule: &[f64]) -> EquipmentConfig {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+        // The tests' schedule values are the kW working values they
+        // reason in; the raw key enters in W.
         raw.insert(
-            KEY_POWER_CONSTANT_KW.to_string(),
-            schedule.first().copied().unwrap_or(0.0).into(),
+            KEY_POWER_CONSTANT_W.to_string(),
+            (schedule.first().copied().unwrap_or(0.0) * 1000.0).into(),
         );
         EquipmentConfig::raw(name.to_string(), name.to_string(), raw)
     }
@@ -2984,7 +3005,7 @@ mod tests {
     #[test]
     fn month_multipliers_scale_a_daily_profile() {
         use super::{
-            KEY_POWER_PROFILE_MAX_KW, KEY_POWER_PROFILE_MONTH, KEY_POWER_PROFILE_WEEKDAY,
+            KEY_POWER_PROFILE_MAX_W, KEY_POWER_PROFILE_MONTH, KEY_POWER_PROFILE_WEEKDAY,
             KEY_POWER_PROFILE_WEEKEND,
         };
         use hares_types::EndUse;
@@ -2995,7 +3016,7 @@ mod tests {
             KEY_POWER_SCHEDULE_SOURCE.to_string(),
             "daily_profile".into(),
         );
-        raw.insert(KEY_POWER_PROFILE_MAX_KW.to_string(), 2.0.into());
+        raw.insert(KEY_POWER_PROFILE_MAX_W.to_string(), 2000.0.into());
         for key in [KEY_POWER_PROFILE_WEEKDAY, KEY_POWER_PROFILE_WEEKEND] {
             raw.insert(
                 key.to_string(),

@@ -479,11 +479,11 @@ fn battery_config_from_py(battery: &PyBattery) -> Result<EquipmentConfig, HaresE
     let cfg = BatteryConfig {
         equipment_id: None,
         zone_id: None,
-        capacity_kwh: battery.capacity_kwh,
-        max_charge_kw: battery.max_charge_kw.unwrap_or(5.0),
-        max_discharge_kw: battery.max_discharge_kw.unwrap_or(5.0),
+        capacity_j: battery.capacity_j,
+        max_charge_w: battery.max_charge_w.unwrap_or(5000.0),
+        max_discharge_w: battery.max_discharge_w.unwrap_or(5000.0),
         power_factor: battery.power_factor,
-        inverter_capacity_kva: battery.inverter_capacity_kva,
+        inverter_capacity_va: battery.inverter_capacity_va,
         n_series: battery.n_series,
         n_parallel: battery.n_parallel,
         ah_cell: None,
@@ -534,7 +534,7 @@ fn pv_config_from_py(pv: &PyPv) -> Result<EquipmentConfig, HaresError> {
     let cfg = PvConfig {
         equipment_id: None,
         zone_id: None,
-        capacity_kw: pv.capacity_kw,
+        capacity_w: pv.capacity_w,
         tilt_deg: Some(pv.tilt),
         azimuth_deg: Some(pv.azimuth),
         module_type: None,
@@ -542,7 +542,7 @@ fn pv_config_from_py(pv: &PyPv) -> Result<EquipmentConfig, HaresError> {
         array_type: None,
         system_losses_fraction: None,
         inverter_efficiency: None,
-        inverter_capacity_kw: None,
+        inverter_capacity_w: None,
         power_factor: None,
         surface_resolution_deg: None,
         sam_lut_path: pv.sam_lut_path.clone(),
@@ -553,15 +553,25 @@ fn pv_config_from_py(pv: &PyPv) -> Result<EquipmentConfig, HaresError> {
 }
 
 fn ev_config_from_py(ev: &PyEv) -> Result<EquipmentConfig, HaresError> {
-    let capacity_kwh = ev.capacity_kwh.unwrap_or(75.0);
-    let max_charging_power_kw =
-        ev.max_charging_kw
-            .unwrap_or(if capacity_kwh < 56.875 { 7.2 } else { 11.5 });
+    // The builder's defaults are datasheet values written in SI: 75 kWh
+    // is 2.7e8 J and 7.2 or 11.5 kW is 7200 or 11500 W, converted once
+    // with uom (the threshold 56.875 kWh is the same test in J).
+    let capacity_j = ev.capacity_j.unwrap_or(270000000.0);
+    let max_charging_power_w = ev.max_charging_power_w.unwrap_or_else(|| {
+        if capacity_j
+            < uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(56.875)
+                .get::<uom::si::energy::joule>()
+        {
+            7200.0
+        } else {
+            11500.0
+        }
+    });
     let cfg = EvConfig {
         equipment_id: None,
-        capacity_kwh,
+        capacity_j,
         charging_level: None,
-        max_charging_power_kw,
+        max_charging_power_w,
         charging_efficiency: None,
         l1_current_a: None,
         l1_voltage_v: None,
@@ -579,21 +589,21 @@ fn ev_config_from_py(ev: &PyEv) -> Result<EquipmentConfig, HaresError> {
         cell_resistance_ohm: ev.cell_resistance_ohm,
         v2l_enabled: None,
         v2l_soc_reserve: None,
-        v2l_max_discharge_kw: None,
+        v2l_max_discharge_w: None,
         v2g_enabled: None,
         v2g_soc_reserve: None,
-        v2g_max_discharge_kw: None,
+        v2g_max_discharge_w: None,
         chemistry: None,
-        fuel_economy_kwh_per_mi: None,
+        fuel_economy_j_per_m: None,
         ready_soc: None,
         charging_strategy: None,
         plug_in_policy: None,
-        power_limit_kw: None,
+        power_limit_w: None,
         initial_connection_state: ev
             .initial_connection_state
             .map(|state| EvConnectionState::from(state).to_string()),
         power_factor: ev.power_factor,
-        charger_capacity_kva: ev.charger_capacity_kva,
+        charger_capacity_va: ev.charger_capacity_va,
         cc_cv_transition_soc: None,
         charging_priority: None,
         discharge_respects_deadline: true,
@@ -1496,16 +1506,16 @@ impl PyDwelling {
         seed: u64,
     ) -> PyResult<()> {
         use hares_core::actors::ev_driver::EvDriverActor;
-        use hares_equipment::ev::catalog::{EvArchetypeId, L1_CAP_KW, VehicleId};
+        use hares_equipment::ev::catalog::{EvArchetypeId, L1_CAP_W, VehicleId};
 
         let rust_vid: VehicleId = vehicle_id.into();
         let rust_aid: EvArchetypeId = archetype_id.into();
         let spec = rust_vid.spec();
         let preset = rust_aid.preset();
 
-        let max_power = match preset.charging_level {
-            hares_types::ChargingLevel::L1 => spec.max_l2_power_kw.min(L1_CAP_KW),
-            hares_types::ChargingLevel::L2 => spec.max_l2_power_kw,
+        let max_power_w = match preset.charging_level {
+            hares_types::ChargingLevel::L1 => spec.charger_power_w().min(L1_CAP_W),
+            hares_types::ChargingLevel::L2 => spec.charger_power_w(),
         };
 
         let config = EquipmentConfig::from_typed(
@@ -1513,12 +1523,12 @@ impl PyDwelling {
             "EV".to_string(),
             EvConfig {
                 equipment_id: None,
-                capacity_kwh: spec.capacity_kwh,
+                capacity_j: spec.capacity_j(),
                 charging_level: Some(match preset.charging_level {
                     hares_types::ChargingLevel::L1 => "L1".to_string(),
                     hares_types::ChargingLevel::L2 => "L2".to_string(),
                 }),
-                max_charging_power_kw: max_power,
+                max_charging_power_w: max_power_w,
                 charging_efficiency: None,
                 l1_current_a: None,
                 l1_voltage_v: None,
@@ -1536,19 +1546,19 @@ impl PyDwelling {
                 cell_resistance_ohm: None,
                 v2l_enabled: None,
                 v2l_soc_reserve: None,
-                v2l_max_discharge_kw: None,
+                v2l_max_discharge_w: None,
                 v2g_enabled: None,
                 v2g_soc_reserve: None,
-                v2g_max_discharge_kw: None,
+                v2g_max_discharge_w: None,
                 chemistry: None,
-                fuel_economy_kwh_per_mi: None,
+                fuel_economy_j_per_m: None,
                 ready_soc: None,
                 charging_strategy: None,
                 plug_in_policy: None,
-                power_limit_kw: None,
+                power_limit_w: None,
                 initial_connection_state: None,
                 power_factor: None,
-                charger_capacity_kva: None,
+                charger_capacity_va: None,
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
@@ -1576,7 +1586,7 @@ impl PyDwelling {
         let actor = EvDriverActor::new(
             &format!("EvDriver:{}", spec.label),
             spec.label,
-            ev_driver_params(spec, preset, seed_bytes, max_power),
+            ev_driver_params(spec, preset, seed_bytes, max_power_w),
             hares_core::ChaCha8Rng::from_seed(seed_bytes),
         );
 
@@ -3408,7 +3418,7 @@ mod tests {
     fn pypv_sam_lut_path_round_trips_into_typed_config() {
         let pv = PyPv {
             name: "PV LUT".to_string(),
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt: 30.0,
             azimuth: 180.0,
             sam_lut_path: Some("/tmp/example.parquet".to_string()),
@@ -3423,7 +3433,7 @@ mod tests {
     fn pypv_without_sam_lut_path_initializes_normally() {
         let pv = PyPv {
             name: "PV No LUT".to_string(),
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt: 30.0,
             azimuth: 180.0,
             sam_lut_path: None,
@@ -3448,7 +3458,7 @@ mod tests {
             fs::write(&bad_lut_path, "not,a,valid,lut\n1,2,3,4").expect("write test file");
             let pv = PyPv {
                 name: "PV Bad LUT".to_string(),
-                capacity_kw: 5.0,
+                capacity_w: 5000.0,
                 tilt: 30.0,
                 azimuth: 180.0,
                 sam_lut_path: Some(bad_lut_path.display().to_string()),

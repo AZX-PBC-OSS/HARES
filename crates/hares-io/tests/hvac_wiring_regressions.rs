@@ -114,9 +114,9 @@ fn g1_crankcase_heater_watts_wired_from_hpxml() {
         .expect("must deserialize into CentralAirConditionerConfig");
 
     assert_eq!(
-        cfg.crankcase_heater_kw,
-        Some(0.075),
-        "CrankcaseHeaterWatts=75 must wire to crankcase_heater_kw=Some(0.075 kW)"
+        cfg.crankcase_heater_w,
+        Some(75.0),
+        "CrankcaseHeaterWatts=75 must wire to crankcase_heater_w=Some(75 W)"
     );
 }
 
@@ -149,9 +149,9 @@ fn g1_crankcase_heater_absent_uses_ochre_default() {
         .expect("must deserialize into CentralAirConditionerConfig");
 
     assert_eq!(
-        cfg.crankcase_heater_kw,
-        Some(0.050),
-        "absent crankcase must apply OCHRE default of 0.050 kW (50 W) for central AC"
+        cfg.crankcase_heater_w,
+        Some(50.0),
+        "absent crankcase must apply OCHRE default of 50 W for central AC"
     );
     let threshold = cfg.crankcase_heater_threshold_c.unwrap_or(f64::NAN);
     assert!(

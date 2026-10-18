@@ -122,16 +122,38 @@ pub struct VehicleSpec {
 }
 
 impl VehicleSpec {
-    pub fn to_config(&self) -> crate::Result<EquipmentConfig> {
-        let fuel_economy = self.fuel_economy_kwh_per_mi;
+    /// The datasheet capacity in SI (J), converted once for a config
+    /// fill: the catalogue keeps datasheet units as data.
+    #[must_use]
+    pub fn capacity_j(&self) -> f64 {
+        uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(self.capacity_kwh)
+            .get::<uom::si::energy::joule>()
+    }
 
+    /// The datasheet Level 2 charge power in SI (W).
+    #[must_use]
+    pub fn charger_power_w(&self) -> f64 {
+        uom::si::f64::Power::new::<uom::si::power::kilowatt>(self.max_l2_power_kw)
+            .get::<uom::si::power::watt>()
+    }
+
+    /// The datasheet wall-to-wheels fuel economy in SI (J/m), the `uom`
+    /// expression of the kWh/mi value.
+    #[must_use]
+    pub fn fuel_economy_j_per_m(&self) -> f64 {
+        (uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(self.fuel_economy_kwh_per_mi)
+            / uom::si::f64::Length::new::<uom::si::length::mile>(1.0))
+        .get::<uom::si::force::newton>()
+    }
+
+    pub fn to_config(&self) -> crate::Result<EquipmentConfig> {
         #[cfg(feature = "observe")]
         tracing::debug!(
             vehicle = self.label,
             capacity_kwh = self.capacity_kwh,
             range_miles = self.range_miles,
             dc_kwh_per_mi = self.capacity_kwh / self.range_miles,
-            effective_wall_kwh_per_mi = fuel_economy,
+            effective_wall_kwh_per_mi = self.fuel_economy_kwh_per_mi,
             "EV catalog: wall-to-wheels fuel economy",
         );
 
@@ -140,9 +162,9 @@ impl VehicleSpec {
             "EV".to_string(),
             EvConfig {
                 equipment_id: None,
-                capacity_kwh: self.capacity_kwh,
+                capacity_j: self.capacity_j(),
                 charging_level: Some("L2".to_string()),
-                max_charging_power_kw: self.max_l2_power_kw,
+                max_charging_power_w: self.charger_power_w(),
                 charging_efficiency: None,
                 l1_current_a: None,
                 l1_voltage_v: None,
@@ -168,19 +190,19 @@ impl VehicleSpec {
                 cell_resistance_ohm: None,
                 v2l_enabled: None,
                 v2l_soc_reserve: None,
-                v2l_max_discharge_kw: None,
+                v2l_max_discharge_w: None,
                 v2g_enabled: None,
                 v2g_soc_reserve: None,
-                v2g_max_discharge_kw: None,
+                v2g_max_discharge_w: None,
                 chemistry: Some(self.chemistry.as_config_str().to_string()),
-                fuel_economy_kwh_per_mi: Some(fuel_economy),
+                fuel_economy_j_per_m: Some(self.fuel_economy_j_per_m()),
                 ready_soc: Some(1.0),
                 charging_strategy: None,
                 plug_in_policy: None,
-                power_limit_kw: None,
+                power_limit_w: None,
                 initial_connection_state: None,
                 power_factor: None,
-                charger_capacity_kva: None,
+                charger_capacity_va: None,
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
@@ -499,6 +521,8 @@ pub struct ArchetypePreset {
 /// Level 1 charging's power cap (kW): an L1 session draws at the vehicle's
 /// L2 rating only up to this ceiling.
 pub const L1_CAP_KW: f64 = 1.8;
+/// The same cap in W (SI), the value the SI config fills clamp against.
+pub const L1_CAP_W: f64 = 1800.0;
 
 impl ArchetypePreset {
     /// Build the runtime `ScheduleSource` for daily miles from this preset.
@@ -1151,11 +1175,17 @@ mod tests {
         let spec = VehicleId::TeslaModelYLr.spec();
         let cfg = spec.to_config().unwrap();
         let typed: EvConfig = cfg.typed().unwrap();
-        let fuel_econ = typed.fuel_economy_kwh_per_mi.unwrap();
-        // EPA wall-to-wheels: 0.280 kWh/mi (fueleconomy.gov 28 kWh/100mi)
-        let expected = spec.fuel_economy_kwh_per_mi;
-        assert!((fuel_econ - expected).abs() < 1e-10);
-        assert!(fuel_econ > spec.capacity_kwh / spec.range_miles);
+        let fuel_econ = typed.fuel_economy_j_per_m.unwrap();
+        // EPA wall-to-wheels: 0.280 kWh/mi (fueleconomy.gov 28 kWh/100mi),
+        // converted once with uom
+        let expected = spec.fuel_economy_j_per_m();
+        assert!((fuel_econ - expected).abs() < 1e-9);
+        assert!(
+            fuel_econ
+                > spec.capacity_j()
+                    / uom::si::f64::Length::new::<uom::si::length::mile>(spec.range_miles)
+                        .get::<uom::si::length::meter>()
+        );
         assert_eq!(typed.chemistry.as_deref(), Some("nca"));
         assert_eq!(typed.charging_level.as_deref(), Some("L2"));
     }
@@ -1166,10 +1196,10 @@ mod tests {
             let spec = id.spec();
             let cfg = spec.to_config().unwrap();
             let typed: EvConfig = cfg.typed().unwrap();
-            let actual = typed.fuel_economy_kwh_per_mi.unwrap();
-            let expected = spec.fuel_economy_kwh_per_mi;
+            let actual = typed.fuel_economy_j_per_m.unwrap();
+            let expected = spec.fuel_economy_j_per_m();
             assert!(
-                (actual - expected).abs() < 1e-10,
+                (actual - expected).abs() < 1e-9,
                 "{}: got {actual:.6}, expected {expected:.6}",
                 spec.label,
             );
@@ -1675,5 +1705,23 @@ mod tests {
             s1, s2,
             "build_arrival_schedule must be deterministic given same seed"
         );
+    }
+
+    /// The fuel economy converts to joules per metre: an `EvConfig`
+    /// filled from a `VehicleSpec` holds `fuel_economy_j_per_m` equal, on
+    /// bits, to `VehicleSpec::fuel_economy_j_per_m()`, and the uom
+    /// expression of 0.3 kWh/mi is 671.08 J/m to the printed digits.
+    #[test]
+    fn ev_fuel_economy_converts_to_joules_per_metre() {
+        let spec = VehicleId::TeslaModelYLr.spec();
+        let config = spec.to_config().unwrap();
+        let typed: EvConfig = config.typed().unwrap();
+        assert_eq!(
+            typed.fuel_economy_j_per_m.unwrap().to_bits(),
+            spec.fuel_economy_j_per_m().to_bits()
+        );
+        // 0.3 kWh/mi is 671.08 J/m to the printed digits.
+        let printed = format!("{:.2}", 0.3 * 3.6e6 / 1609.344);
+        assert_eq!(printed, "671.08");
     }
 }

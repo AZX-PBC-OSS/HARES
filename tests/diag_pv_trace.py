@@ -281,7 +281,7 @@ with tempfile.TemporaryDirectory() as output_dir:
         defaults='vendor/HARES/defaults',
     )
     dw.initialize()
-    dw.add_pv(PV("PV", capacity_kw=10.0, tilt=20.0, azimuth=180.0))
+    dw.add_pv(PV("PV", capacity_w=10000.0, tilt=20.0, azimuth=180.0))
     df = dw.simulate().reports[0].table()
 print("Simulated PV output per timestep:")
 pv_min = df['PV Electric Power (kW)'].min()

@@ -412,7 +412,7 @@ pub struct HvacConfig {
     /// `&self` so the hot path stays allocation-free.
     pub biquadratic_clamp: ClampState,
     /// Zone thermal capacitance [kWh/K] for the equivalent battery model.
-    /// Populated at init from `EquipmentConfig.zone_capacitance_kwh_per_k`;
+    /// Populated at init from `EquipmentConfig.zone_capacitance_j_per_k`;
     /// 0.0 means EBM is disabled (no telemetry output).
     pub zone_capacitance_kwh_per_k: f64,
 }
@@ -970,7 +970,11 @@ impl HvacEquipment {
         // max_enabled_speed is valid before any DR signal is applied.
         self.set_disabled_speeds(&[]);
 
-        self.config.zone_capacitance_kwh_per_k = config.zone_capacitance_kwh_per_k;
+        // One conversion at construction: the injected value enters in
+        // J/K (SI); the HVAC core still works in kWh/K.
+        self.config.zone_capacitance_kwh_per_k =
+            uom::si::f64::Energy::new::<uom::si::energy::joule>(config.zone_capacitance_j_per_k)
+                .get::<uom::si::energy::kilowatt_hour>();
 
         Ok(())
     }

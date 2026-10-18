@@ -163,7 +163,7 @@ fn central_ac_airflow_and_duct_airflow_round_trip_without_collision() {
         },
         system_type: Some("split".to_string()),
         startup_cd: Some(0.15),
-        crankcase_heater_kw: None,
+        crankcase_heater_w: None,
         crankcase_heater_threshold_c: None,
         crankcase_capacity_curve_coeffs: None,
         biquadratic_x1_min: Some(12.0),

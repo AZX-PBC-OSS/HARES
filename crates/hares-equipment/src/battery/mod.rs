@@ -41,11 +41,11 @@ pub use hares_types::BatteryLutType;
 
 use crate::config::{KEY_ZONE_ID, constructor_equipment_id};
 #[cfg(test)]
-pub(crate) const KEY_CAPACITY_KWH: &str = "capacity_kwh";
+pub(crate) const KEY_CAPACITY_J: &str = "capacity_j";
 #[cfg(test)]
-pub(crate) const KEY_MAX_CHARGE_KW: &str = "max_charge_kw";
+pub(crate) const KEY_MAX_CHARGE_W: &str = "max_charge_w";
 #[cfg(test)]
-pub(crate) const KEY_MAX_DISCHARGE_KW: &str = "max_discharge_kw";
+pub(crate) const KEY_MAX_DISCHARGE_W: &str = "max_discharge_w";
 #[cfg(test)]
 const KEY_N_SERIES: &str = "n_series";
 #[cfg(test)]
@@ -110,6 +110,10 @@ const KEY_EXPORT_LIMIT_W: &str = "export_limit_w";
 
 /// Tesla Powerwall 3: 13.5 kWh usable. Franklin aPower 2: 13.6 kWh.
 const DEFAULT_CAPACITY_KWH: f64 = 13.5;
+/// The config defaults' SI forms (the uom expressions of the kWh/kW
+/// values above), the read-back mirrors' placeholders.
+const DEFAULT_CAPACITY_J: f64 = 13.5 * 3.6e6;
+const DEFAULT_MAX_CHARGE_W: f64 = 5000.0;
 /// Powerwall 3 continuous: 11.04 kW charge; most units derate to ~5 kW sustained.
 const DEFAULT_MAX_CHARGE_KW: f64 = 5.0;
 /// Powerwall 3 continuous: 11.04 kW discharge; conservative default for generic pack.
@@ -322,6 +326,11 @@ pub struct Battery {
 
     // Static config
     capacity_kwh: f64,
+    /// The config's capacity and charge power as they entered, in SI
+    /// (J, W): the read-back reports them directly, so the stored units
+    /// and the kWh/kW working values below stay separate.
+    capacity_j: f64,
+    max_charge_w: f64,
     /// Rated pack capacity from config (immutable). Used as baseline for SOH scaling.
     capacity_kwh_rated: f64,
     /// Nominal pack capacity after SOH degradation, before temperature derating.
@@ -461,6 +470,8 @@ impl Battery {
             ports,
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
+            capacity_j: DEFAULT_CAPACITY_J,
+            max_charge_w: DEFAULT_MAX_CHARGE_W,
             capacity_kwh: DEFAULT_CAPACITY_KWH,
             capacity_kwh_rated: DEFAULT_CAPACITY_KWH,
             capacity_kwh_nominal: DEFAULT_CAPACITY_KWH,
@@ -742,11 +753,19 @@ impl Battery {
         let c = config.require_typed::<BatteryConfig>("Battery")?;
         c.validate()?;
 
-        self.capacity_kwh = c.capacity_kwh;
-        self.capacity_kwh_rated = c.capacity_kwh;
+        // One conversion per field at construction: the config enters in
+        // SI (J, W), the pack still works in kWh and kW until the
+        // run-state commit.
+        self.capacity_j = c.capacity_j;
+        self.max_charge_w = c.max_charge_w;
+        self.capacity_kwh = uom::si::f64::Energy::new::<uom::si::energy::joule>(c.capacity_j)
+            .get::<uom::si::energy::kilowatt_hour>();
+        self.capacity_kwh_rated = self.capacity_kwh;
         self.capacity_kwh_nominal = self.capacity_kwh_rated;
-        self.max_charge_kw = c.max_charge_kw;
-        self.max_discharge_kw = c.max_discharge_kw;
+        self.max_charge_kw = uom::si::f64::Power::new::<uom::si::power::watt>(c.max_charge_w)
+            .get::<uom::si::power::kilowatt>();
+        self.max_discharge_kw = uom::si::f64::Power::new::<uom::si::power::watt>(c.max_discharge_w)
+            .get::<uom::si::power::kilowatt>();
 
         // Pack topology
         let explicit_series = c.n_series;
@@ -1055,7 +1074,13 @@ impl Battery {
 
         self.power_factor = c.power_factor.unwrap_or(1.0);
         self.inverter_capacity_kva = c
-            .inverter_capacity_kva
+            .inverter_capacity_va
+            .map(|va| {
+                // An apparent power, dimensionally W: one conversion at
+                // construction, the working value stays kVA.
+                uom::si::f64::Power::new::<uom::si::power::watt>(va)
+                    .get::<uom::si::power::kilowatt>()
+            })
             .unwrap_or_else(|| self.max_charge_kw.max(self.max_discharge_kw));
         self.q_setpoint_kvar = None;
 
@@ -1123,12 +1148,12 @@ impl Equipment for Battery {
         vec![
             hares_types::ResolvedParameter::new(
                 "energy_capacity_j",
-                crate::kwh_to_j(self.capacity_kwh_rated),
+                self.capacity_j,
                 hares_types::Unit::Joule,
             ),
             hares_types::ResolvedParameter::new(
                 "power_capacity_w",
-                crate::kw_to_w(self.max_charge_kw),
+                self.max_charge_w,
                 hares_types::Unit::Watt,
             ),
             hares_types::ResolvedParameter::new(
@@ -2257,9 +2282,9 @@ mod tests {
         let mut cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 10.0,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: 10.0 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -2288,15 +2313,15 @@ mod tests {
             bms_mode: None,
             grid_export_rule: None,
             power_factor: None,
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
         };
         for (k, v) in overrides {
             match *k {
-                KEY_CAPACITY_KWH => cfg.capacity_kwh = *v,
-                KEY_MAX_CHARGE_KW => cfg.max_charge_kw = *v,
-                KEY_MAX_DISCHARGE_KW => cfg.max_discharge_kw = *v,
+                KEY_CAPACITY_J => cfg.capacity_j = *v,
+                KEY_MAX_CHARGE_W => cfg.max_charge_w = *v,
+                KEY_MAX_DISCHARGE_W => cfg.max_discharge_w = *v,
                 KEY_STANDBY_POWER_W => cfg.standby_power_w = Some(*v),
                 KEY_INITIAL_SOC => cfg.initial_soc = Some(*v),
                 KEY_MIN_SOC => cfg.min_soc = Some(*v),
@@ -2331,9 +2356,9 @@ mod tests {
         let cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 10.0,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: 10.0 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -2362,7 +2387,7 @@ mod tests {
             bms_mode: bms_mode.as_ref().map(|m| serde_json::to_string(m).unwrap()),
             grid_export_rule: None,
             power_factor: None,
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
         };
@@ -2500,7 +2525,7 @@ mod tests {
         // longer govern: charging stops at the target instead of riding
         // the latched 5 kW toward max_soc.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -2563,7 +2588,7 @@ mod tests {
 
         // Apply large charge power setpoint
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 100.0,
+            active_power_kw: 100.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -2687,7 +2712,7 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -2829,7 +2854,7 @@ mod tests {
 
         // Command a charge — during a dead-bus outage it must not happen.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0,
+            active_power_kw: 3.0000,
             reactive_power_kvar: Some(1.0),
             min_soc: None,
             max_soc: None,
@@ -2890,7 +2915,7 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0,
+            active_power_kw: 3.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -2932,7 +2957,7 @@ mod tests {
 
         // Command 3 kW of charging — more than the visible surplus.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0,
+            active_power_kw: 3.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -3027,7 +3052,7 @@ mod tests {
         // Both charge at 3 kW
         bat_a
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 3.0,
+                active_power_kw: 3.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3035,7 +3060,7 @@ mod tests {
             .unwrap();
         bat_b
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 3.0,
+                active_power_kw: 3.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3068,7 +3093,7 @@ mod tests {
 
         // Step a few times to build up some state
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0,
+            active_power_kw: 2.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -3160,12 +3185,12 @@ mod tests {
 
     #[test]
     fn init_rejects_zero_capacity() {
-        let config = battery_config(&[(KEY_CAPACITY_KWH, 0.0)]);
+        let config = battery_config(&[(KEY_CAPACITY_J, 0.0)]);
         let mut bat = Battery::new(config.clone());
         let err = bat.init(&config, &base_env()).unwrap_err();
         assert!(
             err.to_string()
-                .contains("capacity_kwh must be finite and > 0")
+                .contains("capacity_j must be finite and > 0")
         );
     }
 
@@ -3204,7 +3229,7 @@ mod tests {
         bat.apply_control(&ControlSignal::GridConnect { connected: false })
             .unwrap();
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -3460,7 +3485,7 @@ mod tests {
         bat.cell_temp_c = -2.0; // Below min charge temp
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -3683,7 +3708,7 @@ mod tests {
                 "TestBat".to_string(),
                 "Battery".to_string(),
                 BatteryConfig {
-                    capacity_kwh,
+                    capacity_j: capacity_kwh * 3.6e6,
                     standby_power_w: Some(0.0),
                     min_soc: Some(0.0),
                     max_soc: Some(1.0),
@@ -3989,7 +4014,7 @@ mod tests {
             (KEY_INITIAL_SOC, 0.5),
             (KEY_MIN_SOC, 0.0),
             (KEY_MAX_SOC, 1.0),
-            (KEY_MAX_DISCHARGE_KW, 1000.0), // allow large setpoint
+            (KEY_MAX_DISCHARGE_W, 1_000_000.0), // allow large setpoint
             (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
             (KEY_INVERTER_EFFICIENCY, 1.0),
         ]);
@@ -4088,7 +4113,7 @@ mod tests {
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &env).unwrap();
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.5,
+            active_power_kw: 2.5000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -4136,7 +4161,7 @@ mod tests {
         let mut bat1 = Battery::new(config.clone());
         bat1.init(&config, &env).unwrap();
         bat1.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.5,
+            active_power_kw: 2.5000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -4303,7 +4328,7 @@ mod tests {
             (KEY_INITIAL_SOC, 0.5),
             (KEY_MIN_SOC, 0.0),
             (KEY_MAX_SOC, 1.0),
-            (KEY_MAX_DISCHARGE_KW, 1000.0),
+            (KEY_MAX_DISCHARGE_W, 1_000_000.0),
             (KEY_SELF_DISCHARGE_PCT_PER_DAY, 0.0),
             (KEY_INVERTER_EFFICIENCY, 1.0),
         ]);
@@ -4509,7 +4534,7 @@ mod tests {
 
         // Run 10 steps to accumulate some sub-daily degradation state.
         bat1.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0,
+            active_power_kw: 3.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -4779,7 +4804,7 @@ mod tests {
         bat.init(&config, &base_env()).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -4857,7 +4882,7 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -5500,7 +5525,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 1.0,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         };
         let config = typed_battery_config(None, Some(bms));
         let mut bat = Battery::new(config.clone());
@@ -5512,7 +5537,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 1.0,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             }
         );
     }
@@ -5526,7 +5551,7 @@ mod tests {
             min_soc: 0.9,
             max_soc: 0.2,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         };
         let config = typed_battery_config(None, Some(inverted_window));
         let mut bat = Battery::new(config.clone());
@@ -5544,7 +5569,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.9,
             solar_only_charging: false,
-            surplus_deadband_kw: -1.0,
+            surplus_deadband_w: -1000.0,
         };
         let config = typed_battery_config(None, Some(negative_deadband));
         let mut bat = Battery::new(config.clone());
@@ -5554,7 +5579,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("bms_mode"), "error must name bms_mode: {msg}");
         assert!(
-            msg.contains("surplus_deadband_kw"),
+            msg.contains("surplus_deadband_w"),
             "error must carry the validator detail: {msg}"
         );
     }
@@ -5582,7 +5607,7 @@ mod tests {
             min_soc: 0.15,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         };
         let config = typed_battery_config(None, Some(bms));
         let mut bat = Battery::new(config.clone());
@@ -5624,7 +5649,7 @@ mod tests {
                     min_soc: 0.15,
                     max_soc: 0.95,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 },
                 true,
             ),
@@ -5740,7 +5765,7 @@ mod tests {
 
                 if step < steps_per_day / 2 {
                     bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-                        active_power_kw: 5.0,
+                        active_power_kw: 5.0000,
                         reactive_power_kvar: None,
                         min_soc: None,
                         max_soc: None,
@@ -5950,7 +5975,7 @@ mod tests {
         let config = battery_config(&[
             (KEY_AH_CELL, 100.0),
             (KEY_V_CELL, 3.6),
-            (KEY_CAPACITY_KWH, 5.0),
+            (KEY_CAPACITY_J, 5.0 * 3.6e6),
         ]);
         let mut bat = Battery::new(config.clone());
         let env = base_env();
@@ -5980,7 +6005,7 @@ mod tests {
         let config = battery_config(&[
             (KEY_AH_CELL, 100.0),
             (KEY_V_CELL, 3.6),
-            (KEY_CAPACITY_KWH, 13.5),
+            (KEY_CAPACITY_J, 13.5 * 3.6e6),
         ]);
         let mut bat = Battery::new(config.clone());
         let env = base_env();
@@ -6011,7 +6036,7 @@ mod tests {
         let config = battery_config(&[
             (KEY_AH_CELL, 5.0),
             (KEY_V_CELL, 3.6),
-            (KEY_CAPACITY_KWH, 13.5),
+            (KEY_CAPACITY_J, 13.5 * 3.6e6),
         ]);
         let mut bat = Battery::new(config.clone());
         let env = base_env();
@@ -6058,7 +6083,7 @@ mod tests {
         bat.capacity_kwh = 0.0;
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -6121,7 +6146,7 @@ mod tests {
                 env.current_time += ChronoDuration::seconds(300);
                 if step < steps_per_day / 2 {
                     bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-                        active_power_kw: 5.0,
+                        active_power_kw: 5.0000,
                         reactive_power_kvar: None,
                         min_soc: None,
                         max_soc: None,
@@ -6505,9 +6530,9 @@ mod tests {
         let cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 10.0,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: 10.0 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -6536,7 +6561,7 @@ mod tests {
             bms_mode: None,
             grid_export_rule: None,
             power_factor: Some(0.9),
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
         };
@@ -6549,7 +6574,7 @@ mod tests {
 
         // Force charging via PowerSetpoint.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0,
+            active_power_kw: 2.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -6578,9 +6603,9 @@ mod tests {
         let cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 10.0,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: 10.0 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -6609,7 +6634,7 @@ mod tests {
             bms_mode: None,
             grid_export_rule: None,
             power_factor: Some(0.9),
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
         };
@@ -6651,9 +6676,9 @@ mod tests {
         let cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 10.0,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: 10.0 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -6682,7 +6707,7 @@ mod tests {
             bms_mode: None,
             grid_export_rule: None,
             power_factor: Some(0.9),
-            inverter_capacity_kva: Some(10.0),
+            inverter_capacity_va: Some(10000.0),
             grid_forming: None,
             min_dwell_steps: 0,
         };
@@ -6716,9 +6741,9 @@ mod tests {
         let cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 10.0,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: 10.0 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -6747,7 +6772,7 @@ mod tests {
             bms_mode: None,
             grid_export_rule: None,
             power_factor: Some(0.9),
-            inverter_capacity_kva: Some(10.0),
+            inverter_capacity_va: Some(10000.0),
             grid_forming: None,
             min_dwell_steps: 0,
         };
@@ -6760,7 +6785,7 @@ mod tests {
 
         // Charge at 2 kW so the pf = 0.9 baseline would produce Q > 0.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0,
+            active_power_kw: 2.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -6805,7 +6830,7 @@ mod tests {
 
         // Force charging via PowerSetpoint so P>0.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0,
+            active_power_kw: 2.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -6872,7 +6897,7 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0,
+            active_power_kw: 2.0000,
             reactive_power_kvar: Some(0.75),
             min_soc: None,
             max_soc: None,
@@ -6896,9 +6921,9 @@ mod tests {
         let cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 10.0,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: 10.0 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -6927,7 +6952,7 @@ mod tests {
             bms_mode: None,
             grid_export_rule: None,
             power_factor: None,
-            inverter_capacity_kva: Some(5.0),
+            inverter_capacity_va: Some(5000.0),
             grid_forming: None,
             min_dwell_steps: 0,
         };
@@ -6940,7 +6965,7 @@ mod tests {
 
         // Command 5 kW charge + 5 kvar reactive → S = sqrt(P²+25) > 5 kVA.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: Some(5.0),
             min_soc: None,
             max_soc: None,
@@ -6978,9 +7003,9 @@ mod tests {
         let cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 10.0,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: 10.0 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -7009,7 +7034,7 @@ mod tests {
             bms_mode: None,
             grid_export_rule: None,
             power_factor: None,
-            inverter_capacity_kva: Some(5.0),
+            inverter_capacity_va: Some(5000.0),
             grid_forming: None,
             min_dwell_steps: 0,
         };
@@ -7021,7 +7046,7 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 4.0,
+            active_power_kw: 4.0000,
             reactive_power_kvar: Some(4.0),
             min_soc: None,
             max_soc: None,
@@ -7120,9 +7145,9 @@ mod tests {
                     BatteryConfig {
                         equipment_id: None,
                         zone_id: None,
-                        capacity_kwh: 10.0,
-                        max_charge_kw: 5.0,
-                        max_discharge_kw: 5.0,
+                        capacity_j: 10.0 * 3.6e6,
+                        max_charge_w: 5000.0,
+                        max_discharge_w: 5000.0,
                         n_series: None,
                         n_parallel: None,
                         ah_cell: None,
@@ -7151,7 +7176,7 @@ mod tests {
                         bms_mode: None,
                         grid_export_rule: None,
                         power_factor: None,
-                        inverter_capacity_kva: None,
+                        inverter_capacity_va: None,
                         grid_forming: None,
                         min_dwell_steps: 0,
                     },

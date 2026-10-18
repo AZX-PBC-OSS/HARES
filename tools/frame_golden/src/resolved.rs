@@ -123,12 +123,12 @@ pub fn first_resolved_differences(
             ));
         }
     }
-    for index in expected.len()..actual.len() {
+    for (offset, extra) in actual[expected.len()..].iter().enumerate() {
         differences.push((
-            format!("[{index}] {}", actual[index].name),
+            format!("[{}] {}", expected.len() + offset, extra.name),
             "<absent>".to_string(),
             "absent from the committed golden".to_string(),
-            render_equipment(&actual[index]),
+            render_equipment(extra),
         ));
     }
     differences

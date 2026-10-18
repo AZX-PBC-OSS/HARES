@@ -247,7 +247,7 @@ impl BatteryManagementActor {
                 min_soc,
                 max_soc,
                 solar_only_charging,
-                surplus_deadband_kw,
+                surplus_deadband_w,
             } => {
                 let Some(soc) = self.read_soc(env) else {
                     self.last_action = "idle:no_soc".into();
@@ -256,7 +256,12 @@ impl BatteryManagementActor {
                 let pv = env.electrical.actual_pv_kw_or_fallback();
                 let load = env.electrical.base_load_kw;
                 let surplus = pv - load;
-                let deadband = *surplus_deadband_kw;
+                // One conversion at the read: the payload enters in W
+                // (SI); the actor still works in kW until the control
+                // commit.
+                let deadband =
+                    uom::si::f64::Power::new::<uom::si::power::watt>(*surplus_deadband_w)
+                        .get::<uom::si::power::kilowatt>();
 
                 if *solar_only_charging && env.electrical.actual_pv_kw <= 0.0 {
                     self.emit(ControlSignal::GridConnect { connected: false }, out);
@@ -929,8 +934,13 @@ impl BatteryManagementActor {
                 min_soc,
                 max_soc,
                 solar_only_charging,
-                surplus_deadband_kw,
+                surplus_deadband_w,
             } => {
+                // One conversion at the read (the actor's kW working
+                // value): the payload enters in W (SI).
+                let deadband =
+                    uom::si::f64::Power::new::<uom::si::power::watt>(*surplus_deadband_w)
+                        .get::<uom::si::power::kilowatt>();
                 self.reevaluate_self_consumption(
                     pv_kw,
                     env,
@@ -938,7 +948,7 @@ impl BatteryManagementActor {
                         min_soc: *min_soc,
                         max_soc: *max_soc,
                         solar_only_charging: *solar_only_charging,
-                        surplus_deadband_kw: *surplus_deadband_kw,
+                        surplus_deadband_kw: deadband,
                     },
                     out,
                 );
@@ -1294,7 +1304,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut id_by_name = std::collections::HashMap::new();
         id_by_name.insert("bat1".to_string(), EquipmentId(1));
@@ -1317,7 +1327,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -1345,7 +1355,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -1378,7 +1388,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: true,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -1607,7 +1617,7 @@ mod tests {
                     min_soc: 0.1,
                     max_soc: 0.95,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 }),
                 dr_discharge_rate: 0.8,
                 min_soc_during_dr: 0.1,
@@ -1748,7 +1758,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             }),
             min_duration_steps: None,
         });
@@ -1888,7 +1898,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -1929,7 +1939,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2207,7 +2217,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.9,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             },
             GridExportRule::Disabled,
         );
@@ -2249,7 +2259,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.9,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             },
             GridExportRule::Disabled,
         );
@@ -2288,7 +2298,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.9,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
 
         let mut env = TestEnvBuilder::new()
@@ -2322,7 +2332,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.9,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             },
             GridExportRule::SolarOnly,
         );
@@ -2368,7 +2378,7 @@ mod tests {
                     min_soc: 0.1,
                     max_soc: 0.9,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: GridExportRule::Disabled,
                 max_charge_kw: 5.0,
@@ -2418,7 +2428,7 @@ mod tests {
                     min_soc: 0.1,
                     max_soc: 0.9,
                     solar_only_charging: false, // user says allow grid charging
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: GridExportRule::Disabled, // but export rule says no grid interaction
                 max_charge_kw: 5.0,
@@ -2463,7 +2473,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.9,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
 
         let mut env = TestEnvBuilder::new()
@@ -2576,7 +2586,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2613,7 +2623,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: true,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2648,7 +2658,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             },
             GridExportRule::SolarOnly,
         );
@@ -2687,7 +2697,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2728,7 +2738,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2765,7 +2775,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2799,7 +2809,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2842,7 +2852,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2876,7 +2886,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: true,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2911,7 +2921,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: true,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -2957,7 +2967,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -3002,7 +3012,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -3042,7 +3052,7 @@ mod tests {
                     min_soc: 0.1,
                     max_soc: 0.95,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 }),
                 dr_discharge_rate: 0.8,
                 min_soc_during_dr: 0.1,
@@ -3106,7 +3116,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             }),
             min_duration_steps: None,
         });
@@ -3161,7 +3171,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.5,
+            surplus_deadband_w: 500.0,
         });
         // decide() with surplus=0.0 → idle (0.0 not > 0.5 deadband)
         let mut env = TestEnvBuilder::new()
@@ -3320,7 +3330,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.5,
+            surplus_deadband_w: 500.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
@@ -3521,7 +3531,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {

@@ -40,7 +40,7 @@ SIM_START = datetime(2019, 7, 1, 12, 0)
 # construction error; the override is the declaration.
 BMS_MODE = (
     '{"SelfConsumption": {"min_soc": 0.1, "max_soc": 1.0, '
-    '"solar_only_charging": false, "surplus_deadband_kw": 0.0}}'
+    '"solar_only_charging": false, "surplus_deadband_w": 0}}'
 )
 BATTERY_OVERRIDES = {"Battery": {"bms_mode": BMS_MODE}}
 

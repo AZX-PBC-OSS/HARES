@@ -99,13 +99,13 @@ fn reactive_power_accumulates_algebraically() {
     let mut ports = PortSlots::default();
     ports
         .accumulate(&PortContribution::Electrical {
-            active_power_w: 1000.0,
+            active_power_w: 1.0,
             reactive_power_kvar: 0.5,
         })
         .unwrap();
     ports
         .accumulate(&PortContribution::Electrical {
-            active_power_w: 1000.0,
+            active_power_w: 1.0,
             reactive_power_kvar: -0.2,
         })
         .unwrap();

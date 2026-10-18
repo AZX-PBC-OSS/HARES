@@ -703,7 +703,7 @@ pub enum ChargingStrategy {
         charge_buffer_hours: f64,
     },
     SolarSurplus {
-        min_charge_rate_kw: f64,
+        min_charge_rate_w: f64,
         #[serde(default)]
         departure_schedule: Vec<DepartureConstraint>,
     },
@@ -713,7 +713,7 @@ pub enum ChargingStrategy {
     },
     V2G {
         min_soc: f64,
-        max_export_kw: f64,
+        max_export_w: f64,
         price_threshold: f64,
     },
 }
@@ -778,12 +778,12 @@ impl ChargingStrategy {
                 Ok(())
             }
             Self::SolarSurplus {
-                min_charge_rate_kw,
+                min_charge_rate_w,
                 departure_schedule,
             } => {
-                if !min_charge_rate_kw.is_finite() || *min_charge_rate_kw < 0.0 {
+                if !min_charge_rate_w.is_finite() || *min_charge_rate_w < 0.0 {
                     return Err(crate::HaresError::Equipment(format!(
-                        "min_charge_rate_kw must be finite and >= 0, got {min_charge_rate_kw}"
+                        "min_charge_rate_w must be finite and >= 0, got {min_charge_rate_w}"
                     )));
                 }
                 for dc in departure_schedule {
@@ -806,13 +806,13 @@ impl ChargingStrategy {
             }
             Self::V2G {
                 min_soc,
-                max_export_kw,
+                max_export_w,
                 price_threshold,
             } => {
                 validate_fraction("min_soc", *min_soc)?;
-                if !max_export_kw.is_finite() || *max_export_kw < 0.0 {
+                if !max_export_w.is_finite() || *max_export_w < 0.0 {
                     return Err(crate::HaresError::Equipment(format!(
-                        "max_export_kw must be finite and >= 0, got {max_export_kw}"
+                        "max_export_w must be finite and >= 0, got {max_export_w}"
                     )));
                 }
                 if !price_threshold.is_finite() {
@@ -963,11 +963,11 @@ pub enum BmsMode {
         min_soc: f64,
         max_soc: f64,
         solar_only_charging: bool,
-        /// Deadband (kW) around surplus=0 to prevent charge/discharge toggling.
+        /// Deadband (W) around surplus=0 to prevent charge/discharge toggling.
         /// Surplus must exceed +deadband to enter charge and drop below -deadband
         /// to enter discharge. Default 0.0 preserves prior behaviour.
         #[serde(default)]
-        surplus_deadband_kw: f64,
+        surplus_deadband_w: f64,
     },
     TimeOfUseOptimization {
         reserve_soc: f64,
@@ -1034,7 +1034,7 @@ impl BmsMode {
             Self::SelfConsumption {
                 min_soc,
                 max_soc,
-                surplus_deadband_kw,
+                surplus_deadband_w,
                 ..
             } => {
                 validate_fraction("min_soc", *min_soc)?;
@@ -1044,7 +1044,7 @@ impl BmsMode {
                         "min_soc must be <= max_soc".into(),
                     ));
                 }
-                validate_finite_non_negative("surplus_deadband_kw", *surplus_deadband_kw)?;
+                validate_finite_non_negative("surplus_deadband_w", *surplus_deadband_w)?;
                 Ok(())
             }
             Self::TimeOfUseOptimization {
@@ -2403,11 +2403,11 @@ mod tests {
             },
             ChargingStrategy::V2G {
                 min_soc: 0.2,
-                max_export_kw: 7.0,
+                max_export_w: 7.0,
                 price_threshold: 0.15,
             },
             ChargingStrategy::SolarSurplus {
-                min_charge_rate_kw: 1.4,
+                min_charge_rate_w: 1.4,
                 departure_schedule: vec![],
             },
         ];
@@ -2462,7 +2462,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.95,
             solar_only_charging: true,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         };
         let json = serde_json::to_string(&mode).unwrap();
         let back: BmsMode = serde_json::from_str(&json).unwrap();
@@ -2504,7 +2504,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.9,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             }),
             dr_discharge_rate: 0.8,
             min_soc_during_dr: 0.15,
@@ -2545,7 +2545,7 @@ mod tests {
                 min_soc: 0.1,
                 max_soc: 0.95,
                 solar_only_charging: true,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             }),
             min_duration_steps: None,
         };
@@ -2564,7 +2564,7 @@ mod tests {
                     min_soc: 0.1,
                     max_soc: 0.9,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 }),
                 dr_discharge_rate: 0.7,
                 min_soc_during_dr: 0.2,
@@ -2611,7 +2611,7 @@ mod tests {
             min_soc: -0.1,
             max_soc: 0.9,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         };
         assert!(bad_soc.validate().is_err());
 
@@ -2627,7 +2627,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 1.5,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         };
         assert!(over_one.validate().is_err());
     }
@@ -2638,7 +2638,7 @@ mod tests {
             min_soc: 0.9,
             max_soc: 0.1,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         };
         assert!(inverted.validate().is_err());
     }
@@ -2649,7 +2649,7 @@ mod tests {
             min_soc: 0.1,
             max_soc: 0.9,
             solar_only_charging: false,
-            surplus_deadband_kw: 0.0,
+            surplus_deadband_w: 0.0,
         };
         assert!(mode.validate().is_ok());
 
@@ -2765,7 +2765,7 @@ mod tests {
     fn charging_strategy_v2g_serde() {
         let s = ChargingStrategy::V2G {
             min_soc: 0.2,
-            max_export_kw: 7.6,
+            max_export_w: 7.6,
             price_threshold: 0.15,
         };
         let json = serde_json::to_string(&s).unwrap();
@@ -2776,7 +2776,7 @@ mod tests {
     #[test]
     fn charging_strategy_solar_surplus_serde() {
         let s = ChargingStrategy::SolarSurplus {
-            min_charge_rate_kw: 1.4,
+            min_charge_rate_w: 1.4,
             departure_schedule: vec![
                 DepartureConstraint {
                     day_filter: crate::DayFilter::Weekdays,
@@ -2928,14 +2928,14 @@ mod tests {
     fn charging_strategy_validate_v2g_rejects_invalid() {
         let bad_kw = ChargingStrategy::V2G {
             min_soc: 0.2,
-            max_export_kw: -1.0,
+            max_export_w: -1.0,
             price_threshold: 0.15,
         };
         assert!(bad_kw.validate().is_err());
 
         let bad_price = ChargingStrategy::V2G {
             min_soc: 0.2,
-            max_export_kw: 7.0,
+            max_export_w: 7.0,
             price_threshold: f64::NAN,
         };
         assert!(bad_price.validate().is_err());
@@ -2945,7 +2945,7 @@ mod tests {
     fn charging_strategy_validate_v2g_accepts_valid() {
         let s = ChargingStrategy::V2G {
             min_soc: 0.2,
-            max_export_kw: 7.6,
+            max_export_w: 7.6,
             price_threshold: 0.15,
         };
         assert!(s.validate().is_ok());
@@ -2954,13 +2954,13 @@ mod tests {
     #[test]
     fn charging_strategy_validate_solar_surplus_rejects_invalid() {
         let bad = ChargingStrategy::SolarSurplus {
-            min_charge_rate_kw: -1.0,
+            min_charge_rate_w: -1.0,
             departure_schedule: vec![],
         };
         assert!(bad.validate().is_err());
 
         let bad_nested = ChargingStrategy::SolarSurplus {
-            min_charge_rate_kw: 1.4,
+            min_charge_rate_w: 1.4,
             departure_schedule: vec![DepartureConstraint {
                 day_filter: crate::DayFilter::Any,
                 departure_minute: 1440,
@@ -2973,7 +2973,7 @@ mod tests {
     #[test]
     fn charging_strategy_validate_solar_surplus_accepts_valid() {
         let s = ChargingStrategy::SolarSurplus {
-            min_charge_rate_kw: 1.4,
+            min_charge_rate_w: 1.4,
             departure_schedule: vec![DepartureConstraint {
                 day_filter: crate::DayFilter::Weekdays,
                 departure_minute: 420,
@@ -3032,11 +3032,11 @@ mod tests {
             },
             ChargingStrategy::V2G {
                 min_soc: 0.2,
-                max_export_kw: 7.6,
+                max_export_w: 7.6,
                 price_threshold: 0.15,
             },
             ChargingStrategy::SolarSurplus {
-                min_charge_rate_kw: 1.4,
+                min_charge_rate_w: 1.4,
                 departure_schedule: vec![],
             },
         ];
@@ -3049,7 +3049,7 @@ mod tests {
     fn charging_strategy_v2g_accepts_negative_price_threshold() {
         let s = ChargingStrategy::V2G {
             min_soc: 0.2,
-            max_export_kw: 7.0,
+            max_export_w: 7.0,
             price_threshold: -0.05,
         };
         assert!(s.validate().is_ok());
@@ -3057,12 +3057,12 @@ mod tests {
 
     #[test]
     fn charging_strategy_solar_surplus_backward_compat() {
-        let raw = r#"{"SolarSurplus":{"min_charge_rate_kw":1.4}}"#;
+        let raw = r#"{"SolarSurplus":{"min_charge_rate_w":1.4}}"#;
         let decoded: ChargingStrategy = serde_json::from_str(raw).unwrap();
         assert_eq!(
             decoded,
             ChargingStrategy::SolarSurplus {
-                min_charge_rate_kw: 1.4,
+                min_charge_rate_w: 1.4,
                 departure_schedule: vec![],
             }
         );
@@ -4228,7 +4228,7 @@ mod tests {
                 charge_buffer_hours: 0.0,
             },
             ChargingStrategy::SolarSurplus {
-                min_charge_rate_kw: 0.0,
+                min_charge_rate_w: 0.0,
                 departure_schedule: vec![],
             },
             ChargingStrategy::V2H {
@@ -4237,7 +4237,7 @@ mod tests {
             },
             ChargingStrategy::V2G {
                 min_soc: 1.0,
-                max_export_kw: 0.0,
+                max_export_w: 0.0,
                 price_threshold: 0.0,
             },
         ];

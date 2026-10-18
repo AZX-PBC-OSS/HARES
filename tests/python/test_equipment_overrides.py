@@ -87,7 +87,7 @@ class TestKnownFieldOverrides:
         baseline.step()
         enlarged = make_sample_dwelling(
             str(ROOT / "tests/fixtures/hpxml/ochre_samples/base-pv.xml"),
-            overrides={"PV": {"capacity_kw": 9.0}},
+            overrides={"PV": {"capacity_w": 9000}},
         )
         enlarged.step()
 

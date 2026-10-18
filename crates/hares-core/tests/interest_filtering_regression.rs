@@ -432,7 +432,7 @@ ach = 0.0
 [schedule]
 occupancy = 1.0
 [event_load]
-active_power_kw = 1.5
+active_power_w = 1500.0
 event_probability = 1.0"#;
     fs::write(path, content).expect("write synthetic TOML");
 }

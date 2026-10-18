@@ -1204,7 +1204,7 @@ impl hares_types::DescribeFields for HeatPumpCoolerConfig {
                 },
             ),
             (
-                "crankcase_heater_kw",
+                "crankcase_heater_w",
                 hares_types::FieldMeta {
                     description: Some("the crankcase heater's power, kilowatts"),
                     ..Default::default()
@@ -1416,7 +1416,7 @@ pub struct HeatPumpCoolerConfig {
     /// ASHP default 0.050 kW (50 W) at 12.78°C (55°F); MSHP default 0.015 kW
     /// (15 W) at 0°C (32°F). OCHRE HVAC.py AirConditioner class.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crankcase_heater_kw: Option<f64>,
+    pub crankcase_heater_w: Option<f64>,
     /// Crankcase heater activation threshold [°C]. The heater draws power when
     /// OAT < this threshold and the compressor is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1453,7 +1453,7 @@ impl Default for HeatPumpCoolerConfig {
         Self {
             common: HeatPumpCommonConfig::default(),
             stage_shrs: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             min_oat_cooling_c: default_min_oat_cooling_c(),
             reject_unknown_keys: crate::RejectUnknownKeys,
@@ -1781,7 +1781,7 @@ mod tests {
                 ..HeatPumpCommonConfig::default()
             },
             stage_shrs: Some(vec![0.78, 0.72]),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             min_oat_cooling_c: 10.0,
         };
@@ -1963,7 +1963,7 @@ mod tests {
                 ..HeatPumpCommonConfig::default()
             },
             stage_shrs: Some(vec![0.78, 0.72]),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             min_oat_cooling_c: 10.0,
         };
@@ -2049,7 +2049,7 @@ mod tests {
                 ..HeatPumpCommonConfig::default()
             },
             stage_shrs: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             min_oat_cooling_c: 10.0,
         };

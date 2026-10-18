@@ -60,6 +60,50 @@ pub(crate) fn unexpected_keyword_error(surface: &str, key: &str) -> PyErr {
     ))
 }
 
+/// The error for one keyword an equipment constructor's signature does
+/// not carry: the removed-keys table first, under the constructor's
+/// config type (the rows the unit move adds are keyed
+/// `<ConfigType>.<key path>`), then the keyword scopes, then Python's
+/// own unexpected-keyword refusal.
+pub(crate) fn unexpected_equipment_keyword_error(
+    surface: &str,
+    config_type: &str,
+    key: &str,
+) -> PyErr {
+    if let Some(replacement) = hares_io::removed_key(
+        hares_io::KeyScope::EquipmentConfig,
+        &format!("{config_type}.{key}"),
+    ) {
+        return PyTypeError::new_err(format!(
+            "configuration keyword '{key}' was removed: {replacement}"
+        ));
+    }
+    unexpected_keyword_error(surface, key)
+}
+
+/// Check an equipment constructor's `**unexpected` keywords against the
+/// constructor's config type: the first offending keyword is named.
+pub(crate) fn check_equipment_unexpected_kwargs(
+    surface: &str,
+    config_type: &str,
+    unexpected: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let Some(unexpected) = unexpected else {
+        return Ok(());
+    };
+    let keys = unexpected.keys();
+    if keys.len() == 0 {
+        return Ok(());
+    }
+    let key = keys.get_item(0)?;
+    let key_str: String = key.extract()?;
+    Err(unexpected_equipment_keyword_error(
+        surface,
+        config_type,
+        &key_str,
+    ))
+}
+
 /// Check a surface's `**unexpected` keywords: the first offending keyword
 /// is named, as Python's own check does.
 pub(crate) fn check_unexpected_kwargs(

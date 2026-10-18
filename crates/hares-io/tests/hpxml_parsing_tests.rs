@@ -328,13 +328,13 @@ fn ev_plug_load_emits_ev_equipment_spec_with_correct_parameters() {
 
     assert_eq!(typed.charging_level.as_deref(), Some("Level 2"));
 
-    // kwh=1200 < 1500 → range_miles=100 → capacity = 32.5 kWh
-    let battery_kwh = typed.capacity_kwh;
+    // kwh=1200 < 1500 → range 100 mi → capacity = 32.5 kWh, in J
+    let battery_j = typed.capacity_j;
     assert!(
-        (battery_kwh - 32.5).abs() < 0.1,
-        "capacity_kwh for 100-mile EV should be ~32.5 kWh, got {battery_kwh:.2}"
+        (battery_j - 32.5 * 3.6e6).abs() < 0.1,
+        "capacity_j for 100-mile EV should be ~1.17e8 J, got {battery_j:.2}"
     );
-    assert!((typed.max_charging_power_kw - 7.2).abs() < 1e-9);
+    assert!((typed.max_charging_power_w - 7200.0).abs() < 1e-9);
 }
 
 #[test]
@@ -370,13 +370,13 @@ fn ev_plug_load_large_kwh_emits_250_mile_range() {
         .typed()
         .expect("EV typed config");
 
-    // kwh=2000 >= 1500 → range_miles=250 → capacity = 81.25 kWh
-    let battery_kwh = typed.capacity_kwh;
+    // kwh=2000 >= 1500 → range 250 mi → capacity = 81.25 kWh, in J
+    let battery_j = typed.capacity_j;
     assert!(
-        (battery_kwh - 81.25).abs() < 0.1,
-        "capacity_kwh for 250-mile EV should be ~81.25 kWh, got {battery_kwh:.2}"
+        (battery_j - 81.25 * 3.6e6).abs() < 0.1,
+        "capacity_j for 250-mile EV should be ~2.925e8 J, got {battery_j:.2}"
     );
-    assert!((typed.max_charging_power_kw - 11.5).abs() < 1e-9);
+    assert!((typed.max_charging_power_w - 11500.0).abs() < 1e-9);
 }
 
 #[test]
@@ -1013,12 +1013,12 @@ fn pv_inverter_max_power_output_w_converted_to_kw() {
         .find(|s| s.name == "PV")
         .expect("should emit PV spec");
 
-    let cap_kw = pv.parameters["inverter_capacity_kw"]
+    let cap_w = pv.parameters["inverter_capacity_w"]
         .as_f64()
-        .expect("inverter_capacity_kw should be present");
+        .expect("inverter_capacity_w should be present");
     assert!(
-        (cap_kw - 5.0).abs() < 1e-9,
-        "5000 W inverter should be 5.0 kW, got {cap_kw}"
+        (cap_w - 5000.0).abs() < 1e-9,
+        "5000 W inverter should be 5000 W, got {cap_w}"
     );
 
     let eff = pv.parameters["inverter_efficiency"]
@@ -3523,5 +3523,45 @@ fn setback_without_hours_is_an_error() {
     assert!(
         err.to_string().contains("TotalSetbackHoursperWeekHeating"),
         "got: {err}"
+    );
+}
+
+/// The old synthetic extension element is refused: the synthetic path
+/// writes `active_power_w` (SI); a document carrying the old kW spelling
+/// fails the parse naming the element and `active_power_w`.
+#[test]
+fn hpxml_active_power_kw_extension_is_rejected() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <XMLTransactionalData>
+    <XMLDocumentID>test</XMLDocumentID>
+  </XMLTransactionalData>
+  <Building>
+    <BuildingID>test</BuildingID>
+    <ProjectStatus><EventType>proposed workscope</EventType></ProjectStatus>
+    <BuildingDetails>
+      <BuildingSummary>
+        <BuildingConstruction>
+          <ResidentialFacilityType>single-family attached</ResidentialFacilityType>
+          <NumberofConditionedFloors>1</NumberofConditionedFloors>
+          <NumberofConditionedBedrooms>3</NumberofConditionedBedrooms>
+          <ConditionedBuildingVolume>12000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Appliances>
+        <CookingRange>
+          <SystemIdentifier id="range1"/>
+          <Extension>
+            <active_power_kw>1.5</active_power_kw>
+          </Extension>
+        </CookingRange>
+      </Appliances>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+    let err = hares_io::hpxml::parse_hpxml_str(xml).expect_err("the old element fails the parse");
+    assert!(
+        err.to_string().contains("active_power_kw") && err.to_string().contains("active_power_w"),
+        "the error must name the element and its replacement, got: {err}"
     );
 }

@@ -19,7 +19,7 @@ from hares import EV
 
 
 def attach_hostile_ev(**kwargs):
-    ev = EV("HostileEV", capacity_kwh=75.0, max_charging_kw=11.5, **kwargs)
+    ev = EV("HostileEV", capacity_j=270000000, max_charging_power_w=11500, **kwargs)
     dwelling = make_dwelling()
     dwelling.add_ev(ev)
 
@@ -83,4 +83,4 @@ def test_hostile_values_leave_the_dwelling_usable():
     with pytest.raises((TypeError, ValueError, OverflowError)):
         attach_hostile_ev(n_series=-1)
     dwelling = make_dwelling()
-    dwelling.add_ev(EV("CleanEV", capacity_kwh=75.0, max_charging_kw=11.5))
+    dwelling.add_ev(EV("CleanEV", capacity_j=270000000, max_charging_power_w=11500))

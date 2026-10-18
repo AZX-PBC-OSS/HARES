@@ -49,7 +49,7 @@ pub struct GeneratorConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
     pub fuel_type: Option<FuelType>,
-    pub rated_power_kw: f64,
+    pub rated_power_w: f64,
     pub eta_electric: Option<f64>,
     /// DEPRECATED: lumped thermal recovery efficiency. Replaced by per-stream
     /// eta_jacket_water / eta_lube_oil / eta_exhaust. When only eta_thermal
@@ -76,10 +76,10 @@ pub struct GeneratorConfig {
     pub eta_exhaust: Option<f64>,
     pub efficiency_type: Option<String>,
     pub efficiency_curve_points: Option<Vec<GeneratorEfficiencyCurvePoint>>,
-    pub delta_kw_per_s: Option<f64>,
-    pub capacity_min_kw: Option<f64>,
-    pub grid_import_limit_kw: Option<f64>,
-    pub export_limit_kw: Option<f64>,
+    pub delta_w_per_s: Option<f64>,
+    pub capacity_min_w: Option<f64>,
+    pub grid_import_limit_w: Option<f64>,
+    pub export_limit_w: Option<f64>,
     /// CHP fluid loop ID (non-zero when thermal recovery is enabled)
     pub loop_id: Option<u16>,
     pub flow_rate_kg_s: Option<f64>,
@@ -157,9 +157,9 @@ pub struct GeneratorEfficiencyCurvePoint {
 impl GeneratorConfig {
     /// Validate fields for physical plausibility.
     pub fn validate(&self) -> crate::Result<()> {
-        if !self.rated_power_kw.is_finite() || self.rated_power_kw <= 0.0 {
+        if !self.rated_power_w.is_finite() || self.rated_power_w <= 0.0 {
             return Err(HaresError::Equipment(
-                "generator rated_power_kw must be finite and > 0".to_string(),
+                "generator rated_power_w must be finite and > 0".to_string(),
             ));
         }
         for (name, val) in [
@@ -223,7 +223,7 @@ impl GeneratorConfig {
             let fluid_capacity_w = flow * CP_LIQUID_WATER_J_KG_K * delta_t;
             let rated_eta_e = self.eta_electric.unwrap_or(0.0);
             if rated_eta_e > 0.0 {
-                let fuel_power_w = power_kw_to_w(self.rated_power_kw) / rated_eta_e;
+                let fuel_power_w = self.rated_power_w / rated_eta_e;
                 let peak_thermal_w = fuel_power_w * eta_t;
                 if fluid_capacity_w < peak_thermal_w * CHP_FLUID_CAPACITY_MARGIN {
                     return Err(HaresError::Equipment(format!(
@@ -235,11 +235,11 @@ impl GeneratorConfig {
                 }
             }
         }
-        if let Some(ramp) = self.delta_kw_per_s
+        if let Some(ramp) = self.delta_w_per_s
             && (!ramp.is_finite() || ramp <= 0.0)
         {
             return Err(HaresError::Equipment(
-                "generator delta_kw_per_s must be finite and > 0".to_string(),
+                "generator delta_w_per_s must be finite and > 0".to_string(),
             ));
         }
         if let Some(efficiency_type) = self.efficiency_type.as_deref() {
@@ -256,11 +256,11 @@ impl GeneratorConfig {
         if let Some(points) = self.efficiency_curve_points.as_deref() {
             EfficiencyModel::validate_curve_points(points)?;
         }
-        if let Some(min_kw) = self.capacity_min_kw
-            && (!min_kw.is_finite() || min_kw < 0.0 || min_kw > self.rated_power_kw)
+        if let Some(min_w) = self.capacity_min_w
+            && (!min_w.is_finite() || min_w < 0.0 || min_w > self.rated_power_w)
         {
             return Err(HaresError::Equipment(
-                "generator capacity_min_kw must be finite, >= 0, and <= rated_power_kw".to_string(),
+                "generator capacity_min_w must be finite, >= 0, and <= rated_power_w".to_string(),
             ));
         }
         if let Some(zone) = self.zone_id
@@ -336,10 +336,17 @@ impl GeneratorConfig {
 
 #[cfg(test)]
 use crate::config::{KEY_EQUIPMENT_ID, KEY_ZONE_ID};
+
+/// One conversion at construction: the config enters in W (SI), the
+/// generator still works in kW until the run-state commit.
+fn w_to_kw(w: f64) -> f64 {
+    uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
+}
+
 #[cfg(test)]
-const KEY_RATED_POWER_KW: &str = "rated_power_kw";
+const KEY_RATED_POWER_W: &str = "rated_power_w";
 #[cfg(test)]
-const KEY_CAPACITY_MIN_KW: &str = "capacity_min_kw";
+const KEY_CAPACITY_MIN_W: &str = "capacity_min_w";
 #[cfg(test)]
 const KEY_ETA_ELECTRIC: &str = "eta_electric";
 #[cfg(test)]
@@ -353,11 +360,11 @@ const KEY_ETA_EXHAUST: &str = "eta_exhaust";
 #[cfg(test)]
 const KEY_EFFICIENCY_TYPE: &str = "efficiency_type";
 #[cfg(test)]
-const KEY_DELTA_KW_PER_S: &str = "delta_kw_per_s";
+const KEY_DELTA_W_PER_S: &str = "delta_w_per_s";
 #[cfg(test)]
-const KEY_GRID_IMPORT_LIMIT_KW: &str = "grid_import_limit_kw";
+const KEY_GRID_IMPORT_LIMIT_W: &str = "grid_import_limit_w";
 #[cfg(test)]
-const KEY_EXPORT_LIMIT_KW: &str = "export_limit_kw";
+const KEY_EXPORT_LIMIT_W: &str = "export_limit_w";
 #[cfg(test)]
 const KEY_LOOP_ID: &str = "loop_id";
 #[cfg(test)]
@@ -820,6 +827,10 @@ pub struct Generator {
 
     // Static config
     rated_power_kw: f64,
+    /// The config's rated power as it entered, in W (SI): the read-back
+    /// reports it directly, so the stored unit and the kW working value
+    /// above stay separate.
+    rated_power_w: f64,
     /// Minimum operating power for self-consumption mode (kW).
     /// Generator will not run below this level; it shuts off instead.
     /// OCHRE: `capacity_min` parameter.
@@ -965,11 +976,19 @@ impl Generator {
             telemetry: default_telemetry(has_chp, kind == GeneratorKind::FuelCell),
             core_output: CoreOutput::default(),
             kind,
+            // One conversion per field at construction: the config
+            // enters in W (SI), the generator still works in kW until
+            // the run-state commit. The SI value is kept for the
+            // read-back, which reports it directly.
+            rated_power_w: typed.as_ref().map(|c| c.rated_power_w).unwrap_or(
+                uom::si::f64::Power::new::<uom::si::power::kilowatt>(DEFAULT_RATED_POWER_KW)
+                    .get::<uom::si::power::watt>(),
+            ),
             rated_power_kw: typed
                 .as_ref()
-                .map(|c| c.rated_power_kw)
+                .map(|c| w_to_kw(c.rated_power_w))
                 .unwrap_or(DEFAULT_RATED_POWER_KW),
-            capacity_min_kw: typed.as_ref().and_then(|c| c.capacity_min_kw),
+            capacity_min_kw: typed.as_ref().and_then(|c| c.capacity_min_w).map(w_to_kw),
             efficiency,
             curve_from_file,
             eta_thermal,
@@ -978,15 +997,18 @@ impl Generator {
             eta_exhaust,
             delta_kw_per_s: typed
                 .as_ref()
-                .and_then(|c| c.delta_kw_per_s)
+                .and_then(|c| c.delta_w_per_s)
+                .map(w_to_kw)
                 .unwrap_or(DEFAULT_DELTA_KW_PER_S),
             grid_import_limit_kw: typed
                 .as_ref()
-                .and_then(|c| c.grid_import_limit_kw)
+                .and_then(|c| c.grid_import_limit_w)
+                .map(w_to_kw)
                 .unwrap_or(DEFAULT_GRID_IMPORT_LIMIT_KW),
             export_limit_kw: typed
                 .as_ref()
-                .and_then(|c| c.export_limit_kw)
+                .and_then(|c| c.export_limit_w)
+                .map(w_to_kw)
                 .unwrap_or(DEFAULT_EXPORT_LIMIT_KW),
             chp_loop_id,
             flow_rate_kg_s: typed
@@ -1149,16 +1171,23 @@ impl Generator {
             self.descriptor.id = EquipmentId(id);
         }
         self.descriptor.zone = c.zone_id.map(ZoneId);
-        self.rated_power_kw = c.rated_power_kw;
-        self.capacity_min_kw = c.capacity_min_kw;
+        self.rated_power_w = c.rated_power_w;
+        self.rated_power_kw = w_to_kw(c.rated_power_w);
+        self.capacity_min_kw = c.capacity_min_w.map(w_to_kw);
         self.eta_thermal = c.eta_thermal.unwrap_or(self.eta_thermal);
         let (eta_jacket_water, eta_lube_oil, eta_exhaust) = resolve_heat_recovery_etas(&Some(&c));
         self.eta_jacket_water = eta_jacket_water;
         self.eta_lube_oil = eta_lube_oil;
         self.eta_exhaust = eta_exhaust;
-        self.delta_kw_per_s = c.delta_kw_per_s.unwrap_or(self.delta_kw_per_s);
-        self.grid_import_limit_kw = c.grid_import_limit_kw.unwrap_or(self.grid_import_limit_kw);
-        self.export_limit_kw = c.export_limit_kw.unwrap_or(self.export_limit_kw);
+        self.delta_kw_per_s = c.delta_w_per_s.map(w_to_kw).unwrap_or(self.delta_kw_per_s);
+        self.grid_import_limit_kw = c
+            .grid_import_limit_w
+            .map(w_to_kw)
+            .unwrap_or(self.grid_import_limit_kw);
+        self.export_limit_kw = c
+            .export_limit_w
+            .map(w_to_kw)
+            .unwrap_or(self.export_limit_kw);
         self.flow_rate_kg_s = c.flow_rate_kg_s.unwrap_or(self.flow_rate_kg_s);
         self.supply_temp_c = c.supply_temp_c.unwrap_or(self.supply_temp_c);
         self.return_temp_c = c.return_temp_c.unwrap_or(self.return_temp_c);
@@ -1228,7 +1257,7 @@ impl Equipment for Generator {
     fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
         vec![hares_types::ResolvedParameter::new(
             "rated_power_w",
-            crate::kw_to_w(self.rated_power_kw),
+            self.rated_power_w,
             hares_types::Unit::Watt,
         )]
     }
@@ -2205,9 +2234,10 @@ impl hares_types::DescribeFields for GeneratorConfig {
                 },
             ),
             (
-                "rated_power_kw",
+                "rated_power_w",
                 hares_types::FieldMeta {
-                    description: Some("the generator's rated power, kW"),
+                    description: Some("the generator's rated power"),
+                    unit: Some("W"),
                     ..Default::default()
                 },
             ),
@@ -2261,30 +2291,34 @@ impl hares_types::DescribeFields for GeneratorConfig {
                 },
             ),
             (
-                "delta_kw_per_s",
+                "delta_w_per_s",
                 hares_types::FieldMeta {
-                    description: Some("the ramp rate, kW per second"),
+                    description: Some("the ramp rate"),
+                    unit: Some("W/s"),
                     ..Default::default()
                 },
             ),
             (
-                "capacity_min_kw",
+                "capacity_min_w",
                 hares_types::FieldMeta {
-                    description: Some("the minimum capacity, kW"),
+                    description: Some("the minimum capacity"),
+                    unit: Some("W"),
                     ..Default::default()
                 },
             ),
             (
-                "grid_import_limit_kw",
+                "grid_import_limit_w",
                 hares_types::FieldMeta {
-                    description: Some("the grid import limit, kW"),
+                    description: Some("the grid import limit"),
+                    unit: Some("W"),
                     ..Default::default()
                 },
             ),
             (
-                "export_limit_kw",
+                "export_limit_w",
                 hares_types::FieldMeta {
-                    description: Some("the export limit, kW"),
+                    description: Some("the export limit"),
+                    unit: Some("W"),
                     ..Default::default()
                 },
             ),
@@ -2478,7 +2512,7 @@ mod tests {
             zone_id: None,
             // The fuel is stated input, never a Gas fallback.
             fuel_type: Some(FuelType::Gas),
-            rated_power_kw: 10.0,
+            rated_power_w: 10000.0,
             eta_electric: Some(0.30),
             eta_thermal: None,
             eta_jacket_water: None,
@@ -2514,10 +2548,10 @@ mod tests {
                     efficiency_ratio: 1.0,
                 },
             ]),
-            delta_kw_per_s: Some(1.0),
-            capacity_min_kw: None,
-            grid_import_limit_kw: None,
-            export_limit_kw: None,
+            delta_w_per_s: Some(1000.0),
+            capacity_min_w: None,
+            grid_import_limit_w: None,
+            export_limit_w: None,
             loop_id: None,
             flow_rate_kg_s: None,
             supply_temp_c: None,
@@ -2537,7 +2571,7 @@ mod tests {
         };
         for (k, v) in overrides {
             match (*k, v) {
-                (KEY_RATED_POWER_KW, ConfigValue::Float(value)) => cfg.rated_power_kw = *value,
+                (KEY_RATED_POWER_W, ConfigValue::Float(value)) => cfg.rated_power_w = *value,
                 (KEY_ETA_ELECTRIC, ConfigValue::Float(value)) => cfg.eta_electric = Some(*value),
                 (KEY_ETA_THERMAL, ConfigValue::Float(value)) => cfg.eta_thermal = Some(*value),
                 (KEY_ETA_JACKET_WATER, ConfigValue::Float(value)) => {
@@ -2548,17 +2582,15 @@ mod tests {
                 (KEY_EFFICIENCY_TYPE, ConfigValue::Text(value)) => {
                     cfg.efficiency_type = Some(value.clone())
                 }
-                (KEY_DELTA_KW_PER_S, ConfigValue::Float(value)) => {
-                    cfg.delta_kw_per_s = Some(*value)
+                (KEY_DELTA_W_PER_S, ConfigValue::Float(value)) => cfg.delta_w_per_s = Some(*value),
+                (KEY_CAPACITY_MIN_W, ConfigValue::Float(value)) => {
+                    cfg.capacity_min_w = Some(*value)
                 }
-                (KEY_CAPACITY_MIN_KW, ConfigValue::Float(value)) => {
-                    cfg.capacity_min_kw = Some(*value)
+                (KEY_GRID_IMPORT_LIMIT_W, ConfigValue::Float(value)) => {
+                    cfg.grid_import_limit_w = Some(*value)
                 }
-                (KEY_GRID_IMPORT_LIMIT_KW, ConfigValue::Float(value)) => {
-                    cfg.grid_import_limit_kw = Some(*value)
-                }
-                (KEY_EXPORT_LIMIT_KW, ConfigValue::Float(value)) => {
-                    cfg.export_limit_kw = Some(*value)
+                (KEY_EXPORT_LIMIT_W, ConfigValue::Float(value)) => {
+                    cfg.export_limit_w = Some(*value)
                 }
                 (KEY_LOOP_ID, ConfigValue::Float(value)) => cfg.loop_id = Some(*value as u16),
                 (KEY_FLOW_RATE_KG_S, ConfigValue::Float(value)) => {
@@ -2826,7 +2858,7 @@ mod tests {
         // fuel rate. At 0.001 kW with eta=0.30, load fuel ≈ 3.3 W, idle fuel =
         // 10 kW / 0.30 * 0.40 ≈ 13333 W. The total fuel_w should be the max.
         let config = gen_config(&[
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
             (KEY_NO_LOAD_FUEL_FRACTION, 0.40.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
@@ -2834,7 +2866,7 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.001,
+                active_power_kw: 0.0010,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -2930,14 +2962,14 @@ mod tests {
         // Higher no_load_fuel_fraction produces proportionally higher idle fuel.
         let run_with_fraction = |fraction: f64| -> f64 {
             let config = gen_config(&[
-                (KEY_DELTA_KW_PER_S, 100.0.into()),
+                (KEY_DELTA_W_PER_S, 100000.0.into()),
                 (KEY_NO_LOAD_FUEL_FRACTION, fraction.into()),
             ]);
             let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
             generator.init(&config, &base_env()).unwrap();
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 0.001,
+                    active_power_kw: 0.0010,
                     reactive_power_kvar: None,
                     min_soc: None,
                     max_soc: None,
@@ -2976,13 +3008,13 @@ mod tests {
         // fuel_w must match idle_fuel_w (the floor), not load_fuel_w.
         let config = gen_config(&[
             (KEY_NO_LOAD_FUEL_FRACTION, 0.40.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.001,
+                active_power_kw: 0.0010,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3070,7 +3102,7 @@ mod tests {
                         efficiency_ratio: 1.0,
                     },
                 ]),
-                delta_kw_per_s: Some(100.0),
+                delta_w_per_s: Some(100000.0),
                 ..minimal_generator_config()
             },
         )
@@ -3081,7 +3113,7 @@ mod tests {
         // At rated (10 kW, cr=1.0): eta = 0.95*1.0 = 0.95
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3100,7 +3132,7 @@ mod tests {
         // At 25% load (2.5 kW, cr=0.25): eta = 0.95*0.5 = 0.475
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 2.5,
+                active_power_kw: 2.5000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3129,7 +3161,7 @@ mod tests {
                 KEY_EFFICIENCY_TYPE,
                 ConfigValue::Text("quadratic".to_string()),
             ),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -3137,7 +3169,7 @@ mod tests {
         // cr=1.0: eff = 0.40 * 1.0 = 0.40
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3155,7 +3187,7 @@ mod tests {
         // cr=0.5: eff = 0.40 * 0.625 = 0.25
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3177,12 +3209,12 @@ mod tests {
 
     #[test]
     fn electrical_port_is_negative_generation() {
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3205,14 +3237,14 @@ mod tests {
     #[test]
     fn ramp_rate_limits_power_increase_per_step() {
         let config = gen_config(&[
-            (KEY_DELTA_KW_PER_S, 2.0.into()),
-            (KEY_RATED_POWER_KW, 10.0.into()),
+            (KEY_DELTA_W_PER_S, 2000.0.into()),
+            (KEY_RATED_POWER_W, 10000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3245,7 +3277,7 @@ mod tests {
     fn ramp_rate_does_not_limit_power_decrease() {
         // OCHRE Generator.py:129: ramp rate only constrains increasing generation.
         // Shutdown from 10 kW should happen in a single step, not be ramp-limited.
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 1.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 1000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         ramp_to_steady_state(&mut generator, 10.0, &base_env());
@@ -3257,7 +3289,7 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0,
+                active_power_kw: 0.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3281,7 +3313,7 @@ mod tests {
 
     #[test]
     fn self_consumption_covers_net_load() {
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
@@ -3300,8 +3332,8 @@ mod tests {
     #[test]
     fn self_consumption_respects_import_limit() {
         let config = gen_config(&[
-            (KEY_GRID_IMPORT_LIMIT_KW, 2.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_GRID_IMPORT_LIMIT_W, 2000.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -3320,7 +3352,7 @@ mod tests {
 
     #[test]
     fn self_consumption_does_not_export_beyond_limit() {
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
@@ -3337,8 +3369,8 @@ mod tests {
         // OCHRE Generator.py get_power_limits: capacity_min sets a floor on
         // operating power. Requests below capacity_min are clamped UP, not shut off.
         let config = gen_config(&[
-            (KEY_CAPACITY_MIN_KW, 3.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_CAPACITY_MIN_W, 3000.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -3373,8 +3405,8 @@ mod tests {
         // OCHRE Generator.py get_power_limits: setpoint below capacity_min
         // is clamped UP to capacity_min (not shut off).
         let config = gen_config(&[
-            (KEY_CAPACITY_MIN_KW, 3.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_CAPACITY_MIN_W, 3000.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -3382,7 +3414,7 @@ mod tests {
         // Setpoint of 1 kW is below capacity_min of 3 kW → clamp up to 3 kW.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
+                active_power_kw: 1.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3401,7 +3433,7 @@ mod tests {
         // Setpoint of 5 kW is above capacity_min → generator runs at 5 kW.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3423,8 +3455,8 @@ mod tests {
         // A setpoint of exactly 0 must shut the generator off, not clamp up
         // to capacity_min_kw. Only positive-but-below-min values clamp up.
         let config = gen_config(&[
-            (KEY_CAPACITY_MIN_KW, 3.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_CAPACITY_MIN_W, 3000.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -3436,7 +3468,7 @@ mod tests {
         // Set power to 0 -- should shut off, not clamp to 3 kW.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0,
+                active_power_kw: 0.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3464,14 +3496,14 @@ mod tests {
         // should be 9.5 kW (electrical port receives -9.5 kW).
         let config = gen_config(&[
             (KEY_PARASITIC_FRACTION, 0.05.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3505,13 +3537,13 @@ mod tests {
     fn parasitic_fraction_zero_produces_identical_behavior() {
         // Default parasitic_fraction = 0.0 must produce exactly the same
         // results as before the feature was added (backward compatibility).
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3546,14 +3578,14 @@ mod tests {
         let config = gen_config(&[
             (KEY_PARASITIC_FRACTION, 0.05.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3585,14 +3617,14 @@ mod tests {
         // (no thermal accumulator to receive it).
         let config = gen_config(&[
             (KEY_PARASITIC_FRACTION, 0.05.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3678,14 +3710,14 @@ mod tests {
         let config = gen_config(&[
             (KEY_PARASITIC_FRACTION, 0.05.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3734,14 +3766,14 @@ mod tests {
         // prevent validate_core_contract from rejecting Off with non-zero flows.
         let config = gen_config(&[
             (KEY_PARASITIC_FRACTION, 0.999999.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.001,
+                active_power_kw: 0.0010,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3781,13 +3813,13 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_THERMAL, 0.40.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0,
+                active_power_kw: 6.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3820,13 +3852,13 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_THERMAL, 0.40.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3859,13 +3891,13 @@ mod tests {
         // OCHRE: sensible_gain = (electric_kw - power_input) * 1000
         let config = gen_config(&[
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0,
+                active_power_kw: 6.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3899,13 +3931,13 @@ mod tests {
             (KEY_ETA_THERMAL, 0.35.into()),
             (KEY_LOOP_ID, 7.0.into()),
             (KEY_FLOW_RATE_KG_S, 0.4.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 8.0,
+                active_power_kw: 8.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -3956,13 +3988,13 @@ mod tests {
             (KEY_ZONE_ID, 1.0.into()),
             (KEY_LOOP_ID, 7.0.into()),
             (KEY_FLOW_RATE_KG_S, 0.4.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0,
+                active_power_kw: 6.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4032,13 +4064,13 @@ mod tests {
             (KEY_ETA_LUBE_OIL, 0.04.into()),
             (KEY_ETA_EXHAUST, 0.24.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0,
+                active_power_kw: 6.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4083,7 +4115,7 @@ mod tests {
             (KEY_ETA_LUBE_OIL, 0.05.into()),
             (KEY_ETA_EXHAUST, 0.25.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -4091,7 +4123,7 @@ mod tests {
         // Half load (5 kW): verify each stream scales independently.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4123,7 +4155,7 @@ mod tests {
         // Full load (10 kW): total is higher but fractions remain the same.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4172,13 +4204,13 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_THERMAL, 0.40.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0,
+                active_power_kw: 6.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4233,13 +4265,13 @@ mod tests {
             (KEY_ETA_LUBE_OIL, 0.04.into()),
             (KEY_ETA_EXHAUST, 0.24.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 7.5,
+                active_power_kw: 7.5000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4297,13 +4329,13 @@ mod tests {
             (KEY_ETA_LUBE_OIL, 0.04.into()),
             (KEY_ETA_EXHAUST, 0.24.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0,
+                active_power_kw: 6.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4347,13 +4379,13 @@ mod tests {
             (KEY_ETA_LUBE_OIL, 0.05.into()),
             (KEY_ETA_EXHAUST, 0.25.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4407,7 +4439,7 @@ mod tests {
             (KEY_ETA_JACKET_WATER, 0.15.into()),
             (KEY_ETA_LUBE_OIL, 0.05.into()),
             (KEY_ETA_EXHAUST, 0.20.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -4460,13 +4492,13 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_JACKET_WATER, 0.12.into()),
             (KEY_ETA_EXHAUST, 0.24.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4549,14 +4581,14 @@ mod tests {
 
     #[test]
     fn init_rejects_nonpositive_rated_power() {
-        let config = gen_config(&[(KEY_RATED_POWER_KW, 0.0.into())]);
+        let config = gen_config(&[(KEY_RATED_POWER_W, 0.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         assert!(
             generator
                 .init(&config, &base_env())
                 .unwrap_err()
                 .to_string()
-                .contains("rated_power_kw")
+                .contains("rated_power_w")
         );
     }
 
@@ -4570,7 +4602,7 @@ mod tests {
 
     #[test]
     fn init_rejects_invalid_capacity_min() {
-        let config = gen_config(&[(KEY_CAPACITY_MIN_KW, 20.0.into())]); // > rated 10
+        let config = gen_config(&[(KEY_CAPACITY_MIN_W, 20000.0.into())]); // > rated 10000
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         assert!(generator.init(&config, &base_env()).is_err());
     }
@@ -4655,12 +4687,12 @@ mod tests {
 
     #[test]
     fn mode_override_off_stops_generation() {
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4686,12 +4718,12 @@ mod tests {
 
     #[test]
     fn mode_override_standby_restores_self_consumption() {
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4710,7 +4742,7 @@ mod tests {
         // command: return to self-consumption control.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -4743,7 +4775,7 @@ mod tests {
     /// self-consumption (with no setpoint) removes availability.
     #[test]
     fn generator_is_island_source_and_runs_during_outage() {
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         assert!(
@@ -4781,7 +4813,7 @@ mod tests {
 
     #[test]
     fn self_consumption_signal_disables_generation() {
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
@@ -4834,7 +4866,7 @@ mod tests {
         // even with net load present.
         let config = gen_config(&[
             (KEY_STANDBY_MODE, ConfigValue::Bool(true)),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -4859,7 +4891,7 @@ mod tests {
         // self-consumption to pick up the house load.
         let config = gen_config(&[
             (KEY_STANDBY_MODE, ConfigValue::Bool(true)),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -4888,7 +4920,7 @@ mod tests {
         // back off when the utility is restored.
         let config = gen_config(&[
             (KEY_STANDBY_MODE, ConfigValue::Bool(true)),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -5132,7 +5164,7 @@ mod tests {
         // eta = 0.25 * 0.8602 ≈ 0.2151, fuel = 5000 / 0.2151 ≈ 23250 W.
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.25.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
             (KEY_ETA_THERMAL, 0.30.into()),
             (KEY_ZONE_ID, 1.0.into()),
         ]);
@@ -5140,7 +5172,7 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -5187,7 +5219,7 @@ mod tests {
         // at 2.5 kW AC is 2.5/0.95/10 = 0.263, giving eta ≈ 0.5.
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.95.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut fc = Generator::new(config.clone(), GeneratorKind::FuelCell);
         fc.init(&config, &base_env()).unwrap();
@@ -5198,7 +5230,7 @@ mod tests {
         //   eta = 0.95 * 0.7125 ≈ 0.677.
         // Constant at any cr: eta = 0.95
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.5,
+            active_power_kw: 2.5000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -5223,7 +5255,7 @@ mod tests {
             equipment_id: None,
             zone_id: None,
             fuel_type: Some(FuelType::Gas),
-            rated_power_kw: 10.0,
+            rated_power_w: 10000.0,
             eta_electric: None,
             eta_thermal: None,
             eta_jacket_water: None,
@@ -5259,10 +5291,10 @@ mod tests {
                     efficiency_ratio: 1.0,
                 },
             ]),
-            delta_kw_per_s: None,
-            capacity_min_kw: None,
-            grid_import_limit_kw: None,
-            export_limit_kw: None,
+            delta_w_per_s: None,
+            capacity_min_w: None,
+            grid_import_limit_w: None,
+            export_limit_w: None,
             loop_id: None,
             flow_rate_kg_s: None,
             supply_temp_c: None,
@@ -5293,7 +5325,7 @@ mod tests {
         .unwrap();
         assert!(ec.is_typed());
         let recovered: GeneratorConfig = ec.typed().unwrap();
-        assert_eq!(recovered.rated_power_kw, cfg.rated_power_kw);
+        assert_eq!(recovered.rated_power_w, cfg.rated_power_w);
     }
 
     #[test]
@@ -5331,7 +5363,7 @@ mod tests {
     fn generator_config_rejects_unknown_fields() {
         use crate::config::ConfigPayload;
         let json = serde_json::json!({
-            "rated_power_kw": 10.0,
+            "rated_power_w": 10000.0,
             "mystery_field": "oops"
         });
         let ec = EquipmentConfig::with_payload(
@@ -5351,7 +5383,7 @@ mod tests {
     #[test]
     fn generator_config_validate_rejects_zero_rated_power() {
         let mut cfg = minimal_generator_config();
-        cfg.rated_power_kw = 0.0;
+        cfg.rated_power_w = 0.0;
         assert!(cfg.validate().is_err());
     }
 
@@ -5463,7 +5495,7 @@ mod tests {
 
     #[test]
     fn core_output_operating_mode_reflects_generator_state() {
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
@@ -5516,13 +5548,13 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.50.into()),
             (KEY_INVERTER_EFFICIENCY, 0.90.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut fc = Generator::new(config.clone(), GeneratorKind::FuelCell);
         fc.init(&config, &base_env()).unwrap();
 
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -5561,7 +5593,7 @@ mod tests {
         //   qs_cool = 0.2 * Pel (20 % of DC power as stack heat)
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.50.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
             (KEY_STACK_COOLER_R0, 0.20.into()),
             (KEY_STACK_COOLER_R1, 0.0.into()),
             (KEY_STACK_COOLER_R2, 0.0.into()),
@@ -5573,7 +5605,7 @@ mod tests {
         fc.init(&config, &base_env()).unwrap();
 
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -5599,7 +5631,7 @@ mod tests {
         // qs_cool = (r0 + r1*(Tstack - Tnom)) * Pel (with r2=r3=0)
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.50.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
             (KEY_STACK_COOLER_R0, 0.10.into()),
             (KEY_STACK_COOLER_R1, 0.005.into()), // 0.5%/°C
             (KEY_STACK_COOLER_R2, 0.0.into()),
@@ -5611,7 +5643,7 @@ mod tests {
         fc.init(&config, &base_env()).unwrap();
 
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -5638,7 +5670,7 @@ mod tests {
         // r2=2e-5 (1/W), Pel=~5263 W → r2*Pel = 0.1053 → fuel_curve_power_factor = 1.1053
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.50.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
             (KEY_STACK_COOLER_R0, 0.20.into()),
             (KEY_STACK_COOLER_R1, 0.0.into()),
             (KEY_STACK_COOLER_R2, 2e-5.into()),
@@ -5651,7 +5683,7 @@ mod tests {
         fc.init(&config, &base_env()).unwrap();
 
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -5707,7 +5739,7 @@ mod tests {
                 KEY_EFFICIENCY_TYPE,
                 ConfigValue::Text("constant".to_string()),
             ),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let config_fc = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.50.into()),
@@ -5716,7 +5748,7 @@ mod tests {
                 ConfigValue::Text("constant".to_string()),
             ),
             (KEY_INVERTER_EFFICIENCY, 0.90.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
 
         let mut gg = Generator::new(config_gg.clone(), GeneratorKind::GasGenerator);
@@ -5726,7 +5758,7 @@ mod tests {
 
         // Run GasGenerator at 5 kW AC with eta=0.50.
         gg.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -5737,7 +5769,7 @@ mod tests {
 
         // Run FuelCell at 5 kW AC with eta=0.50, inverter=0.90.
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -5768,14 +5800,14 @@ mod tests {
         // must use the 6-point part-load efficiency curve.
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.30.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -5813,7 +5845,7 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.50.into()),
             (KEY_INVERTER_EFFICIENCY, 0.90.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut fc = Generator::new(config.clone(), GeneratorKind::FuelCell);
         fc.init(&config, &base_env()).unwrap();
@@ -5851,13 +5883,13 @@ mod tests {
             (KEY_FLOW_RATE_KG_S, 0.1.into()),
             (KEY_RETURN_TEMP_C, 75.0.into()),
             (KEY_HEAT_REC_MAX_TEMP_C, 80.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -5923,13 +5955,13 @@ mod tests {
             (KEY_LOOP_ID, 7.0.into()),
             (KEY_FLOW_RATE_KG_S, 0.1.into()),
             (KEY_RETURN_TEMP_C, 60.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -5966,13 +5998,13 @@ mod tests {
             (KEY_LOOP_ID, 7.0.into()),
             (KEY_FLOW_RATE_KG_S, 0.1.into()),
             (KEY_RETURN_TEMP_C, 75.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -5998,13 +6030,13 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_THERMAL, 0.40.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0,
+                active_power_kw: 6.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -6081,13 +6113,13 @@ mod tests {
                 (KEY_FLOW_RATE_KG_S, 0.1.into()),
                 (KEY_RETURN_TEMP_C, return_temp.into()),
                 (KEY_HEAT_REC_MAX_TEMP_C, 80.0.into()),
-                (KEY_DELTA_KW_PER_S, 100.0.into()),
+                (KEY_DELTA_W_PER_S, 100000.0.into()),
             ]);
             let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
             generator.init(&config, &base_env()).unwrap();
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 10.0,
+                    active_power_kw: 10.0000,
                     reactive_power_kvar: None,
                     min_soc: None,
                     max_soc: None,
@@ -6131,13 +6163,13 @@ mod tests {
             (KEY_FLOW_RATE_KG_S, 0.1.into()),
             (KEY_RETURN_TEMP_C, 75.0.into()),
             (KEY_HEAT_REC_MAX_TEMP_C, 80.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -6193,13 +6225,13 @@ mod tests {
             (KEY_ETA_THERMAL, 0.35.into()),
             (KEY_LOOP_ID, 7.0.into()),
             (KEY_FLOW_RATE_KG_S, 0.4.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 8.0,
+                active_power_kw: 8.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -6252,13 +6284,13 @@ mod tests {
             (KEY_ETA_THERMAL, 0.35.into()),
             (KEY_LOOP_ID, 7.0.into()),
             (KEY_FLOW_RATE_KG_S, 0.4.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 8.0,
+                active_power_kw: 8.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -6288,13 +6320,13 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_THERMAL, 0.40.into()),
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0,
+                active_power_kw: 6.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -6320,13 +6352,13 @@ mod tests {
         // at all, so thermal_power_w is never populated.
         let config = gen_config(&[
             (KEY_ZONE_ID, 1.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
+                active_power_kw: 5.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -6359,7 +6391,7 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_JACKET_WATER, 0.15.into()),
             (KEY_LOOP_ID, 7.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -6378,7 +6410,7 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0,
+                active_power_kw: 6.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -6413,7 +6445,7 @@ mod tests {
         let config = gen_config(&[
             (KEY_ETA_JACKET_WATER, 0.15.into()),
             (KEY_LOOP_ID, 7.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -6454,7 +6486,7 @@ mod tests {
             (KEY_FLOW_RATE_KG_S, 0.4.into()),
             (KEY_SUPPLY_TEMP_C, 70.0.into()),
             (KEY_RETURN_TEMP_C, 60.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let cp = CP_LIQUID_WATER_J_KG_K;
         let delta_t = 70.0 - 60.0; // 10 K
@@ -6514,7 +6546,7 @@ mod tests {
             (KEY_FLOW_RATE_KG_S, 0.4.into()),
             (KEY_SUPPLY_TEMP_C, 70.0.into()),
             (KEY_RETURN_TEMP_C, 60.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
 
         let flow_at_5kw = {
@@ -6522,7 +6554,7 @@ mod tests {
             generator.init(&config, &base_env()).unwrap();
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 5.0,
+                    active_power_kw: 5.0000,
                     reactive_power_kvar: None,
                     min_soc: None,
                     max_soc: None,
@@ -6540,7 +6572,7 @@ mod tests {
             generator.init(&config, &base_env()).unwrap();
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 10.0,
+                    active_power_kw: 10.0000,
                     reactive_power_kvar: None,
                     min_soc: None,
                     max_soc: None,
@@ -6578,7 +6610,7 @@ mod tests {
             (KEY_FLOW_RATE_KG_S, 0.4.into()),
             (KEY_SUPPLY_TEMP_C, 70.0.into()),
             (KEY_RETURN_TEMP_C, 60.0.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
 
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
@@ -6591,7 +6623,7 @@ mod tests {
         {
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 10.0,
+                    active_power_kw: 10.0000,
                     reactive_power_kvar: None,
                     min_soc: None,
                     max_soc: None,
@@ -6611,7 +6643,7 @@ mod tests {
         {
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 5.0,
+                    active_power_kw: 5.0000,
                     reactive_power_kvar: None,
                     min_soc: None,
                     max_soc: None,
@@ -6657,7 +6689,7 @@ mod tests {
         // part-load efficiency.
         let config = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.30.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -6724,7 +6756,7 @@ mod tests {
         let config_a = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.30.into()),
             (KEY_EFFICIENCY_TYPE, ConfigValue::Text("curve".to_string())),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
         let mut cfg_a: GeneratorConfig = config_a.typed().unwrap();
         cfg_a.efficiency_curve_points = Some(hardcoded_points);
@@ -6735,7 +6767,7 @@ mod tests {
         // Generator B: no explicit curve (uses hardcoded fallback).
         let config_b = gen_config(&[
             (KEY_ETA_ELECTRIC, 0.30.into()),
-            (KEY_DELTA_KW_PER_S, 100.0.into()),
+            (KEY_DELTA_W_PER_S, 100000.0.into()),
         ]);
 
         let mut gen_a = Generator::new(config_a.clone(), GeneratorKind::GasGenerator);
@@ -6823,7 +6855,7 @@ mod tests {
     /// tripping `check_mode_flow_consistency` in a dwelling run.
     #[test]
     fn generating_checkpoint_restores_an_output_the_mode_flow_guard_accepts() {
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         ramp_to_steady_state(&mut generator, 5.0, &base_env());
@@ -6849,7 +6881,7 @@ mod tests {
         let mut restored = Generator::new(config, GeneratorKind::GasGenerator);
         restored
             .init(
-                &gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]),
+                &gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]),
                 &base_env(),
             )
             .unwrap();
@@ -6899,7 +6931,7 @@ mod tests {
     /// published flow when the restored mode is `Off`.
     #[test]
     fn zeroing_setpoint_window_checkpoint_restores_an_output_the_guard_accepts() {
-        let config = gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]);
+        let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
         ramp_to_steady_state(&mut generator, 5.0, &base_env());
@@ -6913,7 +6945,7 @@ mod tests {
         // ramp-down step runs.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0,
+                active_power_kw: 0.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -6935,7 +6967,7 @@ mod tests {
         let mut restored = Generator::new(config, GeneratorKind::GasGenerator);
         restored
             .init(
-                &gen_config(&[(KEY_DELTA_KW_PER_S, 100.0.into())]),
+                &gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]),
                 &base_env(),
             )
             .unwrap();

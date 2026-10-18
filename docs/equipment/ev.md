@@ -84,7 +84,7 @@ Applied in priority order:
 
 - Enabled via `v2l_enabled` / `v2g_enabled` (default false)
 - Negative `PowerSetpoint` triggers discharge (V2G takes precedence when both are enabled)
-- Constraints: SOC > the effective floor `max(reserve, commanded min_soc, ready_by_soc)` — `v2l_soc_reserve` 0.2 / `v2g_soc_reserve` 0.3; max `v2l_max_discharge_kw` 3.0 kW / `v2g_max_discharge_kw` 5.0 kW
+- Constraints: SOC > the effective floor `max(reserve, commanded min_soc, ready_by_soc)` — `v2l_soc_reserve` 0.2 / `v2g_soc_reserve` 0.3; max `v2l_max_discharge_w` 3000 W / `v2g_max_discharge_w` 5000 W
 - The discharge budget covers the **total pack-side draw** — the export converted at `charging_efficiency` plus the heater's DC draw — so the pack never lands below the floor; at the floor both the export and the heater stop
 
 ## Control Signals
@@ -121,7 +121,7 @@ The EV is an inverter-coupled DER (V2G/V2L via DC-link inverter) and IEEE 1547-2
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `power_factor` | `1.0` | Displacement power factor; 1.0 = unity (PFC rectifier baseline, bit-identical to legacy behaviour) |
-| `charger_capacity_kva` | `max(max_charging_power_kw, v2g_max_discharge_kw, v2l_max_discharge_kw)` | Apparent-power rating for kVA clamp |
+| `charger_capacity_va` | `max(max_charging_power_w, v2g_max_discharge_w, v2l_max_discharge_w)` | Apparent-power rating for VA clamp |
 
 **Precedence** (same as battery):
 1. `q_setpoint_kvar` (from `ReactiveSetpoint` or `PowerSetpoint.reactive_power_kvar`) — absolute override, passed through as-commanded
@@ -129,7 +129,7 @@ The EV is an inverter-coupled DER (V2G/V2L via DC-link inverter) and IEEE 1547-2
 
 Both uses key on the **inverter leg** — the charge/discharge conversion power — never the heater-inclusive port total: a PTC pack heater is resistive and DC-fed, not inverter-coupled, so it produces no vars and consumes no inverter kVA headroom (the same inverter-leg keying the stationary Battery uses).
 
-**kVA clamp**: `|Q| ≤ sqrt(max(0, S² − P²))` with `S = charger_capacity_kva` — active-power priority (P never curtailed for Q).
+**VA clamp**: `|Q| ≤ sqrt(max(0, S² − P²))` with `S = charger_capacity_va` (an apparent power, VA) — active-power priority (P never curtailed for Q).
 
 **Sign convention**: positive = inductive/absorbing vars, negative = capacitive/supplying vars. The same signed value is written to port, CoreOutput, and telemetry (`REACTIVE_POWER_KVAR` key) with no negation.
 

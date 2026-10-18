@@ -219,12 +219,18 @@ fn build_preferences(
             ]
         }
         ChargingStrategy::SolarSurplus {
-            min_charge_rate_kw,
+            min_charge_rate_w,
             departure_schedule,
         } => {
             vec![
                 Box::new(SolarTracking {
-                    min_charge_rate_kw: *min_charge_rate_kw,
+                    // One conversion at the read: the payload enters in W
+                    // (SI); the actor still works in kW until the control
+                    // commit.
+                    min_charge_rate_kw: uom::si::f64::Power::new::<uom::si::power::watt>(
+                        *min_charge_rate_w,
+                    )
+                    .get::<uom::si::power::kilowatt>(),
                 }),
                 Box::new(DepartureDeadline {
                     schedule: departure_schedule.clone(),
@@ -252,7 +258,7 @@ fn build_preferences(
         }
         ChargingStrategy::V2G {
             min_soc,
-            max_export_kw,
+            max_export_w,
             price_threshold,
         } => {
             vec![
@@ -262,7 +268,10 @@ fn build_preferences(
                 }),
                 Box::new(V2GExport {
                     min_soc: *min_soc,
-                    max_export_kw: *max_export_kw,
+                    // One conversion at the read: the payload enters in W
+                    // (SI); the actor still works in kW.
+                    max_export_kw: uom::si::f64::Power::new::<uom::si::power::watt>(*max_export_w)
+                        .get::<uom::si::power::kilowatt>(),
                     price_threshold: *price_threshold,
                 }),
             ]
@@ -2211,7 +2220,7 @@ mod tests {
             (
                 "SolarSurplus",
                 ChargingStrategy::SolarSurplus {
-                    min_charge_rate_kw: 1.0,
+                    min_charge_rate_w: 1000.0,
                     departure_schedule: vec![],
                 },
             ),
@@ -2226,7 +2235,7 @@ mod tests {
                 "V2G",
                 ChargingStrategy::V2G {
                     min_soc: 0.3,
-                    max_export_kw: 5.0,
+                    max_export_w: 5000.0,
                     price_threshold: 0.20,
                 },
             ),
@@ -2474,7 +2483,7 @@ mod tests {
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::V2G {
                 min_soc: 0.3,
-                max_export_kw: 5.0,
+                max_export_w: 5000.0,
                 price_threshold: 0.20,
             },
             0.7,
@@ -4142,7 +4151,7 @@ mod tests {
     fn ev_solar_surplus_modulates_rate() {
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::SolarSurplus {
-                min_charge_rate_kw: 1.0,
+                min_charge_rate_w: 1000.0,
                 departure_schedule: vec![],
             },
             0.4,
@@ -4171,7 +4180,7 @@ mod tests {
     fn ev_solar_surplus_below_min_idles() {
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::SolarSurplus {
-                min_charge_rate_kw: 1.0,
+                min_charge_rate_w: 1000.0,
                 departure_schedule: vec![],
             },
             0.4,
@@ -4377,7 +4386,7 @@ mod tests {
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::V2G {
                 min_soc: 0.3,
-                max_export_kw: 5.0,
+                max_export_w: 5000.0,
                 price_threshold: 0.20,
             },
             0.7,
@@ -4419,7 +4428,7 @@ mod tests {
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::V2G {
                 min_soc: 0.3,
-                max_export_kw: 5.0,
+                max_export_w: 5000.0,
                 price_threshold: 0.20,
             },
             0.7,
@@ -5149,7 +5158,7 @@ mod tests {
 
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::SolarSurplus {
-                min_charge_rate_kw: 1.4,
+                min_charge_rate_w: 1400.0,
                 departure_schedule: vec![DepartureConstraint {
                     day_filter: DayFilter::Any,
                     departure_minute: 7 * 60,
@@ -5258,7 +5267,7 @@ mod tests {
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::V2G {
                 min_soc: 0.3,
-                max_export_kw: 5.0,
+                max_export_w: 5000.0,
                 price_threshold: 0.20,
             },
             0.3, // exactly at min_soc
@@ -5440,7 +5449,7 @@ mod tests {
     fn ev_solar_surplus_tracks_pv_curve() {
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::SolarSurplus {
-                min_charge_rate_kw: 1.4,
+                min_charge_rate_w: 1400.0,
                 departure_schedule: vec![],
             },
             0.3,
@@ -5568,7 +5577,7 @@ mod tests {
     fn ev_missing_electrical_summary_solar_idles() {
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::SolarSurplus {
-                min_charge_rate_kw: 1.0,
+                min_charge_rate_w: 1000.0,
                 departure_schedule: vec![],
             },
             0.4,
@@ -5663,7 +5672,7 @@ mod tests {
     fn build_preferences_solar_surplus_installs_two() {
         let prefs = build_preferences(
             &ChargingStrategy::SolarSurplus {
-                min_charge_rate_kw: 1.0,
+                min_charge_rate_w: 1000.0,
                 departure_schedule: vec![],
             },
             7.2,
@@ -7093,9 +7102,9 @@ mod tests {
             "EV".to_string(),
             EvConfig {
                 equipment_id: None,
-                capacity_kwh: 60.0,
+                capacity_j: 60.0 * 3.6e6,
                 charging_level: None,
-                max_charging_power_kw: 7.2,
+                max_charging_power_w: 7200.0,
                 charging_efficiency: None,
                 l1_current_a: None,
                 l1_voltage_v: None,
@@ -7113,12 +7122,12 @@ mod tests {
                 cell_resistance_ohm: None,
                 v2l_enabled: None,
                 v2l_soc_reserve: None,
-                v2l_max_discharge_kw: None,
+                v2l_max_discharge_w: None,
                 v2g_enabled: None,
                 v2g_soc_reserve: None,
-                v2g_max_discharge_kw: None,
+                v2g_max_discharge_w: None,
                 chemistry: None,
-                fuel_economy_kwh_per_mi: None,
+                fuel_economy_j_per_m: None,
                 ready_soc: None,
                 // The override carries the strategy as its serialized form —
                 // the same JSON string an HPXML `Equipment["EV"]` merge
@@ -7127,10 +7136,10 @@ mod tests {
                 charging_strategy: strategy
                     .map(|s| serde_json::to_string(&s).expect("ChargingStrategy serializes")),
                 plug_in_policy: None,
-                power_limit_kw: None,
+                power_limit_w: None,
                 initial_connection_state: None,
                 power_factor: None,
-                charger_capacity_kva: None,
+                charger_capacity_va: None,
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
@@ -7673,7 +7682,7 @@ mod tests {
 
         let strategy = ChargingStrategy::V2G {
             min_soc: 0.3,
-            max_export_kw: 5.0,
+            max_export_w: 5000.0,
             price_threshold: 0.20,
         };
         let mut composer =
@@ -7742,7 +7751,7 @@ mod tests {
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::V2G {
                 min_soc: 0.3,
-                max_export_kw: 5.0,
+                max_export_w: 5000.0,
                 price_threshold: 0.20,
             },
             0.25,
@@ -7801,7 +7810,7 @@ mod tests {
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::V2G {
                 min_soc: 0.5,
-                max_export_kw: 5.0,
+                max_export_w: 5000.0,
                 price_threshold: 0.20,
             },
             0.9, // stale belief: far above floor and threshold; never reconciled
@@ -7811,9 +7820,9 @@ mod tests {
             "EV".to_string(),
             EvConfig {
                 equipment_id: None,
-                capacity_kwh: 60.0,
+                capacity_j: 60.0 * 3.6e6,
                 charging_level: None,
-                max_charging_power_kw: 7.2,
+                max_charging_power_w: 7200.0,
                 charging_efficiency: None,
                 l1_current_a: None,
                 l1_voltage_v: None,
@@ -7831,19 +7840,19 @@ mod tests {
                 cell_resistance_ohm: None,
                 v2l_enabled: None,
                 v2l_soc_reserve: None,
-                v2l_max_discharge_kw: None,
+                v2l_max_discharge_w: None,
                 v2g_enabled: Some(true),
                 v2g_soc_reserve: None, // default 0.3 — strictly below the 0.5 floor
-                v2g_max_discharge_kw: None,
+                v2g_max_discharge_w: None,
                 chemistry: None,
-                fuel_economy_kwh_per_mi: None,
+                fuel_economy_j_per_m: None,
                 ready_soc: None,
                 charging_strategy: None,
                 plug_in_policy: None,
-                power_limit_kw: None,
+                power_limit_w: None,
                 initial_connection_state: None,
                 power_factor: None,
-                charger_capacity_kva: None,
+                charger_capacity_va: None,
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
@@ -7925,9 +7934,9 @@ mod tests {
             "EV".to_string(),
             EvConfig {
                 equipment_id: None,
-                capacity_kwh: 60.0,
+                capacity_j: 60.0 * 3.6e6,
                 charging_level: None,
-                max_charging_power_kw: 7.2,
+                max_charging_power_w: 7200.0,
                 charging_efficiency: None,
                 l1_current_a: None,
                 l1_voltage_v: None,
@@ -7945,19 +7954,19 @@ mod tests {
                 cell_resistance_ohm: None,
                 v2l_enabled: Some(true),
                 v2l_soc_reserve: None, // default 0.2 — strictly below the 0.5 floor
-                v2l_max_discharge_kw: None,
+                v2l_max_discharge_w: None,
                 v2g_enabled: None,
                 v2g_soc_reserve: None,
-                v2g_max_discharge_kw: None,
+                v2g_max_discharge_w: None,
                 chemistry: None,
-                fuel_economy_kwh_per_mi: None,
+                fuel_economy_j_per_m: None,
                 ready_soc: None,
                 charging_strategy: None,
                 plug_in_policy: None,
-                power_limit_kw: None,
+                power_limit_w: None,
                 initial_connection_state: None,
                 power_factor: None,
-                charger_capacity_kva: None,
+                charger_capacity_va: None,
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,

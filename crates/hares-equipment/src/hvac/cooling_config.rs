@@ -55,7 +55,7 @@ pub struct CentralAirConditionerConfig {
     pub fraction_load_served: Option<f64>,
     /// Crankcase heater rated power (kW).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crankcase_heater_kw: Option<f64>,
+    pub crankcase_heater_w: Option<f64>,
     /// Crankcase activation threshold (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_heater_threshold_c: Option<f64>,
@@ -203,11 +203,11 @@ impl CentralAirConditionerConfig {
                 "CentralAirConditionerConfig: startup_cd must be >= 0".to_string(),
             ));
         }
-        if let Some(v) = self.crankcase_heater_kw
+        if let Some(v) = self.crankcase_heater_w
             && (!v.is_finite() || v < 0.0)
         {
             return Err(HaresError::Equipment(
-                "CentralAirConditionerConfig: crankcase_heater_kw must be finite and >= 0"
+                "CentralAirConditionerConfig: crankcase_heater_w must be finite and >= 0"
                     .to_string(),
             ));
         }
@@ -335,7 +335,7 @@ pub struct RoomAcConfig {
     pub startup_cd: Option<f64>,
     /// Crankcase heater rated power (kW).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crankcase_heater_kw: Option<f64>,
+    pub crankcase_heater_w: Option<f64>,
     /// Crankcase activation threshold (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_heater_threshold_c: Option<f64>,
@@ -404,11 +404,11 @@ impl RoomAcConfig {
                 "RoomAcConfig: startup_cd must be >= 0".to_string(),
             ));
         }
-        if let Some(v) = self.crankcase_heater_kw
+        if let Some(v) = self.crankcase_heater_w
             && (!v.is_finite() || v < 0.0)
         {
             return Err(HaresError::Equipment(
-                "RoomAcConfig: crankcase_heater_kw must be finite and >= 0".to_string(),
+                "RoomAcConfig: crankcase_heater_w must be finite and >= 0".to_string(),
             ));
         }
         if let Some(coeffs) = self.crankcase_capacity_curve_coeffs
@@ -705,7 +705,7 @@ impl hares_types::DescribeFields for CentralAirConditionerConfig {
                 },
             ),
             (
-                "crankcase_heater_kw",
+                "crankcase_heater_w",
                 hares_types::FieldMeta {
                     description: Some("the crankcase heater's power, kilowatts"),
                     ..Default::default()
@@ -946,7 +946,7 @@ impl hares_types::DescribeFields for RoomAcConfig {
                 },
             ),
             (
-                "crankcase_heater_kw",
+                "crankcase_heater_w",
                 hares_types::FieldMeta {
                     description: Some("the crankcase heater's power, kilowatts"),
                     ..Default::default()
@@ -1102,7 +1102,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig {
@@ -1172,7 +1172,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -1210,7 +1210,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -1248,7 +1248,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -1286,7 +1286,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -1324,7 +1324,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -1376,7 +1376,7 @@ mod tests {
                 hysteresis_c: None,
                 airflow_m3_s_per_w: None,
                 fraction_load_served: None,
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
                 duct: DuctConfig::default(),
@@ -1436,7 +1436,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1468,7 +1468,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1496,7 +1496,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1526,7 +1526,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1556,7 +1556,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1585,7 +1585,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: Some(0.15),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1613,7 +1613,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1781,7 +1781,7 @@ mod tests {
             plf_min: None,
             plf_max: None,
             shr: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1809,7 +1809,7 @@ mod tests {
             plf_min: None,
             plf_max: None,
             shr: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1836,7 +1836,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -1880,7 +1880,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: Some(0.15),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,

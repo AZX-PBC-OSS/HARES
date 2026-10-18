@@ -99,24 +99,24 @@ class TestDwellingInterface:
 
 class TestBatteryInterface:
     def test_is_constructable_with_required_args(self) -> None:
-        b = hares.Battery(name="test-battery", capacity_kwh=10.0)
+        b = hares.Battery(name="test-battery", capacity_j=36000000)
         assert b.name == "test-battery"
-        assert b.capacity_kwh == 10.0
+        assert b.capacity_j == 36000000
 
     def test_optional_limits_default_to_none(self) -> None:
-        b = hares.Battery(name="b", capacity_kwh=5.0)
-        assert b.max_charge_kw is None
-        assert b.max_discharge_kw is None
+        b = hares.Battery(name="b", capacity_j=18000000)
+        assert b.max_charge_w is None
+        assert b.max_discharge_w is None
 
     def test_limits_round_trip_when_provided(self) -> None:
         b = hares.Battery(
-            name="b", capacity_kwh=5.0, max_charge_kw=2.5, max_discharge_kw=3.0
+            name="b", capacity_j=18000000, max_charge_w=2500, max_discharge_w=3000
         )
-        assert b.max_charge_kw == 2.5
-        assert b.max_discharge_kw == 3.0
+        assert b.max_charge_w == 2500
+        assert b.max_discharge_w == 3000
 
     def test_repr_is_non_empty_string(self) -> None:
-        b = hares.Battery(name="b", capacity_kwh=5.0)
+        b = hares.Battery(name="b", capacity_j=18000000)
         assert isinstance(repr(b), str) and repr(b)
 
 

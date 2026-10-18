@@ -541,3 +541,29 @@ fn class_declared_surface_matches_the_constructed_descriptors() {
     assert_eq!(class_declared_surface("Television"), None);
     assert_eq!(class_declared_surface("Water Heating"), None);
 }
+
+/// The config type a class's overrides are checked against (the
+/// removed-keys row's prefix): the same class-to-config mapping the
+/// registry's factories implement. `None` for a class whose config type
+/// declares no removed-key row, so its overrides carry none either.
+#[must_use]
+pub fn config_type_for_class(class: &str) -> Option<&'static str> {
+    match class {
+        "PV" => Some("PvConfig"),
+        "Battery" => Some("BatteryConfig"),
+        "EV" | "Electric Vehicle" | "Scheduled EV" => Some("EvConfig"),
+        "Gas Generator" | "Gas Fuel Cell" => Some("GeneratorConfig"),
+        "Air Conditioner" => Some("CentralAirConditionerConfig"),
+        "Room AC" => Some("RoomAcConfig"),
+        "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler" | "WSHP Cooler" => {
+            Some("HeatPumpCoolerConfig")
+        }
+        "EventBasedLoad" | "Cooking Range" | "Microwave" => Some("EventBasedLoad"),
+        "Clothes Washer" | "Dishwasher" | "Clothes Dryer" => Some("WetAppliance"),
+        "Lighting" | "Plug Loads" | "Other" | "Refrigerator" | "Freezer" | "MELs" | "TV"
+        | "Well Pump" | "Pool Pump" | "Pool Heater" | "Spa Pump" | "Spa Heater" | "Gas Grill"
+        | "Gas Fireplace" | "Gas Lighting" | "Ceiling Fan" | "Indoor Lighting"
+        | "Exterior Lighting" | "Basement Lighting" | "Garage Lighting" => Some("ScheduledLoad"),
+        _ => None,
+    }
+}

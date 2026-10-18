@@ -90,7 +90,11 @@ fn net_electric_for(overrides: Option<Value>, hpxml: &str, steps: usize) -> Vec<
 #[test]
 fn pv_capacity_kw_override_changes_generation() {
     let baseline = net_electric_for(None, "base-pv.xml", 4);
-    let enlarged = net_electric_for(Some(json!({"PV": {"capacity_kw": 9.0}})), "base-pv.xml", 4);
+    let enlarged = net_electric_for(
+        Some(json!({"PV": {"capacity_w": 9000.0}})),
+        "base-pv.xml",
+        4,
+    );
 
     assert!(
         baseline != enlarged,
@@ -155,7 +159,7 @@ fn battery_control_override_makes_the_pack_cycle() {
         "min_soc": 0.1,
         "max_soc": 1.0,
         "solar_only_charging": false,
-        "surplus_deadband_kw": 0.0,
+        "surplus_deadband_w": 0.0,
     }});
     let cycling = max_observed_soc(
         Some(json!({"Battery": {"bms_mode": bms_mode.to_string()}})),
@@ -206,7 +210,7 @@ fn blueprint_added_pv_applies_the_spec_bag_override() {
         let typed_cfg = hares_equipment::PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt_deg: Some(30.0),
             azimuth_deg: Some(180.0),
             module_type: None,
@@ -214,7 +218,7 @@ fn blueprint_added_pv_applies_the_spec_bag_override() {
             array_type: None,
             system_losses_fraction: None,
             inverter_efficiency: None,
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,
@@ -226,9 +230,9 @@ fn blueprint_added_pv_applies_the_spec_bag_override() {
             .as_object()
             .cloned()
             .expect("PV config object");
-        parameters.insert("capacity_kw".to_string(), json!(bag_capacity_kw));
+        parameters.insert("capacity_w".to_string(), json!(bag_capacity_kw * 1000.0));
         let mut typed_overrides = serde_json::Map::new();
-        typed_overrides.insert("capacity_kw".to_string(), json!(bag_capacity_kw));
+        typed_overrides.insert("capacity_w".to_string(), json!(bag_capacity_kw * 1000.0));
         let spec = hares_io::EquipmentSpec {
             instance_name: None,
             name: "PV".to_string(),
@@ -336,9 +340,9 @@ fn bms_actor_counts_as_declared_control() {
         .expect("the base dwelling must build");
 
     let battery_cfg: hares_equipment::BatteryConfig = serde_json::from_value(json!({
-        "capacity_kwh": 13.5,
-        "max_charge_kw": 5.0,
-        "max_discharge_kw": 5.0,
+        "capacity_j": 13.5 * 3.6e6,
+        "max_charge_w": 5000.0,
+        "max_discharge_w": 5000.0,
     }))
     .expect("minimal BatteryConfig");
     let eq_config = hares_equipment::EquipmentConfig::from_typed(
@@ -365,7 +369,7 @@ fn bms_actor_counts_as_declared_control() {
                     min_soc: 0.1,
                     max_soc: 1.0,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: GridExportRule::Unrestricted,
                 max_charge_kw: 5.0,
@@ -426,7 +430,7 @@ fn unreadable_battery_config_fails_the_build_naming_the_battery() {
                 hares_equipment::ConfigPayload::Typed {
                     type_name: "Battery".to_string(),
                     version: 1,
-                    data: json!({ "capacity_kwh": "not a number" }),
+                    data: json!({ "capacity_j": "not a number" }),
                 },
             )),
             system_id: Some("BAT-1".to_string()),

@@ -171,7 +171,7 @@ impl HpCooler {
             hysteresis_c: hp_cfg.common.hysteresis_c,
             airflow_m3_s_per_w: hp_cfg.common.airflow_m3_s_per_w,
             fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
-            crankcase_heater_kw: hp_cfg.crankcase_heater_kw,
+            crankcase_heater_w: hp_cfg.crankcase_heater_w,
             crankcase_heater_threshold_c: hp_cfg.crankcase_heater_threshold_c,
             crankcase_capacity_curve_coeffs: None,
             duct: hp_cfg.common.duct.clone(),
@@ -208,7 +208,7 @@ impl HpCooler {
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
         cfg.zone_map = source.zone_map.clone();
-        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
+        cfg.zone_capacitance_j_per_k = source.zone_capacitance_j_per_k;
         Ok(cfg)
     }
 }
@@ -460,7 +460,7 @@ impl GshpCooler {
             fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
             // Crankcase values are overridden post-init (compressor indoors,
             // no crankcase heater needed). Not set here to avoid redundancy.
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: hp_cfg.common.duct.clone(),
@@ -490,7 +490,7 @@ impl GshpCooler {
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
         cfg.zone_map = source.zone_map.clone();
-        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
+        cfg.zone_capacitance_j_per_k = source.zone_capacitance_j_per_k;
         Ok(cfg)
     }
 
@@ -896,7 +896,7 @@ impl WshpCooler {
             hysteresis_c: hp_cfg.common.hysteresis_c,
             airflow_m3_s_per_w: hp_cfg.common.airflow_m3_s_per_w,
             fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: hp_cfg.common.duct.clone(),
@@ -926,7 +926,7 @@ impl WshpCooler {
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
         cfg.zone_map = source.zone_map.clone();
-        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
+        cfg.zone_capacitance_j_per_k = source.zone_capacitance_j_per_k;
         Ok(cfg)
     }
 
@@ -1232,7 +1232,7 @@ mod tests {
                     ..Default::default()
                 },
                 stage_shrs: None,
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 min_oat_cooling_c: 10.0,
             },
@@ -1274,7 +1274,7 @@ mod tests {
                 },
             )
             .unwrap();
-            cfg.zone_capacitance_kwh_per_k = 2.5;
+            cfg.zone_capacitance_j_per_k = 2.5 * 3.6e6;
             cfg
         };
         let env = cooling_env(21.0, 10.0);

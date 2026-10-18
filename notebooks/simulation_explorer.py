@@ -439,7 +439,7 @@ def _run_simulation(
                 candidates = dw.pv_candidates()
                 if candidates:
                     best = candidates[0]
-                    pv_obj = PV("PV", best.max_capacity_kw, best.tilt_deg, best.azimuth_deg)
+                    pv_obj = PV("PV", capacity_w=best.max_capacity_kw * 1000.0, tilt=best.tilt_deg, azimuth=best.azimuth_deg)
                     dw.add_pv(pv_obj)
                     pv_info = {
                         "enabled": True,
@@ -451,7 +451,7 @@ def _run_simulation(
                 else:
                     pv_info = {"enabled": False, "source": "auto", "reason": "no viable roof plane"}
             elif pv_mode_val == "manual":
-                dw.add_pv(PV("PV", pv_kw, pv_tilt_deg, pv_az_deg))
+                dw.add_pv(PV("PV", capacity_w=pv_kw * 1000.0, tilt=pv_tilt_deg, azimuth=pv_az_deg))
                 pv_info = {
                     "enabled": True,
                     "kw": pv_kw,
@@ -468,12 +468,12 @@ def _run_simulation(
             if bat_mode_val == "catalog":
                 bat_obj = Battery.by_product_id(bat_product_val)
                 dw.add_battery(bat_obj)
-                bat_charge_kw = float(bat_obj.max_charge_kw or 5.0)
-                bat_discharge_kw = float(bat_obj.max_discharge_kw or 5.0)
+                bat_charge_kw = float(bat_obj.max_charge_w or 5000.0) / 1000.0
+                bat_discharge_kw = float(bat_obj.max_discharge_w or 5000.0) / 1000.0
                 bat_info = {
                     "enabled": True,
                     "product": bat_product_val,
-                    "kwh": bat_obj.capacity_kwh,
+                    "kwh": bat_obj.capacity_j / 3.6e6,
                     "max_kw": bat_charge_kw,
                     "chemistry": str(bat_obj.chemistry),
                     "control": bat_control_val,
@@ -481,7 +481,7 @@ def _run_simulation(
                 }
                 bat_name = bat_obj.name
             elif bat_mode_val == "manual":
-                bat_obj = Battery("Battery", bat_kwh, max_charge_kw=bat_max_kw, max_discharge_kw=bat_max_kw)
+                bat_obj = Battery("Battery", capacity_j=bat_kwh * 3.6e6, max_charge_w=bat_max_kw * 1000.0, max_discharge_w=bat_max_kw * 1000.0)
                 dw.add_battery(bat_obj)
                 bat_info = {
                     "enabled": True,
@@ -519,7 +519,7 @@ def _run_simulation(
                     "source": "archetype",
                 }
             elif ev_mode_val == "manual":
-                ev_obj = EV("EV", capacity_kwh=ev_kwh, max_charging_kw=ev_kw)
+                ev_obj = EV("EV", capacity_j=ev_kwh * 3.6e6, max_charging_power_w=ev_kw * 1000.0)
                 dw.add_ev(ev_obj)
                 ev_info = {
                     "enabled": True,

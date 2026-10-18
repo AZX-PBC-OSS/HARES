@@ -271,6 +271,7 @@ fn selected_columns(
 /// When `frames_dir` holds full products whose digests equal the committed
 /// golden, the report also carries the first differing row with both
 /// values and bit patterns, plus per-column differing-cell counts.
+#[allow(clippy::too_many_arguments)]
 pub fn compare_products(
     name: &str,
     golden: &GoldenDoc,

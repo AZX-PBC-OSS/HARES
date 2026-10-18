@@ -92,15 +92,17 @@ fn base_env() -> EnvironmentState {
 }
 
 fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> EquipmentConfig {
+    // The config enters in SI: the kWh argument converts once here.
     EquipmentConfig::from_typed(
         "Battery".to_string(),
         "Battery".to_string(),
         BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(capacity_kwh)
+                .get::<uom::si::energy::joule>(),
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -129,7 +131,7 @@ fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> Equipm
             bms_mode: None,
             grid_export_rule: None,
             power_factor: None,
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
         },
@@ -159,7 +161,7 @@ fn battery_charge_cycle_soc_accounting() {
     let env = base_env();
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0,
+        active_power_kw: 3.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -261,7 +263,7 @@ fn battery_soc_limits_enforced() {
         let mut bat = make_battery(&cfg);
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -384,7 +386,7 @@ fn pv_cell_temperature_noct_model() {
         PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt_deg: Some(20.0),
             azimuth_deg: Some(180.0),
             module_type: None,
@@ -392,7 +394,7 @@ fn pv_cell_temperature_noct_model() {
             array_type: None,
             system_losses_fraction: Some(0.0),
             inverter_efficiency: Some(0.96),
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: None,
             surface_resolution_deg: Some(5.0),
             sam_lut_path: None,
@@ -487,7 +489,7 @@ fn pv_cell_temperature_noct_model() {
 fn pv_peak_generation_in_good_conditions() {
     let tilt = 20.0;
     let azimuth = 180.0;
-    let capacity_kw = 10.0;
+    let capacity_kw = 10.0; // kW, converted to the config's W below
 
     let cfg = EquipmentConfig::from_typed(
         "PV".to_string(),
@@ -495,7 +497,8 @@ fn pv_peak_generation_in_good_conditions() {
         PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw,
+            capacity_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
+                .get::<uom::si::power::watt>(),
             tilt_deg: Some(tilt),
             azimuth_deg: Some(azimuth),
             module_type: None,
@@ -506,7 +509,7 @@ fn pv_peak_generation_in_good_conditions() {
             // residential configuration whose output the bug suppressed.
             system_losses_fraction: Some(0.14),
             inverter_efficiency: Some(0.96),
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: None,
             surface_resolution_deg: Some(5.0),
             sam_lut_path: None,
@@ -600,7 +603,7 @@ fn pv_power_temperature_derating() {
             PvConfig {
                 equipment_id: None,
                 zone_id: None,
-                capacity_kw: 5.0,
+                capacity_w: 5000.0,
                 tilt_deg: Some(0.0),
                 azimuth_deg: Some(180.0),
                 module_type: None,
@@ -608,7 +611,7 @@ fn pv_power_temperature_derating() {
                 array_type: None,
                 system_losses_fraction: Some(0.0),
                 inverter_efficiency: Some(1.0),
-                inverter_capacity_kw: None,
+                inverter_capacity_w: None,
                 power_factor: None,
                 surface_resolution_deg: Some(5.0),
                 sam_lut_path: None,
@@ -695,7 +698,7 @@ fn generator_fuel_efficiency_at_half_load() {
             equipment_id: None,
             zone_id: None,
             fuel_type: Some(FuelType::Gas),
-            rated_power_kw: 10.0,
+            rated_power_w: 10000.0,
             eta_electric: Some(0.30),
             eta_thermal: None,
             eta_jacket_water: None,
@@ -724,10 +727,10 @@ fn generator_fuel_efficiency_at_half_load() {
                 },
             ]),
             efficiency_type: None,
-            delta_kw_per_s: Some(100.0),
-            capacity_min_kw: None,
-            grid_import_limit_kw: None,
-            export_limit_kw: None,
+            delta_w_per_s: Some(100000.0),
+            capacity_min_w: None,
+            grid_import_limit_w: None,
+            export_limit_w: None,
             loop_id: None,
             flow_rate_kg_s: None,
             supply_temp_c: None,
@@ -755,7 +758,7 @@ fn generator_fuel_efficiency_at_half_load() {
 
     // Command 5 kW (50% load); HARES generator convention: positive = generation output
     eq.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 5.0,
+        active_power_kw: 5.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -820,7 +823,7 @@ fn generator_ramp_rate_is_kw_per_second() {
             equipment_id: None,
             zone_id: None,
             fuel_type: Some(FuelType::Gas),
-            rated_power_kw: 10.0,
+            rated_power_w: 10000.0,
             eta_electric: Some(0.30),
             eta_thermal: None,
             eta_jacket_water: None,
@@ -849,10 +852,10 @@ fn generator_ramp_rate_is_kw_per_second() {
                 },
             ]),
             efficiency_type: None,
-            delta_kw_per_s: Some(delta_kw_per_s),
-            capacity_min_kw: None,
-            grid_import_limit_kw: None,
-            export_limit_kw: None,
+            delta_w_per_s: Some(delta_kw_per_s * 1000.0),
+            capacity_min_w: None,
+            grid_import_limit_w: None,
+            export_limit_w: None,
             loop_id: None,
             flow_rate_kg_s: None,
             supply_temp_c: None,
@@ -880,7 +883,7 @@ fn generator_ramp_rate_is_kw_per_second() {
 
     // Command full load; HARES generator convention: positive = generation output
     eq.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 10.0,
+        active_power_kw: 10.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -927,7 +930,7 @@ fn generator_capacity_min_enforced() {
             equipment_id: None,
             zone_id: None,
             fuel_type: Some(FuelType::Gas),
-            rated_power_kw: 10.0,
+            rated_power_w: 10000.0,
             eta_electric: Some(0.30),
             eta_thermal: None,
             eta_jacket_water: None,
@@ -956,10 +959,10 @@ fn generator_capacity_min_enforced() {
                 },
             ]),
             efficiency_type: None,
-            delta_kw_per_s: Some(100.0),
-            capacity_min_kw: Some(2.0),
-            grid_import_limit_kw: None,
-            export_limit_kw: None,
+            delta_w_per_s: Some(100000.0),
+            capacity_min_w: Some(2000.0),
+            grid_import_limit_w: None,
+            export_limit_w: None,
             loop_id: None,
             flow_rate_kg_s: None,
             supply_temp_c: None,
@@ -989,7 +992,7 @@ fn generator_capacity_min_enforced() {
     // Per OCHRE semantics: minimum operating power clamped UP to capacity_min when on.
     // HARES: values between 0 and capacity_min are clamped up; exact 0 keeps generator off.
     eq.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0, // positive = generation in HARES convention
+        active_power_kw: 1.0000, // positive = generation in HARES convention
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -1043,7 +1046,7 @@ fn battery_control_signal_not_a_stub() {
     let power_charge = {
         let mut bat = make_battery(&cfg);
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0,
+            active_power_kw: 3.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,

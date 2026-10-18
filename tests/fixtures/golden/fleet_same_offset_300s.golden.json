@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "a66ffa8a583739eeb3924cf9db8bb6480e15e257",
+  "git_head": "d12a8c38aa7736089fea3d9b032f3b6e3609f56a",
   "git_dirty": true,
   "metrics": [
     {
@@ -110,8 +110,8 @@
           "value": 0.0
         },
         "refrigeration": {
-          "bits": "0x3fcc21008698c13f",
-          "value": 0.21975714275459698
+          "bits": "0x3fcc21008698c140",
+          "value": 0.219757142754597
         },
         "water_heating": {
           "bits": "0x0000000000000000",
@@ -155,8 +155,8 @@
         "value": 21.000018601243635
       },
       "total_energy_kwh.net_energy_kwh": {
-        "bits": "0x403d4f80458d4edf",
-        "value": 29.310551020621343
+        "bits": "0x403d4f80458d4ee0",
+        "value": 29.310551020621347
       },
       "total_energy_kwh.per_end_use": {
         "hvac_cooling": {
@@ -184,8 +184,8 @@
           "value": -21.000018601243635
         },
         "refrigeration": {
-          "bits": "0x402199207d2ac45c",
-          "value": 8.799075995894036
+          "bits": "0x402199207d2ac45d",
+          "value": 8.799075995894038
         },
         "water_heating": {
           "bits": "0x0000000000000000",
@@ -301,8 +301,8 @@
           "value": 0.0
         },
         "refrigeration": {
-          "bits": "0x3fcc21008698c13f",
-          "value": 0.21975714275459698
+          "bits": "0x3fcc21008698c140",
+          "value": 0.219757142754597
         },
         "water_heating": {
           "bits": "0x0000000000000000",
@@ -375,8 +375,8 @@
           "value": -30.000843194061396
         },
         "refrigeration": {
-          "bits": "0x402199207d2ac45c",
-          "value": 8.799075995894036
+          "bits": "0x402199207d2ac45d",
+          "value": 8.799075995894038
         },
         "water_heating": {
           "bits": "0x0000000000000000",
@@ -492,8 +492,8 @@
           "value": 0.0
         },
         "refrigeration": {
-          "bits": "0x3fcc21008698c13f",
-          "value": 0.21975714275459698
+          "bits": "0x3fcc21008698c140",
+          "value": 0.219757142754597
         },
         "water_heating": {
           "bits": "0x0000000000000000",
@@ -537,8 +537,8 @@
         "value": 23.51997897927844
       },
       "total_energy_kwh.net_energy_kwh": {
-        "bits": "0x4039da0fe9bb13fd",
-        "value": 25.85180531327568
+        "bits": "0x4039da0fe9bb13fe",
+        "value": 25.851805313275683
       },
       "total_energy_kwh.per_end_use": {
         "hvac_cooling": {
@@ -566,8 +566,8 @@
           "value": -23.51997897927844
         },
         "refrigeration": {
-          "bits": "0x402199207d2ac45c",
-          "value": 8.799075995894036
+          "bits": "0x402199207d2ac45d",
+          "value": 8.799075995894038
         },
         "water_heating": {
           "bits": "0x0000000000000000",
@@ -776,10 +776,10 @@
         },
         {
           "name": "Total Electric Power (kW)",
-          "digest": "1e4dbf024103b3ed62475e14a613076361d2abd8cb289caae81ebcb67bdaccb8",
+          "digest": "169f57730681ceefc71b138e165edb4024a036a447828663fe3d8ab6a65773b2",
           "blocks": [
-            "ad1667750a7d54f11d955f21fdca24554fe6222d19c92944d35df0448535658c",
-            "4467f08807a96e2aa0474e366a5bcdab573cd7fcf9e457676f2e6306999ba334"
+            "0699103b8d08e2e89983a5c56c9d69b1bbfc4d545da0ee808e319cf3cd06d57e",
+            "2106ea67a3b8a74ccfd6e7a028f56b6bf2cad051b0dadba60a6646549b92c7af"
           ]
         },
         {
@@ -792,10 +792,10 @@
         },
         {
           "name": "Total Reactive Power (kVAR)",
-          "digest": "193471468aec363bd196bf42a58f30f45f2d2724a74b1e040d2dff5cb052395d",
+          "digest": "3ca4311df9501ca32c59cc50dee6ff06fe8a80831e1d604e635094515eab60f8",
           "blocks": [
-            "c47b8e4a3e1c60af2860e3adb964f830b002a4028c694f615b776df8d727fe25",
-            "25ebe4294b19635e032f770d5b9ee220900f93027abedff19bacf4d715ae805a"
+            "c895ffa72618101269d6fc084eeb4a2374c06db16afb13a77989da468f99c501",
+            "1415b21954592ef18e3a03b24af2175ea0dac13e5ebb4ac01d6426d93481e624"
           ]
         },
         {
@@ -904,10 +904,10 @@
         },
         {
           "name": "Refrigerator #2 Electric Power (kW)",
-          "digest": "3971312278bd4db487b6ff627901a6f1450b04a7d2d20e24a37cc73c862f78c8",
+          "digest": "0d85f1e285a34e562aebedce20b48ce60b9f3b511adb6675d9e35397624ab739",
           "blocks": [
-            "7721acd6e07e7c0f8667a414881cdcec3f21aea0b9b33e8a8fd06fba2261f7cb",
-            "7721acd6e07e7c0f8667a414881cdcec3f21aea0b9b33e8a8fd06fba2261f7cb"
+            "604c7bddddb76e778ec9c867ec9ae0fb4a47839fba297c5706f44f1a71e6ae9d",
+            "604c7bddddb76e778ec9c867ec9ae0fb4a47839fba297c5706f44f1a71e6ae9d"
           ]
         },
         {
@@ -1000,10 +1000,10 @@
         },
         {
           "name": "Refrigeration End Use Electric Power (kW)",
-          "digest": "0f2f161c306d3cdfa8ffcced7231b1fca3d20d526e1a01e4bdec0083a2802de8",
+          "digest": "193ecf831fb85472b40cbc0af40fd47f44c0022e10e082eb31b8cc1cee651a2c",
           "blocks": [
-            "a8fa5994e4ee28e5f0261536805ba4e87330b02155d104919ba3e36aaa7bf43d",
-            "a8fa5994e4ee28e5f0261536805ba4e87330b02155d104919ba3e36aaa7bf43d"
+            "03c51fa350be8c08121d129db19b54c25d5838ce5f7c953904389ac9316e70bc",
+            "03c51fa350be8c08121d129db19b54c25d5838ce5f7c953904389ac9316e70bc"
           ]
         },
         {
@@ -1024,10 +1024,10 @@
         },
         {
           "name": "Temperature - Zone_2 (C)",
-          "digest": "1565601224e5f3a272c2244f3e1870bdd30f0465bd98ac4093f501e022258c4c",
+          "digest": "e8c722bdcf38447b81f605bebc8415071d3bda292cacb0c3a799fd12ba91d9c3",
           "blocks": [
             "a0e3df04026a621fa851a427b461423afb894750816caec71d905ca73fcd7bd9",
-            "3d9fbe7ce3ebc75b2fca1f78d199e1c20a4cced07cc0cb4eb11b0605fe28f6ec"
+            "1896a0a96a19271a6c79b64fafae68bff48a2ccfacfe5e22ee6b0bb6f66d8d87"
           ]
         },
         {
@@ -1620,9 +1620,9 @@
         },
         {
           "name": "total_energy_kwh",
-          "digest": "2e5b1ecada9885414faf7ac7b1bca5ab54f9c8a74f46f9ec17b220101157c0e7",
+          "digest": "dc58af2a06c50d8b62c579010c06e522ba408fc4928e80d982b3a2a0bc53114e",
           "blocks": [
-            "2e5b1ecada9885414faf7ac7b1bca5ab54f9c8a74f46f9ec17b220101157c0e7"
+            "dc58af2a06c50d8b62c579010c06e522ba408fc4928e80d982b3a2a0bc53114e"
           ]
         },
         {

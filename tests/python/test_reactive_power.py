@@ -100,9 +100,9 @@ class TestBatteryPowerFactorCharging:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.3,
             standby_power_w=0.0,
             charge_efficiency=1.0,
@@ -134,9 +134,9 @@ class TestBatteryPowerFactorCharging:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.3,
             standby_power_w=0.0,
             charge_efficiency=1.0,
@@ -170,15 +170,15 @@ class TestBatteryReactiveSetpoint:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.5,
             standby_power_w=0.0,
             charge_efficiency=1.0,
             discharge_efficiency=1.0,
             power_factor=0.9,
-            inverter_capacity_kva=10.0,
+            inverter_capacity_va=10000,
         )
         dw.add_battery(bat)
         # ReactiveSetpoint takes precedence over baseline pf.
@@ -202,9 +202,9 @@ class TestBatteryReactiveSetpoint:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.5,
             standby_power_w=0.0,
             charge_efficiency=1.0,
@@ -234,14 +234,14 @@ class TestBatteryReactiveSetpoint:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.5,
             standby_power_w=0.0,
             charge_efficiency=1.0,
             discharge_efficiency=1.0,
-            inverter_capacity_kva=10.0,
+            inverter_capacity_va=10000,
         )
         dw.add_battery(bat)
         dw.apply_control(
@@ -271,12 +271,12 @@ class TestEvPowerFactorCharging:
         dw.initialize()
         ev = EV(
             "TestEV",
-            capacity_kwh=75.0,
-            max_charging_kw=7.2,
+            capacity_j=270000000,
+            max_charging_power_w=7200,
             initial_soc=0.5,
             initial_connection_state=EvConnectionState.HomePluggedIn,
             power_factor=0.9,
-            charger_capacity_kva=15.0,
+            charger_capacity_va=15000,
         )
         dw.add_ev(ev)
         dw.step()
@@ -302,12 +302,12 @@ class TestEvPowerFactorCharging:
         dw.initialize()
         ev = EV(
             "TestEV",
-            capacity_kwh=75.0,
-            max_charging_kw=7.2,
+            capacity_j=270000000,
+            max_charging_power_w=7200,
             initial_soc=0.5,
             initial_connection_state=EvConnectionState.HomePluggedIn,
             power_factor=0.9,
-            charger_capacity_kva=15.0,
+            charger_capacity_va=15000,
         )
         dw.add_ev(ev)
         dw.step()
@@ -329,8 +329,8 @@ class TestEvReactiveSetpoint:
         )
         dw.initialize()
         defaults: dict[str, Any] = dict(
-            capacity_kwh=75.0,
-            max_charging_kw=7.2,
+            capacity_j=270000000,
+            max_charging_power_w=7200,
             initial_soc=0.5,
             initial_connection_state=EvConnectionState.HomePluggedIn,
         )
@@ -343,7 +343,7 @@ class TestEvReactiveSetpoint:
         from hares import ControlSignal
 
         dw = self._make_ev_dwelling(
-            power_factor=0.9, charger_capacity_kva=10.0
+            power_factor=0.9, charger_capacity_va=10000
         )
         dw.apply_control("TestEV", ControlSignal.reactive_setpoint(1.5))
         dw.apply_control("TestEV", ControlSignal.power_setpoint(2.0))
@@ -375,7 +375,7 @@ class TestEvReactiveSetpoint:
     def test_power_setpoint_with_reactive_kvar_accepted(self):
         from hares import ControlSignal
 
-        dw = self._make_ev_dwelling(charger_capacity_kva=10.0)
+        dw = self._make_ev_dwelling(charger_capacity_va=10000)
         dw.apply_control(
             "TestEV", ControlSignal.power_setpoint(2.0, reactive_kvar=0.75)
         )
@@ -391,7 +391,7 @@ class TestEvReactiveSetpoint:
         """Sending a ReactiveSetpoint must not alter real power."""
         from hares import ControlSignal
 
-        dw = self._make_ev_dwelling(power_factor=0.9, charger_capacity_kva=10.0)
+        dw = self._make_ev_dwelling(power_factor=0.9, charger_capacity_va=10000)
         dw.apply_control("TestEV", ControlSignal.power_setpoint(3.0))
         dw.step()
         tel_before = _equipment_telemetry(dw, "TestEV")
@@ -421,8 +421,8 @@ class TestDefaultEvZeroQ:
         dw.initialize()
         ev = EV(
             "TestEV",
-            capacity_kwh=75.0,
-            max_charging_kw=7.2,
+            capacity_j=270000000,
+            max_charging_power_w=7200,
             initial_soc=0.5,
             initial_connection_state=EvConnectionState.HomePluggedIn,
         )
@@ -624,9 +624,9 @@ class TestDefaultBatteryZeroQ:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.5,
             standby_power_w=0.0,
             charge_efficiency=1.0,
@@ -669,9 +669,9 @@ class TestResolvedZipInspection:
 
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.5,
             standby_power_w=0.0,
             **kw,

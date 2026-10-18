@@ -37,7 +37,7 @@ const EVENT_LOAD_CHECKPOINT_VERSION: u32 = 4;
 const WORDS_PER_DRAW: u128 = 2;
 
 const KEY_N_UNITS: &str = "n_units";
-const KEY_ACTIVE_POWER_KW: &str = "active_power_kw";
+const KEY_ACTIVE_POWER_W: &str = "active_power_w";
 const KEY_ACTIVE_DURATION_S: &str = "active_duration_s";
 const KEY_COOLDOWN_DURATION_S: &str = "cooldown_duration_s";
 const KEY_PHASE_LEN: &str = "phase_len";
@@ -47,7 +47,7 @@ const KEY_EVENT_PROBABILITY_SOURCE: &str = "event_probability_source";
 const KEY_EVENT_PROBABILITY_SCHEDULE_COL: &str = "event_probability_schedule_col";
 const KEY_EVENT_PROBABILITY_CONSTANT: &str = "event_probability_constant";
 
-const KEY_EVENT_POWER_KW_SERIES: &str = "event_power_kw_series";
+const KEY_EVENT_POWER_W_SERIES: &str = "event_power_w_series";
 const KEY_FUEL_TYPE: &str = "fuel_type";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,11 +100,22 @@ struct EventReplay {
 impl EventReplay {
     fn from_config(config: &EquipmentConfig) -> Self {
         config
-            .get_f64_array(KEY_EVENT_POWER_KW_SERIES)
-            .map(|kw_series| Self {
-                events: extract_events_from_kw_series(kw_series),
-                schedule_len: kw_series.len(),
-                current: None,
+            .get_f64_array(KEY_EVENT_POWER_W_SERIES)
+            // One conversion at the read: the series enters in W (SI);
+            // the replay still works in kW until the run-state commit.
+            .map(|w_series| {
+                let kw_series: Vec<f64> = w_series
+                    .iter()
+                    .map(|w| {
+                        uom::si::f64::Power::new::<uom::si::power::watt>(*w)
+                            .get::<uom::si::power::kilowatt>()
+                    })
+                    .collect();
+                Self {
+                    events: extract_events_from_kw_series(&kw_series),
+                    schedule_len: kw_series.len(),
+                    current: None,
+                }
             })
             .unwrap_or_default()
     }
@@ -202,7 +213,7 @@ fn expected_event_mean_power_kw(
 }
 
 const PHASE_PREFIX: &str = "phase_";
-const PHASE_POWER_SUFFIX: &str = "_power_kw";
+const PHASE_POWER_SUFFIX: &str = "_power_w";
 const PHASE_DURATION_SUFFIX: &str = "_duration_s";
 
 /// The parameters both event-driven kinds read beside the ones every
@@ -215,7 +226,7 @@ pub(crate) const EVENT_PARAMS: &[RawParam] = &[
     RawParam::key(KEY_EVENT_PROBABILITY_SCHEDULE_COL, ParamKind::Number),
     RawParam::key(KEY_EVENT_PROBABILITY_CONSTANT, ParamKind::Number),
     RawParam::key(KEY_FUEL_TYPE, ParamKind::Text),
-    RawParam::key(KEY_EVENT_POWER_KW_SERIES, ParamKind::NumberList),
+    RawParam::key(KEY_EVENT_POWER_W_SERIES, ParamKind::NumberList),
 ];
 
 const fn phase_param(suffix: &'static str, kind: ParamKind) -> RawParam {
@@ -224,7 +235,7 @@ const fn phase_param(suffix: &'static str, kind: ParamKind) -> RawParam {
 
 /// What an [`EventBasedLoad`] alone reads.
 pub(crate) const EVENT_LOAD_PARAMS: &[RawParam] = &[
-    RawParam::key(KEY_ACTIVE_POWER_KW, ParamKind::Number),
+    RawParam::key(KEY_ACTIVE_POWER_W, ParamKind::Number),
     RawParam::key(KEY_ACTIVE_DURATION_S, ParamKind::Number),
     RawParam::key(KEY_COOLDOWN_DURATION_S, ParamKind::Number),
 ];
@@ -233,7 +244,7 @@ pub(crate) const EVENT_LOAD_PARAMS: &[RawParam] = &[
 /// its cycle when `phase_len` is absent or 0.
 pub(crate) const WET_APPLIANCE_PARAMS: &[RawParam] = &[
     RawParam::key(KEY_N_UNITS, ParamKind::Number),
-    RawParam::key(KEY_ACTIVE_POWER_KW, ParamKind::Number),
+    RawParam::key(KEY_ACTIVE_POWER_W, ParamKind::Number),
     RawParam::key(KEY_ACTIVE_DURATION_S, ParamKind::Number),
     RawParam::key(KEY_PHASE_LEN, ParamKind::Number),
     phase_param(PHASE_POWER_SUFFIX, ParamKind::Number),
@@ -305,6 +316,9 @@ pub struct EventBasedLoad {
     event_probability_source: ScheduleSource,
 
     active_power_kw: f64,
+    /// The config's active power as it entered, in W (SI): the read-back
+    /// reports it directly.
+    configured_active_power_w: f64,
     active_duration_s: f64,
     cooldown_duration_s: f64,
     gains: GainFractions,
@@ -397,6 +411,7 @@ impl EventBasedLoad {
             event_window_source: ScheduleSource::Constant(1.0),
             event_probability_source: ScheduleSource::Constant(1.0),
             active_power_kw: 0.0,
+            configured_active_power_w: 0.0,
             active_duration_s: 0.0,
             cooldown_duration_s: 0.0,
             gains: GainFractions::default(),
@@ -593,7 +608,7 @@ impl Equipment for EventBasedLoad {
         vec![
             hares_types::ResolvedParameter::new(
                 "active_power_w",
-                crate::kw_to_w(self.active_power_kw),
+                self.configured_active_power_w,
                 hares_types::Unit::Watt,
             ),
             hares_types::ResolvedParameter::new(
@@ -657,7 +672,15 @@ impl Equipment for EventBasedLoad {
         self.event_window_source = window_source;
         self.event_probability_source = probability_source;
 
-        self.active_power_kw = parse_non_negative(config, KEY_ACTIVE_POWER_KW)?.unwrap_or(1.0);
+        // One conversion at construction: the raw key enters in W (SI);
+        // the load still works in kW until the run-state commit. The
+        // configured value is kept in W for the read-back, which reports
+        // it directly.
+        self.configured_active_power_w =
+            parse_non_negative(config, KEY_ACTIVE_POWER_W)?.unwrap_or(1000.0);
+        self.active_power_kw =
+            uom::si::f64::Power::new::<uom::si::power::watt>(self.configured_active_power_w)
+                .get::<uom::si::power::kilowatt>();
         self.active_duration_s = parse_positive(config, KEY_ACTIVE_DURATION_S)?.unwrap_or(900.0);
         self.cooldown_duration_s =
             parse_non_negative(config, KEY_COOLDOWN_DURATION_S)?.unwrap_or(0.0);
@@ -1630,8 +1653,15 @@ fn parse_event_probability_source(
 fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>> {
     let count = parse_usize(config, KEY_PHASE_LEN)?.unwrap_or(0);
     if count == 0 {
+        // One conversion at the read: the raw key enters in W (SI).
+        let power_kw = parse_non_negative(config, KEY_ACTIVE_POWER_W)?
+            .map(|w| {
+                uom::si::f64::Power::new::<uom::si::power::watt>(w)
+                    .get::<uom::si::power::kilowatt>()
+            })
+            .unwrap_or(1.0);
         return Ok(vec![CyclePhase {
-            power_kw: parse_non_negative(config, KEY_ACTIVE_POWER_KW)?.unwrap_or(1.0),
+            power_kw,
             duration_s: parse_positive(config, KEY_ACTIVE_DURATION_S)?.unwrap_or(900.0),
         }]);
     }
@@ -1641,11 +1671,19 @@ fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>
         let power_key = format!("{PHASE_PREFIX}{idx}{PHASE_POWER_SUFFIX}");
         let duration_key = format!("{PHASE_PREFIX}{idx}{PHASE_DURATION_SUFFIX}");
 
-        let power_kw = config.get_f64(&power_key).ok_or_else(|| {
-            HaresError::Equipment(format!(
-                "missing wet appliance phase power at index {idx} (key '{power_key}')"
-            ))
-        })?;
+        // One conversion at the read: the raw key enters in W (SI); the
+        // cycle still works in kW until the run-state commit.
+        let power_kw = config
+            .get_f64(&power_key)
+            .map(|w| {
+                uom::si::f64::Power::new::<uom::si::power::watt>(w)
+                    .get::<uom::si::power::kilowatt>()
+            })
+            .ok_or_else(|| {
+                HaresError::Equipment(format!(
+                    "missing wet appliance phase power at index {idx} (key '{power_key}')"
+                ))
+            })?;
         let duration_s = config.get_f64(&duration_key).ok_or_else(|| {
             HaresError::Equipment(format!(
                 "missing wet appliance phase duration at index {idx} (key '{duration_key}')"
@@ -1923,7 +1961,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.5.into());
+        raw.insert("active_power_w".to_string(), 1500.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 60.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.4.into());
@@ -1937,9 +1975,9 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 2.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_power_w".to_string(), 500.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
-        raw.insert("phase_1_power_kw".to_string(), 1.2.into());
+        raw.insert("phase_1_power_w".to_string(), 1200.0.into());
         raw.insert("phase_1_duration_s".to_string(), 120.0.into());
         raw.insert("n_units".to_string(), n_units.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.2.into());
@@ -2314,7 +2352,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 2.0.into()); // wraps to 0 for payload len=2
         raw.insert("event_probability_schedule_col".to_string(), 3.0.into()); // wraps to 1 for payload len=2
-        raw.insert("active_power_kw".to_string(), 2.0.into());
+        raw.insert("active_power_w".to_string(), 2000.0.into());
         raw.insert("active_duration_s".to_string(), 30.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
@@ -2336,7 +2374,7 @@ mod tests {
         // Create a config with no schedule entries at all
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         // No compact event schedule keys
@@ -2517,7 +2555,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         // Long duration so the Active phase persists across multiple steps.
-        raw.insert("active_power_kw".to_string(), 3.0.into());
+        raw.insert("active_power_w".to_string(), 3000.0.into());
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
@@ -2544,7 +2582,7 @@ mod tests {
 
         // Apply a PowerSetpoint override for the next step only.
         eq.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 0.5,
+            active_power_kw: 0.5000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -2727,7 +2765,7 @@ mod tests {
         );
         assert_eq!(
             elec_kw, 0.0,
-            "active_power_kw must be zero for gas equipment"
+            "active_power_w must be zero for gas equipment"
         );
     }
 
@@ -2849,8 +2887,8 @@ mod tests {
         let mut config = event_config("Zeroed Season Load", "EventBasedLoad");
         let extras = config.test_extras_mut();
         extras.insert(
-            "event_power_kw_series".to_string(),
-            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+            "event_power_w_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2000.0, 4000.0, 0.0]),
         );
         for month in 0..12 {
             extras.insert(format!("month_multiplier_{month}"), 0.0.into());
@@ -2879,8 +2917,8 @@ mod tests {
         let mut config = event_config("Half Year Load", "EventBasedLoad");
         let extras = config.test_extras_mut();
         extras.insert(
-            "event_power_kw_series".to_string(),
-            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+            "event_power_w_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2000.0, 4000.0, 0.0]),
         );
         for month in 0..12 {
             extras.insert(format!("month_multiplier_{month}"), 0.5.into());
@@ -2907,8 +2945,8 @@ mod tests {
         let mut config = event_config("Shoulder Season Load", "EventBasedLoad");
         let extras = config.test_extras_mut();
         extras.insert(
-            "event_power_kw_series".to_string(),
-            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+            "event_power_w_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2000.0, 4000.0, 0.0]),
         );
         for month in 0..12 {
             let multiplier = if month == 11 { 1.0 } else { 0.0 };
@@ -3246,7 +3284,9 @@ mod tests {
     fn deterministic_replay_matches_schedule() {
         use super::super::config::ConfigValue;
 
-        let kw_series = vec![0.0_f64, 2.0, 4.0, 0.0, 0.0, 6.0, 6.0, 0.0];
+        // The series enters in W (SI): the kW series' own values times
+        // 1000, the replay's event power unchanged.
+        let w_series = vec![0.0_f64, 2000.0, 4000.0, 0.0, 0.0, 6000.0, 6000.0, 0.0];
         let expected_w: &[f64] = &[0.0, 3000.0, 3000.0, 0.0, 0.0, 6000.0, 6000.0, 0.0];
 
         let mut raw: std::collections::HashMap<String, ConfigValue> =
@@ -3255,14 +3295,14 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         // active_power_kw is irrelevant in deterministic mode; the series power wins.
-        raw.insert("active_power_kw".to_string(), 99.0.into());
+        raw.insert("active_power_w".to_string(), 99000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         raw.insert("latent_gain_fraction".to_string(), 0.0.into());
         raw.insert(
-            "event_power_kw_series".to_string(),
-            ConfigValue::FloatArray(kw_series),
+            "event_power_w_series".to_string(),
+            ConfigValue::FloatArray(w_series),
         );
         let config = raw_config("replay_test".to_string(), "EventBasedLoad".to_string(), raw);
 
@@ -3392,7 +3432,7 @@ mod tests {
         eq.init(&config, &env).unwrap();
 
         eq.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -3419,7 +3459,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 3.0.into());
+        raw.insert("active_power_w".to_string(), 3000.0.into());
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
@@ -3442,7 +3482,7 @@ mod tests {
         );
 
         eq.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 0.75,
+            active_power_kw: 0.7500,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -3469,19 +3509,20 @@ mod tests {
     fn deterministic_event_does_not_mutate_active_power_kw_field() {
         use super::super::config::ConfigValue;
 
-        let kw_series = vec![0.0_f64, 5.0, 5.0, 0.0];
+        // The series enters in W (SI).
+        let w_series = vec![0.0_f64, 5000.0, 5000.0, 0.0];
         let mut raw: std::collections::HashMap<String, ConfigValue> =
             std::collections::HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 99.0.into());
+        raw.insert("active_power_w".to_string(), 99000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         raw.insert(
-            "event_power_kw_series".to_string(),
-            ConfigValue::FloatArray(kw_series),
+            "event_power_w_series".to_string(),
+            ConfigValue::FloatArray(w_series),
         );
         let config = raw_config(
             "field_unchanged".to_string(),
@@ -3503,7 +3544,7 @@ mod tests {
 
         assert_eq!(
             eq.active_power_kw, original_active_power_kw,
-            "deterministic replay must not mutate active_power_kw field; \
+            "deterministic replay must not mutate the active power working value; \
              expected {original_active_power_kw}, got {}",
             eq.active_power_kw
         );
@@ -3520,7 +3561,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
@@ -3556,7 +3597,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
@@ -3575,7 +3616,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), (-0.1_f64).into());
@@ -3594,7 +3635,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 1.5_f64.into());
@@ -3613,7 +3654,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.7_f64.into());
@@ -3634,7 +3675,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_power_w".to_string(), 500.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
@@ -3654,7 +3695,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_power_w".to_string(), 500.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), (-0.1_f64).into());
@@ -3674,7 +3715,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_power_w".to_string(), 500.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 1.5_f64.into());
@@ -3694,7 +3735,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_power_w".to_string(), 500.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.7_f64.into());
@@ -4017,12 +4058,12 @@ mod tests {
     fn parse_cycle_phases_reads_one_spelling() {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("cycle_phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("cycle_phase_0_power_w".to_string(), 0.5.into());
         raw.insert("cycle_phase_0_duration_s".to_string(), 60.0.into());
 
         let config = raw_config("test_alt_key".to_string(), "Dishwasher".to_string(), raw);
         let err = super::parse_cycle_phases(&config).unwrap_err();
-        assert!(err.to_string().contains("phase_0_power_kw"), "{err}");
+        assert!(err.to_string().contains("phase_0_power_w"), "{err}");
     }
 
     #[test]
@@ -4059,7 +4100,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 2.0.into());
+        raw.insert("phase_0_power_w".to_string(), 2.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.5.into());

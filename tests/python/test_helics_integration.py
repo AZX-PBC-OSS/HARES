@@ -614,7 +614,7 @@ def test_control_signal_via_helics() -> None:
     with _Federation(n_federates=2) as federation:
         baseline = _RecordingDwelling(_new_dwelling())
         baseline._dwelling.add_battery(
-            Battery("Battery", 13.5, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.4)
+            Battery("Battery", capacity_j=48600000, max_charge_w=5000, max_discharge_w=5000, initial_soc=0.4)
         )
 
         def _run_federate(ready: Callable[[], None]) -> None:

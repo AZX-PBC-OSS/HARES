@@ -8,7 +8,7 @@ use hares_types::{FuelType, Warning};
 use super::HpxmlError;
 use super::building::XmlNode;
 use super::equipment::{EquipmentSpec, build_typed_spec};
-use super::xml_helpers::{child_energy_kwh, child_f64, child_text, element_id, parse_fuel};
+use super::xml_helpers::{child_energy_j, child_f64, child_text, element_id, parse_fuel};
 
 use super::elements::*;
 use crate::defaults::DefaultsStore;
@@ -17,7 +17,7 @@ use crate::defaults::DefaultsStore;
 const KBTU_TO_KWH: f64 = 0.293_071_07;
 
 /// SAE J1772 AC Level 2 maximum charging power (kW): 80 A at 240 V.
-const EV_AC_LEVEL_2_MAX_KW: f64 = 19.2;
+const EV_AC_LEVEL_2_MAX_W: f64 = 19200.0;
 
 /// The array azimuth: `ArrayAzimuth`, or else the azimuth OS-HPXML derives
 /// from `ArrayOrientation` (`defaults.rb` `apply_pv_systems` through
@@ -77,7 +77,7 @@ pub(super) fn resolve_pv(
     };
 
     let mut inverter_eff_by_id: HashMap<String, f64> = HashMap::new();
-    let mut inverter_cap_kw_by_id: HashMap<String, f64> = HashMap::new();
+    let mut inverter_cap_w_by_id: HashMap<String, f64> = HashMap::new();
     for inverter in photovoltaics.children_named(&INVERTER) {
         let Some(id) = element_id(inverter) else {
             continue;
@@ -85,8 +85,10 @@ pub(super) fn resolve_pv(
         if let Some(eff) = child_f64(inverter, &INVERTER_EFFICIENCY) {
             inverter_eff_by_id.insert(id.clone(), eff);
         }
+        // The inverter's MaxPowerOutput enters in W, stored in W: no
+        // conversion on either side.
         if let Some(max_power_w) = child_f64(inverter, &MAX_POWER_OUTPUT) {
-            inverter_cap_kw_by_id.insert(id, max_power_w / 1000.0);
+            inverter_cap_w_by_id.insert(id, max_power_w);
         }
     }
 
@@ -108,12 +110,13 @@ pub(super) fn resolve_pv(
         let inverter_eff = inverter_id
             .and_then(|id| inverter_eff_by_id.get(id))
             .copied();
-        let inverter_capacity_kw = inverter_id
-            .and_then(|id| inverter_cap_kw_by_id.get(id))
+        let inverter_capacity_w = inverter_id
+            .and_then(|id| inverter_cap_w_by_id.get(id))
             .copied();
 
-        let capacity_kw = child_f64(pv, &MAX_POWER_OUTPUT)
-            .map(|watts| watts / 1000.0)
+        // The array's MaxPowerOutput enters in W and is stored in W: no
+        // conversion on either side.
+        let capacity_w = child_f64(pv, &MAX_POWER_OUTPUT)
             .ok_or_else(|| HpxmlError::MissingField {
                 path: "PVSystem/MaxPowerOutput",
                 system_kind: "PV",
@@ -133,7 +136,7 @@ pub(super) fn resolve_pv(
         let cfg = PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw,
+            capacity_w,
             tilt_deg: Some(tilt_deg),
             azimuth_deg: Some(azimuth_deg),
             module_type: child_text(pv, &MODULE_TYPE),
@@ -141,7 +144,7 @@ pub(super) fn resolve_pv(
             array_type: None,
             system_losses_fraction: child_f64(pv, &SYSTEM_LOSSES_FRACTION),
             inverter_efficiency: inverter_eff,
-            inverter_capacity_kw,
+            inverter_capacity_w,
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,
@@ -171,8 +174,9 @@ pub(super) fn resolve_batteries(
         let battery_id = battery_id_opt
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
-        let rated_power_kw = child_f64(battery, &RATED_POWER_OUTPUT)
-            .map(|w| w / 1000.0)
+        // RatedPowerOutput enters in W, stored in W: no conversion on
+        // either side.
+        let rated_power_w = child_f64(battery, &RATED_POWER_OUTPUT)
             .ok_or_else(|| HpxmlError::MissingField {
                 path: "Battery/RatedPowerOutput",
                 system_kind: "Battery",
@@ -180,7 +184,9 @@ pub(super) fn resolve_batteries(
                 reason:
                     "rated charge/discharge power (W) is required to size the inverter; no silent default permitted",
             })?;
-        let capacity_kwh = child_energy_kwh(battery, &NOMINAL_CAPACITY).ok_or_else(|| {
+        // The nominal capacity enters in kWh (the document's declared
+        // unit) and is converted once, with uom, where it is read.
+        let capacity_j = child_energy_j(battery, &NOMINAL_CAPACITY).ok_or_else(|| {
             HpxmlError::MissingField {
                 path: "Battery/NominalCapacity",
                 system_kind: "Battery",
@@ -192,9 +198,9 @@ pub(super) fn resolve_batteries(
         let cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh,
-            max_charge_kw: rated_power_kw,
-            max_discharge_kw: rated_power_kw,
+            capacity_j,
+            max_charge_w: rated_power_w,
+            max_discharge_w: rated_power_w,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -223,7 +229,7 @@ pub(super) fn resolve_batteries(
             bms_mode: None,
             grid_export_rule: None,
             power_factor: None,
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
         };
@@ -245,7 +251,9 @@ pub(super) fn resolve_ev(
     for ev in evs.children_named(&ELECTRIC_VEHICLE) {
         let ev_id_opt = element_id(ev);
         let ev_id = ev_id_opt.clone().unwrap_or_else(|| "unknown".to_string());
-        let capacity_kwh = child_energy_kwh(ev, &BATTERY_CAPACITY).ok_or_else(|| {
+        // The battery capacity enters in kWh (the document's declared
+        // unit) and is converted once, with uom, where it is read.
+        let capacity_j = child_energy_j(ev, &BATTERY_CAPACITY).ok_or_else(|| {
             HpxmlError::MissingField {
                 path: "ElectricVehicle/BatteryCapacity",
                 system_kind: "EV",
@@ -254,34 +262,36 @@ pub(super) fn resolve_ev(
                     "battery energy capacity (kWh) is required to simulate charging sessions; no silent default permitted",
             }
         })?;
-        let max_charging_power_kw = child_f64(ev, &MAX_CHARGING_POWER).ok_or_else(|| {
-            HpxmlError::MissingField {
+        // MaxChargingPower enters in kW (the document's declared unit)
+        // and is converted once, with uom, where it is read.
+        let max_charging_power_w = child_f64(ev, &MAX_CHARGING_POWER)
+            .map(|kw| uom::si::f64::Power::new::<uom::si::power::kilowatt>(kw).get::<uom::si::power::watt>())
+            .ok_or_else(|| HpxmlError::MissingField {
                 path: "ElectricVehicle/MaxChargingPower",
                 system_kind: "EV",
                 system_id: ev_id.clone(),
                 reason:
                     "maximum charging power (kW) is required to size the EVSE; no silent default permitted",
-            }
-        })?;
+            })?;
         // SAE J1772 AC Level 2 tops out at 19.2 kW; anything above is DC
         // power (or a W/kW unit mixup) misread as an AC level, which would
         // size an EVSE the vehicle can never draw.
-        if max_charging_power_kw > EV_AC_LEVEL_2_MAX_KW {
+        if max_charging_power_w > EV_AC_LEVEL_2_MAX_W {
             return Err(HpxmlError::InvalidField {
                 path: "ElectricVehicle/MaxChargingPower",
                 system_kind: "EV",
                 system_id: ev_id,
-                value_received: format!("{max_charging_power_kw} kW"),
-                reason: "exceeds the SAE J1772 AC Level 2 maximum of 19.2 kW; \
+                value_received: format!("{max_charging_power_w} W"),
+                reason: "exceeds the SAE J1772 AC Level 2 maximum of 19200 W; \
                          a charging power above it is DC (or a unit mixup) and \
                          cannot size an AC EVSE",
             });
         }
         let cfg = EvConfig {
             equipment_id: None,
-            capacity_kwh,
+            capacity_j,
             charging_level: child_text(ev, &CHARGING_LEVEL),
-            max_charging_power_kw,
+            max_charging_power_w,
             charging_efficiency: None,
             l1_current_a: None,
             l1_voltage_v: None,
@@ -299,19 +309,19 @@ pub(super) fn resolve_ev(
             cell_resistance_ohm: None,
             v2l_enabled: None,
             v2l_soc_reserve: None,
-            v2l_max_discharge_kw: None,
+            v2l_max_discharge_w: None,
             v2g_enabled: None,
             v2g_soc_reserve: None,
-            v2g_max_discharge_kw: None,
+            v2g_max_discharge_w: None,
             chemistry: None,
-            fuel_economy_kwh_per_mi: None,
+            fuel_economy_j_per_m: None,
             ready_soc: None,
             charging_strategy: None,
             plug_in_policy: None,
-            power_limit_kw: None,
+            power_limit_w: None,
             initial_connection_state: None,
             power_factor: None,
-            charger_capacity_kva: None,
+            charger_capacity_va: None,
             cc_cv_transition_soc: None,
             charging_priority: None,
             discharge_respects_deadline: true,
@@ -351,15 +361,22 @@ pub(super) fn resolve_generators(
             None
         };
 
-        let rated_power_kw = child_f64(generator, &ELECTRICAL_POWER_OUTPUT).ok_or_else(|| {
-            HpxmlError::MissingField {
-                path: "Generator/ElectricalPowerOutput",
-                system_kind: "Generator",
-                system_id: generator_id.clone(),
-                reason:
-                    "rated electrical output (kW) is required to size the generator; no silent default permitted",
-            }
-        })?;
+        // ElectricalPowerOutput enters in kW (the document's declared
+        // unit) and is converted once, with uom, where it is read.
+        let rated_power_w = child_f64(generator, &ELECTRICAL_POWER_OUTPUT)
+            .map(|kw| {
+                uom::si::f64::Power::new::<uom::si::power::kilowatt>(kw)
+                    .get::<uom::si::power::watt>()
+            })
+            .ok_or_else(|| {
+                HpxmlError::MissingField {
+                    path: "Generator/ElectricalPowerOutput",
+                    system_kind: "Generator",
+                    system_id: generator_id.clone(),
+                    reason:
+                        "rated electrical output (kW) is required to size the generator; no silent default permitted",
+                }
+            })?;
 
         let efficiency_curve_points = defaults.generator_efficiency_curve_points();
 
@@ -367,7 +384,7 @@ pub(super) fn resolve_generators(
             equipment_id: None,
             zone_id: None,
             fuel_type: Some(fuel),
-            rated_power_kw,
+            rated_power_w,
             eta_electric,
             eta_thermal: None,
             eta_jacket_water: None,
@@ -375,10 +392,10 @@ pub(super) fn resolve_generators(
             eta_exhaust: None,
             efficiency_type: None,
             efficiency_curve_points,
-            delta_kw_per_s: None,
-            capacity_min_kw: None,
-            grid_import_limit_kw: None,
-            export_limit_kw: None,
+            delta_w_per_s: None,
+            capacity_min_w: None,
+            grid_import_limit_w: None,
+            export_limit_w: None,
             loop_id: None,
             flow_rate_kg_s: None,
             supply_temp_c: None,
@@ -448,9 +465,9 @@ mod tests {
             .typed()
             .expect("must deserialize to BatteryConfig");
         assert!(
-            (cfg.max_charge_kw - 5.0).abs() < 1e-9,
-            "RatedPowerOutput=5000 W must parse as max_charge_kw=5.0 kW, got {}",
-            cfg.max_charge_kw
+            (cfg.max_charge_w - 5000.0).abs() < 1e-9,
+            "RatedPowerOutput=5000 W must parse as max_charge_w=5000 W, got {}",
+            cfg.max_charge_w
         );
     }
 
@@ -486,14 +503,13 @@ mod tests {
         let mut specs = Vec::new();
         let err = resolve_ev(details, &DefaultsStore::empty(), &mut specs)
             .expect_err("a charging power above the AC Level 2 maximum is rejected");
+        // The document's 11500 kW enters converted once (11500000 W);
+        // the error names the W value, the 19200 W limit and the
+        // replacement's unit.
         let message = err.to_string();
         assert!(
-            message.contains("11500") && message.contains("kW"),
-            "the error names the value and the kW unit, got: {message}"
-        );
-        assert!(
-            message.contains("19.2"),
-            "the error names the limit, got: {message}"
+            message.contains("11500000 W") && message.contains("19200 W"),
+            "the error names the value and the limit, got: {message}"
         );
     }
 }

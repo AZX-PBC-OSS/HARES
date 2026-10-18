@@ -30,6 +30,8 @@ pub enum Unit {
     Kilowatt,
     /// Kilowatt-hours.
     KilowattHour,
+    /// Volt-amperes (an apparent power, dimensionally W).
+    VoltAmpere,
     /// Kilovolt-amperes reactive.
     VoltAmpereReactive,
     /// Therms per hour (gas power; the OCHRE-style column name is historical).
@@ -68,6 +70,12 @@ pub enum Unit {
     LitrePerDay,
     /// Joules.
     Joule,
+    /// Joules per metre (fuel economy).
+    JoulePerMeter,
+    /// Joules per kelvin (thermal capacitance).
+    JoulePerKelvin,
+    /// Watts per second (a ramp rate).
+    WattPerSecond,
     /// Cubic metres.
     CubicMeter,
     /// Watts per kelvin (thermal conductance).
@@ -97,6 +105,7 @@ impl Unit {
         Self::Watt,
         Self::Kilowatt,
         Self::KilowattHour,
+        Self::VoltAmpere,
         Self::VoltAmpereReactive,
         Self::ThermPerHour,
         Self::WattPerSquareMeter,
@@ -116,6 +125,9 @@ impl Unit {
         Self::MeterPerSecond,
         Self::LitrePerDay,
         Self::Joule,
+        Self::JoulePerMeter,
+        Self::JoulePerKelvin,
+        Self::WattPerSecond,
         Self::CubicMeter,
         Self::WattPerKelvin,
         Self::Count,
@@ -146,6 +158,7 @@ impl Unit {
             Self::Watt => "W",
             Self::Kilowatt => "kW",
             Self::KilowattHour => "kWh",
+            Self::VoltAmpere => "VA",
             Self::VoltAmpereReactive => "kVAR",
             Self::ThermPerHour => "therms/hour",
             Self::WattPerSquareMeter => "W/m2",
@@ -165,6 +178,9 @@ impl Unit {
             Self::MeterPerSecond => "m/s",
             Self::LitrePerDay => "L/day",
             Self::Joule => "J",
+            Self::JoulePerMeter => "J/m",
+            Self::JoulePerKelvin => "J/K",
+            Self::WattPerSecond => "W/s",
             Self::CubicMeter => "m3",
             Self::WattPerKelvin => "W/K",
             Self::Count => "count",

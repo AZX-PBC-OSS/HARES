@@ -68,9 +68,9 @@ fn base_battery_config() -> BatteryConfig {
     BatteryConfig {
         equipment_id: None,
         zone_id: None,
-        capacity_kwh: 13.5,
-        max_charge_kw: 5.0,
-        max_discharge_kw: 5.0,
+        capacity_j: 13.5 * 3.6e6,
+        max_charge_w: 5000.0,
+        max_discharge_w: 5000.0,
         n_series: None,
         n_parallel: None,
         ah_cell: None,
@@ -99,7 +99,7 @@ fn base_battery_config() -> BatteryConfig {
         bms_mode: None,
         grid_export_rule: None,
         power_factor: None,
-        inverter_capacity_kva: None,
+        inverter_capacity_va: None,
         grid_forming: None,
         min_dwell_steps: 0,
     }
@@ -143,7 +143,7 @@ fn charge_increases_soc() {
     let soc_before = bat.telemetry().get("soc").expect("soc telemetry");
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0,
+        active_power_kw: 3.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -257,7 +257,7 @@ fn soc_clamped_at_min_max() {
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &env).expect("init");
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
+            active_power_kw: 5.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -480,7 +480,7 @@ fn power_limits_respected() {
     let dt = Duration::from_secs(60);
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 100.0,
+        active_power_kw: 100.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -545,7 +545,7 @@ fn checkpoint_preserves_soc_and_mode() {
 
     // Charge for a while to move SOC away from initial 0.5.
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 4.0,
+        active_power_kw: 4.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,

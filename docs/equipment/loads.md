@@ -92,9 +92,9 @@ stateDiagram-v2
 
 ### Wet Appliance Variant
 
-Multi-phase cycles (e.g., washer: fill -> wash -> spin):
-- `phase_len` phases, each `phase_<n>_power_kw` and `phase_<n>_duration_s`;
-  with no `phase_len`, one phase of `active_power_kw` for `active_duration_s`
+Multi-phase cycles (e.g., washer: fill -> wash -> spin), the powers in W (SI):
+- `phase_len` phases, each `phase_<n>_power_w` and `phase_<n>_duration_s`;
+  with no `phase_len`, one phase of `active_power_w` for `active_duration_s`
 - The electric cycle replays the appliance's power column's events; the hot
   water is a separate schedule-driven draw: the `hot_water_clothes_washer`
   and `hot_water_dishwasher` columns normalized to the appliance's daily
@@ -135,7 +135,7 @@ equipment overrides use the same lists:
   fraction in a layer are an error.
 - The wildcard override (`all` or `*`, one of them; both is an error) reaches
   every equipment: each takes the wildcard parameters it reads once every
-  override layer is applied (a numbered key such as `phase_4_power_kw` only
+  override layer is applied (a numbered key such as `phase_4_power_w` only
   within its family's count; a typed config the fields its schema has) and
   skips the rest. A wildcard parameter no equipment of the dwelling reads
   fails the build.

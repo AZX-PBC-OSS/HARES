@@ -16,7 +16,7 @@ class TestAddEquipment:
         from hares import Battery
 
         dw = _make_dwelling()
-        bat = Battery("TestBat", 10.0)
+        bat = Battery("TestBat", capacity_j=36000000)
         dw.add_battery(bat)
         assert "TestBat" in dw.equipment_names()
 
@@ -28,7 +28,7 @@ class TestAddEquipment:
         baseline = dw.step()
 
         dw2 = _make_dwelling()
-        bat = Battery("TestBat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0)
+        bat = Battery("TestBat", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000)
         dw2.add_battery(bat)
         result = dw2.step()
         assert "timestamp" in result
@@ -41,7 +41,7 @@ class TestAddEquipment:
         from hares import PV
 
         dw = _make_dwelling()
-        pv = PV("TestPV", 5.0, 30.0, 180.0)
+        pv = PV("TestPV", capacity_w=5000, tilt=30.0, azimuth=180.0)
         dw.add_pv(pv)
         assert "TestPV" in dw.equipment_names()
 
@@ -49,7 +49,7 @@ class TestAddEquipment:
         from hares import PV
 
         dw = _make_dwelling()
-        pv = PV("TestPV", 5.0, 30.0, 180.0)
+        pv = PV("TestPV", capacity_w=5000, tilt=30.0, azimuth=180.0)
         dw.add_pv(pv)
         result = dw.step()
         assert "timestamp" in result
@@ -62,7 +62,7 @@ class TestAddEquipment:
         from hares import EV
 
         dw = _make_dwelling()
-        ev = EV("TestEV", capacity_kwh=75.0)
+        ev = EV("TestEV", capacity_j=270000000)
         dw.add_ev(ev)
         assert "TestEV" in dw.equipment_names()
 
@@ -70,7 +70,7 @@ class TestAddEquipment:
         from hares import EV
 
         dw = _make_dwelling()
-        ev = EV("TestEV", capacity_kwh=75.0, max_charging_kw=7.2)
+        ev = EV("TestEV", capacity_j=270000000, max_charging_power_w=7200)
         dw.add_ev(ev)
         result = dw.step()
         assert "timestamp" in result
@@ -83,9 +83,9 @@ class TestAddEquipment:
         from hares import Battery
 
         dw = _make_dwelling()
-        bat1 = Battery("TestBat", 10.0)
+        bat1 = Battery("TestBat", capacity_j=36000000)
         dw.add_battery(bat1)
-        bat2 = Battery("TestBat", 12.0)
+        bat2 = Battery("TestBat", capacity_j=43200000)
         with pytest.raises(ValueError, match="duplicate equipment name"):
             dw.add_battery(bat2)
 
@@ -93,9 +93,9 @@ class TestAddEquipment:
         from hares import PV
 
         dw = _make_dwelling()
-        pv1 = PV("TestPV", 5.0, 30.0, 180.0)
+        pv1 = PV("TestPV", capacity_w=5000, tilt=30.0, azimuth=180.0)
         dw.add_pv(pv1)
-        pv2 = PV("TestPV", 3.0, 20.0, 200.0)
+        pv2 = PV("TestPV", capacity_w=3000, tilt=20.0, azimuth=200.0)
         with pytest.raises(ValueError, match="duplicate equipment name"):
             dw.add_pv(pv2)
 
@@ -103,9 +103,9 @@ class TestAddEquipment:
         from hares import EV
 
         dw = _make_dwelling()
-        ev1 = EV("TestEV", capacity_kwh=75.0)
+        ev1 = EV("TestEV", capacity_j=270000000)
         dw.add_ev(ev1)
-        ev2 = EV("TestEV", capacity_kwh=60.0)
+        ev2 = EV("TestEV", capacity_j=216000000)
         with pytest.raises(ValueError, match="duplicate equipment name"):
             dw.add_ev(ev2)
 
@@ -161,7 +161,7 @@ class TestAddEquipment:
         """Regression: max_charging_kw must map to max_charging_power_kw config key.
 
         Starts the EV plugged in at home with low SOC so it charges on the first
-        step. Configures max_charging_kw=3.6 (below L2 default ~7.7 kW). If the
+        step. Configures max_charging_power_w=3600 (below L2 default ~7.7 kW). If the
         config key were wrong, the EV would charge at the default power.
         """
         from hares import EV, EvConnectionState
@@ -169,8 +169,8 @@ class TestAddEquipment:
         dw = _make_dwelling()
         ev = EV(
             "TestEV",
-            capacity_kwh=60.0,
-            max_charging_kw=3.6,
+            capacity_j=216000000,
+            max_charging_power_w=3600,
             initial_soc=0.2,
             initial_connection_state=EvConnectionState.HomePluggedIn,
         )
@@ -194,7 +194,7 @@ class TestRemoveEquipment:
         from hares import Battery
 
         dw = _make_dwelling()
-        bat = Battery("TestBat", 10.0)
+        bat = Battery("TestBat", capacity_j=36000000)
         dw.add_battery(bat)
         assert "TestBat" in dw.equipment_names()
 
@@ -213,7 +213,7 @@ class TestRemoveEquipment:
         from hares import Battery
 
         dw = _make_dwelling()
-        bat = Battery("TestBat", 10.0)
+        bat = Battery("TestBat", capacity_j=36000000)
         dw.add_battery(bat)
         dw.remove_equipment("TestBat")
         result = dw.step()
@@ -231,10 +231,10 @@ class TestReplaceEquipment:
         from hares import Battery
 
         dw = _make_dwelling()
-        bat1 = Battery("TestBat", 10.0)
+        bat1 = Battery("TestBat", capacity_j=36000000)
         dw.add_battery(bat1)
 
-        bat2 = Battery("TestBat", 20.0)
+        bat2 = Battery("TestBat", capacity_j=72000000)
         dw.replace_equipment("TestBat", bat2)
 
         # Name should still be present
@@ -249,7 +249,7 @@ class TestReplaceEquipment:
         from hares._hares import HaresConfigError
 
         dw = _make_dwelling()
-        bat = Battery("NoSuch", 10.0)
+        bat = Battery("NoSuch", capacity_j=36000000)
         # HaresConfigError is a ValueError subclass; catch the specific type.
         with pytest.raises(HaresConfigError, match="not found"):
             dw.replace_equipment("NoSuch", bat)
@@ -258,10 +258,10 @@ class TestReplaceEquipment:
         from hares import Battery
 
         dw = _make_dwelling()
-        bat1 = Battery("TestBat", 10.0)
+        bat1 = Battery("TestBat", capacity_j=36000000)
         dw.add_battery(bat1)
 
-        bat2 = Battery("TestBat", 20.0, max_charge_kw=10.0, max_discharge_kw=10.0)
+        bat2 = Battery("TestBat", capacity_j=72000000, max_charge_w=10000, max_discharge_w=10000)
         dw.replace_equipment("TestBat", bat2)
 
         result = dw.step()
@@ -285,7 +285,7 @@ class TestUpdateEquipment:
         from hares import Battery
 
         dw = _make_dwelling()
-        bat = Battery("TestBat", 10.0)
+        bat = Battery("TestBat", capacity_j=36000000)
         dw.add_battery(bat)
 
         # LFP-style OCV curve (lower voltages than NMC)
@@ -323,7 +323,7 @@ class TestUpdateEquipment:
         from hares import Battery
 
         dw = _make_dwelling()
-        bat = Battery("TestBat", 10.0)
+        bat = Battery("TestBat", capacity_j=36000000)
         dw.add_battery(bat)
 
         uneg_data = [
@@ -377,7 +377,7 @@ class TestSetEquipmentLut:
         from hares import Battery, LutType
 
         dw = _make_dwelling()
-        bat = Battery("TestBat", 10.0)
+        bat = Battery("TestBat", capacity_j=36000000)
         dw.add_battery(bat)
 
         ocv_dict = {
@@ -404,7 +404,7 @@ class TestSetEquipmentLut:
         from hares import Battery, LutType
 
         dw = _make_dwelling()
-        bat = Battery("TestBat", 10.0)
+        bat = Battery("TestBat", capacity_j=36000000)
         dw.add_battery(bat)
 
         ocv_dict = {
@@ -448,8 +448,8 @@ class TestMultipleMutations:
         from hares import Battery, PV
 
         dw = _make_dwelling()
-        dw.add_battery(Battery("Bat1", 10.0))
-        dw.add_pv(PV("PV1", 5.0, 30.0, 180.0))
+        dw.add_battery(Battery("Bat1", capacity_j=36000000))
+        dw.add_pv(PV("PV1", capacity_w=5000, tilt=30.0, azimuth=180.0))
 
         names = dw.equipment_names()
         assert "Bat1" in names
@@ -462,9 +462,9 @@ class TestMultipleMutations:
         from hares import Battery, PV
 
         dw = _make_dwelling()
-        dw.add_battery(Battery("Bat1", 10.0))
+        dw.add_battery(Battery("Bat1", capacity_j=36000000))
         dw.remove_equipment("Bat1")
-        dw.add_pv(PV("PV1", 5.0, 30.0, 180.0))
+        dw.add_pv(PV("PV1", capacity_w=5000, tilt=30.0, azimuth=180.0))
 
         names = dw.equipment_names()
         assert "Bat1" not in names
@@ -479,7 +479,7 @@ class TestBatteryConfigParams:
         from hares import Battery
 
         dw = _make_dwelling()
-        bat = Battery("TestBat", 10.0, initial_soc=0.8, min_soc=0.15, max_soc=0.95)
+        bat = Battery("TestBat", capacity_j=36000000, initial_soc=0.8, min_soc=0.15, max_soc=0.95)
         dw.add_battery(bat)
         result = dw.step()
         assert "timestamp" in result
@@ -487,7 +487,7 @@ class TestBatteryConfigParams:
     def test_soc_limits_round_trip_via_getters(self):
         from hares import Battery
 
-        bat = Battery("B", 10.0, initial_soc=0.8, min_soc=0.15, max_soc=0.95)
+        bat = Battery("B", capacity_j=36000000, initial_soc=0.8, min_soc=0.15, max_soc=0.95)
         assert bat.initial_soc == 0.8
         assert bat.min_soc == 0.15
         assert bat.max_soc == 0.95
@@ -496,7 +496,7 @@ class TestBatteryConfigParams:
         from hares import Battery, BatteryChemistry
 
         dw = _make_dwelling()
-        bat = Battery("TestBat", 10.0, chemistry=BatteryChemistry.Lfp)
+        bat = Battery("TestBat", capacity_j=36000000, chemistry=BatteryChemistry.Lfp)
         dw.add_battery(bat)
         result = dw.step()
         assert "timestamp" in result
@@ -504,14 +504,14 @@ class TestBatteryConfigParams:
     def test_chemistry_getter_round_trips(self):
         from hares import Battery, BatteryChemistry
 
-        bat = Battery("B", 10.0, chemistry=BatteryChemistry.Lfp)
+        bat = Battery("B", capacity_j=36000000, chemistry=BatteryChemistry.Lfp)
         assert bat.chemistry == BatteryChemistry.Lfp
 
     def test_standby_and_self_discharge_add_and_step(self):
         from hares import Battery
 
         dw = _make_dwelling()
-        bat = Battery("TestBat", 10.0, standby_power_w=10.0, self_discharge_pct_per_day=0.05)
+        bat = Battery("TestBat", capacity_j=36000000, standby_power_w=10.0, self_discharge_pct_per_day=0.05)
         dw.add_battery(bat)
         result = dw.step()
         assert "timestamp" in result
@@ -519,17 +519,17 @@ class TestBatteryConfigParams:
     def test_standby_and_self_discharge_getters(self):
         from hares import Battery
 
-        bat = Battery("B", 10.0, standby_power_w=10.0, self_discharge_pct_per_day=0.05)
+        bat = Battery("B", capacity_j=36000000, standby_power_w=10.0, self_discharge_pct_per_day=0.05)
         assert bat.standby_power_w == 10.0
         assert bat.self_discharge_pct_per_day == 0.05
 
     def test_repr_defaults_only(self):
         from hares import Battery
 
-        bat = Battery("MyBat", 5.0)
+        bat = Battery("MyBat", capacity_j=18000000)
         r = repr(bat)
         assert "MyBat" in r
-        assert "capacity_kwh=5" in r
+        assert "capacity_j=18000000" in r
         assert "initial_soc" not in r
         assert "chemistry" not in r
 
@@ -538,7 +538,7 @@ class TestBatteryConfigParams:
 
         bat = Battery(
             "MyBat",
-            5.0,
+            capacity_j=18000000,
             chemistry=BatteryChemistry.Nmc,
             initial_soc=0.5,
             standby_power_w=5.0,
@@ -553,7 +553,7 @@ class TestBatteryConfigParams:
         from hares import Battery, ControlSignal
 
         dw = _make_dwelling()
-        bat = Battery("Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0,
+        bat = Battery("Bat", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000,
                       initial_soc=0.3, min_soc=0.2)
         dw.add_battery(bat)
         dw.apply_control("Bat", ControlSignal.power_setpoint(-5.0))
@@ -569,7 +569,7 @@ class TestBatteryConfigParams:
         from hares import Battery
 
         dw = _make_dwelling()
-        bat = Battery("Bat", 10.0, initial_soc=0.8)
+        bat = Battery("Bat", capacity_j=36000000, initial_soc=0.8)
         dw.add_battery(bat)
         dw.step()
         tel = dw.telemetry().equipment()
@@ -589,7 +589,7 @@ class TestBatteryConfigParams:
         from hares import Battery
 
         dw = _make_dwelling()
-        bat = Battery("TestBat", 10.0, min_charge_temp_c=5.0, full_power_temp_c=0.0)
+        bat = Battery("TestBat", capacity_j=36000000, min_charge_temp_c=5.0, full_power_temp_c=0.0)
         try:
             dw.add_battery(bat)
             result = dw.step()
@@ -609,7 +609,7 @@ class TestCheckpointRoundTrip:
         from hares import Battery
 
         dw = _make_dwelling()
-        dw.add_battery(Battery("TestBat", 10.0))
+        dw.add_battery(Battery("TestBat", capacity_j=36000000))
         dw.step()
 
         state = dw.save_state()
@@ -630,7 +630,7 @@ class TestPvSoilingConfig:
             max_loss=0.9,
             initial_loss=0.0,
         )
-        pv = PV("SoiledPV", 5.0, 30.0, 180.0, soiling=sc)
+        pv = PV("SoiledPV", capacity_w=5000, tilt=30.0, azimuth=180.0, soiling=sc)
 
         num_days = 2
         step_s = 1800

@@ -375,10 +375,10 @@ mod tests {
         let wet = &WET_APPLIANCE;
         let four_phases = json!({ "phase_len": 4 }).as_object().cloned().unwrap();
         let none = Map::new();
-        assert!(wet.reads("phase_3_power_kw", &lookup(&four_phases)));
-        assert!(!wet.reads("phase_4_power_kw", &lookup(&four_phases)));
-        assert!(!wet.reads("phase_0_power_kw", &lookup(&none)));
-        assert!(wet.names("phase_9_power_kw"));
+        assert!(wet.reads("phase_3_power_w", &lookup(&four_phases)));
+        assert!(!wet.reads("phase_4_power_w", &lookup(&four_phases)));
+        assert!(!wet.reads("phase_0_power_w", &lookup(&none)));
+        assert!(wet.names("phase_9_power_w"));
         assert!(SCHEDULED_LOAD.reads("month_multiplier_11", &lookup(&none)));
         assert!(!SCHEDULED_LOAD.reads("month_multiplier_12", &lookup(&none)));
         assert!(!SCHEDULED_LOAD.names("month_multiplier_12"));
@@ -545,7 +545,7 @@ mod tests {
                     (KEY_USAGE_MULTIPLIER, number(2.0)),
                 ],
                 [
-                    profile("power_schedule_source", "power_profile_max_kw"),
+                    profile("power_schedule_source", "power_profile_max_w"),
                     profile("gas_schedule_source", "gas_profile_max"),
                     vec![
                         ("power_profile_weekday", numbers(24, 1.0)),
@@ -559,7 +559,7 @@ mod tests {
                 .concat(),
                 vec![
                     ("power_schedule_source", text("constant")),
-                    ("power_constant_kw", number(0.1)),
+                    ("power_constant_w", number(100.0)),
                     ("gas_schedule_source", text("constant")),
                     ("gas_constant", number(0.1)),
                 ],
@@ -569,7 +569,7 @@ mod tests {
                 ("event_window_schedule_col", number(0.0)),
                 ("event_probability_schedule_col", number(1.0)),
                 ("fuel_type", text("electricity")),
-                ("event_power_kw_series", numbers(4, 0.0)),
+                ("event_power_w_series", numbers(4, 0.0)),
             ];
             let constant_sources = vec![
                 ("event_window_source", text("constant")),
@@ -577,7 +577,7 @@ mod tests {
                 ("event_probability_constant", number(0.5)),
             ];
             let single_cycle = vec![
-                ("active_power_kw", number(1.0)),
+                ("active_power_w", number(1000.0)),
                 ("active_duration_s", number(60.0)),
                 ("cooldown_duration_s", number(60.0)),
             ];
@@ -587,7 +587,7 @@ mod tests {
                 let phased = vec![
                     ("n_units", number(1.0)),
                     ("phase_len", number(1.0)),
-                    ("phase_0_power_kw", number(1.0)),
+                    ("phase_0_power_w", number(1000.0)),
                     ("phase_0_duration_s", number(60.0)),
                 ];
                 vec![

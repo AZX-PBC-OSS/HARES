@@ -1211,20 +1211,23 @@ mod tests {
             .typed()
             .expect("Battery typed config");
 
+        // The HPXML document's 10 kWh / 5 kW / 5 kW enter and are stored
+        // in SI: 10 kWh is 3.6e7 J and 5 kW is 5000 W, converted once
+        // with uom where read.
         assert!(
-            (typed.capacity_kwh - 10.0).abs() < 1e-9,
-            "capacity_kwh={}, expected 10.0",
-            typed.capacity_kwh
+            (typed.capacity_j - 10.0 * 3.6e6).abs() < 1e-6,
+            "capacity_j={}, expected 3.6e7",
+            typed.capacity_j
         );
         assert!(
-            (typed.max_charge_kw - 5.0).abs() < 1e-9,
-            "max_charge_kw={}, expected 5.0",
-            typed.max_charge_kw
+            (typed.max_charge_w - 5000.0).abs() < 1e-9,
+            "max_charge_w={}, expected 5000.0",
+            typed.max_charge_w
         );
         assert!(
-            (typed.max_discharge_kw - 5.0).abs() < 1e-9,
-            "max_discharge_kw={}, expected 5.0",
-            typed.max_discharge_kw
+            (typed.max_discharge_w - 5000.0).abs() < 1e-9,
+            "max_discharge_w={}, expected 5000.0",
+            typed.max_discharge_w
         );
     }
 
@@ -1310,14 +1313,14 @@ mod tests {
 
         assert_eq!(typed.charging_level.as_deref(), Some("Level 2"));
         assert!(
-            (typed.max_charging_power_kw - 7.2).abs() < 1e-9,
-            "max_charging_power_kw={}, expected 7.2",
-            typed.max_charging_power_kw
+            (typed.max_charging_power_w - 7200.0).abs() < 1e-9,
+            "max_charging_power_w={}, expected 7200.0",
+            typed.max_charging_power_w
         );
         assert!(
-            (typed.capacity_kwh - 60.0).abs() < 1e-9,
-            "capacity_kwh={}, expected 60.0",
-            typed.capacity_kwh
+            (typed.capacity_j - 60.0 * 3.6e6).abs() < 1e-6,
+            "capacity_j={}, expected 2.16e8",
+            typed.capacity_j
         );
     }
 
@@ -1372,7 +1375,7 @@ mod tests {
             .typed()
             .expect("PV typed config");
 
-        assert!((typed.capacity_kw - 5.0).abs() < 1e-9);
+        assert!((typed.capacity_w - 5000.0).abs() < 1e-9);
         assert_eq!(typed.tilt_deg, Some(30.0));
         assert_eq!(typed.azimuth_deg, Some(180.0));
         assert_eq!(typed.module_type.as_deref(), Some("standard"));
@@ -1536,7 +1539,7 @@ mod tests {
             .expect("generator typed config");
 
         assert_eq!(typed.fuel_type, Some(FuelType::Gas));
-        assert!((typed.rated_power_kw - 10.0).abs() < 1e-9);
+        assert!((typed.rated_power_w - 10000.0).abs() < 1e-9);
         let eta = typed.eta_electric.expect("eta_electric must be present");
         let expected = 2500.0 / (9000.0 * 0.293_071_07);
         assert!((eta - expected).abs() < 1e-9);
@@ -2380,12 +2383,12 @@ mod tests {
 
         let rated_power = generator
             .parameters
-            .get("rated_power_kw")
+            .get("rated_power_w")
             .and_then(Value::as_f64)
-            .expect("rated_power_kw must be present");
+            .expect("rated_power_w must be present");
         assert!(
-            (rated_power - 10.0).abs() < 1e-9,
-            "rated_power_kw={rated_power}, expected 10.0"
+            (rated_power - 10000.0).abs() < 1e-9,
+            "rated_power_w={rated_power}, expected 10000.0"
         );
 
         let eta = generator

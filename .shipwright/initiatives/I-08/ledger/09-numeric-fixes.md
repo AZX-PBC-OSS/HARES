@@ -3942,6 +3942,134 @@ on the EV dwelling of `crates/hares-core/tests/ev_thermal_regressions.rs`'s
 2018-01-01T00:00:00-10:00 for 45 d), before and after, per variable, in
 `02-measurement.md`.
 
+**State:** commits 1 and 2 committed on branch `row/r94c-b14` (worktree
+`r94c-b14`, based on `ff39b24b`; commit 1 `a776983b`, commit 2 the
+branch's next commit). Commits 3 and 4 (rows 94g and 94h) are not landed.
+Adaptations to this base, recorded: the entry's evidence cites `21d90588`
+and `afa9a071` and this base is `ff39b24b`, so the cited line numbers
+drifted (PvArray `array_config.rs:100`, PvArraySpec `:155`,
+`HeatPumpCoolerConfig`'s crankcase heater `:1399`,
+`EquipmentConfig.zone_capacitance` `:338`, the BMS actor's fill
+`actor_registry.rs:513`) while every field set matched. (a) Commit 1
+adds one read-only accessor, `Fleet::home_configs()` (hares-fleet): the
+ResStock constructor builds the homes' configs internally, so the
+resolved product cannot otherwise be the model of the config the fleet
+runs; it changes no number. (b) The entry's table lists `PvArray` beside
+`PvArraySpec`; at this base the config element is `PvArraySpec`
+(renamed, SI) and `PvArray` is the runtime struct whose `capacity_kw` is
+the construction-time kW working value commit 3 deletes, so it keeps its
+name. (c) The shared raw keys' rows are added under `WetAppliance.` as
+well as `EventBasedLoad.` (the wet appliances read the same keys; the
+entry names two reading types only). (d) The `si_guard` walks Rust files
+(`syn`); `notebooks/simulation_explorer.py` is covered by the census
+step's own witness grep, not the guard's file walk.
+
+Commit 1 (the capture): the two DER fixtures per the Fixtures section,
+captured on the unfixed engine at `ff39b24b` with the resolved product
+gained by `frame_golden` (per home, through `DwellingBlueprint::validate`
+on the config the home runs: the dwelling path validates the same
+blueprint it builds, the fleet paths validate each home's config before
+the fleet consumes them); every manifest's committed golden re-captured
+with it, twice byte-identical; compare-all identical under both feature
+sets. The resolved products captured: the DER dwellings carry the
+battery's `energy_capacity_j`/`power_capacity_w`, the PVs' `nameplate_w`,
+the EV's `battery_capacity_j`/`max_charging_power_w` (the plug-load EV's
+250-mile option at 2.925e8 J and 11500 W), the HVAC's rated capacities,
+the loads' `active_power_w` and the ventilation fans' powers.
+
+Commit 2 (the fix): every field in the commit-2 table renamed and stored
+in SI, every boundary converting once with `uom` (the HPXML resolvers: a
+W value enters with no conversion, a kW or kWh document value converts
+where read, `child_energy_j` replacing `child_energy_kwh`; the schedule
+resolver's raw-key writes; the vehicle-mapping loader;
+`SyntheticEventLoadConfig`'s `active_power_w`; the catalogue fills
+through `BatterySpec::capacity_j()`/`max_charge_w()`/`max_discharge_w()`
+and `VehicleSpec::capacity_j()`/`charger_power_w()`/
+`fuel_economy_j_per_m()`; the BMS actor's payload fill and the EV
+driver's and BMS actor's payload reads, one conversion at each read),
+the equipment's kW working values converted once at construction, the
+read-back reading the retained SI config values directly (the runtime
+mirrors `capacity_w`, `capacity_j`/`max_charge_w`,
+`battery_capacity_j`/`max_charging_power_w`/`fuel_economy_j_per_m`,
+`rated_power_w`, `configured_active_power_w`, so the resolved product
+does not pay a conversion pair), the hand-written read-back conversions
+(`kwh_to_j`, `kw_to_w`) deleted, the raw EV payload path deleted with
+its constants and helpers (a typed config only; the placeholder holds
+the typed defaults), the override merge walking every layer's keys
+against `REMOVED_KEYS` (the wildcard and own layers, payload strings
+parsed and pathed under their variant, array rows under `[]`; the
+pattern rows matching `<n>` against a run of ASCII digits), the
+synthetic `[event_load]` table checked before its deserialisation, the
+HPXML extension element renamed with `active_power_kw` added to the
+rejected elements, the Python constructors keyword-only with
+`**unexpected` catch-alls raising the removed-key error,
+`OD-2` site 7's range check at 19200 W, `register_pv_roof_shading`
+reading `capacity_w` and dropping its own factor, `DescribeFields`
+giving the renamed fields their SI units (`Unit` gains `VA`, `J/m`,
+`J/K`, `W/s`), `si_guard` widened with the unit-suffix rule (123 files
+allowlisted, every entry marked with the boundary it holds or the commit
+that removes it), and the docs. RED first: the
+commit-1 captures are the witness, the fix's movement measured against
+them before re-capture (below). GREEN: re-captured twice byte-identical;
+compare-all 10 identical (default features) + 1 (dst).
+
+The movement (the RED witness, per golden, every difference last-bit):
+`der_pv_battery_900s`: the Clothes Washer's and Other End Use's electric
+power, 4 cells each (the event load's kW working value through the
+resolver's x1000 and the load's /1000 pair); `der_pv_battery_ev_900s`:
+the EV's power and end use (3 cells), the BMS actor's `load_kw` (2), the
+EV driver's `charge_kw` (3) and `soc` (120), the totals, and the
+metrics' renewable fraction, gross consumption, net energy and EV end
+use (last bits); `consumer_shape_900s`: the total electric (6695 cells),
+total and water-heater gas power (5), total reactive (10781), the
+refrigerator's and refrigeration end use's power, one indoor and 1779
+zone-2 temperature cells, four metrics (last bits); `fleet_mixed_offset`
+(11 differences) and `fleet_same_offset_300s`: the aggregates' power and
+temperature columns and the homes' energies (last bits);
+`full_year_hourly` and `full_year_900s_dst`: the total electric and
+reactive, the ASHP heater, the loads' powers, the end-use sums, one
+indoor temperature cell; `leap_year_february_900s`,
+`weather_wrap_900s`, `month_boundary_billing_3600s` and
+`resstock_2025_fleet` compare bitwise. The resolved products of every
+golden compare bitwise (the guard's expectation: every resolved
+equipment parameter unchanged). The pairs that explain the movement: the
+schedule resolver's kW-to-W write and the loads' W-to-kW construction
+read; the EV's fuel economy (0.325 kWh/mi is not binary-exact in J/m,
+and the round trip moves its last bit); each propagated difference is
+the one-ulp tail of those through the physics and the folds. The 45-day
+EV cold-snap run (the Measurement section's EV dwelling), before and
+after, per variable: `EV SOC (-)` and `actor:EvDriver:EV:soc` 304 cells
+at one f64 ulp (2.2e-16 absolute); `Total Electric Power (kW)`,
+`EV Electric Power (kW)`, `EV End Use Electric Power (kW)`,
+`EV Energy (kWh)` and `actor:EvDriver:EV:charge_kw` 4 cells each, max
+relative difference 6.6e-15; the first differing rows at 226 to 288
+recorded above in `frame_golden`'s diff. No scaled difference above
+1e-9 and no scale ratio near a unit factor anywhere: the movement is
+the conversion pairs.
+
+Verification (both commits): fmt clean; clippy `--workspace
+--all-targets --all-features -D warnings` clean; `cargo nextest run
+--workspace --all-features -j 2` all passing; `pytest -m ''` all passing
+(0 failed, 0 errors, the 6 xfails as expected); `uv run pyright` 0; the
+acceptance tests of this entry's commit-2 list added and passing
+(`equipment_config_fields_are_si`,
+`input_schema_override_classes_are_si`,
+`raw_equipment_keys_are_si` (both greps print nothing), `si_guard`,
+`removed_equipment_key_names_its_replacement` (all 33 rows, own key and
+wildcard), `si_payload_keys_merge_cleanly`,
+`synthetic_event_load_removed_key_names_its_replacement`,
+`hpxml_active_power_kw_extension_is_rejected`,
+`pv_capacity_kw_override_fails_construction`,
+`test_positional_calls_raise_type_error`,
+`test_removed_keyword_names_replacement` (Python),
+`equipment_config_values_unit_invariant` (the PV, battery, crankcase,
+zone-capacitance, plug-load EV and payload cases),
+`hpxml_pv_capacity_enters_in_watts`,
+`battery_catalogue_fill_converts_with_uom`,
+`ev_fuel_economy_converts_to_joules_per_metre`),
+`numeric_changes_name_existing_goldens` passing with this commit's
+line; `si_census` 8751 lines with all four witnesses.
+
 ## B-15: OpenStudio-HPXML unavailable periods are applied
 
 **Kind:** numeric fix (`dl-i08-architecture.unavailable_periods`: applied

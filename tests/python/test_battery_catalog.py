@@ -46,25 +46,25 @@ class TestBatteryCatalogFactories:
     @pytest.mark.parametrize("product_id", PRODUCT_IDS)
     def test_from_product_creates_valid_battery(self, product_id):
         bat = Battery.from_product(product_id)
-        assert bat.capacity_kwh > 0
-        assert bat.max_charge_kw is not None and bat.max_charge_kw > 0
-        assert bat.max_discharge_kw is not None and bat.max_discharge_kw > 0
+        assert bat.capacity_j > 0
+        assert bat.max_charge_w is not None and bat.max_charge_w > 0
+        assert bat.max_discharge_w is not None and bat.max_discharge_w > 0
         assert bat.chemistry is not None
         assert bat.charge_efficiency is not None
         assert bat.discharge_efficiency is not None
 
     def test_tesla_pw3_specs(self):
         bat = Battery.tesla_pw3()
-        assert bat.capacity_kwh == 13.5
-        assert bat.max_charge_kw == 11.5
-        assert bat.max_discharge_kw == 11.5
+        assert bat.capacity_j == 48600000
+        assert bat.max_charge_w == 11500
+        assert bat.max_discharge_w == 11500
         assert str(bat.chemistry) == "LFP"
         assert bat.min_soc == 0.05
         assert bat.max_soc == 1.0
 
     def test_by_product_id_string_lookup(self):
         bat = Battery.by_product_id("tesla_pw3")
-        assert bat.capacity_kwh == 13.5
+        assert bat.capacity_j == 48600000
 
     def test_by_product_id_invalid_raises(self):
         with pytest.raises(ValueError):
@@ -87,12 +87,12 @@ class TestBatteryCatalogFactories:
         assert len(shorthands) == 11
         for factory in shorthands:
             bat = factory()
-            assert bat.capacity_kwh > 0
+            assert bat.capacity_j > 0
 
     def test_custom_battery_still_works(self):
-        bat = Battery("Custom", 20.0)
+        bat = Battery("Custom", capacity_j=72000000.0)
         assert bat.name == "Custom"
-        assert bat.capacity_kwh == 20.0
+        assert bat.capacity_j == 72000000
 
     def test_catalog_battery_charges_in_simulation(self):
         """Tesla Powerwall 3 from catalog must charge when SOC target applied.

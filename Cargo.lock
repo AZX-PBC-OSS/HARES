@@ -1002,6 +1002,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uom",
 ]
 
 [[package]]
@@ -1129,6 +1130,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+ "uom",
 ]
 
 [[package]]

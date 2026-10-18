@@ -393,7 +393,7 @@ def test_vec_gym_random_policy_100_steps():
         for i in range(n_dwel)
     ]
     for dw in dwellings:
-        dw.add_battery(Battery("Batt", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0))
+        dw.add_battery(Battery("Batt", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000))
 
     action_config = {
         "Gas Furnace": ["heat_c"],
@@ -634,7 +634,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
     ]
     from hares import Battery
     for dw in dwellings:
-        dw.add_battery(Battery("Batt", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0))
+        dw.add_battery(Battery("Batt", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000))
 
     action_config = {
         "Gas Furnace": ["heat_c"],

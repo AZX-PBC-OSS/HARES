@@ -1091,6 +1091,17 @@ pub(crate) fn merged_equipment_config(
         return Err(non_object_overrides(overrides));
     };
     let layers = hares_io::hpxml::override_layers(root, &spec.name)?;
+    // Every key the override merge receives is checked against the
+    // removed-keys table before anything merges, the wildcard ("all"/"*")
+    // payload included: the raw path accepts any key, so without the walk
+    // an old key would be silently ignored, and a typed payload's own
+    // unknown-key error names no replacement.
+    if let Some((source, layer)) = layers.wildcard {
+        check_layer_removed_keys(&spec.name, source, layer)?;
+    }
+    if let Some(layer) = layers.own {
+        check_layer_removed_keys(&spec.name, "its own override", layer)?;
+    }
     if let Some(typed) = &spec.typed_config
         && matches!(typed.payload, ConfigPayload::Typed { .. })
     {
@@ -1131,6 +1142,64 @@ pub(crate) fn merged_equipment_config(
 /// The reserved override object that carries an equipment's ZIP
 /// coefficients, which every equipment takes.
 const RESERVED_ZIP_OVERRIDE: &str = "zip";
+
+/// The removed-key check one override layer's keys run through: the key
+/// is looked up under the class's config type (the same class-to-config
+/// mapping the registry's factories implement) and an old key fails
+/// naming its replacement. A JSON-string payload field (`bms_mode`,
+/// `charging_strategy`) is parsed and its keys are pathed under the
+/// variant; an array field's element objects are walked under the `[]`
+/// row.
+fn check_override_removed_key(class: &str, source: &str, key: &str, value: &Value) -> Result<()> {
+    let Some(config_type) = hares_equipment::config_type_for_class(class) else {
+        return Ok(());
+    };
+    let reject = |row_key: String| -> Result<()> {
+        if let Some(replacement) =
+            hares_io::removed_key(hares_io::KeyScope::EquipmentConfig, &row_key)
+        {
+            return Err(HaresError::Dwelling(format!(
+                "equipment '{class}' ({source}): configuration key '{row_key}' \
+                 was removed: {replacement}"
+            )));
+        }
+        Ok(())
+    };
+    reject(format!("{config_type}.{key}"))?;
+    // The payload fields: the string's own variant keys are pathed under
+    // the field.
+    if let Some(text) = value.as_str()
+        && (key == "bms_mode" || key == "charging_strategy")
+        && let Ok(serde_json::Value::Object(payload)) = serde_json::from_str::<Value>(text)
+    {
+        for (variant, fields) in &payload {
+            if let serde_json::Value::Object(map) = fields {
+                for field in map.keys() {
+                    reject(format!("{config_type}.{key}.{variant}.{field}"))?;
+                }
+            }
+        }
+    }
+    // The array rows: every element object's keys against the `[]` row.
+    if let Some(items) = value.as_array() {
+        for item in items {
+            if let serde_json::Value::Object(map) = item {
+                for field in map.keys() {
+                    reject(format!("{config_type}.{key}[].{field}"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The layer walk: every key of the layer's payload, the value beside it.
+fn check_layer_removed_keys(class: &str, source: &str, layer: &Map<String, Value>) -> Result<()> {
+    for (key, value) in layer {
+        check_override_removed_key(class, source, key, value)?;
+    }
+    Ok(())
+}
 
 /// The reserved `envelope` override, deserialised and validated: the
 /// scales the boundary construction multiplies its selected layers by.
@@ -2524,7 +2593,7 @@ mod tests {
         let typed_cfg = hares_equipment::PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt_deg: Some(30.0),
             azimuth_deg: Some(180.0),
             module_type: None,
@@ -2532,7 +2601,7 @@ mod tests {
             array_type: None,
             system_losses_fraction: None,
             inverter_efficiency: None,
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,
@@ -2544,9 +2613,9 @@ mod tests {
             .as_object()
             .cloned()
             .expect("PV config object");
-        parameters.insert("capacity_kw".to_string(), json!(override_kw));
+        parameters.insert("capacity_w".to_string(), json!(override_kw * 1000.0));
         let mut typed_overrides = serde_json::Map::new();
-        typed_overrides.insert("capacity_kw".to_string(), json!(override_kw));
+        typed_overrides.insert("capacity_w".to_string(), json!(override_kw * 1000.0));
         hares_io::EquipmentSpec {
             instance_name: None,
             name: "PV".to_string(),
@@ -2583,10 +2652,10 @@ mod tests {
             .expect("the merged payload must deserialize as PvConfig");
 
         assert!(
-            (cfg.capacity_kw - 9.0).abs() < 1e-12,
+            (cfg.capacity_w - 9000.0).abs() < 1e-9,
             "an override the caller set on the spec must reach the typed \
-             config instead of being dropped, got capacity_kw {}",
-            cfg.capacity_kw
+             config instead of being dropped, got capacity_w {}",
+            cfg.capacity_w
         );
     }
 
@@ -2602,7 +2671,7 @@ mod tests {
             .require_typed::<hares_equipment::PvConfig>("PV")
             .expect("the merged payload must deserialize as PvConfig");
 
-        assert!((cfg.capacity_kw - 5.0).abs() < 1e-12);
+        assert!((cfg.capacity_w - 5000.0).abs() < 1e-9);
         assert!((cfg.tilt_deg.unwrap() - 30.0).abs() < 1e-12);
     }
 
@@ -2881,23 +2950,23 @@ mod tests {
             ),
             ("Indirect Tank", "ua_w_per_k", json!({}), json!(5.0)),
             ("Heat Pump Water Heater", "cop", json!({}), json!(3.0)),
-            ("PV", "noct_c", json!({"capacity_kw": 1.0}), json!(45.0)),
+            ("PV", "noct_c", json!({"capacity_w": 1000.0}), json!(45.0)),
             (
                 "Battery",
                 "self_discharge_pct_per_day",
-                json!({"capacity_kwh": 1.0, "max_charge_kw": 1.0, "max_discharge_kw": 1.0}),
+                json!({"capacity_j": 3600000.0, "max_charge_w": 1000.0, "max_discharge_w": 1000.0}),
                 json!(0.1),
             ),
             (
                 "EV",
                 "charging_level",
-                json!({"capacity_kwh": 1.0, "max_charging_power_kw": 1.0}),
+                json!({"capacity_j": 3600000.0, "max_charging_power_w": 1000.0}),
                 json!("L2"),
             ),
             (
                 "Generator",
                 "zone_id",
-                json!({"rated_power_kw": 1.0}),
+                json!({"rated_power_w": 1000.0}),
                 json!(1),
             ),
             (
@@ -5389,7 +5458,7 @@ mod tests {
             others.extend(own.iter().map(|(key, _)| format!("{key}x")));
             others.extend([
                 "month_multiplier_12".to_string(),
-                "phase_4_power_kw".to_string(),
+                "phase_4_power_w".to_string(),
             ]);
             others.push("fuel_type".to_string());
             for key in others
@@ -5417,7 +5486,7 @@ mod tests {
         let message = err.to_string();
         for key in [
             "usage_multiplier",
-            "power_constant_kw",
+            "power_constant_w",
             "month_multiplier_<n>",
         ] {
             assert!(message.contains(key), "{key} missing from: {message}");
@@ -5452,19 +5521,15 @@ mod tests {
     fn a_wildcard_numbered_key_reaches_a_load_within_its_count() {
         let washer = raw_load_spec("Dishwasher");
         let short =
-            merged_equipment_config(&washer, &json!({ "all": { "phase_4_power_kw": 1.0 } }))
+            merged_equipment_config(&washer, &json!({ "all": { "phase_4_power_w": 1000.0 } }))
                 .expect("skipped for a four-phase cycle");
-        assert!(
-            !raw_keys(&short)
-                .iter()
-                .any(|key| *key == "phase_4_power_kw")
-        );
+        assert!(!raw_keys(&short).iter().any(|key| *key == "phase_4_power_w"));
         let long = merged_equipment_config(
             &washer,
-            &json!({ "all": { "phase_len": 5, "phase_4_power_kw": 1.0 } }),
+            &json!({ "all": { "phase_len": 5, "phase_4_power_w": 1000.0 } }),
         )
         .expect("the fifth phase exists");
-        assert_eq!(long.get_f64("phase_4_power_kw"), Some(1.0));
+        assert_eq!(long.get_f64("phase_4_power_w"), Some(1000.0));
     }
 
     /// Both wildcard spellings are an error, never one shadowing the other.
@@ -5501,7 +5566,7 @@ mod tests {
             ("all", "usage_multiplir"),
             ("*", "afuee"),
             ("all", "month_multiplier_12"),
-            ("*", "phase_4_power_kw"),
+            ("*", "phase_4_power_w"),
         ] {
             let err = validate_wildcard_override(&json!({ wildcard: { key: 2.0 } }), &population)
                 .expect_err("read by no equipment");
@@ -5515,7 +5580,7 @@ mod tests {
             .expect_err("no wet appliance reads it here");
         assert!(err.to_string().contains("n_units"), "{err}");
         validate_wildcard_override(
-            &json!({ "all": { "phase_4_power_kw": 1.0 }, "Dishwasher": { "phase_len": 5 } }),
+            &json!({ "all": { "phase_4_power_w": 1000.0 }, "Dishwasher": { "phase_len": 5 } }),
             &population,
         )
         .expect("the dishwasher's own entry gives it a fifth phase");
@@ -5738,5 +5803,284 @@ mod tests {
             matches!(&err, HaresError::InvalidEquipmentParameter { key, .. } if key == "frac_sensible"),
             "{err}"
         );
+    }
+
+    /// The spec of one row's class: the typed classes carry the minimal
+    /// typed payload their deserialisation accepts (the removed-key walk
+    /// runs before it and fails first), the raw classes the parameter
+    /// bag.
+    fn override_test_spec(class: &str) -> hares_io::EquipmentSpec {
+        let base = hares_io::EquipmentSpec {
+            instance_name: None,
+            name: class.to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            typed_overrides: Map::new(),
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+        };
+        let typed_payload = match class {
+            "PV" => json!({"capacity_w": 5000.0, "tilt_deg": 30.0, "azimuth_deg": 180.0}),
+            "Battery" => {
+                json!({"capacity_j": 48600000.0, "max_charge_w": 5000.0, "max_discharge_w": 5000.0})
+            }
+            "EV" => json!({"capacity_j": 270000000.0, "max_charging_power_w": 7200.0}),
+            "Gas Generator" => json!({"rated_power_w": 10000.0, "eta_electric": 0.3}),
+            "Air Conditioner" => json!({"capacity_w": 10000.0, "eir": 0.3}),
+            "Room AC" => json!({"capacity_w": 3500.0, "eir": 0.3}),
+            "ASHP Cooler" => json!({"capacity_w": 10000.0, "eir": 0.3}),
+            _ => {
+                return raw_load_spec(class);
+            }
+        };
+        hares_io::EquipmentSpec {
+            typed_config: Some(hares_equipment::EquipmentConfig::with_payload(
+                "test".to_string(),
+                class.to_string(),
+                hares_equipment::ConfigPayload::Typed {
+                    type_name: class.to_string(),
+                    version: 1,
+                    data: typed_payload,
+                },
+            )),
+            ..base
+        }
+    }
+
+    /// Every removed equipment key the unit move adds to the table: the
+    /// merge with the old key path set fails naming the row's
+    /// replacement, under the class's own override key and under the
+    /// wildcard alike. The pattern rows write a phase number; the array
+    /// row writes inside arrays[1]; the payload rows write inside the
+    /// JSON string.
+    #[test]
+    fn removed_equipment_key_names_its_replacement() {
+        let rows: &[(&str, serde_json::Value, &str)] = &[
+            ("PV", json!({"capacity_kw": 1.0}), "PvConfig.capacity_w (W)"),
+            (
+                "PV",
+                json!({"inverter_capacity_kw": 1.0}),
+                "PvConfig.inverter_capacity_w (W)",
+            ),
+            (
+                "PV",
+                json!({"arrays": [{}, {"capacity_kw": 1.0}]}),
+                "PvConfig.arrays[].capacity_w (W)",
+            ),
+            (
+                "Battery",
+                json!({"capacity_kwh": 1.0}),
+                "BatteryConfig.capacity_j (J)",
+            ),
+            (
+                "Battery",
+                json!({"max_charge_kw": 1.0}),
+                "BatteryConfig.max_charge_w (W)",
+            ),
+            (
+                "Battery",
+                json!({"max_discharge_kw": 1.0}),
+                "BatteryConfig.max_discharge_w (W)",
+            ),
+            (
+                "Battery",
+                json!({"inverter_capacity_kva": 1.0}),
+                "BatteryConfig.inverter_capacity_va (VA)",
+            ),
+            (
+                "Battery",
+                json!({"bms_mode": "{\"SelfConsumption\": {\"min_soc\": 0.1, \"max_soc\": 0.95, \"solar_only_charging\": false, \"surplus_deadband_kw\": 1.0}}"}),
+                "BatteryConfig.bms_mode.SelfConsumption.surplus_deadband_w (W)",
+            ),
+            (
+                "EV",
+                json!({"capacity_kwh": 1.0}),
+                "EvConfig.capacity_j (J)",
+            ),
+            (
+                "EV",
+                json!({"max_charging_kw": 1.0}),
+                "EvConfig.max_charging_power_w (W)",
+            ),
+            (
+                "EV",
+                json!({"max_charging_power_kw": 1.0}),
+                "EvConfig.max_charging_power_w (W)",
+            ),
+            (
+                "EV",
+                json!({"v2l_max_discharge_kw": 1.0}),
+                "EvConfig.v2l_max_discharge_w (W)",
+            ),
+            (
+                "EV",
+                json!({"v2g_max_discharge_kw": 1.0}),
+                "EvConfig.v2g_max_discharge_w (W)",
+            ),
+            (
+                "EV",
+                json!({"power_limit_kw": 1.0}),
+                "EvConfig.power_limit_w (W)",
+            ),
+            (
+                "EV",
+                json!({"fuel_economy_kwh_per_mi": 1.0}),
+                "EvConfig.fuel_economy_j_per_m (J/m)",
+            ),
+            (
+                "EV",
+                json!({"charger_capacity_kva": 1.0}),
+                "EvConfig.charger_capacity_va (VA)",
+            ),
+            (
+                "EV",
+                json!({"charging_strategy": "{\"V2G\": {\"min_soc\": 0.3, \"max_export_kw\": 1.0, \"price_threshold\": 0.25}}"}),
+                "EvConfig.charging_strategy.V2G.max_export_w (W)",
+            ),
+            (
+                "EV",
+                json!({"charging_strategy": "{\"SolarSurplus\": {\"min_charge_rate_kw\": 1.0}}"}),
+                "EvConfig.charging_strategy.SolarSurplus.min_charge_rate_w (W)",
+            ),
+            (
+                "Gas Generator",
+                json!({"rated_power_kw": 1.0}),
+                "GeneratorConfig.rated_power_w (W)",
+            ),
+            (
+                "Gas Generator",
+                json!({"capacity_min_kw": 1.0}),
+                "GeneratorConfig.capacity_min_w (W)",
+            ),
+            (
+                "Gas Generator",
+                json!({"grid_import_limit_kw": 1.0}),
+                "GeneratorConfig.grid_import_limit_w (W)",
+            ),
+            (
+                "Gas Generator",
+                json!({"export_limit_kw": 1.0}),
+                "GeneratorConfig.export_limit_w (W)",
+            ),
+            (
+                "Gas Generator",
+                json!({"delta_kw_per_s": 1.0}),
+                "GeneratorConfig.delta_w_per_s (W/s)",
+            ),
+            (
+                "Air Conditioner",
+                json!({"crankcase_heater_kw": 1.0}),
+                "CentralAirConditionerConfig.crankcase_heater_w (W)",
+            ),
+            (
+                "Room AC",
+                json!({"crankcase_heater_kw": 1.0}),
+                "RoomAcConfig.crankcase_heater_w (W)",
+            ),
+            (
+                "ASHP Cooler",
+                json!({"crankcase_heater_kw": 1.0}),
+                "HeatPumpCoolerConfig.crankcase_heater_w (W)",
+            ),
+            (
+                "EventBasedLoad",
+                json!({"active_power_kw": 1.0}),
+                "EventBasedLoad.active_power_w (W)",
+            ),
+            (
+                "EventBasedLoad",
+                json!({"phase_2_power_kw": 1.0, "phase_len": 4}),
+                "EventBasedLoad.phase_<n>_power_w (W)",
+            ),
+            (
+                "EventBasedLoad",
+                json!({"cycle_phase_2_power_kw": 1.0, "phase_len": 4}),
+                "EventBasedLoad.cycle_phase_<n>_power_w (W)",
+            ),
+            (
+                "EventBasedLoad",
+                json!({"event_power_kw_series": [1.0, 0.0]}),
+                "EventBasedLoad.event_power_w_series (W)",
+            ),
+            (
+                "Clothes Washer",
+                json!({"active_power_kw": 1.0}),
+                "WetAppliance.active_power_w (W)",
+            ),
+            (
+                "Lighting",
+                json!({"power_constant_kw": 1.0}),
+                "ScheduledLoad.power_constant_w (W)",
+            ),
+            (
+                "Lighting",
+                json!({"power_profile_max_kw": 1.0}),
+                "ScheduledLoad.power_profile_max_w (W)",
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (class, old_payload, replacement) in rows {
+            let spec = override_test_spec(class);
+            for layer in [
+                json!({ class.to_string(): old_payload.clone() }),
+                json!({ "all": old_payload }),
+            ] {
+                let error = match merged_equipment_config(&spec, &layer) {
+                    Err(error) => error,
+                    Ok(_) => {
+                        failures.push(format!(
+                            "{class} {old_payload}: the old key must fail the merge"
+                        ));
+                        continue;
+                    }
+                };
+                let message = error.to_string();
+                if !message.contains(*replacement) {
+                    failures.push(format!(
+                        "{class}: the error must name the replacement {replacement:?}, got: {message}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "every removed key must name its replacement:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// The unit move's payload spellings survive the walk: the new keys
+    /// (`surplus_deadband_w`, `max_export_w`, `min_charge_rate_w`) merge
+    /// without error.
+    #[test]
+    fn si_payload_keys_merge_cleanly() {
+        let mode = serde_json::to_string(&hares_types::BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_w: 500.0,
+        })
+        .unwrap();
+        merged_equipment_config(
+            &override_test_spec("Battery"),
+            &json!({"Battery": {"bms_mode": mode}}),
+        )
+        .expect("the SI deadband spelling merges");
+
+        let strategy = serde_json::to_string(&hares_types::ChargingStrategy::SolarSurplus {
+            min_charge_rate_w: 1400.0,
+            departure_schedule: Vec::new(),
+        })
+        .unwrap();
+        merged_equipment_config(
+            &override_test_spec("EV"),
+            &json!({"EV": {"charging_strategy": strategy}}),
+        )
+        .expect("the SI strategy spelling merges");
     }
 }

@@ -33,22 +33,22 @@ class TestFromVehicleWithArchetype:
     @pytest.mark.parametrize("aid", ARCHETYPE_IDS)
     def test_all_archetypes_create_valid_ev(self, aid):
         ev = EV.from_vehicle_with_archetype(VehicleId.tesla_model_y_lr(), aid)
-        assert ev.capacity_kwh is not None and ev.capacity_kwh > 0
-        assert ev.max_charging_kw is not None and ev.max_charging_kw > 0
+        assert ev.capacity_j is not None and ev.capacity_j > 0
+        assert ev.max_charging_power_w is not None and ev.max_charging_power_w > 0
 
     def test_l1_archetype_caps_charging_power(self):
         ev = EV.from_vehicle_with_archetype(
             VehicleId.tesla_model_y_lr(),
             EvArchetypeId.daily_commuter_l1(),
         )
-        assert ev.max_charging_kw is not None and ev.max_charging_kw <= 1.8
+        assert ev.max_charging_power_w is not None and ev.max_charging_power_w <= 1800
 
     def test_l2_archetype_preserves_vehicle_power(self):
         ev = EV.from_vehicle_with_archetype(
             VehicleId.tesla_model_y_lr(),
             EvArchetypeId.daily_commuter_l2(),
         )
-        assert ev.max_charging_kw == 11.5
+        assert ev.max_charging_power_w == 11500
 
 
 class TestAddEvWithDriver:
@@ -91,9 +91,9 @@ class TestAddEvWithDriver:
 
 class TestCustomConstructionStillWorks:
     def test_custom_ev_independent_of_archetypes(self):
-        ev = EV("CustomEV", capacity_kwh=100.0, max_charging_kw=7.2)
+        ev = EV("CustomEV", capacity_j=360000000, max_charging_power_w=7200)
         assert ev.name == "CustomEV"
-        assert ev.capacity_kwh == 100.0
+        assert ev.capacity_j == 360000000
 
 
 class TestEvFullDayCycle:

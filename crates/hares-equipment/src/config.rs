@@ -335,7 +335,7 @@ pub struct EquipmentConfig {
     /// Populated by the dwelling from envelope solver zone capacitances at
     /// construction time; 0.0 means EBM is disabled for this equipment.
     #[serde(skip, default)]
-    pub zone_capacitance_kwh_per_k: f64,
+    pub zone_capacitance_j_per_k: f64,
     #[cfg(test)]
     #[serde(skip, default)]
     test_extras: HashMap<String, ConfigValue>,
@@ -351,7 +351,7 @@ impl EquipmentConfig {
             zip: None,
             zone_map: None,
             rng_stream: None,
-            zone_capacitance_kwh_per_k: 0.0,
+            zone_capacitance_j_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
@@ -571,7 +571,7 @@ impl EquipmentConfig {
             zip: None,
             zone_map: None,
             rng_stream: None,
-            zone_capacitance_kwh_per_k: 0.0,
+            zone_capacitance_j_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
         })
@@ -588,7 +588,7 @@ impl EquipmentConfig {
             zip: None,
             zone_map: None,
             rng_stream: None,
-            zone_capacitance_kwh_per_k: 0.0,
+            zone_capacitance_j_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
@@ -1748,10 +1748,10 @@ mod tests {
         let json = r#"{
             "name": "ASHP Heater",
             "ochre_class": "ASHP Heater",
-            "payload": {"kind": "raw", "data": {"power_constant_kw": 1.5}}
+            "payload": {"kind": "raw", "data": {"power_constant_w": 1500.0}}
         }"#;
         let cfg: EquipmentConfig = serde_json::from_str(json).expect("legacy deserialize");
         assert_eq!(cfg.zip, None);
-        assert_eq!(cfg.get_f64("power_constant_kw"), Some(1.5));
+        assert_eq!(cfg.get_f64("power_constant_w"), Some(1500.0));
     }
 }

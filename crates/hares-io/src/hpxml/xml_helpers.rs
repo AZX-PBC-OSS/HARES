@@ -135,7 +135,7 @@ pub(crate) fn child_temperature_c(node: &XmlNode) -> Option<f64> {
     }
 }
 
-pub(crate) fn child_energy_kwh(
+pub(crate) fn child_energy_j(
     node: &XmlNode,
     element: &'static super::elements::HpxmlElement,
 ) -> Option<f64> {
@@ -143,15 +143,27 @@ pub(crate) fn child_energy_kwh(
     let value = child_f64(target, &VALUE)?;
     let units = child_text(target, &UNITS)?.to_ascii_lowercase();
     match units.as_str() {
-        "kwh" | "kwh/year" | "kwh/yr" => Some(value),
-        "wh" | "wh/year" | "wh/yr" => Some(value / 1000.0),
-        "therm" | "therm/year" | "therm/yr" => Some(conv::energy_therms_to_kwh(value)),
+        // One uom conversion per arm, at the read: the reader returns J.
+        "kwh" | "kwh/year" | "kwh/yr" => Some(
+            uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(value)
+                .get::<uom::si::energy::joule>(),
+        ),
+        "wh" | "wh/year" | "wh/yr" => Some(
+            uom::si::f64::Energy::new::<uom::si::energy::watt_hour>(value)
+                .get::<uom::si::energy::joule>(),
+        ),
+        "therm" | "therm/year" | "therm/yr" => Some(
+            uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
+                conv::energy_therms_to_kwh(value),
+            )
+            .get::<uom::si::energy::joule>(),
+        ),
         other => {
             tracing::warn!(
                 units = other,
                 value,
                 field = element.name,
-                "Unrecognized energy unit; cannot convert child energy to kWh"
+                "Unrecognized energy unit; cannot convert child energy to J"
             );
             None
         }
@@ -468,7 +480,7 @@ pub(crate) fn parse_schedule_extension_params(
     // synthetic TOML fixtures set them via `<extension>` children so
     // they flow through the HPXML resolver into the EquipmentConfig.
     for (element, config_key) in &[
-        (&ACTIVE_POWER_KW, "active_power_kw"),
+        (&ACTIVE_POWER_W, "active_power_w"),
         (&ACTIVE_DURATION_S, "active_duration_s"),
         (&COOLDOWN_DURATION_S, "cooldown_duration_s"),
         (&EVENT_WINDOW_SOURCE, "event_window_source"),
@@ -663,7 +675,7 @@ mod tests {
         assert!(child_load_therms(&node).is_none());
     }
 
-    // --- child_energy_kwh tests ---
+    // --- child_energy_j tests ---
 
     fn energy_node(child_name: &str, value: f64, units: Option<&str>) -> XmlNode {
         let mut children = vec![XmlNode {
@@ -694,35 +706,44 @@ mod tests {
     }
 
     #[test]
-    fn child_energy_kwh_parses_kwh() {
+    fn child_energy_j_parses_kwh() {
         let node = energy_node("Usage", 100.0, Some("kWh"));
-        assert!((child_energy_kwh(&node, &USAGE).unwrap() - 100.0).abs() < 1e-10);
+        assert!((child_energy_j(&node, &USAGE).unwrap() - 100.0 * 3.6e6).abs() < 1e-6);
     }
 
     #[test]
-    fn child_energy_kwh_parses_wh() {
+    fn child_energy_j_parses_wh() {
         let node = energy_node("Usage", 5000.0, Some("Wh"));
-        assert!((child_energy_kwh(&node, &USAGE).unwrap() - 5.0).abs() < 1e-10);
+        assert!(
+            (child_energy_j(&node, &USAGE).unwrap() - 5000.0 * 3600.0).abs() < 1e-6,
+            "5000 Wh is 1.8e7 J"
+        );
     }
 
     #[test]
-    fn child_energy_kwh_converts_therms() {
+    fn child_energy_j_converts_therms() {
         let node = energy_node("Usage", 10.0, Some("therm"));
-        let expected = conv::energy_therms_to_kwh(10.0);
-        assert!((child_energy_kwh(&node, &USAGE).unwrap() - expected).abs() < 1e-10);
+        let expected = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
+            conv::energy_therms_to_kwh(10.0),
+        )
+        .get::<uom::si::energy::joule>();
+        assert!((child_energy_j(&node, &USAGE).unwrap() - expected).abs() < 1e-6);
     }
 
     #[test]
-    fn child_energy_kwh_converts_therm_per_year() {
+    fn child_energy_j_converts_therm_per_year() {
         let node = energy_node("Usage", 10.0, Some("therm/year"));
-        let expected = conv::energy_therms_to_kwh(10.0);
-        assert!((child_energy_kwh(&node, &USAGE).unwrap() - expected).abs() < 1e-10);
+        let expected = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
+            conv::energy_therms_to_kwh(10.0),
+        )
+        .get::<uom::si::energy::joule>();
+        assert!((child_energy_j(&node, &USAGE).unwrap() - expected).abs() < 1e-6);
     }
 
     #[test]
-    fn child_energy_kwh_returns_none_for_unrecognized_unit() {
+    fn child_energy_j_returns_none_for_unrecognized_unit() {
         let node = energy_node("Usage", 100.0, Some("gigajoules"));
-        assert!(child_energy_kwh(&node, &USAGE).is_none());
+        assert!(child_energy_j(&node, &USAGE).is_none());
     }
 
     #[test]

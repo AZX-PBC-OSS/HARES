@@ -27,17 +27,17 @@ class TestEvCatalogFactories:
     @pytest.mark.parametrize("vehicle_id", VEHICLE_IDS)
     def test_from_vehicle_creates_valid_ev(self, vehicle_id):
         ev = EV.from_vehicle(vehicle_id)
-        assert ev.capacity_kwh is not None and ev.capacity_kwh > 0
-        assert ev.max_charging_kw is not None and ev.max_charging_kw > 0
+        assert ev.capacity_j is not None and ev.capacity_j > 0
+        assert ev.max_charging_power_w is not None and ev.max_charging_power_w > 0
 
     def test_tesla_model_y_lr_specs(self):
         ev = EV.tesla_model_y_lr()
-        assert ev.capacity_kwh == 77.0
-        assert ev.max_charging_kw == 11.5
+        assert ev.capacity_j == 277200000
+        assert ev.max_charging_power_w == 11500
 
     def test_by_vehicle_id_string_lookup(self):
         ev = EV.by_vehicle_id("tesla_model_y_lr")
-        assert ev.capacity_kwh == 77.0
+        assert ev.capacity_j == 277200000
 
     def test_by_vehicle_id_invalid_raises(self):
         with pytest.raises(ValueError):
@@ -62,9 +62,9 @@ class TestEvCatalogFactories:
         assert len(shorthands) == 13
         for factory in shorthands:
             ev = factory()
-            assert ev.capacity_kwh is not None and ev.capacity_kwh > 0
+            assert ev.capacity_j is not None and ev.capacity_j > 0
 
     def test_custom_ev_still_works(self):
-        ev = EV("Custom", capacity_kwh=200.0)
+        ev = EV("Custom", capacity_j=720000000)
         assert ev.name == "Custom"
-        assert ev.capacity_kwh == 200.0
+        assert ev.capacity_j == 720000000

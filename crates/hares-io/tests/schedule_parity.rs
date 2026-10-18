@@ -107,7 +107,7 @@ fn resolved_kw_series(spec: &EquipmentSpec, schedule: &ScheduleTimeSeries) -> Ve
         "constant" => {
             let kw = spec
                 .parameters
-                .get("power_constant_kw")
+                .get("power_constant_w")
                 .and_then(Value::as_f64)
                 .expect("power_constant_kw should be present");
             vec![kw; schedule.len()]

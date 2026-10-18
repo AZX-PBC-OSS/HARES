@@ -80,7 +80,7 @@ fn generator_fluid_solver_invariant_passes() {
         equipment_id: None,
         zone_id: Some(1),
         fuel_type: Some(hares_types::FuelType::Gas),
-        rated_power_kw: 10.0,
+        rated_power_w: 10000.0,
         eta_electric: Some(0.30),
         eta_thermal: Some(0.35),
         eta_jacket_water: None,
@@ -108,10 +108,10 @@ fn generator_fluid_solver_invariant_passes() {
                 efficiency_ratio: 1.0,
             },
         ]),
-        delta_kw_per_s: Some(100.0),
-        capacity_min_kw: None,
-        grid_import_limit_kw: None,
-        export_limit_kw: None,
+        delta_w_per_s: Some(100000.0),
+        capacity_min_w: None,
+        grid_import_limit_w: None,
+        export_limit_w: None,
         loop_id: Some(loop_id.0),
         flow_rate_kg_s: Some(0.35),
         supply_temp_c: Some(70.0),
@@ -142,7 +142,7 @@ fn generator_fluid_solver_invariant_passes() {
     // Ramp to steady-state at 8 kW electrical.
     generator
         .apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 8.0,
+            active_power_kw: 8.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,

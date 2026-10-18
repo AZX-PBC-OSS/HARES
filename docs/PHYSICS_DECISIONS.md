@@ -746,6 +746,7 @@ from the RFC 3339 strings to the naive local timestamps in the
 `fleet_report` products carry no `Time` column and are unchanged); no
 energy, power or weather number moves.
 
+<<<<<<< HEAD
 ## The defrost penalty is applied by one model
 
 A heat pump's defrost penalty exists in the engine as two models of the
@@ -809,3 +810,32 @@ stack to its air node; the gas water heater's split
 the pattern the helper extracts. Direction of the delta: the heating gas
 in boiler-bearing fixtures rises (the flue share is no longer free zone
 heat) and the zone's free heat falls; `fleet_mixed_offset` re-captured.
+=======
+## Equipment configuration fields are stored in SI
+
+Every equipment config field that carries a power, an energy or an
+apparent power is stored in SI and named for its unit: `capacity_w`,
+`inverter_capacity_w`, `max_charge_w`, `max_discharge_w`,
+`inverter_capacity_va` (an apparent power, dimensionally W), `capacity_j`,
+`max_charging_power_w`, `v2l_max_discharge_w`, `v2g_max_discharge_w`,
+`power_limit_w`, `fuel_economy_j_per_m`, `charger_capacity_va`,
+`rated_power_w`, `capacity_min_w`, `grid_import_limit_w`,
+`export_limit_w`, `delta_w_per_s`, `crankcase_heater_w` and
+`zone_capacitance_j_per_k`; the loads' raw keys carry the same rule
+(`active_power_w`, `phase_<n>_power_w`, `power_profile_max_w`,
+`power_constant_w`, `event_power_w_series`). Every value that enters a
+config in another unit is converted once, with `uom`, at the boundary
+where it is read: the HPXML resolvers (a document value in W enters with
+no conversion; a value in kW or kWh converts once), the schedule
+resolver, the defaults loaders (the external data files keep their own
+unit columns), the catalogue fills (the compiled-in catalogues keep
+datasheet values as data and convert in their fill methods), the
+override merge and the Python constructors. An equipment that still
+computes in kW converts the SI config value once at construction. OCHRE
+stores these fields in kW and kWh; the boundary to it converts once.
+
+The rule removes the per-equipment hand-written conversion factors and
+the caller's need to know which fields are not SI: every config a caller
+builds or reads is SI, and the read-back reports the resolved parameters
+directly from the SI fields.
+>>>>>>> b847aedf (fix: store equipment power, energy and apparent-power config fields in SI units)

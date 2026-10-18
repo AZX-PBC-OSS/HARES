@@ -438,6 +438,17 @@ Every callable, class and keyword added to, changed in or removed from
 `hares._hares` since `ebdb1a17`, each removed or renamed one with its
 replacement.
 
+- Changed: the `Battery`, `PV` and `EV` constructors take the SI names,
+  keyword-only: `Battery(name, *, capacity_j, max_charge_w=None,
+  max_discharge_w=None, ..., inverter_capacity_va=None, ...)`,
+  `PV(name, *, capacity_w, tilt, azimuth, sam_lut_path=None,
+  soiling=None)` and `EV(name, *, capacity_j=None,
+  max_charging_power_w=None, ..., charger_capacity_va=None, ...)`; the
+  `BmsMode.self_consumption` and `ChargingStrategy.solar_surplus` /
+  `.v2g` payloads take `surplus_deadband_w`, `min_charge_rate_w` and
+  `max_export_w`, keyword-only. A removed keyword names its replacement;
+  the parent's positional forms raise `TypeError`.
+
 - Added: `defaults_dir()`: the packaged defaults directory, the
   `defaults` tree the installed package carries, resolved from the
   installed package's own location. `defaults=None` (the constructors'
@@ -670,6 +681,22 @@ Maturin builds against the Python in the active virtualenv. Verify with
 `uv run python --version` — it should be 3.12.x or 3.13.x.
 
 ## Numeric changes
+
+- The equipment configuration fields are stored in SI: the `Battery`, `PV`
+  and `EV` constructors and the `BmsMode` / `ChargingStrategy` payloads
+  take the SI names (`capacity_j`, `max_charge_w`, `capacity_w`,
+  `max_charging_power_w`, `charger_capacity_va`, `inverter_capacity_va`,
+  `surplus_deadband_w`, `min_charge_rate_w`, `max_export_w`,
+  `fuel_economy_j_per_m`, `power_limit_w`, `v2l_max_discharge_w`,
+  `v2g_max_discharge_w`), every renamed parameter keyword-only; the loads'
+  raw keys carry the same rule (`active_power_w`, `phase_<n>_power_w`,
+  `power_profile_max_w`, `power_constant_w`, `event_power_w_series`). The
+  goldens re-captured: `full_year_hourly`, `full_year_900s_dst`,
+  `leap_year_february_900s` (identical), `weather_wrap_900s` (identical),
+  `month_boundary_billing_3600s` (identical), `consumer_shape_900s`,
+  `fleet_mixed_offset`, `fleet_same_offset_300s`, `resstock_2025_fleet`
+  (identical), and the new `der_pv_battery_900s` and
+  `der_pv_battery_ev_900s` captured first on the unfixed engine.
 
 Every number a commit moves is recorded here: what moved, why, and the
 golden fixtures re-captured.

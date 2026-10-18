@@ -556,7 +556,7 @@ class TestDwellingConfig:
             DwellingConfig(**cast("dict[str, Any]", kwargs))
 
     def test_overrides_round_trips_as_dict(self):
-        overrides = {"hvac": {"capacity_kw": 5.0}}
+        overrides = {"hvac": {"capacity_w": 5000}}
         cfg = DwellingConfig(
             hpxml="path/to/building.xml",
             schedule="path/to/schedules.csv",
@@ -567,7 +567,7 @@ class TestDwellingConfig:
         result = cfg.overrides
         assert result is not None
         assert "hvac" in result
-        assert result["hvac"]["capacity_kw"] == 5.0
+        assert result["hvac"]["capacity_w"] == 5000.0
 
 
 class TestDefaultsKeyword:

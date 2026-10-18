@@ -495,12 +495,11 @@ class ChargingStrategy:
     def v2h(discharge_threshold_soc: float, min_soc: float) -> ChargingStrategy: ...
     @staticmethod
     def v2g(
-        min_soc: float, max_export_kw: float, price_threshold: float
+        *, min_soc: float, max_export_w: float, price_threshold: float
     ) -> ChargingStrategy: ...
     @staticmethod
     def solar_surplus(
-        min_charge_rate_kw: float,
-        departure_schedule: list[DepartureConstraint] | None = None,
+        *, min_charge_rate_w: float, departure_schedule: list[DepartureConstraint] | None = None
     ) -> ChargingStrategy: ...
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
@@ -569,9 +568,11 @@ class BmsScheduleWindow:
 class BmsMode:
     @staticmethod
     def self_consumption(
+        *,
         min_soc: float = 0.1,
         max_soc: float = 1.0,
         solar_only_charging: bool = False,
+        surplus_deadband_w: float = 0.0,
     ) -> BmsMode: ...
     @staticmethod
     def time_of_use_optimization(
@@ -1130,11 +1131,11 @@ class Battery:
     @property
     def name(self) -> str: ...
     @property
-    def capacity_kwh(self) -> float: ...
+    def capacity_j(self) -> float: ...
     @property
-    def max_charge_kw(self) -> float | None: ...
+    def max_charge_w(self) -> float | None: ...
     @property
-    def max_discharge_kw(self) -> float | None: ...
+    def max_discharge_w(self) -> float | None: ...
     @property
     def chemistry(self) -> BatteryChemistry | None: ...
     @property
@@ -1152,7 +1153,7 @@ class Battery:
     @property
     def power_factor(self) -> float | None: ...
     @property
-    def inverter_capacity_kva(self) -> float | None: ...
+    def inverter_capacity_va(self) -> float | None: ...
     @property
     def self_discharge_pct_per_day(self) -> float | None: ...
     @property
@@ -1182,9 +1183,10 @@ class Battery:
     def __init__(
         self,
         name: str,
-        capacity_kwh: float,
-        max_charge_kw: float | None = ...,
-        max_discharge_kw: float | None = ...,
+        *,
+        capacity_j: float,
+        max_charge_w: float | None = ...,
+        max_discharge_w: float | None = ...,
         chemistry: BatteryChemistry | None = ...,
         initial_soc: float | None = ...,
         min_soc: float | None = ...,
@@ -1193,7 +1195,7 @@ class Battery:
         charge_efficiency: float | None = ...,
         discharge_efficiency: float | None = ...,
         power_factor: float | None = ...,
-        inverter_capacity_kva: float | None = ...,
+        inverter_capacity_va: float | None = ...,
         self_discharge_pct_per_day: float | None = ...,
         standby_power_w: float | None = ...,
         import_limit_w: float | None = ...,
@@ -1269,19 +1271,23 @@ class PV:
     @property
     def name(self) -> str: ...
     @property
-    def capacity_kw(self) -> float: ...
+    def capacity_w(self) -> float: ...
     @property
     def tilt(self) -> float: ...
     @property
     def azimuth(self) -> float: ...
     @property
+    def sam_lut_path(self) -> str | None: ...
+    @property
     def soiling(self) -> PvSoilingConfig | None: ...
     def __init__(
         self,
         name: str,
-        capacity_kw: float,
+        *,
+        capacity_w: float,
         tilt: float,
         azimuth: float,
+        sam_lut_path: str | None = ...,
         soiling: PvSoilingConfig | None = ...,
     ) -> None: ...
     def __repr__(self) -> str: ...
@@ -1383,9 +1389,9 @@ class EV:
     @property
     def name(self) -> str: ...
     @property
-    def capacity_kwh(self) -> float | None: ...
+    def capacity_j(self) -> float | None: ...
     @property
-    def max_charging_kw(self) -> float | None: ...
+    def max_charging_power_w(self) -> float | None: ...
     @property
     def initial_soc(self) -> float | None: ...
     @property
@@ -1393,7 +1399,7 @@ class EV:
     @property
     def power_factor(self) -> float | None: ...
     @property
-    def charger_capacity_kva(self) -> float | None: ...
+    def charger_capacity_va(self) -> float | None: ...
     @property
     def battery_temp_c(self) -> float | None: ...
     @property
@@ -1417,12 +1423,13 @@ class EV:
     def __init__(
         self,
         name: str,
-        capacity_kwh: float | None = ...,
-        max_charging_kw: float | None = ...,
+        *,
+        capacity_j: float | None = ...,
+        max_charging_power_w: float | None = ...,
         initial_soc: float | None = ...,
         initial_connection_state: EvConnectionState | None = ...,
         power_factor: float | None = ...,
-        charger_capacity_kva: float | None = ...,
+        charger_capacity_va: float | None = ...,
         battery_temp_c: float | None = ...,
         min_charge_temp_c: float | None = ...,
         full_power_temp_c: float | None = ...,

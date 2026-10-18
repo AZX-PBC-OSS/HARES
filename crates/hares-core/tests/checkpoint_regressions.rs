@@ -67,7 +67,7 @@ fn build_dwelling_with_base_load(dir: &Path) -> (PathBuf, Dwelling) {
     let env = dwelling.latest_env().clone();
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -112,7 +112,7 @@ fn prior_electrical_summary_survives_checkpoint_restart() {
     // Re-add the same equipment so the equipment count matches.
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -156,7 +156,7 @@ fn equipment_core_populated_after_checkpoint_restore() {
     let mut dwelling_b = dwelling_b_raw;
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -218,7 +218,7 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
     let env_a = dwelling_a.latest_env().clone();
     let mut raw2: HashMap<String, ConfigValue> = HashMap::new();
     raw2.insert("power_schedule_source".to_string(), "constant".into());
-    raw2.insert("power_constant_kw".to_string(), 0.5.into());
+    raw2.insert("power_constant_w".to_string(), 500.0.into());
     raw2.insert("sensible_gain_fraction".to_string(), 0.3.into());
     raw2.insert("zone_id".to_string(), 1.0.into());
     let config2 = EquipmentConfig::raw("Plug".to_string(), "ScheduledLoad".to_string(), raw2);
@@ -250,7 +250,7 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
     // Re-add both equipment pieces.
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -262,7 +262,7 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
 
     let mut raw2_b: HashMap<String, ConfigValue> = HashMap::new();
     raw2_b.insert("power_schedule_source".to_string(), "constant".into());
-    raw2_b.insert("power_constant_kw".to_string(), 0.5.into());
+    raw2_b.insert("power_constant_w".to_string(), 500.0.into());
     raw2_b.insert("sensible_gain_fraction".to_string(), 0.3.into());
     raw2_b.insert("zone_id".to_string(), 1.0.into());
     let config2_b = EquipmentConfig::raw("Plug".to_string(), "ScheduledLoad".to_string(), raw2_b);
@@ -309,7 +309,7 @@ fn first_post_restore_step_produces_valid_equipment_output() {
     let mut dwelling_b = dwelling_b_raw;
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -350,9 +350,9 @@ fn add_ev_to_dwelling(dwelling: &mut Dwelling) {
         "EV".to_string(),
         EvConfig {
             equipment_id: None,
-            capacity_kwh: 60.0,
+            capacity_j: 216000000.0,
             charging_level: Some("L2".to_string()),
-            max_charging_power_kw: 7.2,
+            max_charging_power_w: 7200.0,
             charging_efficiency: None,
             l1_current_a: None,
             l1_voltage_v: None,
@@ -370,19 +370,19 @@ fn add_ev_to_dwelling(dwelling: &mut Dwelling) {
             cell_resistance_ohm: None,
             v2l_enabled: None,
             v2l_soc_reserve: None,
-            v2l_max_discharge_kw: None,
+            v2l_max_discharge_w: None,
             v2g_enabled: None,
             v2g_soc_reserve: None,
-            v2g_max_discharge_kw: None,
+            v2g_max_discharge_w: None,
             chemistry: None,
-            fuel_economy_kwh_per_mi: None,
+            fuel_economy_j_per_m: None,
             ready_soc: None,
             charging_strategy: None,
             plug_in_policy: None,
-            power_limit_kw: None,
+            power_limit_w: None,
             initial_connection_state: None,
             power_factor: None,
-            charger_capacity_kva: None,
+            charger_capacity_va: None,
             cc_cv_transition_soc: None,
             charging_priority: None,
             discharge_respects_deadline: true,
@@ -438,7 +438,7 @@ fn equipment_core_restores_ev_soc_after_checkpoint() {
     // Re-add BaseLoad (same as build_dwelling_with_base_load).
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);

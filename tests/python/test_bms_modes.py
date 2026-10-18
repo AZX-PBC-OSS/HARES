@@ -146,7 +146,7 @@ def test_departure_constraint_defaults() -> None:
 
 
 def test_charging_strategy_v2g() -> None:
-    s = ChargingStrategy.v2g(min_soc=0.2, max_export_kw=5.0, price_threshold=0.15)
+    s = ChargingStrategy.v2g(min_soc=0.2, max_export_w=5000, price_threshold=0.15)
     assert "V2G" in repr(s)
 
 
@@ -157,7 +157,7 @@ def test_charging_strategy_v2h() -> None:
 
 def test_charging_strategy_solar_surplus() -> None:
     dc = DepartureConstraint(day_filter="weekdays", departure_minute=480, target_soc=0.9)
-    s = ChargingStrategy.solar_surplus(min_charge_rate_kw=1.2, departure_schedule=[dc])
+    s = ChargingStrategy.solar_surplus(min_charge_rate_w=1200, departure_schedule=[dc])
     assert "SolarSurplus" in repr(s)
 
 

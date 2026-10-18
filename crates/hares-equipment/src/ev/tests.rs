@@ -9,6 +9,47 @@ use hares_types::{
 
 use super::*;
 
+// The fixture builder's override keys: the typed EvConfig's own field
+// names (the raw payload path is gone).
+const KEY_CHARGING_LEVEL: &str = "charging_level";
+const KEY_CAPACITY_J: &str = "capacity_j";
+const KEY_MAX_CHARGING_POWER_W: &str = "max_charging_power_w";
+const KEY_RANGE_M: &str = "range_m";
+const KEY_INITIAL_SOC: &str = "initial_soc";
+const KEY_EFFICIENCY: &str = "charging_efficiency";
+const KEY_L1_CURRENT_A: &str = "l1_current_a";
+const KEY_L1_VOLTAGE_V: &str = "l1_voltage_v";
+const KEY_BATTERY_TEMP_C: &str = "battery_temp_c";
+const KEY_MIN_CHARGE_TEMP_C: &str = "min_charge_temp_c";
+const KEY_FULL_POWER_TEMP_C: &str = "full_power_temp_c";
+const KEY_HEATER_POWER_W: &str = "heater_power_w";
+const KEY_HEATER_THRESHOLD_C: &str = "heater_threshold_c";
+const KEY_THERMAL_MASS_J_PER_K: &str = "thermal_mass_j_per_k";
+const KEY_UA_W_PER_K: &str = "ua_w_per_k";
+const KEY_V2L_ENABLED: &str = "v2l_enabled";
+const KEY_V2L_SOC_RESERVE: &str = "v2l_soc_reserve";
+const KEY_V2L_MAX_DISCHARGE_W: &str = "v2l_max_discharge_w";
+const KEY_V2G_ENABLED: &str = "v2g_enabled";
+const KEY_V2G_SOC_RESERVE: &str = "v2g_soc_reserve";
+const KEY_V2G_MAX_DISCHARGE_W: &str = "v2g_max_discharge_w";
+const KEY_N_SERIES: &str = "n_series";
+const KEY_N_PARALLEL: &str = "n_parallel";
+const KEY_CELL_RESISTANCE_OHM: &str = "cell_resistance_ohm";
+const KEY_READY_SOC: &str = "ready_soc";
+const KEY_FUEL_ECONOMY_J_PER_M: &str = "fuel_economy_j_per_m";
+const KEY_POWER_LIMIT_W: &str = "power_limit_w";
+const KEY_CHARGER_CAPACITY_VA: &str = "charger_capacity_va";
+const KEY_CC_CV_TRANSITION_SOC: &str = "cc_cv_transition_soc";
+const KEY_CHARGING_STRATEGY: &str = "charging_strategy";
+const KEY_PLUG_IN_POLICY: &str = "plug_in_policy";
+const KEY_INITIAL_CONNECTION_STATE: &str = "initial_connection_state";
+const KEY_POWER_FACTOR: &str = "power_factor";
+const KEY_CHEMISTRY: &str = "chemistry";
+const KEY_CHARGING_PRIORITY: &str = "charging_priority";
+const KEY_SOC_MAX: &str = "soc_max";
+const DEFAULT_CAPACITY_J: f64 = 75.0 * 3.6e6;
+const L1_CHARGING_POWER_W: f64 = 1400.0;
+
 fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::DateTime<FixedOffset> {
     FixedOffset::east_opt(0)
         .expect("UTC offset")
@@ -72,6 +113,9 @@ fn sample_env() -> EnvironmentState {
 }
 
 fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfig {
+    // The typed EvConfig built directly, in SI: the raw EV payload path is
+    // gone, so the fixture builder overrides the typed fields and applies
+    // the default charging-power rule from its typed inputs only.
     let get_f64 = |keys: &[&str]| {
         keys.iter()
             .find_map(|key| raw.get(*key).and_then(crate::config::ConfigValue::as_f64))
@@ -85,36 +129,38 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
         })
     };
 
-    let charging_level = get_str(&[KEY_CHARGING_LEVEL, KEY_CHARGING_LEVEL_HPXML]).map(|level| {
-        match level.as_str() {
-            "Level1" => "L1".to_string(),
-            "Level2" => "L2".to_string(),
-            _ => level,
-        }
+    let charging_level = get_str(&[KEY_CHARGING_LEVEL]).map(|level| match level.as_str() {
+        "Level1" => "L1".to_string(),
+        "Level2" => "L2".to_string(),
+        _ => level,
     });
 
-    let capacity_kwh = get_f64(&[KEY_BATTERY_CAPACITY_KWH, KEY_BATTERY_CAPACITY_HPXML_KWH])
+    let capacity_j = get_f64(&[KEY_CAPACITY_J])
         .or_else(|| {
-            get_f64(&[KEY_RANGE_MILES]).map(|range| {
-                let economy = get_f64(&[KEY_FUEL_ECONOMY_KWH_PER_MI])
-                    .unwrap_or(DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
-                range * economy
+            // The range rule on its typed inputs: the range enters in m.
+            get_f64(&[KEY_RANGE_M]).map(|range_m| {
+                let economy =
+                    get_f64(&[KEY_FUEL_ECONOMY_J_PER_M]).unwrap_or(DEFAULT_FUEL_ECONOMY_J_PER_M);
+                range_m * economy
             })
         })
-        .unwrap_or(DEFAULT_CAPACITY_KWH);
+        .unwrap_or(DEFAULT_CAPACITY_J);
 
     let default_level = charging_level.clone().unwrap_or_else(|| "L2".to_string());
-    let max_charging_power_kw =
-        get_f64(&[KEY_MAX_CHARGING_POWER_KW, KEY_MAX_CHARGING_POWER_HPXML_KW]).unwrap_or_else(
-            || match default_level.as_str() {
-                "L1" => L1_CHARGING_POWER_KW,
-                _ => default_max_power_kw(
-                    &EquipmentConfig::raw("EV #1".to_string(), "EV".to_string(), raw.clone()),
-                    hares_types::ChargingLevel::L2,
-                    capacity_kwh,
-                ),
-            },
-        );
+    let max_charging_power_w = get_f64(&[KEY_MAX_CHARGING_POWER_W]).unwrap_or_else(|| {
+        match default_level.as_str() {
+            "L1" => L1_CHARGING_POWER_W,
+            // The L2 default charging-power rule, typed inputs only: the
+            // vehicle number from the capacity (the BEV default; the
+            // vehicle_type raw key is gone with the raw path).
+            _ => {
+                let capacity_kwh = uom::si::f64::Energy::new::<uom::si::energy::joule>(capacity_j)
+                    .get::<uom::si::energy::kilowatt_hour>();
+                let range_miles = capacity_kwh / DEFAULT_FUEL_ECONOMY_KWH_PER_MI;
+                if range_miles < 175.0 { 3600.0 } else { 11500.0 }
+            }
+        }
+    });
 
     EquipmentConfig::from_typed(
         "EV #1".to_string(),
@@ -124,9 +170,9 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
                 .get(crate::config::KEY_EQUIPMENT_ID)
                 .and_then(crate::config::ConfigValue::as_f64)
                 .map(|value| value as u32),
-            capacity_kwh,
+            capacity_j,
             charging_level,
-            max_charging_power_kw,
+            max_charging_power_w,
             charging_efficiency: get_f64(&[KEY_EFFICIENCY]),
             l1_current_a: get_f64(&[KEY_L1_CURRENT_A]),
             l1_voltage_v: get_f64(&[KEY_L1_VOLTAGE_V]),
@@ -150,19 +196,19 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
             cell_resistance_ohm: get_f64(&[KEY_CELL_RESISTANCE_OHM]),
             v2l_enabled: get_bool(KEY_V2L_ENABLED),
             v2l_soc_reserve: get_f64(&[KEY_V2L_SOC_RESERVE]),
-            v2l_max_discharge_kw: get_f64(&[KEY_V2L_MAX_DISCHARGE_KW]),
+            v2l_max_discharge_w: get_f64(&[KEY_V2L_MAX_DISCHARGE_W]),
             v2g_enabled: get_bool(KEY_V2G_ENABLED),
             v2g_soc_reserve: get_f64(&[KEY_V2G_SOC_RESERVE]),
-            v2g_max_discharge_kw: get_f64(&[KEY_V2G_MAX_DISCHARGE_KW]),
+            v2g_max_discharge_w: get_f64(&[KEY_V2G_MAX_DISCHARGE_W]),
             chemistry: get_str(&[KEY_CHEMISTRY]),
-            fuel_economy_kwh_per_mi: get_f64(&[KEY_FUEL_ECONOMY_KWH_PER_MI]),
+            fuel_economy_j_per_m: get_f64(&[KEY_FUEL_ECONOMY_J_PER_M]),
             ready_soc: get_f64(&[KEY_READY_SOC]),
             charging_strategy: get_str(&[KEY_CHARGING_STRATEGY]),
             plug_in_policy: get_str(&[KEY_PLUG_IN_POLICY]),
-            power_limit_kw: get_f64(&[KEY_POWER_LIMIT_KW]),
+            power_limit_w: get_f64(&[KEY_POWER_LIMIT_W]),
             initial_connection_state: get_str(&[KEY_INITIAL_CONNECTION_STATE]),
             power_factor: get_f64(&[KEY_POWER_FACTOR]),
-            charger_capacity_kva: get_f64(&[KEY_CHARGER_CAPACITY_KVA]),
+            charger_capacity_va: get_f64(&[KEY_CHARGER_CAPACITY_VA]),
             cc_cv_transition_soc: get_f64(&[KEY_CC_CV_TRANSITION_SOC]),
             charging_priority: get_str(&[KEY_CHARGING_PRIORITY]).map(|s| match s.as_str() {
                 "ExternalAuthority" => ChargingPriority::ExternalAuthority,
@@ -174,20 +220,17 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
     .unwrap()
 }
 
-/// The reversible temperature-capacity derate factor at `temp_c` — the
-/// same model `Ev::refresh_usable_capacity` applies (the stationary
-/// Battery's default `CapacityDerateModel`: the NREL SSC d0 Arrhenius,
-/// d0,ref = 1.001 at T_ref = 25 °C). For deriving exact usable-capacity
-/// expectations: `capacity = rated · SOH · capacity_derate_at(temp_c)`.
+/// The default derate curve at one temperature, for deriving exact
+/// usable-capacity expectations: `capacity = rated · SOH · derate(temp)`.
 fn capacity_derate_at(temp_c: f64) -> f64 {
     crate::battery::CapacityDerateModel::default().evaluate(temp_c)
 }
 
 fn base_raw() -> HashMap<String, crate::config::ConfigValue> {
     let mut raw = HashMap::new();
-    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
     raw.insert(KEY_CHARGING_LEVEL.to_string(), "L2".into());
-    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 7200.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
     raw
 }
@@ -235,7 +278,7 @@ fn no_power_when_disconnected() {
 fn l1_default_power_is_1p4_kw() {
     let mut raw = base_raw();
     raw.insert(KEY_CHARGING_LEVEL.to_string(), "L1".into());
-    raw.remove(KEY_MAX_CHARGING_POWER_KW);
+    raw.remove(KEY_MAX_CHARGING_POWER_W);
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
@@ -329,8 +372,8 @@ fn save_load_preserves_trajectory() {
 #[test]
 fn hpxml_range_to_capacity_derivation_uses_verified_constant() {
     let mut raw = base_raw();
-    raw.remove(KEY_BATTERY_CAPACITY_KWH);
-    raw.insert(KEY_RANGE_MILES.to_string(), 200.0.into());
+    raw.remove(KEY_CAPACITY_J);
+    raw.insert(KEY_RANGE_M.to_string(), 321868.8.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     ev.init(&config, &sample_env()).unwrap();
@@ -393,25 +436,6 @@ fn apply_soc_target_limits_charging() {
 }
 
 #[test]
-fn supports_hpxml_key_aliases() {
-    let mut raw = base_raw();
-    raw.remove(KEY_BATTERY_CAPACITY_KWH);
-    raw.remove(KEY_MAX_CHARGING_POWER_KW);
-    raw.remove(KEY_CHARGING_LEVEL);
-    raw.insert(KEY_BATTERY_CAPACITY_HPXML_KWH.to_string(), 64.0.into());
-    raw.insert(KEY_MAX_CHARGING_POWER_HPXML_KW.to_string(), 11.5.into());
-    raw.insert(KEY_CHARGING_LEVEL_HPXML.to_string(), "Level2".into());
-
-    let config = ev_config(raw);
-    let mut ev = Ev::new(config.clone());
-    ev.init(&config, &sample_env()).unwrap();
-
-    assert!((ev.battery_capacity_kwh_rated - 64.0).abs() < 1e-9);
-    assert!((ev.rated_power_kw - 11.5).abs() < 1e-9);
-    assert_eq!(ev.charging_level, ChargingLevel::L2);
-}
-
-#[test]
 fn l1_8amp_mode_is_supported() {
     let mut raw = base_raw();
     raw.insert(KEY_CHARGING_LEVEL.to_string(), "L1".into());
@@ -458,7 +482,7 @@ fn ohmic_heat_nonzero_during_active_charging() {
 fn l1_configured_power_is_respected_not_hardcoded() {
     let mut raw = base_raw();
     raw.insert(KEY_CHARGING_LEVEL.to_string(), "L1".into());
-    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 1.8.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 1800.0.into());
     raw.remove(KEY_L1_CURRENT_A);
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -1026,7 +1050,7 @@ fn commanded_power_setpoint_bounds_total_draw_with_heater_running() {
     env.weather.outdoor_temp_c = 2.0;
     ev.init(&config, &env).unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0,
+        active_power_kw: 3.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -1099,7 +1123,7 @@ fn urgent_deadline_with_heater_exceeds_soft_setpoint_within_the_supply_bound() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0,
+        active_power_kw: 1.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -1154,7 +1178,7 @@ fn cold_v2l_export_conserves_pack_energy_and_stops_at_floor() {
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
     raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
     raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
@@ -1257,7 +1281,7 @@ fn cold_discharge_ohmic_loss_covers_export_and_heater_terminal_currents() {
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
     raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
     raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
@@ -1632,7 +1656,7 @@ fn grid_outage_suspends_preconditioning_except_while_the_vehicle_discharges() {
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
     raw.insert(KEY_HEATER_POWER_W.to_string(), 1500.0.into());
     raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
@@ -1829,7 +1853,7 @@ fn grid_emergency_discharge_with_running_heater_publishes_a_guard_valid_output()
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
     raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
     raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
@@ -1892,7 +1916,7 @@ fn grid_emergency_v2g_discharge_with_running_heater_publishes_a_guard_valid_outp
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.3.into());
-    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
     raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
     raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
@@ -1966,7 +1990,7 @@ fn pack_fed_preconditioning_reports_and_restores_standby_mode() {
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_BATTERY_TEMP_C.to_string(), 2.0.into());
     raw.insert(KEY_MIN_CHARGE_TEMP_C.to_string(), 0.0.into());
     raw.insert(KEY_FULL_POWER_TEMP_C.to_string(), 10.0.into());
@@ -2201,7 +2225,7 @@ fn sub_threshold_export_leg_discharge_mode_still_publishes_a_nonzero_flow() {
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.200_000_000_001_f64.into());
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_BATTERY_TEMP_C.to_string(), 20.0.into());
     raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
     let config = ev_config(raw);
@@ -2567,7 +2591,7 @@ fn v2l_allows_negative_power_when_enabled_and_soc_above_reserve() {
     let mut raw = base_raw();
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -2598,7 +2622,7 @@ fn v2l_respects_soc_reserve_floor() {
     let mut raw = base_raw();
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.5.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -2631,7 +2655,7 @@ fn v2l_discharge_lands_on_soc_reserve_floor() {
     let mut raw = base_raw();
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.1.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.12.into());
     raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
     let config = ev_config(raw);
@@ -2676,7 +2700,7 @@ fn v2g_discharge_lands_on_soc_reserve_floor() {
     let mut raw = base_raw();
     raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.22.into());
     raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
     let config = ev_config(raw);
@@ -2718,7 +2742,7 @@ fn v2l_respects_max_discharge_limit() {
     let mut raw = base_raw();
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.1.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 2.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 2000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.8.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -2770,7 +2794,7 @@ fn v2l_does_not_export_to_grid() {
     let mut raw = base_raw();
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.1.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.8.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -2812,7 +2836,7 @@ fn v2g_allows_negative_power_when_enabled() {
     let mut raw = base_raw();
     raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.3.into());
-    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
@@ -2832,7 +2856,7 @@ fn v2g_discharge_produces_negative_power() {
     let mut raw = base_raw();
     raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.8.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -2862,7 +2886,7 @@ fn v2g_respects_soc_reserve() {
     let mut raw = base_raw();
     raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.5.into());
-    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -2899,7 +2923,7 @@ fn v2g_respects_power_setpoint_min_soc_above_reserve() {
     let mut raw = base_raw();
     raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.30.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -2929,7 +2953,7 @@ fn v2g_discharges_when_soc_above_power_setpoint_min_soc() {
     let mut raw = base_raw();
     raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.50.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -2959,7 +2983,7 @@ fn v2l_respects_power_setpoint_min_soc_above_reserve() {
     let mut raw = base_raw();
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.25.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -2994,7 +3018,7 @@ fn power_setpoint_max_soc_caps_charging() {
     ev.init(&config, &env).expect("init");
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 7.2,
+        active_power_kw: 7.2000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: Some(0.90),
@@ -3781,7 +3805,7 @@ fn power_setpoint_zero_suppresses_charging() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0,
+        active_power_kw: 0.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -3895,7 +3919,7 @@ fn soc_target_clears_latched_zero_power_hold() {
 
     // An idle window latches the hold …
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0,
+        active_power_kw: 0.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -3933,7 +3957,7 @@ fn ready_by_clears_latched_zero_power_hold() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0,
+        active_power_kw: 0.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -3983,7 +4007,7 @@ fn urgent_ready_by_deadline_charges_through_latched_hold() {
     .unwrap();
     // … then a later idle step latches the hold on top of it.
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0,
+        active_power_kw: 0.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -4024,7 +4048,7 @@ fn latched_hold_and_target_survive_equipment_checkpoint_round_trip() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0,
+        active_power_kw: 0.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -4243,7 +4267,7 @@ fn disconnect_clears_latched_hold_for_away_charging() {
 
     // Home session leaves a hold and a target latched …
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0,
+        active_power_kw: 0.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -4436,7 +4460,7 @@ fn deadline_guarantee_raises_power_above_setpoint_when_urgent() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0,
+        active_power_kw: 1.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -4482,7 +4506,7 @@ fn external_authority_respects_setpoint_despite_urgent_deadline() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0,
+        active_power_kw: 1.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -4542,7 +4566,7 @@ fn external_authority_deadline_target_must_not_raise_controller_destination() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0,
+        active_power_kw: 1.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -4647,7 +4671,7 @@ fn deadline_guarantee_respects_setpoint_when_not_urgent() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0,
+        active_power_kw: 1.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -4697,7 +4721,7 @@ fn power_limit_caps_after_deadline_guarantee_max() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0,
+        active_power_kw: 1.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -4752,7 +4776,7 @@ fn deadline_guarantee_meets_target_soc_despite_low_setpoint() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0,
+        active_power_kw: 1.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -4806,7 +4830,7 @@ fn external_authority_reports_no_cc_cv_derating_when_setpoint_active() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.5,
+        active_power_kw: 1.5000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -4930,8 +4954,8 @@ fn cc_cv_taper_omitted_when_lut_present() {
 #[test]
 fn soc_88_linear_taper_near_transition() {
     let mut raw = base_raw();
-    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
-    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 7200.0.into());
     raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.88.into());
     let config = ev_config(raw);
@@ -5106,9 +5130,14 @@ fn telemetry_has_capacity_and_fuel_economy() {
         (ev.telemetry().get("capacity_kwh").unwrap() - 60.0 * capacity_derate_at(10.0)).abs()
             < 1e-9
     );
-    assert_eq!(
-        ev.telemetry().get("fuel_economy_kwh_per_mi"),
-        Some(DEFAULT_FUEL_ECONOMY_KWH_PER_MI)
+    // The telemetry value is the SI fuel economy's own round trip (the
+    // config enters J/m; the working value converts back): the pair's
+    // last-bit move is the unit move's recorded movement, so the
+    // assertion is on the value within its ulp.
+    assert!(
+        (ev.telemetry().get("fuel_economy_kwh_per_mi").unwrap() - DEFAULT_FUEL_ECONOMY_KWH_PER_MI)
+            .abs()
+            < 1e-12,
     );
 }
 
@@ -5167,7 +5196,7 @@ fn ev_charging_strategy_v2g_from_config() {
     let mut raw = base_raw();
     let json = serde_json::to_string(&hares_types::ChargingStrategy::V2G {
         min_soc: 0.3,
-        max_export_kw: 7.2,
+        max_export_w: 7200.0,
         price_threshold: 0.25,
     })
     .unwrap();
@@ -5183,7 +5212,7 @@ fn ev_charging_strategy_v2g_from_config() {
         ev.charging_strategy(),
         &hares_types::ChargingStrategy::V2G {
             min_soc: 0.3,
-            max_export_kw: 7.2,
+            max_export_w: 7200.0,
             price_threshold: 0.25,
         }
     );
@@ -5260,8 +5289,8 @@ fn actor_seed_nightly_returns_ev_seed() {
 #[test]
 fn l2_charging_energy_accounting() {
     let mut raw = base_raw();
-    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
-    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 7200.0.into());
     raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
@@ -5293,8 +5322,8 @@ fn l2_charging_energy_accounting() {
 #[test]
 fn charging_reaches_full_at_correct_time() {
     let mut raw = base_raw();
-    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
-    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 7200.0.into());
     raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
@@ -5333,9 +5362,9 @@ fn charging_reaches_full_at_correct_time() {
 #[test]
 fn driving_soc_decrease_matches_fuel_economy() {
     let mut raw = base_raw();
-    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 1.0.into());
-    raw.insert(KEY_FUEL_ECONOMY_KWH_PER_MI.to_string(), 0.325.into());
+    raw.insert(KEY_FUEL_ECONOMY_J_PER_M.to_string(), 0.325.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
@@ -5415,8 +5444,8 @@ fn battery_thermal_exponential_decay() {
 fn soc_clamps_at_boundaries() {
     // Charge well past full from SOC 0.5 for 600 minutes
     let mut raw = base_raw();
-    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
-    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 7200.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
     let config = ev_config(raw);
@@ -5436,7 +5465,7 @@ fn soc_clamps_at_boundaries() {
 
     // Discharge from low SOC with a large drive
     let mut raw2 = base_raw();
-    raw2.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw2.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
     raw2.insert(KEY_INITIAL_SOC.to_string(), 0.05.into());
     let config2 = ev_config(raw2);
     let mut ev2 = Ev::new(config2.clone());
@@ -5597,8 +5626,8 @@ fn connection_state_transitions_are_valid() {
 #[test]
 fn charge_session_pack_heating_is_i2r_only() {
     let mut raw = base_raw();
-    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
-    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 7200.0.into());
     raw.insert(KEY_EFFICIENCY.to_string(), 0.9.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
     raw.insert(KEY_BATTERY_TEMP_C.to_string(), 20.0.into());
@@ -6116,9 +6145,9 @@ fn ev_departure_at_step_boundary() {
 fn minimal_ev_config() -> EvConfig {
     EvConfig {
         equipment_id: None,
-        capacity_kwh: 75.0,
+        capacity_j: 75.0 * 3.6e6,
         charging_level: None,
-        max_charging_power_kw: 11.5,
+        max_charging_power_w: 11500.0,
         charging_efficiency: None,
         l1_current_a: None,
         l1_voltage_v: None,
@@ -6136,19 +6165,19 @@ fn minimal_ev_config() -> EvConfig {
         cell_resistance_ohm: None,
         v2l_enabled: None,
         v2l_soc_reserve: None,
-        v2l_max_discharge_kw: None,
+        v2l_max_discharge_w: None,
         v2g_enabled: None,
         v2g_soc_reserve: None,
-        v2g_max_discharge_kw: None,
+        v2g_max_discharge_w: None,
         chemistry: None,
-        fuel_economy_kwh_per_mi: None,
+        fuel_economy_j_per_m: None,
         ready_soc: None,
         charging_strategy: None,
         plug_in_policy: None,
-        power_limit_kw: None,
+        power_limit_w: None,
         initial_connection_state: None,
         power_factor: None,
-        charger_capacity_kva: None,
+        charger_capacity_va: None,
         cc_cv_transition_soc: None,
         charging_priority: None,
         discharge_respects_deadline: true,
@@ -6163,15 +6192,15 @@ fn ev_config_round_trips_via_equipment_config() {
             .unwrap();
     assert!(ec.is_typed());
     let recovered: EvConfig = ec.typed().unwrap();
-    assert_eq!(recovered.capacity_kwh, cfg.capacity_kwh);
+    assert_eq!(recovered.capacity_j, cfg.capacity_j);
 }
 
 #[test]
 fn ev_config_rejects_unknown_fields() {
     use crate::config::ConfigPayload;
     let json = serde_json::json!({
-        "capacity_kwh": 75.0,
-        "max_charging_power_kw": 7.2,
+        "capacity_j": 270000000.0,
+        "max_charging_power_w": 7200.0,
         "unexpected_key": "bad"
     });
     let ec = crate::EquipmentConfig::with_payload(
@@ -6191,7 +6220,7 @@ fn ev_config_rejects_unknown_fields() {
 #[test]
 fn ev_config_validate_rejects_zero_capacity() {
     let mut cfg = minimal_ev_config();
-    cfg.capacity_kwh = 0.0;
+    cfg.capacity_j = 0.0;
     assert!(cfg.validate().is_err());
 }
 
@@ -6333,9 +6362,9 @@ fn ev_config_validate_rejects_non_finite_temperature_fields() {
 #[test]
 fn ev_init_typed_sets_fields_from_ev_config() {
     let cfg = EvConfig {
-        capacity_kwh: 60.0,
+        capacity_j: 60.0 * 3.6e6,
         charging_level: Some("L2".to_string()),
-        max_charging_power_kw: 7.2,
+        max_charging_power_w: 7200.0,
         charging_efficiency: Some(0.92),
         initial_soc: Some(0.5),
         ..minimal_ev_config()
@@ -6356,14 +6385,19 @@ fn ev_init_typed_sets_fields_from_ev_config() {
     assert!((ev.rated_power_kw - 7.2).abs() < 1e-9);
 }
 
-// ── Raw config cold-charging field path tests ──────────────────────
+// ── Typed cold-charging field path tests ───────────────────────────
 
 #[test]
-fn raw_config_reads_cold_charging_and_strategy_fields() {
-    let mut raw = HashMap::new();
-    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
-    raw.insert(KEY_CHARGING_LEVEL.to_string(), "L2".into());
-    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+fn typed_config_reads_cold_charging_and_strategy_fields() {
+    // The raw payload path is gone: the same field set lands through the
+    // typed config.
+    let strategy_json = serde_json::to_string(&ChargingStrategy::Nightly {
+        off_peak_start_hour: 22.0,
+        off_peak_end_hour: 6.0,
+        target_soc: 0.8,
+    })
+    .unwrap();
+    let mut raw = base_raw();
     raw.insert(
         KEY_MIN_CHARGE_TEMP_C.to_string(),
         crate::config::ConfigValue::Float(-10.0),
@@ -6388,19 +6422,15 @@ fn raw_config_reads_cold_charging_and_strategy_fields() {
         KEY_UA_W_PER_K.to_string(),
         crate::config::ConfigValue::Float(8.0),
     );
-    let strategy_json = serde_json::to_string(&ChargingStrategy::Nightly {
-        off_peak_start_hour: 22.0,
-        off_peak_end_hour: 6.0,
-        target_soc: 0.8,
-    })
-    .unwrap();
     raw.insert(
         KEY_CHARGING_STRATEGY.to_string(),
         crate::config::ConfigValue::Text(strategy_json),
     );
 
-    let config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw);
-    let ev = Ev::new(config);
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
 
     assert_eq!(ev.min_charge_temp_c, -10.0);
     assert_eq!(ev.full_power_temp_c, 15.0);
@@ -6420,13 +6450,14 @@ fn raw_config_reads_cold_charging_and_strategy_fields() {
 
 #[test]
 fn raw_config_cold_charging_defaults_preserved() {
-    let mut raw = HashMap::new();
-    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
-    raw.insert(KEY_CHARGING_LEVEL.to_string(), "L2".into());
-    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
-
-    let config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw);
-    let ev = Ev::new(config);
+    // The placeholder constructor holds the typed defaults (the raw
+    // payload path is gone; init replaces them from the config or the
+    // cascade). The defaults derive from the default capacity (75 kWh).
+    let ev = Ev::new(EquipmentConfig::raw(
+        "test_ev".to_string(),
+        "EV".to_string(),
+        HashMap::new(),
+    ));
 
     assert_eq!(ev.min_charge_temp_c, DEFAULT_MIN_CHARGE_TEMP_C);
     assert_eq!(ev.full_power_temp_c, DEFAULT_FULL_POWER_TEMP_C);
@@ -6434,8 +6465,11 @@ fn raw_config_cold_charging_defaults_preserved() {
     assert_eq!(ev.heater_threshold_c, DEFAULT_HEATER_THRESHOLD_C);
     // Thermal defaults are capacity-derived (pack mass × cell specific
     // heat; area-scaled UA), not flat constants.
-    assert_eq!(ev.thermal_mass_j_per_k, default_thermal_mass_j_per_k(60.0));
-    assert_eq!(ev.ua_w_per_k, default_ua_w_per_k(60.0));
+    assert_eq!(
+        ev.thermal_mass_j_per_k,
+        default_thermal_mass_j_per_k(DEFAULT_CAPACITY_KWH)
+    );
+    assert_eq!(ev.ua_w_per_k, default_ua_w_per_k(DEFAULT_CAPACITY_KWH));
     assert_eq!(
         ev.charging_strategy(),
         &ChargingStrategy::Immediate { target_soc: 1.0 }
@@ -6464,7 +6498,7 @@ fn commanded_power_limit_zero_suspends_preconditioning_with_the_port() {
     raw.insert(KEY_HEATER_POWER_W.to_string(), 1500.0.into());
     raw.insert(KEY_HEATER_THRESHOLD_C.to_string(), 5.0.into());
     raw.insert(KEY_UA_W_PER_K.to_string(), 0.0.into());
-    raw.insert(KEY_POWER_LIMIT_KW.to_string(), 0.0.into());
+    raw.insert(KEY_POWER_LIMIT_W.to_string(), 0.0.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     ev.init(&config, &sample_env()).unwrap();
@@ -6534,31 +6568,20 @@ fn capacity_derived_thermal_defaults_match_cited_densities_and_scale_with_capaci
 
 #[test]
 fn raw_and_typed_config_cold_derate_equivalence() {
-    // Raw path: -15 C min, 10 C full, battery at 0 C (→ derate = 0.6)
+    // The typed path: -15 C min, 10 C full, battery at 0 C (derate = 0.6).
+    // The raw payload path is gone: a raw config is refused at init, so
+    // the equivalence test's raw half is the refusal.
     let mut raw_data = HashMap::new();
-    raw_data.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
+    raw_data.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
     raw_data.insert(KEY_CHARGING_LEVEL.to_string(), "L2".into());
-    raw_data.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
+    raw_data.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 7200.0.into());
     raw_data.insert(KEY_INITIAL_SOC.to_string(), 0.3.into());
-    raw_data.insert(
-        KEY_MIN_CHARGE_TEMP_C.to_string(),
-        crate::config::ConfigValue::Float(-15.0),
-    );
-    raw_data.insert(
-        KEY_FULL_POWER_TEMP_C.to_string(),
-        crate::config::ConfigValue::Float(10.0),
-    );
-    raw_data.insert(
-        KEY_BATTERY_TEMP_C.to_string(),
-        crate::config::ConfigValue::Float(0.0),
-    );
     let raw_config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw_data);
-    let mut raw_ev = Ev::new(raw_config);
+    let mut raw_ev = Ev::new(raw_config.clone());
 
-    // Typed path: same values
     let cfg = EvConfig {
-        capacity_kwh: 60.0,
-        max_charging_power_kw: 7.2,
+        capacity_j: 60.0 * 3.6e6,
+        max_charging_power_w: 7200.0,
         min_charge_temp_c: Some(-15.0),
         full_power_temp_c: Some(10.0),
         battery_temp_c: Some(0.0),
@@ -6570,28 +6593,30 @@ fn raw_and_typed_config_cold_derate_equivalence() {
     let env = sample_env();
     typed_ev.init(&typed, &env).unwrap();
 
-    assert_eq!(raw_ev.min_charge_temp_c, typed_ev.min_charge_temp_c);
-    assert_eq!(raw_ev.full_power_temp_c, typed_ev.full_power_temp_c);
+    assert_eq!(typed_ev.min_charge_temp_c, -15.0);
+    assert_eq!(typed_ev.full_power_temp_c, 10.0);
 
-    let mut ports = PortSlots::default();
+    // The derate read post-init (the pack at 0 C, the ramp -15 to 10):
+    // the ramp's linear value, and the step charges at the derated rate,
+    // below the level's full power.
+    let typed_derate = typed_ev.telemetry().get("charge_derate");
+    assert_eq!(
+        typed_derate,
+        Some(0.6),
+        "the 0 C pack between -15 and 10 derates to the ramp's linear value"
+    );
     raw_ev
-        .step(&env, Duration::minutes(15), &mut ports)
-        .unwrap();
+        .init(&raw_config, &env)
+        .expect_err("a raw EV payload is refused at init");
     let mut ports = PortSlots::default();
     typed_ev
         .step(&env, Duration::minutes(15), &mut ports)
         .unwrap();
 
-    assert_eq!(
-        raw_ev.telemetry().get("charge_derate"),
-        typed_ev.telemetry().get("charge_derate"),
-        "raw and typed paths must produce the same charge_derate telemetry"
-    );
-    let raw_power = raw_ev.telemetry().get("active_power_kw").unwrap();
     let typed_power = typed_ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        (raw_power - typed_power).abs() < 1e-9,
-        "raw ({raw_power}) and typed ({typed_power}) paths must produce the same charging power"
+        typed_power > 0.0 && typed_power <= 7.2,
+        "the cold pack charges at or below the level's power, got {typed_power}"
     );
 }
 
@@ -6629,16 +6654,9 @@ fn raw_and_typed_default_battery_temp_c_are_consistent() {
 fn raw_and_typed_explicit_battery_temp_c_is_honoured() {
     let env = sample_env();
 
-    // Raw path: explicit key → 35.0
-    let mut raw_data = base_raw();
-    raw_data.insert(
-        KEY_BATTERY_TEMP_C.to_string(),
-        crate::config::ConfigValue::Float(35.0),
-    );
-    let raw_config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw_data);
-    let raw_ev = Ev::new(raw_config);
-
-    // Typed path: explicit Some(35.0) → 35.0
+    // The raw path is gone: the placeholder constructor's explicit-key
+    // read is the typed default's, and the raw config is refused at
+    // init. The explicit value honours only the typed path now.
     let cfg = EvConfig {
         battery_temp_c: Some(35.0),
         ..minimal_ev_config()
@@ -6647,12 +6665,17 @@ fn raw_and_typed_explicit_battery_temp_c_is_honoured() {
     let mut typed_ev = Ev::new(typed.clone());
     typed_ev.init(&typed, &env).unwrap();
 
-    assert_eq!(raw_ev.battery_temp_c, 35.0);
     assert_eq!(typed_ev.battery_temp_c, 35.0);
-    assert_eq!(
-        raw_ev.battery_temp_c, typed_ev.battery_temp_c,
-        "raw and typed paths must produce the same battery_temp_c when an explicit value is present"
-    );
+
+    // The omitted key's cascade: the outdoor ambient (the sample's 10 C).
+    let omitted = EvConfig {
+        ..minimal_ev_config()
+    };
+    let typed =
+        EquipmentConfig::from_typed("test_ev2".to_string(), "EV".to_string(), omitted).unwrap();
+    let mut omitted_ev = Ev::new(typed.clone());
+    omitted_ev.init(&typed, &env).unwrap();
+    assert_eq!(omitted_ev.battery_temp_c, 10.0);
 }
 
 // ── DemandResponse tests ──────────────────────────────────────────
@@ -6833,7 +6856,7 @@ fn ev_default_real_power_bit_identical_to_pf_one() {
 fn ev_reactive_setpoint_overrides_baseline_q() {
     let mut raw = base_raw();
     raw.insert(KEY_POWER_FACTOR.to_string(), 0.9.into());
-    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    raw.insert(KEY_CHARGER_CAPACITY_VA.to_string(), 20000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -6868,7 +6891,7 @@ fn ev_power_factor_setpoint_zeros_q_setpoint_and_follows_baseline() {
 
     // Force charging via PowerSetpoint so P>0.
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0,
+        active_power_kw: 3.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -6893,14 +6916,14 @@ fn ev_power_factor_setpoint_zeros_q_setpoint_and_follows_baseline() {
 #[test]
 fn ev_power_setpoint_stores_reactive_q() {
     let mut raw = base_raw();
-    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    raw.insert(KEY_CHARGER_CAPACITY_VA.to_string(), 20000.0.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0,
+        active_power_kw: 3.0000,
         reactive_power_kvar: Some(0.75),
         min_soc: None,
         max_soc: None,
@@ -6961,7 +6984,7 @@ fn ev_rejected_power_setpoint_leaves_reactive_state_unchanged() {
 fn ev_reactive_setpoint_zero_forces_q_zero_over_pf_baseline() {
     let mut raw = base_raw();
     raw.insert(KEY_POWER_FACTOR.to_string(), 0.9.into());
-    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    raw.insert(KEY_CHARGER_CAPACITY_VA.to_string(), 20000.0.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
@@ -6969,7 +6992,7 @@ fn ev_reactive_setpoint_zero_forces_q_zero_over_pf_baseline() {
 
     // Charge so the pf = 0.9 baseline produces Q > 0.
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0,
+        active_power_kw: 3.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,
@@ -6998,7 +7021,7 @@ fn ev_reactive_setpoint_zero_forces_q_zero_over_pf_baseline() {
 #[test]
 fn ev_kva_clamp_curtails_reactive_not_active_power() {
     let mut raw = base_raw();
-    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 5.0.into());
+    raw.insert(KEY_CHARGER_CAPACITY_VA.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -7007,7 +7030,7 @@ fn ev_kva_clamp_curtails_reactive_not_active_power() {
 
     // Command 5 kW charge + 5 kvar reactive → S = sqrt(P²+25) > 5 kVA.
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.6,
+        active_power_kw: 3.6000,
         reactive_power_kvar: Some(5.0),
         min_soc: None,
         max_soc: None,
@@ -7039,7 +7062,7 @@ fn ev_kva_clamp_curtails_reactive_not_active_power() {
 #[test]
 fn ev_kva_clamp_reduces_q_to_charger_limit() {
     let mut raw = base_raw();
-    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 5.0.into());
+    raw.insert(KEY_CHARGER_CAPACITY_VA.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -7047,7 +7070,7 @@ fn ev_kva_clamp_reduces_q_to_charger_limit() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.6,
+        active_power_kw: 3.6000,
         reactive_power_kvar: Some(4.0),
         min_soc: None,
         max_soc: None,
@@ -7078,10 +7101,10 @@ fn ev_kva_clamp_reduces_q_to_charger_limit() {
 fn ev_charging_vs_v2g_discharge_signs() {
     let mut raw = base_raw();
     raw.insert(KEY_POWER_FACTOR.to_string(), 0.9.into());
-    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    raw.insert(KEY_CHARGER_CAPACITY_VA.to_string(), 20000.0.into());
     raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     let config = ev_config(raw);
 
@@ -7091,7 +7114,7 @@ fn ev_charging_vs_v2g_discharge_signs() {
     ev_charge.init(&config, &env).unwrap();
     ev_charge
         .apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0,
+            active_power_kw: 3.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -7150,7 +7173,7 @@ fn ev_charging_vs_v2g_discharge_signs() {
 #[test]
 fn ev_port_core_output_telemetry_reactive_consistent() {
     let mut raw = base_raw();
-    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    raw.insert(KEY_CHARGER_CAPACITY_VA.to_string(), 20000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -7179,7 +7202,7 @@ fn ev_port_core_output_telemetry_reactive_consistent() {
 #[test]
 fn ev_validate_core_contract_passes_with_reactive() {
     let mut raw = base_raw();
-    raw.insert(KEY_CHARGER_CAPACITY_KVA.to_string(), 20.0.into());
+    raw.insert(KEY_CHARGER_CAPACITY_VA.to_string(), 20000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -7302,7 +7325,7 @@ fn v2l_discharge_not_gated_by_outage_and_counts_as_island_source() {
     let mut raw = base_raw();
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -7346,7 +7369,7 @@ fn v2l_discharge_stops_at_ready_by_soc() {
     let mut raw = base_raw();
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -7382,7 +7405,7 @@ fn v2l_discharge_proceeds_without_ready_by_soc() {
     let mut raw = base_raw();
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -7412,7 +7435,7 @@ fn v2g_discharge_stops_at_ready_by_soc() {
     let mut raw = base_raw();
     raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -7448,7 +7471,7 @@ fn v2g_discharge_proceeds_without_ready_by_soc() {
     let mut raw = base_raw();
     raw.insert(KEY_V2G_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2G_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2G_MAX_DISCHARGE_KW.to_string(), 5.0.into());
+    raw.insert(KEY_V2G_MAX_DISCHARGE_W.to_string(), 5000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -7478,7 +7501,7 @@ fn ev_with_0700_deadline_refuses_discharge_below_90pct_at_2000() {
     let mut raw = base_raw();
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -7516,7 +7539,7 @@ fn v2l_discharge_respects_deadline_flag_off_bypasses_interlock() {
     let mut raw = base_raw();
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
@@ -7874,13 +7897,13 @@ fn ev_soc_window_fields_reject_non_finite_on_unchecked_path() {
 
     for signal in [
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
+            active_power_kw: 1.0000,
             reactive_power_kvar: None,
             min_soc: Some(f64::NAN),
             max_soc: None,
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
+            active_power_kw: 1.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: Some(f64::INFINITY),
@@ -7950,13 +7973,13 @@ fn power_setpoint_rejects_non_finite_soc_window_on_checked_path() {
 
     for signal in [
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
+            active_power_kw: 1.0000,
             reactive_power_kvar: None,
             min_soc: Some(f64::NAN),
             max_soc: None,
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
+            active_power_kw: 1.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: Some(f64::NAN),
@@ -8044,19 +8067,19 @@ fn power_setpoint_rejects_out_of_domain_soc_window_on_unchecked_path() {
 
     for signal in [
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
+            active_power_kw: 1.0000,
             reactive_power_kvar: None,
             min_soc: Some(7.5),
             max_soc: None,
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
+            active_power_kw: 1.0000,
             reactive_power_kvar: None,
             min_soc: Some(0.8),
             max_soc: Some(0.2),
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
+            active_power_kw: 1.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: Some(-0.1),
@@ -8180,7 +8203,7 @@ fn actor_seed_returns_ev_seed_for_every_charging_strategy() {
             charge_buffer_hours: 2.0,
         },
         hares_types::ChargingStrategy::SolarSurplus {
-            min_charge_rate_kw: 1.4,
+            min_charge_rate_w: 1400.0,
             departure_schedule: vec![],
         },
         hares_types::ChargingStrategy::V2H {
@@ -8189,7 +8212,7 @@ fn actor_seed_returns_ev_seed_for_every_charging_strategy() {
         },
         hares_types::ChargingStrategy::V2G {
             min_soc: 0.3,
-            max_export_kw: 7.2,
+            max_export_w: 7200.0,
             price_threshold: 0.25,
         },
     ];
@@ -8386,35 +8409,20 @@ fn accepted_charging_level_spellings_parse() {
 /// placeholder state.
 #[test]
 fn raw_config_invalid_values_defer_error_to_init() {
+    // The raw payload path is gone: whatever the payload carries, the
+    // EV's init refuses it (a typed config is the only way in), so no
+    // invalid value can slip through as a silent default either.
     let mut raw = HashMap::new();
-    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
-    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
-    // Domain-invalid strategy: parses as JSON, fails validate().
-    raw.insert(
-        KEY_CHARGING_STRATEGY.to_string(),
-        crate::config::ConfigValue::Text(r#"{"Immediate":{"target_soc":1.5}}"#.to_string()),
-    );
-    // Unknown charging level.
-    raw.insert(
-        KEY_CHARGING_LEVEL.to_string(),
-        crate::config::ConfigValue::Text("L3".to_string()),
-    );
+    raw.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 7200.0.into());
     let config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw);
-    let ev = Ev::new(config.clone());
-    // Constructed with placeholders, not silently valid:
-    assert_eq!(
-        ev.charging_strategy(),
-        &ChargingStrategy::Immediate { target_soc: 1.0 }
-    );
-
-    let mut ev = ev;
+    let mut ev = Ev::new(config.clone());
     let err = ev
         .init(&config, &sample_env())
-        .expect_err("deferred raw-config error must surface at init");
-    // The first invalid field (charging_level, parsed before strategy) wins.
+        .expect_err("a raw EV payload is refused at init");
     assert!(
-        format!("{err:?}").contains("charging_level"),
-        "error must name the first offending key, got {err:?}"
+        format!("{err:?}").contains("typed config"),
+        "the refusal names the typed-config requirement, got {err:?}"
     );
 }
 
@@ -8422,21 +8430,20 @@ fn raw_config_invalid_values_defer_error_to_init() {
 /// silently becoming `DeadlineGuarantee`.
 #[test]
 fn raw_config_unknown_charging_priority_defers_error_to_init() {
+    // The raw payload path is gone: the refusal is the raw config's own,
+    // whatever its values, and a typed config's charging priority is the
+    // typed enum.
     let mut raw = HashMap::new();
-    raw.insert(KEY_BATTERY_CAPACITY_KWH.to_string(), 60.0.into());
-    raw.insert(KEY_MAX_CHARGING_POWER_KW.to_string(), 7.2.into());
-    raw.insert(
-        KEY_CHARGING_PRIORITY.to_string(),
-        crate::config::ConfigValue::Text("ExternaAuthority".to_string()),
-    );
+    raw.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
+    raw.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 7200.0.into());
     let config = EquipmentConfig::raw("test_ev".to_string(), "EV".to_string(), raw);
     let mut ev = Ev::new(config.clone());
     let err = ev
         .init(&config, &sample_env())
-        .expect_err("unknown charging_priority must fail init");
+        .expect_err("a raw EV payload is refused at init");
     assert!(
-        format!("{err:?}").contains("charging_priority"),
-        "error must name the offending key, got {err:?}"
+        format!("{err:?}").contains("typed config"),
+        "the refusal names the typed-config requirement, got {err:?}"
     );
 }
 
@@ -9023,7 +9030,7 @@ fn mid_discharge_checkpoint_restores_island_source_availability() {
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.5.into());
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
@@ -9104,7 +9111,7 @@ fn floor_held_discharge_checkpoint_restores_the_published_v2l_state() {
     raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
     // SOC exactly at the reserve: the floor-held discharge corner.
     raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
-    raw.insert(KEY_V2L_MAX_DISCHARGE_KW.to_string(), 3.0.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
@@ -9208,7 +9215,7 @@ fn ev_setpoint_above_rated_warns_once_per_run() {
     let mut drained: Vec<hares_types::Warning> = Vec::new();
     for _ in 0..3 {
         ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-            active_power_kw: 20.0,
+            active_power_kw: 20.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -9233,7 +9240,7 @@ fn ev_setpoint_above_rated_warns_once_per_run() {
     })
     .unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: 20.0,
+        active_power_kw: 20.0000,
         reactive_power_kvar: None,
         min_soc: None,
         max_soc: None,

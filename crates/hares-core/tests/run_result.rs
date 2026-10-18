@@ -243,7 +243,7 @@ fn take_warnings_returns_only_new_warnings_and_run_result_keeps_all() {
     dwelling.apply_control(
         "no such equipment",
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
+            active_power_kw: 1.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -299,7 +299,7 @@ fn gym_drain_sees_warnings_past_run_capacity() {
                     "no such equipment",
                 )),
                 signal: ControlSignal::PowerSetpoint {
-                    active_power_kw: 1.0,
+                    active_power_kw: 1.0000,
                     reactive_power_kvar: None,
                     min_soc: None,
                     max_soc: None,

@@ -41,12 +41,12 @@ pub static ACTIVE_DURATION_S: HpxmlElement = HpxmlElement {
     description: "the <active_duration_s> element the parser reads under its parent",
 };
 
-/// the <active_power_kw> element the parser reads under its parent
-pub static ACTIVE_POWER_KW: HpxmlElement = HpxmlElement {
-    name: "active_power_kw",
-    context: "the synthetic extension element's active power, kilowatts",
+/// the <active_power_w> element the parser reads under its parent
+pub static ACTIVE_POWER_W: HpxmlElement = HpxmlElement {
+    name: "active_power_w",
+    context: "the synthetic extension element's active power, watts",
     unit: None,
-    description: "the <active_power_kw> element the parser reads under its parent",
+    description: "the <active_power_w> element the parser reads under its parent",
 };
 
 /// the <AdjustedAnnualkWh> element the parser reads under its parent
@@ -3055,7 +3055,7 @@ pub static WITHIN_INFILTRATION_VOLUME: HpxmlElement = HpxmlElement {
 pub static HPXML_ELEMENTS: &[&HpxmlElement] = &[
     &ABOVE_APARTMENT,
     &ACTIVE_DURATION_S,
-    &ACTIVE_POWER_KW,
+    &ACTIVE_POWER_W,
     &ADJUSTED_ANNUALK_WH,
     &ADVANCED_RESEARCH_FEATURES,
     &AEXT,
@@ -3436,12 +3436,21 @@ pub static HPXML_ELEMENTS: &[&HpxmlElement] = &[
 /// Every element whose presence fails the parse. The parser's
 /// rejection scan runs over this list, so a caller can see what the
 /// parser refuses and why.
-pub static HPXML_REJECTED_ELEMENTS: &[&RejectedHpxmlElement] = &[&HAS_FLUE_OR_CHIMNEY_REJECTED];
+pub static HPXML_REJECTED_ELEMENTS: &[&RejectedHpxmlElement] =
+    &[&HAS_FLUE_OR_CHIMNEY_REJECTED, &ACTIVE_POWER_KW_REJECTED];
 
 /// The legacy flue flag: HARES reads `HasFlueOrChimneyInConditionedSpace`,
 /// never the older name; the parse's rejection scan searches the whole
 /// tree's names for it (the fixture form is under the air-infiltration
 /// measurement's extension).
+/// The old synthetic extension element: HARES reads `active_power_w`
+/// (SI); the kW spelling is refused, naming the replacement.
+pub static ACTIVE_POWER_KW_REJECTED: RejectedHpxmlElement = RejectedHpxmlElement {
+    name: "active_power_kw",
+    context: "BuildingDetails/Appliances/CookingRange/extension",
+    reason: "removed element <active_power_kw>; rename it to <active_power_w> (W)",
+};
+
 pub static HAS_FLUE_OR_CHIMNEY_REJECTED: RejectedHpxmlElement = RejectedHpxmlElement {
     name: "HasFlueOrChimney",
     context: "AirInfiltrationMeasurement/extension",

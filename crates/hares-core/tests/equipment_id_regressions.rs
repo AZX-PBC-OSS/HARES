@@ -860,7 +860,7 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
         "min_soc": 0.1,
         "max_soc": 1.0,
         "solar_only_charging": false,
-        "surplus_deadband_kw": 0.0,
+        "surplus_deadband_w": 0.0,
     }});
     let overrides = serde_json::json!({
         "Battery": { "bms_mode": bms_mode.to_string() }
@@ -1812,7 +1812,7 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
         "min_soc": 0.1,
         "max_soc": 1.0,
         "solar_only_charging": false,
-        "surplus_deadband_kw": 0.0,
+        "surplus_deadband_w": 0.0,
     }});
     let overrides = serde_json::json!({
         "EV": { "charging_strategy": nightly.to_string() },
@@ -2180,7 +2180,7 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
         "min_soc": 0.1,
         "max_soc": 1.0,
         "solar_only_charging": false,
-        "surplus_deadband_kw": 0.0,
+        "surplus_deadband_w": 0.0,
     }});
     let overrides = serde_json::json!({
         "Battery": { "bms_mode": bms_mode.to_string() }
@@ -2222,9 +2222,9 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
         panic!("the original battery seeds a battery manager");
     };
     let battery_cfg: hares_equipment::BatteryConfig = serde_json::from_value(serde_json::json!({
-        "capacity_kwh": 13.5,
-        "max_charge_kw": max_charge_kw,
-        "max_discharge_kw": max_discharge_kw,
+        "capacity_j": 13.5 * 3.6e6,
+        "max_charge_w": max_charge_kw * 1000.0,
+        "max_discharge_w": max_discharge_kw * 1000.0,
         "bms_mode": bms_mode.to_string(),
     }))
     .expect("minimal BatteryConfig");
@@ -2358,7 +2358,7 @@ fn user_bms_actor() -> Box<dyn hares_core::actor::Actor> {
                 min_soc: 0.1,
                 max_soc: 1.0,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             },
             grid_export_rule: GridExportRule::Unrestricted,
             max_charge_kw: 5.0,
@@ -2467,9 +2467,9 @@ fn actor_binding_recovers_when_its_equipment_arrives_later() {
     // The battery joins through the user entrance — registry-built and
     // initialized, mirroring the Python adapter's add path.
     let battery_cfg: hares_equipment::BatteryConfig = serde_json::from_value(serde_json::json!({
-        "capacity_kwh": 13.5,
-        "max_charge_kw": 5.0,
-        "max_discharge_kw": 5.0,
+        "capacity_j": 13.5 * 3.6e6,
+        "max_charge_w": 5000.0,
+        "max_discharge_w": 5000.0,
     }))
     .expect("minimal BatteryConfig");
     let eq_config =

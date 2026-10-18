@@ -235,7 +235,7 @@ class TestControlInjection:
         dw = _init_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
         )
-        bat = Battery("Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.3)
+        bat = Battery("Bat", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000, initial_soc=0.3)
         dw.add_battery(bat)
         dw.apply_control("Bat", ControlSignal.soc_target(target=0.9))
         for _ in range(5):
@@ -620,7 +620,7 @@ class TestSolarOverride:
         from hares import PV
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        dw.add_pv(PV("TestPV", 5.0, 30.0, 180.0))
+        dw.add_pv(PV("TestPV", capacity_w=5000, tilt=30.0, azimuth=180.0))
 
         surface_ids = dw.surface_ids()
         assert isinstance(surface_ids, list)
@@ -662,7 +662,7 @@ class TestBatteryLutInjection:
         from hares import Battery
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        bat = Battery("B1", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0)
+        bat = Battery("B1", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000)
         dw.add_battery(bat)
 
         # Set an OCV table (simpler than 4D charging curve LUT)
@@ -688,7 +688,7 @@ class TestEvLifecycle:
         from hares import EV
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68)
+        ev = EV("EV1", capacity_j=270000000, max_charging_power_w=7680)
         dw.add_ev(ev)
         assert "EV1" in dw.equipment_names()
 
@@ -720,7 +720,7 @@ class TestEvLifecycle:
         }
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68, charging_curve_lut=cc_cv_lut)
+        ev = EV("EV1", capacity_j=270000000, max_charging_power_w=7680, charging_curve_lut=cc_cv_lut)
         dw.add_ev(ev)
         assert "EV1" in dw.equipment_names()
         assert dw.has_equipment_lut("EV1", LutType.charging_curve())
@@ -740,7 +740,7 @@ class TestEvControlSignals:
         from hares import ControlSignal, EV, EvConnectionState
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=60.0, max_charging_kw=7.2, initial_soc=0.3)
+        ev = EV("EV1", capacity_j=216000000, max_charging_power_w=7200, initial_soc=0.3)
         dw.add_ev(ev)
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
         dw.step()
@@ -757,7 +757,7 @@ class TestEvControlSignals:
         # initializes at the (Denver, January, -18 C) outdoor ambient and
         # the usable capacity carries the reversible cold-temperature
         # contraction, shifting the debit.
-        ev = EV("EV1", capacity_kwh=75.0, initial_soc=0.5, battery_temp_c=20.0)
+        ev = EV("EV1", capacity_j=270000000, initial_soc=0.5, battery_temp_c=20.0)
         dw.add_ev(ev)
         # Disconnect then drive
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
@@ -779,7 +779,7 @@ class TestEvControlSignals:
         # residential-power and SOC behavior. Unpinned, the pack now
         # initializes at the (Denver, January) outdoor ambient and the
         # first steps are preconditioning, not charging.
-        ev = EV("EV1", capacity_kwh=60.0, initial_soc=0.3, battery_temp_c=20.0)
+        ev = EV("EV1", capacity_j=216000000, initial_soc=0.3, battery_temp_c=20.0)
         dw.add_ev(ev)
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
         dw.step()
@@ -801,7 +801,7 @@ class TestEvControlSignals:
         # Pack temperature pinned (see test_ev_away_charge_no_residential_power):
         # the subject is default home charging, not ambient-aware thermal init.
         ev = EV(
-            "EV1", capacity_kwh=60.0, max_charging_kw=7.2, initial_soc=0.3, battery_temp_c=20.0
+            "EV1", capacity_j=216000000, max_charging_power_w=7200, initial_soc=0.3, battery_temp_c=20.0
         )
         dw.add_ev(ev)
         for _ in range(5):
@@ -815,7 +815,7 @@ class TestEvControlSignals:
         from hares import ControlSignal, EV, EvConnectionState
 
         dw = _init_dwelling(duration_s=300, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=60.0, initial_soc=0.5,
+        ev = EV("EV1", capacity_j=216000000, initial_soc=0.5,
                 initial_connection_state=EvConnectionState.HomePluggedIn)
         dw.add_ev(ev)
         with pytest.raises((ValueError, RuntimeError)):
@@ -826,7 +826,7 @@ class TestEvControlSignals:
         from hares import ControlSignal, EV, EvConnectionState
 
         dw = _init_dwelling(duration_s=300, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=60.0, initial_soc=0.3,
+        ev = EV("EV1", capacity_j=216000000, initial_soc=0.3,
                 initial_connection_state=EvConnectionState.HomePluggedIn)
         dw.add_ev(ev)
         with pytest.raises((ValueError, RuntimeError)):
@@ -838,7 +838,7 @@ class TestEquipmentMutationRoundTrip:
         from hares import Battery
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        bat = Battery("B1", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0)
+        bat = Battery("B1", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000)
         dw.add_battery(bat)
         assert "B1" in dw.equipment_names()
 
@@ -860,7 +860,7 @@ class TestEquipmentMutationRoundTrip:
         from hares import Battery
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        bat = Battery("B1", 10.0)
+        bat = Battery("B1", capacity_j=36000000)
         dw.add_battery(bat)
         dw.update_equipment("B1", ocv_table=[(0.0, 3.0), (1.0, 4.2)])
 
@@ -935,10 +935,10 @@ class TestDerSimulationExplorer:
         dw.initialize()
 
         # Add PV
-        dw.add_pv(PV("PV", 6.0, 26.0, 180.0))
+        dw.add_pv(PV("PV", capacity_w=6000, tilt=26.0, azimuth=180.0))
 
         # Add Battery
-        bat = Battery("Battery", 13.5, max_charge_kw=5.0, max_discharge_kw=5.0)
+        bat = Battery("Battery", capacity_j=48600000, max_charge_w=5000, max_discharge_w=5000)
         dw.add_battery(bat)
 
         # Self-consumption control
@@ -948,7 +948,7 @@ class TestDerSimulationExplorer:
         )
 
         # Add EV
-        ev = EV("EV", capacity_kwh=75.0, max_charging_kw=7.68)
+        ev = EV("EV", capacity_j=270000000, max_charging_power_w=7680)
         dw.add_ev(ev)
 
         # Run simulation: the return value is the run's RunResult; the

@@ -16,10 +16,10 @@ pub struct BatteryConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
 
-    // Core energy / power
-    pub capacity_kwh: f64,
-    pub max_charge_kw: f64,
-    pub max_discharge_kw: f64,
+    // Core energy / power, SI (J, W)
+    pub capacity_j: f64,
+    pub max_charge_w: f64,
+    pub max_discharge_w: f64,
 
     // Pack topology
     pub n_series: Option<u32>,
@@ -73,10 +73,10 @@ pub struct BatteryConfig {
     pub grid_export_rule: Option<String>,
 
     // Reactive power / smart-inverter control (VPP / RL use cases).
-    // power_factor defaults to 1.0 (no reactive); inverter_capacity_kva
-    // defaults to max(max_charge_kw, max_discharge_kw) at init time.
+    // power_factor defaults to 1.0 (no reactive); inverter_capacity_va
+    // defaults to max(max_charge_w, max_discharge_w) at init time.
     pub power_factor: Option<f64>,
-    pub inverter_capacity_kva: Option<f64>,
+    pub inverter_capacity_va: Option<f64>,
 
     /// Whether the battery inverter can form an island bus during a utility
     /// outage. `None` (default) ⇒ true (grid-forming). Set `Some(false)` for
@@ -100,19 +100,19 @@ impl BatteryConfig {
     /// Validate fields for physical plausibility.
     pub fn validate(&self) -> crate::Result<()> {
         use hares_types::HaresError;
-        if !self.capacity_kwh.is_finite() || self.capacity_kwh <= 0.0 {
+        if !self.capacity_j.is_finite() || self.capacity_j <= 0.0 {
             return Err(HaresError::Equipment(
-                "battery capacity_kwh must be finite and > 0".to_string(),
+                "battery capacity_j must be finite and > 0".to_string(),
             ));
         }
-        if !self.max_charge_kw.is_finite() || self.max_charge_kw <= 0.0 {
+        if !self.max_charge_w.is_finite() || self.max_charge_w <= 0.0 {
             return Err(HaresError::Equipment(
-                "battery max_charge_kw must be finite and > 0".to_string(),
+                "battery max_charge_w must be finite and > 0".to_string(),
             ));
         }
-        if !self.max_discharge_kw.is_finite() || self.max_discharge_kw <= 0.0 {
+        if !self.max_discharge_w.is_finite() || self.max_discharge_w <= 0.0 {
             return Err(HaresError::Equipment(
-                "battery max_discharge_kw must be finite and > 0".to_string(),
+                "battery max_discharge_w must be finite and > 0".to_string(),
             ));
         }
         if let (Some(min), Some(max)) = (self.min_soc, self.max_soc)
@@ -222,11 +222,11 @@ impl BatteryConfig {
                 "battery power_factor must be finite and within (0, 1]".to_string(),
             ));
         }
-        if let Some(kva) = self.inverter_capacity_kva
+        if let Some(kva) = self.inverter_capacity_va
             && (!kva.is_finite() || kva <= 0.0)
         {
             return Err(HaresError::Equipment(
-                "battery inverter_capacity_kva must be finite and > 0".to_string(),
+                "battery inverter_capacity_va must be finite and > 0".to_string(),
             ));
         }
         Ok(())
@@ -252,21 +252,21 @@ impl hares_types::DescribeFields for BatteryConfig {
                 },
             ),
             (
-                "capacity_kwh",
+                "capacity_j",
                 hares_types::FieldMeta {
                     description: Some("the pack's capacity, kWh"),
                     ..Default::default()
                 },
             ),
             (
-                "max_charge_kw",
+                "max_charge_w",
                 hares_types::FieldMeta {
                     description: Some("the maximum charge power, kW"),
                     ..Default::default()
                 },
             ),
             (
-                "max_discharge_kw",
+                "max_discharge_w",
                 hares_types::FieldMeta {
                     description: Some("the maximum discharge power, kW"),
                     ..Default::default()
@@ -469,7 +469,7 @@ impl hares_types::DescribeFields for BatteryConfig {
                 },
             ),
             (
-                "inverter_capacity_kva",
+                "inverter_capacity_va",
                 hares_types::FieldMeta {
                     description: Some("the inverter's capacity, kVA"),
                     ..Default::default()
@@ -502,9 +502,9 @@ mod tests {
         BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 13.5,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: 13.5 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -533,7 +533,7 @@ mod tests {
             bms_mode: None,
             grid_export_rule: None,
             power_factor: None,
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
         }
@@ -550,16 +550,16 @@ mod tests {
         .unwrap();
         assert!(ec.is_typed());
         let recovered: BatteryConfig = ec.typed().unwrap();
-        assert_eq!(recovered.capacity_kwh, cfg.capacity_kwh);
-        assert_eq!(recovered.max_charge_kw, cfg.max_charge_kw);
+        assert_eq!(recovered.capacity_j, cfg.capacity_j);
+        assert_eq!(recovered.max_charge_w, cfg.max_charge_w);
     }
 
     #[test]
     fn battery_config_rejects_unknown_fields() {
         let json = serde_json::json!({
-            "capacity_kwh": 13.5,
-            "max_charge_kw": 5.0,
-            "max_discharge_kw": 5.0,
+            "capacity_j": 48600000.0,
+            "max_charge_w": 5000.0,
+            "max_discharge_w": 5000.0,
             "unknown_field": 42.0
         });
         let ec = EquipmentConfig::with_payload(
@@ -579,7 +579,7 @@ mod tests {
     #[test]
     fn battery_config_validate_rejects_zero_capacity() {
         let mut cfg = minimal_battery_config();
-        cfg.capacity_kwh = 0.0;
+        cfg.capacity_j = 0.0;
         assert!(cfg.validate().is_err());
     }
 
@@ -621,7 +621,7 @@ mod tests {
     #[test]
     fn battery_config_validate_rejects_negative_inverter_capacity() {
         let mut cfg = minimal_battery_config();
-        cfg.inverter_capacity_kva = Some(-1.0);
+        cfg.inverter_capacity_va = Some(-1.0);
         assert!(cfg.validate().is_err());
     }
 
@@ -629,7 +629,7 @@ mod tests {
     fn battery_config_validate_accepts_power_factor_and_inverter_capacity() {
         let mut cfg = minimal_battery_config();
         cfg.power_factor = Some(0.95);
-        cfg.inverter_capacity_kva = Some(7.0);
+        cfg.inverter_capacity_va = Some(7000.0);
         assert!(cfg.validate().is_ok());
     }
 

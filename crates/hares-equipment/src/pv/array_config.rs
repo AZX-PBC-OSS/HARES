@@ -152,7 +152,7 @@ impl PvArray {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PvArraySpec {
-    pub capacity_kw: f64,
+    pub capacity_w: f64,
     #[serde(default)]
     pub tilt_deg: Option<f64>,
     #[serde(default)]
@@ -173,9 +173,9 @@ impl PvArraySpec {
     /// Validate per-array fields for physical plausibility.
     pub fn validate(&self) -> crate::Result<()> {
         use hares_types::HaresError;
-        if !self.capacity_kw.is_finite() || self.capacity_kw <= 0.0 {
+        if !self.capacity_w.is_finite() || self.capacity_w <= 0.0 {
             return Err(HaresError::Equipment(
-                "PvArraySpec capacity_kw must be finite and > 0".to_string(),
+                "PvArraySpec capacity_w must be finite and > 0".to_string(),
             ));
         }
         if let Some(tilt) = self.tilt_deg {
@@ -313,7 +313,7 @@ mod tests {
 
     fn minimal_array_spec() -> PvArraySpec {
         PvArraySpec {
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt_deg: Some(30.0),
             azimuth_deg: Some(180.0),
             module_type: None,
@@ -332,14 +332,14 @@ mod tests {
     #[test]
     fn array_spec_validate_rejects_zero_capacity() {
         let mut spec = minimal_array_spec();
-        spec.capacity_kw = 0.0;
+        spec.capacity_w = 0.0;
         assert!(spec.validate().is_err());
     }
 
     #[test]
     fn array_spec_validate_rejects_negative_capacity() {
         let mut spec = minimal_array_spec();
-        spec.capacity_kw = -1.0;
+        spec.capacity_w = -1000.0;
         assert!(spec.validate().is_err());
     }
 
@@ -383,16 +383,16 @@ mod tests {
         let spec = minimal_array_spec();
         let json = serde_json::to_string(&spec).unwrap();
         let recovered: PvArraySpec = serde_json::from_str(&json).unwrap();
-        assert_eq!(recovered.capacity_kw, spec.capacity_kw);
+        assert_eq!(recovered.capacity_w, spec.capacity_w);
         assert_eq!(recovered.tilt_deg, spec.tilt_deg);
         assert_eq!(recovered.azimuth_deg, spec.azimuth_deg);
     }
 
     #[test]
     fn array_spec_defaults_absent_fields_to_none() {
-        let json = serde_json::json!({"capacity_kw": 3.0});
+        let json = serde_json::json!({"capacity_w": 3000.0});
         let spec: PvArraySpec = serde_json::from_value(json).unwrap();
-        assert_eq!(spec.capacity_kw, 3.0);
+        assert_eq!(spec.capacity_w, 3000.0);
         assert_eq!(spec.tilt_deg, None);
         assert_eq!(spec.azimuth_deg, None);
         assert_eq!(spec.module_type, None);

@@ -1,0 +1,194 @@
+engine_version: 2
+description: "One implementation ticket driven through implement, coverage, triage, red-team, review, and commit — the child flow the feature fan-out runs per ticket"
+recipe_summary: "implement, round-out-coverage, coverage-triage, red-team, review, commit"
+steps:
+  - id: implement
+    label: Implement
+    description: "Write production code and tests for this ticket; the ticket's validation hooks gate the work"
+    required: true
+    type: agent
+    agent_role: implement
+    charter: implement
+    challenge: implement
+    includes: [reflection-scaffold, prove-with-test]
+    must_pass:
+      - { from_key: validation_hooks }
+    default_next: round-out-coverage
+
+  - id: round-out-coverage
+    label: Round out coverage
+    description: "Add regression tests and shore up related test coverage"
+    required: true
+    type: agent
+    agent_role: coverage-round
+    challenge: coverage-round
+    output:
+      file: coverage-note.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [coverage_note_outcome]
+        properties:
+          coverage_note_outcome:
+            type: string
+            enum: [written, skipped]
+            description: "Whether a coverage note was written"
+    default_next: coverage-triage
+
+  - id: coverage-triage
+    label: Coverage triage
+    description: "Judge whether the test coverage is adequate or tests are missing"
+    required: true
+    type: agent
+    agent_role: triage
+    challenge: triage
+    includes: [reflection-scaffold, prove-with-test]
+    output:
+      file: coverage-note-quality.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [coverage_outcome, failing_tests]
+        properties:
+          coverage_outcome:
+            type: string
+            enum: [adequate, tests_missing, defect_found]
+            description: "Routing key — coverage adequate, tests missing, or coverage work surfaced a real defect in the implementation (not just a test gap)"
+          new_test_paths:
+            type: array
+            items: { type: string }
+            description: "Non-routing metadata: new test paths to track as regression tests"
+          failing_tests:
+            type: array
+            items:
+              type: object
+              properties:
+                command: { type: string }
+                path: { type: string }
+                name: { type: string }
+              required: [command]
+            description: "Well-known gate key: commands proving a claimed defect_found genuinely fails; empty for adequate/tests_missing"
+    must_fail:
+      - { from_key: failing_tests }
+    side_effects:
+      - when:
+          - field: coverage_outcome
+            eq: defect_found
+          - field: failing_tests
+            empty: true
+        action: append_decision_log
+        action_name: coverage_triage_defect_without_tests
+        note: "coverage_outcome is defect_found but failing_tests is empty — the claim carries no failing-test evidence and the must_fail gate had nothing to run"
+      - action: append_initiative_frontmatter
+        field: regression_tests
+        from: new_test_paths
+    edges:
+      - when:
+          field: coverage_outcome
+          eq: tests_missing
+        next: round-out-coverage
+        max_traversals: 5
+        inject: "coverage-note-quality.md marked coverage_outcome: tests_missing — it names the untested paths. Write tests covering exactly those paths; do not re-scope beyond what it flagged."
+      - when:
+          field: coverage_outcome
+          eq: defect_found
+        next: implement
+        max_traversals: 5
+        inject: "coverage-note-quality.md lists failing_tests — each is a reproducible defect, not a test artifact. Fix the underlying code so every listed test passes; never edit or delete the test to make it pass. round-out-coverage re-runs afterward to add the regression test once the fix lands."
+    default_next: red-team
+
+  - id: red-team
+    label: Red team
+    description: "Actively try to break what was just implemented with adversarial tests"
+    required: true
+    type: agent
+    agent_role: red-team
+    charter: red-team
+    challenge: red-team
+    includes: [reflection-scaffold, prove-with-test]
+    concerns: [red-teaming, test-quality, testing]
+    output:
+      file: red-team-note.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [red_team_outcome, failing_tests]
+        properties:
+          red_team_outcome:
+            type: string
+            enum: [clean, issues_found]
+            description: "Routing key — no adversarial gaps found, or genuine issues found"
+          failing_tests:
+            type: array
+            items:
+              type: object
+              properties:
+                command: { type: string }
+                path: { type: string }
+                name: { type: string }
+              required: [command]
+            description: "Well-known gate key: commands proving the red-team's findings genuinely fail"
+    must_fail:
+      - { from_key: failing_tests }
+    side_effects:
+      - when:
+          - field: red_team_outcome
+            eq: issues_found
+          - field: failing_tests
+            empty: true
+        action: append_decision_log
+        action_name: red_team_findings_without_tests
+        note: "red_team_outcome is issues_found but failing_tests is empty — the findings carry no failing-test evidence and the must_fail gate had nothing to run"
+    edges:
+      - when:
+          field: red_team_outcome
+          eq: issues_found
+        next: implement
+        max_traversals: 5
+        inject: "red-team-note.md lists failing_tests — each is a reproducible defect, not a test artifact. Fix the underlying code so every listed test passes; never edit or delete the test to make it pass."
+    default_next: review
+
+  - id: review
+    label: Review
+    description: "Adversarial review of this ticket's implementation against its spec: completeness, correctness, code quality"
+    required: true
+    type: agent
+    agent_role: review
+    charter: review-findings
+    challenge: review
+    includes: [reflection-scaffold, prove-with-test, severity-ladder]
+    concerns: [test-quality, security]
+    must_pass:
+      - { from_key: validation_hooks }
+    output:
+      file: review.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [review_outcome]
+        properties:
+          review_outcome:
+            type: string
+            enum: [clean, findings, test_gaps, halt, clean_with_nits_applied]
+            description: "Routing key — review verdict"
+    edges:
+      - when: { field: review_outcome, eq: findings }
+        next: implement
+        max_traversals: 5
+        inject: "review.md carries severity-laddered findings. Address every finding at the severity the ladder assigns — critical and major findings must be fixed; a minor finding may be deferred only with the justification recorded."
+      - when: { field: review_outcome, eq: test_gaps }
+        next: round-out-coverage
+        max_traversals: 5
+        inject: "review.md flagged test_gaps — it names the coverage review found missing. Add tests covering exactly what it named."
+      - when: { field: review_outcome, eq: halt }
+        next: halt
+    default_next: commit
+
+  - id: commit
+    label: Commit
+    description: "Commit this ticket's reviewed, verified changes"
+    required: true
+    type: agent
+    agent_role: commit
+    challenge: true
+    default_next: done

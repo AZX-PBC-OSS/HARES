@@ -304,7 +304,7 @@ pub fn ac_spec_from_py(ac: &PyAirConditioner) -> PyResult<EquipmentSpec> {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),

@@ -215,7 +215,7 @@ On battery and EV, reactive power is clamped to respect the inverter's apparent-
 - Supports `ReactiveSetpoint`, `PowerFactorSetpoint`, and `PowerSetpoint.reactive_power_kvar`
 - `PowerFactorSetpoint` clears the `q_setpoint_kvar` override to `None` (same as PV)
 - kVA clamp with active-power priority: real power is never reduced for reactive
-- Config fields in `BatteryConfig`: `power_factor` (default 1.0), `inverter_capacity_kva` (default `max(max_charge_kw, max_discharge_kw)`)
+- Config fields in `BatteryConfig` (SI): `power_factor` (default 1.0), `inverter_capacity_va` (default `max(max_charge_w, max_discharge_w)`)
 - Charging battery at pf < 1 produces positive Q (absorbing vars); discharging at pf < 1 produces negative Q (supplying vars baseline — follows the sign of P)
 
 ### EV
@@ -223,7 +223,7 @@ On battery and EV, reactive power is clamped to respect the inverter's apparent-
 - Supports `ReactiveSetpoint`, `PowerFactorSetpoint`, and `PowerSetpoint.reactive_power_kvar` — same smart-inverter var control as the battery (IEEE 1547-2018 / SAE J3072)
 - `PowerFactorSetpoint` clears the `q_setpoint_kvar` override to `None` (same as battery)
 - kVA clamp with active-power priority: real power is never reduced for reactive
-- Config fields in `EvConfig`: `power_factor` (default 1.0 for PFC unity bit-identical baseline), `charger_capacity_kva` (default `max(max_charging_power_kw, v2g_max_discharge_kw, v2l_max_discharge_kw)`)
+- Config fields in `EvConfig` (SI): `power_factor` (default 1.0 for PFC unity bit-identical baseline), `charger_capacity_va` (default `max(max_charging_power_w, v2g_max_discharge_w, v2l_max_discharge_w)`)
 - Charging EV at pf < 1 produces positive Q (absorbing vars); V2G/V2L discharge at pf < 1 produces negative Q (supplying vars — baseline sign follows P)
 - Checkpoint version 3 persists `q_setpoint_kvar` (`Option<f64>`) and `power_factor`; `reactive_power_kvar` resets to 0.0 on load (recomputed on next step)
 

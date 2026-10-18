@@ -307,19 +307,19 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
         .get("power_profile_month")
         .and_then(Value::as_array)
         .expect("month multipliers");
-    let max_kw = specs[0]
+    let max_w = specs[0]
         .parameters
-        .get("power_profile_max_kw")
+        .get("power_profile_max_w")
         .and_then(Value::as_f64)
-        .expect("max kw");
+        .expect("max W");
 
     let hour = env.current_time.hour() as usize;
     let month_idx = env.current_time.month0() as usize;
-    let expected_kw = weekday[hour].as_f64().expect("hourly fraction")
+    let expected_w = weekday[hour].as_f64().expect("hourly fraction")
         * month[month_idx].as_f64().expect("month fraction")
-        * max_kw;
+        * max_w;
 
-    assert!((ports.electrical.net_active_w() - expected_kw * 1000.0).abs() < 1e-9);
+    assert!((ports.electrical.net_active_w() - expected_w).abs() < 1e-9);
 }
 
 #[test]
@@ -348,11 +348,11 @@ fn io_injection_to_scheduled_load_step_constant_source() {
         Some("constant")
     );
 
-    let expected_kw = specs[0]
+    let expected_w = specs[0]
         .parameters
-        .get("power_constant_kw")
+        .get("power_constant_w")
         .and_then(Value::as_f64)
-        .expect("power_constant_kw should be injected");
+        .expect("power_constant_w should be injected");
 
     let config = equipment_config_from_spec(&specs[0]);
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Ventilation Fan");
@@ -365,7 +365,7 @@ fn io_injection_to_scheduled_load_step_constant_source() {
     eq.step(&env, Duration::from_secs(60), &mut ports)
         .expect("scheduled load step should pass");
 
-    assert!((ports.electrical.net_active_w() - expected_kw * 1000.0).abs() < 1e-9);
+    assert!((ports.electrical.net_active_w() - expected_w).abs() < 1e-9);
 }
 
 #[test]
@@ -395,7 +395,7 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
     let config = equipment_config_from_spec_with_extras(
         &specs[0],
         &[
-            ("active_power_kw", 1.5.into()),
+            ("active_power_w", 1500.0.into()),
             ("active_duration_s", 60.0.into()),
         ],
         &[],

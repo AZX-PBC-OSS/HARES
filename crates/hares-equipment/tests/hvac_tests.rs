@@ -645,7 +645,7 @@ fn hvac_port_contributions_are_correct_sign() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -3663,7 +3663,7 @@ fn update_mode_cooling_transition() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -3782,7 +3782,7 @@ fn ac_core_output_carries_cop() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -3902,7 +3902,7 @@ fn speed_staging_keys_present_in_telemetry() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -3990,7 +3990,7 @@ fn single_speed_duty_cycle_equals_part_load_ratio() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -4070,7 +4070,7 @@ fn schedule_setpoint_keys_reflect_static_when_no_schedule_source() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -4460,7 +4460,7 @@ fn ac_sensible_thermal_port_strongly_negative_at_sf1() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -4528,7 +4528,7 @@ fn ac_electrical_halved_thermal_unscaled_at_half_sf() {
                 hysteresis_c: None,
                 airflow_m3_s_per_w: None,
                 fraction_load_served: Some(sf),
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
                 duct: DuctConfig::default(),
@@ -4783,10 +4783,10 @@ fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
 // ---------------------------------------------------------------------------
 #[test]
 fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
-    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+    const ZONE_CAPACITANCE_J_PER_K: f64 = 2.0 * 3.6e6;
 
     let mut cfg = electric_furnace_config("furnace_release");
-    cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
+    cfg.zone_capacitance_j_per_k = ZONE_CAPACITANCE_J_PER_K;
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Furnace", cfg.clone()).unwrap();
     // Zone above the heating setpoint: the thermostat idles in Deadband,
@@ -4841,7 +4841,7 @@ fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
     let ebm_min = t.get(tk::EBM_MIN_ENERGY_KWH).unwrap_or(f64::NAN);
     let ebm_max = t.get(tk::EBM_MAX_ENERGY_KWH).unwrap_or(f64::NAN);
     let range = ebm_max - ebm_min;
-    let expected = ZONE_CAPACITANCE_KWH_PER_K * ThermostatConfig::default().hysteresis_c;
+    let expected = ZONE_CAPACITANCE_J_PER_K / 3.6e6 * ThermostatConfig::default().hysteresis_c;
     assert!(
         (range - expected).abs() < 1e-9,
         "the EBM energy window must stay capacitance * hysteresis ({expected} kWh), got {range}"
@@ -4852,9 +4852,9 @@ fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
 /// rejected at application; the unit then still heats with an open window.
 #[test]
 fn sub_band_deadbands_are_rejected_and_the_unit_keeps_heating() {
-    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+    const ZONE_CAPACITANCE_J_PER_K: f64 = 2.0 * 3.6e6;
     let mut cfg = electric_furnace_config("furnace_subband");
-    cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
+    cfg.zone_capacitance_j_per_k = ZONE_CAPACITANCE_J_PER_K;
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Furnace", cfg.clone()).unwrap();
     eq.init(&cfg, &env_with_zone_temp(22.0)).unwrap();
@@ -4897,7 +4897,7 @@ fn sub_band_deadbands_are_rejected_and_the_unit_keeps_heating() {
         .telemetry()
         .get(tk::EBM_MAX_ENERGY_KWH)
         .unwrap_or(f64::NAN);
-    let expected = ZONE_CAPACITANCE_KWH_PER_K * ThermostatConfig::default().hysteresis_c;
+    let expected = ZONE_CAPACITANCE_J_PER_K / 3.6e6 * ThermostatConfig::default().hysteresis_c;
     assert!(
         (ebm_max - ebm_min - expected).abs() < 1e-9,
         "the EBM window must equal capacitance * default hysteresis ({expected} kWh), got {}",
@@ -4924,7 +4924,7 @@ fn configured_hysteresis_below_a_thermostat_band_is_rejected() {
             },
         )
         .and_then(|mut cfg| {
-            cfg.zone_capacitance_kwh_per_k = 2.0;
+            cfg.zone_capacitance_j_per_k = 2.0 * 3.6e6;
             let registry = EquipmentRegistry::new();
             let mut eq = registry.create("ASHP Heater", cfg.clone())?;
             eq.init(&cfg, &env_with_zone_temp(15.0))
@@ -4942,7 +4942,7 @@ fn configured_hysteresis_below_a_thermostat_band_is_rejected() {
 /// one.
 #[test]
 fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
-    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+    const ZONE_CAPACITANCE_J_PER_K: f64 = 2.0 * 3.6e6;
     const BAND_C: f64 = 0.25;
     let cases = [
         ("Electric Furnace", electric_furnace_config("ef_band")),
@@ -4955,7 +4955,7 @@ fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
     let env_warm = env_with_zone_temp(22.0);
     let env_cold = env_with_zone_temp(18.0);
     for (kind, mut cfg) in cases {
-        cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
+        cfg.zone_capacitance_j_per_k = ZONE_CAPACITANCE_J_PER_K;
         let mut continuous = registry.create(kind, cfg.clone()).unwrap();
         continuous.init(&cfg, &env_warm).unwrap();
         continuous
@@ -4993,7 +4993,7 @@ fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
             *window =
                 t.get(tk::EBM_MAX_ENERGY_KWH).unwrap() - t.get(tk::EBM_MIN_ENERGY_KWH).unwrap();
         }
-        let expected = ZONE_CAPACITANCE_KWH_PER_K * BAND_C;
+        let expected = ZONE_CAPACITANCE_J_PER_K / 3.6e6 * BAND_C;
         assert!(
             (windows[0] - expected).abs() < 1e-9 && windows[1] == windows[0],
             "{kind}: continuous window {} kWh, restored {} kWh, expected {expected}",
@@ -5052,7 +5052,7 @@ fn a_failed_hvac_step_leaves_no_partial_state() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -5122,7 +5122,7 @@ fn a_failed_hvac_step_leaves_no_partial_state() {
     ];
     let registry = EquipmentRegistry::new();
     for (kind, mut cfg, signal, env) in cases {
-        cfg.zone_capacitance_kwh_per_k = 1e-15;
+        cfg.zone_capacitance_j_per_k = 3.6e-9;
         let mut eq = registry.create(kind, cfg.clone()).unwrap();
         eq.init(&cfg, &env).unwrap();
         eq.apply_control(signal).unwrap();
@@ -5157,7 +5157,7 @@ fn a_failed_hvac_step_leaves_no_partial_state() {
 #[test]
 fn a_step_without_its_zone_errors_instead_of_assuming_a_temperature() {
     let mut cfg = electric_baseboard_config("bb_no_zone");
-    cfg.zone_capacitance_kwh_per_k = 2.0;
+    cfg.zone_capacitance_j_per_k = 2.0 * 3.6e6;
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Baseboard", cfg.clone()).unwrap();
     eq.init(&cfg, &env_with_zone_temp(18.0)).unwrap();

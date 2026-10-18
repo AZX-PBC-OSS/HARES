@@ -78,7 +78,8 @@ def test_non_finite_ocv_table_fails_loudly_at_the_boundary(bad: float) -> None:
     dwelling = make_dwelling()
     dwelling.add_battery(
         hares.Battery(
-            "Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.5
+            "Bat",
+            capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000, initial_soc=0.5
         )
     )
     with pytest.raises((TypeError, ValueError)):
@@ -101,7 +102,8 @@ def test_negative_infinite_ocv_table_is_already_rejected() -> None:
     dwelling = make_dwelling()
     dwelling.add_battery(
         hares.Battery(
-            "Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.5
+            "Bat",
+            capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000, initial_soc=0.5
         )
     )
     with pytest.raises((TypeError, ValueError)):
@@ -118,7 +120,8 @@ def test_finite_ocv_table_attaches() -> None:
     dwelling = make_dwelling()
     dwelling.add_battery(
         hares.Battery(
-            "Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.5
+            "Bat",
+            capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000, initial_soc=0.5
         )
     )
     dwelling.set_equipment_lut(

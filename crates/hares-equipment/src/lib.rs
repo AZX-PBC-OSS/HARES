@@ -93,7 +93,7 @@ pub use pv::{PvConfig, PvOrientation};
 pub use raw_params::{IndexCount, ParamForm, ParamKind, RawParam, RawParams, raw_params_for_class};
 pub use registry::{
     CANONICAL_EQUIPMENT_NAMES, ClassDeclaredSurface, EquipmentFactory, EquipmentRegistry,
-    class_declared_surface,
+    class_declared_surface, config_type_for_class,
 };
 pub use ventilation::VentilationConfig;
 pub use water_heater::DHW_DEMAND_LOOP;
@@ -146,20 +146,6 @@ pub(crate) fn linear_temp_derate(temp_c: f64, temp_min: f64, temp_max: f64) -> f
             (temp_c - temp_min) / span
         }
     }
-}
-
-/// Kilowatt-hours to joules, the resolved-parameter read-back's kWh → SI
-/// conversion: the config fields still stored in kWh report through this
-/// until the equipment-config row moves them to SI.
-#[inline]
-pub(crate) fn kwh_to_j(kwh: f64) -> f64 {
-    uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(kwh).get::<uom::si::energy::joule>()
-}
-
-/// Kilowatts to watts, the read-back's kW → SI conversion.
-#[inline]
-pub(crate) fn kw_to_w(kw: f64) -> f64 {
-    uom::si::f64::Power::new::<uom::si::power::kilowatt>(kw).get::<uom::si::power::watt>()
 }
 
 /// How an equipment's expected mean real power can be determined for

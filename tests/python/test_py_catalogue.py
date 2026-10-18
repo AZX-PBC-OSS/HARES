@@ -66,7 +66,7 @@ def dwelling_with_battery():
     from hares import Battery
 
     dw = build(result_config())
-    dw.add_battery(Battery("Battery", 13.5, max_charge_kw=5.0, max_discharge_kw=5.0))
+    dw.add_battery(Battery("Battery", capacity_j=48600000, max_charge_w=5000, max_discharge_w=5000))
     return dw
 
 

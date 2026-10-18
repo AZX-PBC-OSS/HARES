@@ -1,0 +1,143 @@
+engine_version: 2
+kind: spec
+description: "Define requirements and design without implementation"
+recipe_summary: "discovery, spec, check-consistency, critique, revise"
+start:
+  next: discovery
+
+steps:
+  - id: discovery
+    label: Discovery
+    description: "Understand the problem, stakeholders, and constraints before designing"
+    required: true
+    type: agent
+    agent_role: research
+    charter: research
+    challenge: research
+    includes: [reflection-scaffold, artifact-alignment]
+    output:
+      file: discovery.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [passing_commands]
+        properties:
+          passing_commands:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              properties:
+                command: { type: string }
+              required: [command]
+            description: "Verification commands discovered from project configuration (test, typecheck, lint, format-check, build)"
+    default_next: spec
+
+  - id: spec
+    label: Specification
+    description: "Write a structured specification with requirements and acceptance criteria"
+    required: true
+    type: agent
+    agent_role: spec
+    charter: spec
+    challenge: spec
+    includes: [reflection-scaffold, artifact-alignment, interactive-protocol]
+    output:
+      file: spec.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [spec_outcome]
+        properties:
+          spec_outcome:
+            type: string
+            enum: [complete, needs_clarification]
+            description: "Routing key — spec complete or needs more discovery/clarification"
+    edges:
+      - when: { field: spec_outcome, eq: needs_clarification }
+        next: discovery
+        max_traversals: 5
+        inject: "resolve the open questions the spec surfaced before re-drafting"
+    default_next: check-consistency
+
+  - id: check-consistency
+    label: Check consistency
+    description: "Verify all prior artifacts are aligned: no contradictions, no drifted duplications, no gaps between artifacts. Resolve conflicts with the operator and update artifacts to cede authority."
+    required: true
+    skippable: true
+    type: agent
+    agent_role: check-consistency
+    challenge: check-consistency
+    includes: [reflection-scaffold, artifact-alignment, interactive-protocol]
+    output:
+      file: consistency-report.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [consistency_outcome]
+        properties:
+          consistency_outcome:
+            type: string
+            enum: [aligned, contradictions_found]
+            description: "Routing key — artifacts aligned or contradictions requiring spec revision"
+    edges:
+      - when: { field: consistency_outcome, eq: contradictions_found }
+        next: spec
+        max_traversals: 5
+        inject: "resolve the contradictions the consistency check found in the spec"
+    default_next: critique
+
+  - id: critique
+    label: Critique
+    description: "Adversarial review of the specification for completeness and consistency"
+    required: true
+    type: agent
+    agent_role: critique
+    challenge: critique
+    includes: [reflection-scaffold, severity-ladder]
+    output:
+      file: critique.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [critique_outcome]
+        properties:
+          critique_outcome:
+            type: string
+            enum: [clean, findings, halt]
+            description: "Routing key — critique verdict"
+    edges:
+      - when: { field: critique_outcome, eq: findings }
+        next: revise
+        max_traversals: 5
+        inject: "address the critique findings in the spec"
+      - when: { field: critique_outcome, eq: halt }
+        next: halt
+    default_next: revise
+
+  - id: revise
+    label: Revise
+    description: "Address critique findings and finalise the specification"
+    required: true
+    type: agent
+    agent_role: spec
+    challenge: spec
+    includes: [reflection-scaffold, artifact-alignment, interactive-protocol]
+    output:
+      file: spec.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [spec_outcome]
+        properties:
+          spec_outcome:
+            type: string
+            enum: [complete, needs_clarification]
+    must_pass:
+      - { from_key: passing_commands }
+    edges:
+      - when: { field: spec_outcome, eq: needs_clarification }
+        next: discovery
+        max_traversals: 5
+        inject: "resolve the open questions the revision surfaced before re-drafting"
+    default_next: done

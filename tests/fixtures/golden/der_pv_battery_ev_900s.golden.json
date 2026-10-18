@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "a66ffa8a583739eeb3924cf9db8bb6480e15e257",
+  "git_head": "d12a8c38aa7736089fea3d9b032f3b6e3609f56a",
   "git_dirty": true,
   "metrics": [
     {
@@ -159,16 +159,16 @@
         "value": 168.0
       },
       "total_energy_kwh.gross_consumption_kwh": {
-        "bits": "0x406d4aec141e5c2f",
-        "value": 234.34131818704324
+        "bits": "0x406d4aec141e5c2e",
+        "value": 234.3413181870432
       },
       "total_energy_kwh.gross_pv_generation_kwh": {
         "bits": "0x4063614058f3880a",
         "value": 155.0391049152825
       },
       "total_energy_kwh.net_energy_kwh": {
-        "bits": "0x4053d3577655a836",
-        "value": 79.30221327176045
+        "bits": "0x4053d3577655a833",
+        "value": 79.30221327176041
       },
       "total_energy_kwh.per_end_use": {
         "battery": {
@@ -176,8 +176,8 @@
           "value": 2.399650282444434
         },
         "ev": {
-          "bits": "0x40548ae6b231558d",
-          "value": 82.17033057039062
+          "bits": "0x40548ae6b231558c",
+          "value": 82.1703305703906
         },
         "hvac_cooling": {
           "bits": "0x4021337e740dfeac",
@@ -508,14 +508,14 @@
         },
         {
           "name": "Total Electric Power (kW)",
-          "digest": "c4cd108e0a2b3043ddf23fdee25e61045d9ac5d9ee6e9d426dfece713798420e",
+          "digest": "08dd12bf28342ec299d703bf315d71a41abe528cd6a8aa36e5c203fe6ab2345c",
           "blocks": [
-            "eb2f54f97d197b30e1d2753147b1ee640108c5930cd829d7939567d9b8fddb8d",
+            "94d632370904df59dcbbc3f94b6683ebda83815637da04517f8a5a0da33e2d71",
             "6b02f467a3474818941082b6623a7413028ba122983f29770bb7aee656fa8d22",
             "b869e6f43ef62b1f52752e244ff375d8e0112d5e7097d6951203db20043b23f1",
-            "5cd1c1b21c3a618ffa5b384480d8e9ca2a22a64425a9f03b9e31dee7d03521e7",
+            "85034c2f98fc6d24fec899ad85670bd76e97d3e34b38593d179f712900b3e35d",
             "f0bcc65662e6323a622fc4a1adcb221128067779c0019ad99d97436a6d54c638",
-            "e1fad8899787e19770328616aede4611ebe2eb772834dde2075e253d24eafb70",
+            "dd0b43ef8c0f25119503c3c5159537652194eea464a5c7cb044147e008f4a1a2",
             "a76c1c5f4cea82e5e75606796897aa88bc7c10a7bdc9b6742086fcc1f9724b8c"
           ]
         },
@@ -755,14 +755,14 @@
         },
         {
           "name": "Electric Vehicle Electric Power (kW)",
-          "digest": "dca6e89abbc47c1c54286f8af098df765bdfd183c3e92b72b8246f2648a85f5a",
+          "digest": "1e4c6060affc074e07266487dcbd28834f0533bfdc1fe27222910f95d1fb6fc3",
           "blocks": [
-            "4ec11b456398341150732eacc24fd9268b4d5103e730bce7ca2854590ce51c68",
+            "c6e00ef75694e9e9ee2e4ca4284312fde5a68f6a0b77da5aeed7b1ad579557c2",
             "a475a25a7ef59b91f714a317988785b04888563641b9989dce231c446895ab3b",
             "ec2941d3042799324c258639faf0e16545a06eb8c81bde3818a635841fcb1959",
-            "a60a333aa4705393cde1764591a7444ff251be5cb20e0ffa8c621a5b5fb3707d",
+            "5f372c2ef26bcac164ec7a921d3da601841dbf816bb7f5b156362782b2a45252",
             "8cf353edb5e02e6138709640e90fa5acedb65e6411cf93dbc5663f8d944df332",
-            "d3ae4aab404ea2408c35db5de7483fd4e347cfa3ffe73bca19407e6290ae7e06",
+            "5b456b2802d3e2394db11071989f1e8bb4617650078de382adf0d794e32f5148",
             "e38142efd2ce96c276f22ab872d8f28c1a4118d131bccdfe056d9f021d5042b2"
           ]
         },
@@ -898,14 +898,14 @@
         },
         {
           "name": "EV End Use Electric Power (kW)",
-          "digest": "dca6e89abbc47c1c54286f8af098df765bdfd183c3e92b72b8246f2648a85f5a",
+          "digest": "1e4c6060affc074e07266487dcbd28834f0533bfdc1fe27222910f95d1fb6fc3",
           "blocks": [
-            "4ec11b456398341150732eacc24fd9268b4d5103e730bce7ca2854590ce51c68",
+            "c6e00ef75694e9e9ee2e4ca4284312fde5a68f6a0b77da5aeed7b1ad579557c2",
             "a475a25a7ef59b91f714a317988785b04888563641b9989dce231c446895ab3b",
             "ec2941d3042799324c258639faf0e16545a06eb8c81bde3818a635841fcb1959",
-            "a60a333aa4705393cde1764591a7444ff251be5cb20e0ffa8c621a5b5fb3707d",
+            "5f372c2ef26bcac164ec7a921d3da601841dbf816bb7f5b156362782b2a45252",
             "8cf353edb5e02e6138709640e90fa5acedb65e6411cf93dbc5663f8d944df332",
-            "d3ae4aab404ea2408c35db5de7483fd4e347cfa3ffe73bca19407e6290ae7e06",
+            "5b456b2802d3e2394db11071989f1e8bb4617650078de382adf0d794e32f5148",
             "e38142efd2ce96c276f22ab872d8f28c1a4118d131bccdfe056d9f021d5042b2"
           ]
         },
@@ -1028,14 +1028,14 @@
         },
         {
           "name": "actor:BatteryManagementActor:Battery:load_kw",
-          "digest": "a61b4b3808528375156cc3e10ee5c180dabdda12a6ee2df1501368cec69ca217",
+          "digest": "de963073ba01369196a7bb5ac84891db53abed5f5c5106d4f59307bcddc9413d",
           "blocks": [
             "f8a5f9d38126fed39087ebda01b0964d08c345fad86078e752f66d38abdea696",
             "21992df4de22baa470c0321e27e8656219e95aa3feb3221819e967acee020d31",
             "9111a90faa13c63f0364d322070cd09802b9698d5211f7183bcaa2c318e6d603",
-            "bf97b4aecd6ff71ed5e7c61aa3e9be1ae548ccf9499b98bbfc8b9ebfe858b561",
+            "39646368674d0058bbdc3316c7262f270b9104ec86e53ece48d225bb60e7e365",
             "4de0368753068508b5963b2b4658d238217d509875e463a721d6afbd4237899c",
-            "fb02a86e48f6527753a687dfb82d9d98533883d0e18eca8c897c53d6f26a7249",
+            "4f5b6e0127246b21ecd7e4626d76e2044b8619a8c9f419a080e5b740b88a48b0",
             "b6580cc5e81d97d8a77b960e80bcc6a34e58fb815569f36495cfa066dac10eee"
           ]
         },
@@ -1067,14 +1067,14 @@
         },
         {
           "name": "actor:EvDriver:Electric Vehicle:charge_kw",
-          "digest": "e4f772adbdac05c1b3bdc520cf0acb31014d5957a621a1f387e9592402b19243",
+          "digest": "f72800a8758e70c0417c341947a22523b2d0bd5c5bc1e2e9de89b10d66bd75b7",
           "blocks": [
-            "08add17bdaacedc6d9e286cf9b5b22ee4b7028a93e2583507a877eeb41f5fef4",
+            "6d61a3d28a7aebff2998fc334ad873216ec50f5b9deda67f84d058a37881c4a6",
             "8716a0a6922d11686040a1eb0d3d0f10d21da74ff29e9d7248221b868434cd0b",
             "8bb2e2394a828f4ee408d322cb500c4771e34e874e36a62fe90b4aa0329d33cb",
-            "64c511c9f0b06b80522a26e8bde350a979d41592c896d8ca4e82a2e7761d71e9",
+            "ccc5a850905c1ab598de0f763aeb8296fb6860722a4c254544478cc118c1e79c",
             "e1e6f3e51d2e50de96005491ae29f77c524d5f96645cb24eb7ea36fb8a5fcedc",
-            "a236e3b10bfbe98fbdac8f7a168caa4f1bd2339d9f928623e3b922a7f94f902b",
+            "f2d83cd96cdca6ca1f4bad2270877c7ffeab7603199d860bde3497b2eb7ffcab",
             "3a7fb04742ceb26b4248e0911ebb5a184831f38f8d2d7d6dc7abb7bfd0768215"
           ]
         },
@@ -1158,14 +1158,14 @@
         },
         {
           "name": "actor:EvDriver:Electric Vehicle:soc",
-          "digest": "3f7312c4766092e6ace71f83a41d470ee2aed9ad9c940cfa0fa62e944439a449",
+          "digest": "fe9a359cef817dc6971e419d19ce6e6ab5089929a773afbad610087a741f3f05",
           "blocks": [
-            "c566be88d61ee88308b158d9ca7f5adefaca3907e1b7d240b599d203cc5cf4e4",
+            "36aa7c32d09953cf55fda692b21a5784f415f8a060e4727512e49db6cf530446",
             "2d917ccb9710375ba46e9da01cb5191370f9ae7f70fcf0846d65e7ee342ca934",
             "fda82b53e6c17ce824c407e9ef30f4906602c5092e8c2465c02a65833f7194b4",
-            "ef0aef0e5c2789dab047ef4f26dd9e427a425be7789255c041716540d7b8d2e9",
+            "b56e216171305c2adf34796f5df42383dc5b835c8d374c3c0ca2d481a904c08c",
             "89a4a326e7a0849185bc595b3584d5cd83eaa7658b81f422e1a609f3f08347d2",
-            "787a464fa3241bff9775ca701cd449d9783f967079e693bfface8da8abfca4ed",
+            "8b146bd319b9826aaf1dd9fa9b79610ec58f89a7bcd9df1e82ab4c56c08bd8fc",
             "3867c07438bbfa14dde922d0a8e3f7b6ffc2aad4dca43951d90fc9d4137a686e"
           ]
         },

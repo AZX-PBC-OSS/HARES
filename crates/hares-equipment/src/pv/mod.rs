@@ -198,6 +198,10 @@ pub struct PV {
     core_output: CoreOutput,
     arrays: Vec<PvArray>,
     surface_resolution_deg: f64,
+    /// The config's nameplate as it entered, in W (SI): the read-back
+    /// reports it directly, so the stored unit and the arrays' kW
+    /// working values stay separate.
+    capacity_w: f64,
     inverter_efficiency: f64,
     /// AC output cap imposed by physical inverter size (DC/AC ratio scenarios).
     inverter_capacity_kw: Option<f64>,
@@ -315,6 +319,7 @@ impl PV {
             core_output: CoreOutput::default(),
             arrays,
             surface_resolution_deg: DEFAULT_SURFACE_RESOLUTION_DEG,
+            capacity_w: 0.0,
             inverter_efficiency: DEFAULT_INVERTER_EFFICIENCY,
             inverter_capacity_kw: None,
             power_factor: DEFAULT_POWER_FACTOR,
@@ -642,6 +647,7 @@ impl PV {
         let c = config.require_typed::<PvConfig>("PV")?;
         c.validate()?;
 
+        self.capacity_w = c.capacity_w;
         self.surface_resolution_deg = c.surface_resolution_deg();
         if !self.surface_resolution_deg.is_finite() || self.surface_resolution_deg <= 0.0 {
             return Err(HaresError::Equipment(
@@ -654,7 +660,7 @@ impl PV {
             Some(specs) => specs.as_slice(),
             None => {
                 single_array = [PvArraySpec {
-                    capacity_kw: c.capacity_kw,
+                    capacity_w: c.capacity_w,
                     tilt_deg: c.tilt_deg,
                     azimuth_deg: c.azimuth_deg,
                     module_type: c.module_type.clone(),
@@ -686,7 +692,11 @@ impl PV {
                 let array = PvArray {
                     tilt_deg: orientation.tilt_deg,
                     azimuth_deg: orientation.azimuth_deg,
-                    capacity_kw: spec.capacity_kw,
+                    // One conversion per array at construction: the config
+                    // enters in W (SI), the module still computes in kW
+                    // until the run-state commit.
+                    capacity_kw: uom::si::f64::Power::new::<uom::si::power::watt>(spec.capacity_w)
+                        .get::<uom::si::power::kilowatt>(),
                     noct_c: spec.noct_c.unwrap_or(array_type.noct_c()),
                     module_type,
                     array_type,
@@ -704,7 +714,9 @@ impl PV {
             .unwrap_or(DEFAULT_INVERTER_EFFICIENCY)
             .clamp(0.0, 1.0);
 
-        self.inverter_capacity_kw = c.inverter_capacity_kw;
+        self.inverter_capacity_kw = c.inverter_capacity_w.map(|w| {
+            uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
+        });
         // PvConfig::validate() (called above) rejects any configured
         // power_factor that is non-finite or outside (0, 1], matching
         // battery/EV config validation — a misconfigured pf fails at init
@@ -959,7 +971,7 @@ impl Equipment for PV {
     fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
         vec![hares_types::ResolvedParameter::new(
             "nameplate_w",
-            crate::kw_to_w(self.total_dc_capacity()),
+            self.capacity_w,
             hares_types::Unit::Watt,
         )]
     }
@@ -1650,7 +1662,7 @@ mod tests {
         PvConfig {
             equipment_id: Some(29),
             zone_id: None,
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt_deg: Some(30.0),
             azimuth_deg: Some(180.0),
             module_type: None,
@@ -1658,7 +1670,7 @@ mod tests {
             array_type: None,
             system_losses_fraction: Some(DEFAULT_SYSTEM_LOSSES_FRACTION),
             inverter_efficiency: Some(0.96),
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: Some(DEFAULT_POWER_FACTOR),
             surface_resolution_deg: Some(5.0),
             sam_lut_path: None,
@@ -1954,10 +1966,10 @@ mod tests {
             "PV Multi".to_string(),
             "PV".to_string(),
             PvConfig {
-                capacity_kw: 5.0,
+                capacity_w: 5000.0,
                 arrays: Some(vec![
                     PvArraySpec {
-                        capacity_kw: 3.0,
+                        capacity_w: 3000.0,
                         tilt_deg: Some(30.0),
                         azimuth_deg: Some(180.0),
                         module_type: None,
@@ -1967,7 +1979,7 @@ mod tests {
                         attached_boundary_id: None,
                     },
                     PvArraySpec {
-                        capacity_kw: 2.0,
+                        capacity_w: 2000.0,
                         tilt_deg: Some(20.0),
                         azimuth_deg: Some(90.0),
                         module_type: None,
@@ -2008,6 +2020,8 @@ mod tests {
         pv.init(&cfg, &env).unwrap();
 
         assert_eq!(pv.arrays.len(), 2);
+        // One conversion per array at construction: the W configs' kW
+        // working values.
         assert_eq!(pv.arrays[0].capacity_kw, 3.0);
         assert_eq!(pv.arrays[1].capacity_kw, 2.0);
         assert_eq!(pv.arrays[0].surface_id, Some(sid0));
@@ -2029,9 +2043,9 @@ mod tests {
             "PV Multi 360".to_string(),
             "PV".to_string(),
             PvConfig {
-                capacity_kw: 3.0,
+                capacity_w: 3000.0,
                 arrays: Some(vec![PvArraySpec {
-                    capacity_kw: 3.0,
+                    capacity_w: 3000.0,
                     tilt_deg: Some(30.0),
                     azimuth_deg: Some(360.0),
                     module_type: None,
@@ -2169,7 +2183,7 @@ mod tests {
         source.init(&cfg, &env).unwrap();
         source
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 3.0,
+                active_power_kw: 3.0000,
                 reactive_power_kvar: Some(0.0),
                 min_soc: None,
                 max_soc: None,
@@ -2233,7 +2247,7 @@ mod tests {
             PvConfig {
                 equipment_id: None,
                 zone_id: None,
-                capacity_kw: 4.2,
+                capacity_w: 4200.0,
                 tilt_deg: Some(27.0),
                 azimuth_deg: Some(200.0),
                 module_type: Some("thin_film".to_string()),
@@ -2241,7 +2255,7 @@ mod tests {
                 array_type: None,
                 system_losses_fraction: Some(DEFAULT_SYSTEM_LOSSES_FRACTION),
                 inverter_efficiency: Some(0.96),
-                inverter_capacity_kw: None,
+                inverter_capacity_w: None,
                 power_factor: Some(DEFAULT_POWER_FACTOR),
                 surface_resolution_deg: Some(5.0),
                 sam_lut_path: None,
@@ -2265,6 +2279,8 @@ mod tests {
         pv.init(&cfg, &env).unwrap();
         assert_eq!(pv.arrays.len(), 1);
         assert_eq!(pv.arrays[0].module_type, ModuleType::ThinFilm);
+        // One conversion at construction: 4200 W enters, the kW working
+        // value is 4.2.
         assert_eq!(pv.arrays[0].capacity_kw, 4.2);
     }
 
@@ -2389,7 +2405,7 @@ mod tests {
         // Set inverter_capacity_kw = 3.0 to force clipping.
         let mut cfg = base_pv_typed_config();
         cfg.equipment_id = Some(1);
-        cfg.inverter_capacity_kw = Some(3.0);
+        cfg.inverter_capacity_w = Some(3000.0);
         let cfg =
             EquipmentConfig::from_typed("PV Clip".to_string(), "PV".to_string(), cfg).unwrap();
 
@@ -2651,7 +2667,7 @@ mod tests {
         // PowerSetpoint with active_power_kw=3.0 and reactive_power_kvar=Some(0.0)
         // should force Q to zero.
         pv.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0,
+            active_power_kw: 3.0000,
             reactive_power_kvar: Some(0.0),
             min_soc: None,
             max_soc: None,
@@ -2761,7 +2777,7 @@ mod tests {
     fn raw_config_rejected_in_init() {
         let mut raw = HashMap::new();
         raw.insert("equipment_id".to_string(), 4.0.into());
-        raw.insert("capacity_kw".to_string(), (-1.0_f64).into());
+        raw.insert("capacity_w".to_string(), (-1000.0_f64).into());
         raw.insert("tilt_deg".to_string(), 30.0.into());
         raw.insert("azimuth_deg".to_string(), 180.0.into());
         raw.insert("surface_resolution_deg".to_string(), 5.0.into());
@@ -3122,7 +3138,10 @@ mod tests {
         typed.equipment_id = Some(30);
         typed.inverter_efficiency = Some(1.0);
         typed.system_losses_fraction = Some(0.0);
-        typed.inverter_capacity_kw = Some(inv_cap_kw);
+        typed.inverter_capacity_w = Some(
+            uom::si::f64::Power::new::<uom::si::power::kilowatt>(inv_cap_kw)
+                .get::<uom::si::power::watt>(),
+        );
         typed.power_factor = Some(1.0);
         let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed).unwrap();
         let env = env_with_surfaces_full(
@@ -3341,7 +3360,7 @@ mod tests {
         // Large enough that neither active clipping nor the kVA limit binds
         // (S needed at pf 0.9 is ~5.6 kVA), small enough that the DC-to-AC
         // ratio (5.0 / 6.0 ≈ 0.83) stays inside the validated [0.8, 2.0].
-        cfg.inverter_capacity_kw = Some(6.0);
+        cfg.inverter_capacity_w = Some(6000.0);
         cfg.power_factor = Some(0.9);
         let cfg =
             EquipmentConfig::from_typed("PV Sign".to_string(), "PV".to_string(), cfg).unwrap();
@@ -3595,7 +3614,7 @@ mod tests {
     fn power_setpoint_stores_q_value() {
         let mut pv = PV::new(config_single());
         pv.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0,
+            active_power_kw: 2.0000,
             reactive_power_kvar: Some(0.75),
             min_soc: None,
             max_soc: None,
@@ -3708,7 +3727,7 @@ mod tests {
 
         // Apply a PowerSetpoint limiting to 2.0 kW.
         pv.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0,
+            active_power_kw: 2.0000,
             reactive_power_kvar: None,
             min_soc: None,
             max_soc: None,
@@ -3779,7 +3798,7 @@ mod tests {
             "PV".to_string(),
             PvConfig {
                 equipment_id: Some(1),
-                capacity_kw: 5.0,
+                capacity_w: 5000.0,
                 tilt_deg: Some(30.0),
                 azimuth_deg: Some(180.0),
                 surface_resolution_deg: Some(5.0),
@@ -3824,7 +3843,7 @@ mod tests {
         cfg.equipment_id = Some(1);
         cfg.inverter_efficiency = Some(1.0);
         cfg.system_losses_fraction = Some(0.0);
-        cfg.inverter_capacity_kw = Some(4.0);
+        cfg.inverter_capacity_w = Some(4000.0);
         let cfg =
             EquipmentConfig::from_typed("PV 5kW/4kW inverter".to_string(), "PV".to_string(), cfg)
                 .unwrap();
@@ -3934,7 +3953,7 @@ mod tests {
         cfg.equipment_id = Some(2);
         cfg.inverter_efficiency = Some(1.0);
         cfg.system_losses_fraction = Some(0.0);
-        cfg.inverter_capacity_kw = Some(3.0);
+        cfg.inverter_capacity_w = Some(3000.0);
         let cfg =
             EquipmentConfig::from_typed("PV 5kW/3kW".to_string(), "PV".to_string(), cfg).unwrap();
 
@@ -4570,7 +4589,8 @@ mod tests {
             "PV".to_string(),
             PvConfig {
                 equipment_id: Some(1),
-                capacity_kw,
+                capacity_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
+                    .get::<uom::si::power::watt>(),
                 tilt_deg: Some(30.0),
                 azimuth_deg: Some(180.0),
                 module_type: Some("Standard".to_string()),
@@ -4605,7 +4625,8 @@ mod tests {
         // LUT PV: same config plus LUT path.
         let mut cfg_lut = base_pv_typed_config();
         cfg_lut.equipment_id = Some(2);
-        cfg_lut.capacity_kw = capacity_kw;
+        cfg_lut.capacity_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
+            .get::<uom::si::power::watt>();
         cfg_lut.system_losses_fraction = Some(hares_losses);
         cfg_lut.inverter_efficiency = Some(hares_inv_eff);
         cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
@@ -4682,7 +4703,8 @@ mod tests {
         // LUT PV.
         let mut cfg_lut = base_pv_typed_config();
         cfg_lut.equipment_id = Some(2);
-        cfg_lut.capacity_kw = capacity_kw;
+        cfg_lut.capacity_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
+            .get::<uom::si::power::watt>();
         cfg_lut.system_losses_fraction = Some(hares_losses);
         cfg_lut.inverter_efficiency = Some(hares_inv_eff);
         cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
@@ -5008,7 +5030,8 @@ mod tests {
 
         let mut cfg = base_pv_typed_config();
         cfg.equipment_id = Some(1);
-        cfg.capacity_kw = capacity_kw;
+        cfg.capacity_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
+            .get::<uom::si::power::watt>();
         cfg.system_losses_fraction = Some(0.0);
         cfg.inverter_efficiency = Some(1.0);
         cfg.sam_lut_path = Some(path.to_string_lossy().into_owned());
@@ -5168,7 +5191,8 @@ mod tests {
 
         let mut cfg_lut = base_pv_typed_config();
         cfg_lut.equipment_id = Some(2);
-        cfg_lut.capacity_kw = capacity_kw;
+        cfg_lut.capacity_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
+            .get::<uom::si::power::watt>();
         cfg_lut.system_losses_fraction = Some(hares_losses);
         cfg_lut.inverter_efficiency = Some(hares_inv_eff);
         cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());

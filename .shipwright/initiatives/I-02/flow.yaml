@@ -1,0 +1,473 @@
+"engine_version": 2
+"initiative_id": "I-02"
+"kind": "fix"
+"recipe_source": "workspace_override"
+"canonical_recipe_path": "Z:/home/rich/src/HARES/.shipwright/flows/fix.yaml"
+"recipe_sha256": "10902c4131024a9024ccef1cbb96af994f1550e48c95c88d0b3fa4d00e5aed6f"
+"created_by": "operator"
+"created_at": "2026-09-11T19:40:36.938Z"
+"start_next": "diagnose"
+"edge_counters":
+  "red-team#0->fix": 1
+"execution_count": 12
+"run_state":
+  "status": "completed"
+  "completedAt": "2026-09-12T06:27:24.641Z"
+"edge_budget_extensions": {}
+"global_budget_extension": 0
+"concern_trigger_base_ref": "c2e122067cba7f7cdcccf12d337603b847884f93"
+"steps":
+  - "id": "diagnose"
+    "label": "Diagnose"
+    "description": "Identify the root cause of the observed symptom"
+    "required": true
+    "type": "agent"
+    "agent_role": "fix-diagnose"
+    "challenge": "fix-diagnose"
+    "output":
+      - "file": "rca.md"
+        "schema":
+          "type": "object"
+          "additionalProperties": false
+          "required":
+            - "diagnosis_outcome"
+            - "passing_commands"
+          "properties":
+            "diagnosis_outcome":
+              "type": "string"
+              "enum":
+                - "root_cause_found"
+                - "no_bug_found"
+              "description": "Routing key — root cause found or no bug"
+            "complexity":
+              "type": "string"
+              "enum":
+                - "trivial"
+                - "simple"
+                - "moderate"
+                - "complex"
+              "description": "Not a routing key — but every later step in this flow reads it to select the matching role tier (CLI/model/reasoning effort), when the resolved role declares one"
+            "failing_tests":
+              "type": "array"
+              "items":
+                "type": "object"
+                "properties":
+                  "command":
+                    "type": "string"
+                  "path":
+                    "type": "string"
+                  "name":
+                    "type": "string"
+                "required":
+                  - "command"
+              "description": "Well-known gate key: commands proving the bug reproduces"
+            "passing_commands":
+              "type": "array"
+              "minItems": 1
+              "items":
+                "type": "object"
+                "properties":
+                  "command":
+                    "type": "string"
+                "required":
+                  - "command"
+              "description": "Verification commands discovered from project configuration (test, typecheck, lint, format-check, build)"
+    "edges":
+      - "when":
+          "field": "diagnosis_outcome"
+          "eq": "no_bug_found"
+        "next": "done"
+      - "when":
+          "field": "diagnosis_outcome"
+          "eq": "root_cause_found"
+        "next": "reproduce"
+    "default_next": "reproduce"
+    "status": "done"
+    "outcome": "converged"
+    "traversal_history":
+      - "timestamp": "2026-09-11T19:48:03.725Z"
+        "outcomeValue": "root_cause_found"
+        "edgeTaken": "reproduce"
+  - "id": "reproduce"
+    "label": "Reproduce"
+    "description": "Reproduce the bug with a failing test or documented bypass"
+    "required": true
+    "type": "agent"
+    "skippable": true
+    "agent_role": "reproduce"
+    "challenge": "reproduce"
+    "output":
+      - "file": "reproduction.md"
+        "schema":
+          "type": "object"
+          "additionalProperties": false
+          "required":
+            - "reproduction_outcome"
+            - "failing_tests"
+          "properties":
+            "reproduction_outcome":
+              "type": "string"
+              "enum":
+                - "confirmed"
+                - "bypassed"
+              "description": "Routing key — confirmed failing test or documented bypass"
+            "reason":
+              "type": "string"
+              "description": "Documented bypass reason — a bypassed outcome without a reason is logged as a trace error"
+            "failing_tests":
+              "type": "array"
+              "items":
+                "type": "object"
+                "properties":
+                  "command":
+                    "type": "string"
+                  "path":
+                    "type": "string"
+                  "name":
+                    "type": "string"
+                "required":
+                  - "command"
+              "description": "Well-known gate key: commands that must fail before fix and pass after — an explicit empty list on a bypassed outcome is the designed 'nothing to run' declaration"
+    "default_next": "fix"
+    "must_fail":
+      - "kind": "from_key"
+        "from_key": "failing_tests"
+    "side_effects":
+      - "action": "append_decision_log"
+        "action_name": "no_test_reason_accepted"
+        "reason_from": "reason"
+        "when":
+          "field": "reproduction_outcome"
+          "eq": "bypassed"
+      - "action": "append_decision_log"
+        "action_name": "no_tests_declared"
+        "note": "reproduction_outcome is confirmed but failing_tests is empty — the must_fail gate had no commands to run, so the reproduction claim carried no executable evidence"
+        "when":
+          - "field": "reproduction_outcome"
+            "eq": "confirmed"
+          - "field": "failing_tests"
+            "empty": true
+      - "action": "append_initiative_frontmatter"
+        "field": "regression_tests"
+        "from": "failing_tests"
+        "when":
+          "field": "reproduction_outcome"
+          "eq": "confirmed"
+        "item_path": "path"
+    "status": "done"
+    "outcome": "converged"
+    "traversal_history":
+      - "timestamp": "2026-09-11T19:53:15.646Z"
+        "edgeTaken": "fix"
+  - "id": "fix"
+    "label": "Fix"
+    "description": "Implement the corrective change and verify the symptom is resolved"
+    "required": true
+    "type": "agent"
+    "agent_role": "fix"
+    "charter": "implement"
+    "concerns":
+      - "wiring"
+      - "test-quality"
+      - "testing"
+    "includes":
+      - "reflection-scaffold"
+      - "prove-with-test"
+    "challenge": "fix"
+    "default_next": "round-out-coverage"
+    "must_pass":
+      - "kind": "from_key"
+        "from_key": "failing_tests"
+      - "kind": "from_key"
+        "from_key": "passing_commands"
+    "status": "done"
+    "outcome": "converged"
+    "traversal_history":
+      - "timestamp": "2026-09-12T01:19:32.657Z"
+        "edgeTaken": "round-out-coverage"
+      - "timestamp": "2026-09-12T05:01:28.688Z"
+        "edgeTaken": "round-out-coverage"
+  - "id": "round-out-coverage"
+    "label": "Round out coverage"
+    "description": "Add regression tests and shore up related test coverage"
+    "required": true
+    "type": "agent"
+    "agent_role": "coverage-round"
+    "challenge": "coverage-round"
+    "output":
+      - "file": "coverage-note.md"
+        "schema":
+          "type": "object"
+          "additionalProperties": false
+          "required":
+            - "coverage_note_outcome"
+          "properties":
+            "coverage_note_outcome":
+              "type": "string"
+              "enum":
+                - "written"
+                - "skipped"
+              "description": "Whether a coverage note was written"
+    "default_next": "coverage-triage"
+    "status": "done"
+    "outcome": "converged"
+    "traversal_history":
+      - "timestamp": "2026-09-12T01:25:13.897Z"
+        "edgeTaken": "coverage-triage"
+      - "timestamp": "2026-09-12T05:05:36.550Z"
+        "edgeTaken": "coverage-triage"
+  - "id": "coverage-triage"
+    "label": "Coverage triage"
+    "description": "Judge whether the test coverage is adequate or tests are missing"
+    "required": true
+    "type": "agent"
+    "agent_role": "triage"
+    "includes":
+      - "reflection-scaffold"
+      - "prove-with-test"
+    "challenge": "triage"
+    "output":
+      - "file": "coverage-note-quality.md"
+        "schema":
+          "type": "object"
+          "additionalProperties": false
+          "required":
+            - "coverage_outcome"
+            - "failing_tests"
+          "properties":
+            "coverage_outcome":
+              "type": "string"
+              "enum":
+                - "adequate"
+                - "tests_missing"
+                - "defect_found"
+              "description": "Routing key — coverage adequate, tests missing, or coverage work surfaced a real defect in the implementation (not just a test gap)"
+            "new_test_paths":
+              "type": "array"
+              "items":
+                "type": "string"
+              "description": "Non-routing metadata: new test paths to track as regression tests"
+            "failing_tests":
+              "type": "array"
+              "items":
+                "type": "object"
+                "properties":
+                  "command":
+                    "type": "string"
+                  "path":
+                    "type": "string"
+                  "name":
+                    "type": "string"
+                "required":
+                  - "command"
+              "description": "Well-known gate key: commands proving a claimed defect_found genuinely fails; empty for adequate/tests_missing"
+    "edges":
+      - "when":
+          "field": "coverage_outcome"
+          "eq": "tests_missing"
+        "next": "round-out-coverage"
+        "inject": "coverage-note-quality.md marked coverage_outcome: tests_missing — it names the untested paths. Write tests covering exactly those paths; do not re-scope beyond what it flagged."
+        "max_traversals": 5
+      - "when":
+          "field": "coverage_outcome"
+          "eq": "defect_found"
+        "next": "fix"
+        "inject": "coverage-note-quality.md lists failing_tests — each is a reproducible defect, not a test artifact. Fix the underlying code so every listed test passes; never edit or delete the test to make it pass. round-out-coverage re-runs afterward to add the regression test once the fix lands."
+        "max_traversals": 5
+    "default_next": "red-team"
+    "must_fail":
+      - "kind": "from_key"
+        "from_key": "failing_tests"
+    "side_effects":
+      - "action": "append_decision_log"
+        "action_name": "coverage_triage_defect_without_tests"
+        "note": "coverage_outcome is defect_found but failing_tests is empty — the claim carries no failing-test evidence and the must_fail gate had nothing to run"
+        "when":
+          - "field": "coverage_outcome"
+            "eq": "defect_found"
+          - "field": "failing_tests"
+            "empty": true
+      - "action": "append_initiative_frontmatter"
+        "field": "regression_tests"
+        "from": "new_test_paths"
+    "status": "done"
+    "outcome": "converged"
+    "traversal_history":
+      - "timestamp": "2026-09-12T01:26:59.858Z"
+        "edgeTaken": "red-team"
+      - "timestamp": "2026-09-12T05:07:14.323Z"
+        "edgeTaken": "red-team"
+  - "id": "red-team"
+    "label": "Red team"
+    "description": "Actively try to break what was just fixed with adversarial tests, before the final review"
+    "required": true
+    "type": "agent"
+    "agent_role": "red-team"
+    "charter": "red-team"
+    "concerns":
+      - "red-teaming"
+      - "test-quality"
+      - "testing"
+    "includes":
+      - "reflection-scaffold"
+      - "prove-with-test"
+    "challenge": "red-team"
+    "output":
+      - "file": "red-team-note.md"
+        "schema":
+          "type": "object"
+          "additionalProperties": false
+          "required":
+            - "red_team_outcome"
+            - "failing_tests"
+          "properties":
+            "red_team_outcome":
+              "type": "string"
+              "enum":
+                - "clean"
+                - "issues_found"
+              "description": "Routing key — no adversarial gaps found, or genuine issues found"
+            "failing_tests":
+              "type": "array"
+              "items":
+                "type": "object"
+                "properties":
+                  "command":
+                    "type": "string"
+                  "path":
+                    "type": "string"
+                  "name":
+                    "type": "string"
+                "required":
+                  - "command"
+              "description": "Well-known gate key: commands proving the red-team's findings genuinely fail"
+    "edges":
+      - "when":
+          "field": "red_team_outcome"
+          "eq": "issues_found"
+        "next": "fix"
+        "inject": "red-team-note.md lists failing_tests — each is a reproducible defect, not a test artifact. Fix the underlying code so every listed test passes; never edit or delete the test to make it pass."
+        "max_traversals": 5
+    "default_next": "review"
+    "must_fail":
+      - "kind": "from_key"
+        "from_key": "failing_tests"
+    "side_effects":
+      - "action": "append_decision_log"
+        "action_name": "red_team_findings_without_tests"
+        "note": "red_team_outcome is issues_found but failing_tests is empty — the findings carry no failing-test evidence and the must_fail gate had nothing to run"
+        "when":
+          - "field": "red_team_outcome"
+            "eq": "issues_found"
+          - "field": "failing_tests"
+            "empty": true
+    "status": "pending"
+    "traversal_history":
+      - "timestamp": "2026-09-12T01:58:58.900Z"
+        "outcomeValue": "issues_found"
+        "edgeTaken": "fix"
+  - "id": "review"
+    "label": "Review"
+    "description": "Adversarial review of the fix for correctness and regression risk"
+    "required": true
+    "type": "agent"
+    "agent_role": "review"
+    "charter": "review-findings"
+    "concerns":
+      - "test-quality"
+      - "security"
+    "includes":
+      - "reflection-scaffold"
+      - "prove-with-test"
+      - "severity-ladder"
+    "challenge": "fix-review"
+    "output":
+      - "file": "review.md"
+        "schema":
+          "type": "object"
+          "additionalProperties": false
+          "required":
+            - "review_outcome"
+          "properties":
+            "review_outcome":
+              "type": "string"
+              "enum":
+                - "clean"
+                - "findings"
+                - "halt"
+                - "clean_with_nits_applied"
+              "description": "Routing key — review verdict"
+    "edges":
+      - "when":
+          "field": "review_outcome"
+          "eq": "findings"
+        "next": "fix"
+        "inject": "review.md carries severity-laddered findings. Address every finding at the severity the ladder assigns — critical and major findings must be fixed; a minor finding may be deferred only with the justification recorded."
+        "max_traversals": 5
+      - "when":
+          "field": "review_outcome"
+          "eq": "halt"
+        "next": "halt"
+    "default_next": "retrospective"
+    "must_pass":
+      - "kind": "from_key"
+        "from_key": "passing_commands"
+    "status": "done"
+    "outcome": "converged"
+    "traversal_history":
+      - "timestamp": "2026-09-12T06:10:39.441Z"
+        "edgeTaken": "retrospective"
+  - "id": "retrospective"
+    "label": "Retrospective"
+    "description": "Assess what went wrong and whether a defense was added"
+    "required": true
+    "type": "agent"
+    "agent_role": "retrospective"
+    "challenge": "retrospective"
+    "output":
+      - "file": "retro.md"
+        "schema":
+          "type": "object"
+          "additionalProperties": false
+          "required":
+            - "retro_outcome"
+          "properties":
+            "retro_outcome":
+              "type": "string"
+              "enum":
+                - "sound"
+                - "defense_gap"
+                - "new_bug_found"
+              "description": "Routing key — retrospective verdict"
+    "edges":
+      - "when":
+          "field": "retro_outcome"
+          "eq": "defense_gap"
+        "next": "fix"
+        "inject": "retro.md identified a defense_gap — the fix resolved the symptom but no regression test or structural guard prevents recurrence. Add the defense retro.md describes."
+        "max_traversals": 5
+      - "when":
+          "field": "retro_outcome"
+          "eq": "new_bug_found"
+        "next": "fix"
+        "inject": "retro.md's retrospective on this fix uncovered a separate, newly-found bug. Fix the new bug it describes; this is independent of the original symptom already resolved."
+        "max_traversals": 5
+    "default_next": "commit"
+    "status": "done"
+    "outcome": "converged"
+    "traversal_history":
+      - "timestamp": "2026-09-12T06:15:39.912Z"
+        "edgeTaken": "commit"
+  - "id": "commit"
+    "label": "Commit"
+    "description": "Commit the reviewed and validated fix"
+    "required": true
+    "type": "agent"
+    "agent_role": "commit"
+    "challenge": true
+    "default_next": "done"
+    "status": "done"
+    "traversal_history":
+      - "timestamp": "2026-09-12T06:27:24.641Z"
+        "edgeTaken": "done"
+    "outcome": "converged"

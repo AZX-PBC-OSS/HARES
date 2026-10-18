@@ -70,7 +70,7 @@ use hares_io::{
 };
 
 use hares_physics::constants::{
-    GAS_THERMS_PER_HOUR_TO_W, J_PER_KWH, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
+    GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
     OCCUPANT_RADIATIVE_FRACTION, OCCUPANT_SENSIBLE_GAIN_W, SECONDS_PER_HOUR,
 };
 use hares_physics::pv_sizing::RoofInfo;
@@ -2350,9 +2350,12 @@ fn register_pv_roof_shading(
             .parameters
             .get("attached_boundary_id")
             .and_then(|v| v.as_u64());
-        let capacity_kw = spec.parameters.get("capacity_kw").and_then(|v| v.as_f64());
+        // The spec's raw bag carries the config's own (SI) spellings: the
+        // capacity enters in W and the collector-area expression takes
+        // the W value in place of its own kW-to-W factor.
+        let capacity_w = spec.parameters.get("capacity_w").and_then(|v| v.as_f64());
 
-        if let (Some(bid), Some(cap)) = (boundary_id, capacity_kw) {
+        if let (Some(bid), Some(cap)) = (boundary_id, capacity_w) {
             let Some(boundary) = building.boundaries.get(bid as usize) else {
                 return Err(HaresError::Dwelling(format!(
                     "PV '{}' attaches to boundary {} which does not exist; the \
@@ -2373,7 +2376,7 @@ fn register_pv_roof_shading(
                 )));
             }
             // ~2 m² per 420 W panel
-            let collector_area = cap * 1000.0 / 420.0 * 2.0;
+            let collector_area = cap / 420.0 * 2.0;
             *coverage_by_roof.entry(bid as u32).or_default() += collector_area / roof_area;
         }
     }
@@ -3025,6 +3028,21 @@ impl Dwelling {
                 return Err(HaresError::Io(message));
             }
         }
+        // The synthetic [event_load] table's keys are checked against the
+        // removed-keys table before the deserialisation, so the old power
+        // spellings name their replacements instead of failing as unknown
+        // fields (the equipment raw-key scope, the rows the event load's
+        // own boundary reads).
+        if let Some(event_load) = table.get("event_load").and_then(|v| v.as_table()) {
+            for key in event_load.keys() {
+                if let Some(message) = hares_io::removed_key_message(
+                    hares_io::KeyScope::EquipmentConfig,
+                    &format!("EventBasedLoad.{key}"),
+                ) {
+                    return Err(HaresError::Io(message));
+                }
+            }
+        }
         let mut config: SyntheticTomlConfig = toml::from_str(&toml_str)
             .map_err(|err| HaresError::Io(format!("failed to parse TOML config: {err}")))?;
         if let Some(reports) = reports_override {
@@ -3610,14 +3628,15 @@ fn assemble_from_blueprint_with_seed(
 
     // ── Zone thermal capacitances for EBM ─────────────────────────────────
     //
-    // Convert envelope solver zone capacitances [J/K] to [kWh/K] and store
-    // in a lookup map. Injected into each HVAC equipment's config before
-    // init() so the equivalent battery model can compute energy state and
-    // baseline power from the building's actual thermal mass.
-    let zone_cap_kwh_per_k: HashMap<ZoneId, f64> = solvers
+    // The envelope solver's zone capacitances [J/K] injected into each
+    // HVAC equipment's config before init() so the equivalent battery
+    // model can compute energy state and baseline power from the
+    // building's actual thermal mass. The config holds SI (J/K); the
+    // HVAC core converts to its kWh/K working value once at its copy.
+    let zone_cap_j_per_k: HashMap<ZoneId, f64> = solvers
         .zone_capacitances_j_k
         .iter()
-        .map(|(zone_id, cap_j_k)| (*zone_id, *cap_j_k / J_PER_KWH))
+        .map(|(zone_id, cap_j_k)| (*zone_id, *cap_j_k))
         .collect();
 
     // ── Autosize HVAC capacities at design conditions ──────────────────────
@@ -4002,9 +4021,9 @@ fn assemble_from_blueprint_with_seed(
         if let Some(zone_id) = merged_cfg
             .zone_id()
             .or_else(|| zone_map.get(ZoneRole::Indoor))
-            && let Some(&cap) = zone_cap_kwh_per_k.get(&zone_id)
+            && let Some(&cap) = zone_cap_j_per_k.get(&zone_id)
         {
-            merged_cfg.zone_capacitance_kwh_per_k = cap;
+            merged_cfg.zone_capacitance_j_per_k = cap;
         }
         let init_result = eq.init(&merged_cfg, &initial_env);
         // Drain the equipment's init warnings whether init succeeded or not:
@@ -9194,7 +9213,7 @@ pub(crate) fn build_actors_from_seeds(
                             min_soc: *reserve_soc,
                             max_soc: 1.0,
                             solar_only_charging: *solar_only_charging,
-                            surplus_deadband_kw: 0.0,
+                            surplus_deadband_w: 0.0,
                         };
                     }
                 }
@@ -10361,7 +10380,7 @@ fn cfg_gated_helper() {
                 ));
             }
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: 0.0,
+                active_power_w: 0.0000,
                 reactive_power_kvar: 0.0,
             })?;
             self.core_output.flows.electric_kw =
@@ -10820,7 +10839,7 @@ fn cfg_gated_helper() {
             {
                 self.core_output.flows.electric_kw = Some(ElectricPower::Consumption(0.001));
                 ports.accumulate(&PortContribution::Electrical {
-                    active_power_w: 1.0,
+                    active_power_w: 1.0000,
                     reactive_power_kvar: 0.0,
                 })?;
             }
@@ -11277,7 +11296,7 @@ fn cfg_gated_helper() {
         // 1.5 kW constant non-dispatchable load.
         let mut raw: HashMap<String, ConfigValue> = HashMap::new();
         raw.insert("power_schedule_source".to_string(), "constant".into());
-        raw.insert("power_constant_kw".to_string(), 1.5.into());
+        raw.insert("power_constant_w".to_string(), 1500.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
         raw.insert("zone_id".to_string(), 1.0.into());
         let config = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -11293,9 +11312,9 @@ fn cfg_gated_helper() {
             "EV".to_string(),
             EvConfig {
                 equipment_id: None,
-                capacity_kwh: 60.0,
+                capacity_j: 216000000.0,
                 charging_level: Some("L2".to_string()),
-                max_charging_power_kw: 7.2,
+                max_charging_power_w: 7200.0,
                 charging_efficiency: None,
                 l1_current_a: None,
                 l1_voltage_v: None,
@@ -11313,19 +11332,19 @@ fn cfg_gated_helper() {
                 cell_resistance_ohm: None,
                 v2l_enabled: Some(true),
                 v2l_soc_reserve: Some(0.2),
-                v2l_max_discharge_kw: Some(3.0),
+                v2l_max_discharge_w: Some(3000.0),
                 v2g_enabled: None,
                 v2g_soc_reserve: None,
-                v2g_max_discharge_kw: None,
+                v2g_max_discharge_w: None,
                 chemistry: None,
-                fuel_economy_kwh_per_mi: None,
+                fuel_economy_j_per_m: None,
                 ready_soc: None,
                 charging_strategy: None,
                 plug_in_policy: None,
-                power_limit_kw: None,
+                power_limit_w: None,
                 initial_connection_state: None,
                 power_factor: None,
-                charger_capacity_kva: None,
+                charger_capacity_va: None,
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
@@ -12009,7 +12028,7 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0,
+                active_power_kw: 0.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -12133,7 +12152,7 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::custom("heat_pump_water_heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 2.5,
+                active_power_kw: 2.5000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -12703,7 +12722,7 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 9.0,
+                active_power_kw: 9.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -12735,7 +12754,7 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 9.0,
+                active_power_kw: 9.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -13095,7 +13114,7 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Battery #1")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 8.0,
+                active_power_kw: 8.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -13278,7 +13297,7 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::BATTERY),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -13356,7 +13375,7 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Battery #1")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 8.0,
+                active_power_kw: 8.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -13408,7 +13427,7 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::BATTERY),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0,
+                active_power_kw: 10.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -13670,7 +13689,7 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::OTHER),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 7.0,
+                active_power_kw: 7.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -13944,7 +13963,7 @@ occupancy = 1.0
                     min_soc: 0.15,
                     max_soc: 0.95,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
                 max_charge_kw: 5.0,
@@ -13976,7 +13995,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_kwh: 60.0,
                 max_charge_kw: 7.6,
-                fuel_economy_kwh_per_mi: 0.3,
+                fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
 
@@ -14037,7 +14056,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_kwh: 60.0,
                 max_charge_kw: 7.6,
-                fuel_economy_kwh_per_mi: 0.3,
+                fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
 
@@ -14065,7 +14084,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_kwh: 60.0,
                 max_charge_kw: 7.6,
-                fuel_economy_kwh_per_mi: 0.3,
+                fuel_economy_kwh_per_mi: 0.28,
             })
         };
         let eq1: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new("EV1", seed()));
@@ -14123,7 +14142,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_kwh: 60.0,
                 max_charge_kw: 7.6,
-                fuel_economy_kwh_per_mi: 0.3,
+                fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
 
@@ -14142,7 +14161,7 @@ occupancy = 1.0
                     min_soc: 0.15,
                     max_soc: 0.95,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
                 max_charge_kw: 5.0,
@@ -14173,7 +14192,7 @@ occupancy = 1.0
                     min_soc: 0.15,
                     max_soc: 0.95,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
                 max_charge_kw: 5.0,
@@ -14204,7 +14223,7 @@ occupancy = 1.0
                     min_soc: 0.15,
                     max_soc: 0.95,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
                 max_charge_kw: 5.0,
@@ -14247,7 +14266,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_kwh: 60.0,
                 max_charge_kw: 7.6,
-                fuel_economy_kwh_per_mi: 0.3,
+                fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
         let eq2: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
@@ -14260,7 +14279,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_kwh: 75.0,
                 max_charge_kw: 11.5,
-                fuel_economy_kwh_per_mi: 0.28,
+                fuel_economy_kwh_per_mi: 0.325,
             }),
         ));
 
@@ -14277,13 +14296,13 @@ occupancy = 1.0
             Some(ActorSeed::Ev {
                 strategy: ChargingStrategy::V2G {
                     min_soc: 0.3,
-                    max_export_kw: 5.0,
+                    max_export_w: 5000.0,
                     price_threshold: 0.15,
                 },
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_kwh: 60.0,
                 max_charge_kw: 7.6,
-                fuel_economy_kwh_per_mi: 0.3,
+                fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
 
@@ -14301,7 +14320,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_kwh: 60.0,
                 max_charge_kw: 7.6,
-                fuel_economy_kwh_per_mi: 0.3,
+                fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
         let eq2: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
@@ -14311,7 +14330,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_kwh: 60.0,
                 max_charge_kw: 7.6,
-                fuel_economy_kwh_per_mi: 0.3,
+                fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
 
@@ -15191,7 +15210,7 @@ occupancy = 1.0
         // Build a raw EquipmentConfig for a garage lighting load.
         let mut raw: HashMap<String, ConfigValue> = HashMap::new();
         raw.insert("power_schedule_source".to_string(), "constant".into());
-        raw.insert("power_constant_kw".to_string(), 1.0.into());
+        raw.insert("power_constant_w".to_string(), 1000.0.into());
         // sensible_gain_fraction is required by init(); set to zero since this
         // test only verifies zone routing, not thermal output.
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
@@ -16097,7 +16116,7 @@ occupancy = 1.0
                     trip_duration: ScheduleSource::Constant(600.0),
                     arrival_time: None,
                     event_day_ratio: 0.8,
-                    fuel_economy_kwh_per_mi: 0.3,
+                    fuel_economy_kwh_per_mi: 0.28,
                     capacity_kwh: 60.0,
                     max_charge_kw: 7.2,
                     average_speed_mph: 30.0,
@@ -16379,7 +16398,7 @@ occupancy = 0.0
             // Write electrical contribution then fail — this exercises the
             // rollback path.
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: 500.0,
+                active_power_w: 500.0000,
                 reactive_power_kvar: 0.1,
             })?;
             ports.accumulate(&PortContribution::Thermal {
@@ -17248,7 +17267,7 @@ occupancy = 0.0
         let config = hares_equipment::PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt_deg,
             azimuth_deg: Some(200.0),
             module_type: None,
@@ -17256,7 +17275,7 @@ occupancy = 0.0
             array_type: None,
             system_losses_fraction: None,
             inverter_efficiency: None,
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: None,
             surface_resolution_deg: resolution_deg,
             sam_lut_path: None,
@@ -18874,7 +18893,7 @@ destination = "memory"
                 min_soc: 0.15,
                 max_soc: 0.95,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             },
             grid_export_rule: hares_types::GridExportRule::Unrestricted,
             max_charge_kw: 5.0,
@@ -18889,7 +18908,7 @@ destination = "memory"
             plug_in_policy: hares_types::PlugInPolicy::Always,
             capacity_kwh: 60.0,
             max_charge_kw: 7.6,
-            fuel_economy_kwh_per_mi: 0.3,
+            fuel_economy_kwh_per_mi: 0.28,
         }
     }
 
@@ -19018,9 +19037,9 @@ destination = "memory"
     /// days from its RNG stream.
     fn driven_ev(name: &str, env: &EnvironmentState) -> Box<dyn Equipment> {
         let config: hares_equipment::EvConfig = serde_json::from_value(serde_json::json!({
-            "capacity_kwh": 60.0,
+            "capacity_j": 216000000.0,
             "charging_level": "L2",
-            "max_charging_power_kw": 7.2,
+            "max_charging_power_w": 7200.0,
         }))
         .expect("minimal EvConfig");
         let config = EquipmentConfig::from_typed(name.to_string(), "EV".to_string(), config)
@@ -19410,9 +19429,9 @@ destination = "memory"
             "min_duration_steps": 3,
         }});
         let config: hares_equipment::BatteryConfig = serde_json::from_value(serde_json::json!({
-            "capacity_kwh": 13.5,
-            "max_charge_kw": 5.0,
-            "max_discharge_kw": 5.0,
+            "capacity_j": 48600000.0,
+            "max_charge_w": 5000.0,
+            "max_discharge_w": 5000.0,
             "bms_mode": bms_mode.to_string(),
             "min_dwell_steps": 3,
         }))
@@ -19578,7 +19597,7 @@ ach = 0.0
 occupancy = 1.0
 
 [event_load]
-active_power_kw = 3.0
+active_power_w = 3000.0
 active_duration_s = 900.0
 cooldown_duration_s = 900.0
 event_probability = 0.25
@@ -20210,9 +20229,9 @@ latent_gain_fraction = 0.08
     fn replacing_an_ev_in_kind_rebuilds_its_driver_for_the_new_ev() {
         let ev_of = |capacity_kwh: f64, env: &EnvironmentState| -> Box<dyn Equipment> {
             let config: hares_equipment::EvConfig = serde_json::from_value(serde_json::json!({
-                "capacity_kwh": capacity_kwh,
+                "capacity_j": capacity_kwh * 3.6e6,
                 "charging_level": "L2",
-                "max_charging_power_kw": 7.2,
+                "max_charging_power_w": 7200.0,
             }))
             .expect("EvConfig");
             let config = EquipmentConfig::from_typed("EV1".to_string(), "EV".to_string(), config)
@@ -20285,7 +20304,7 @@ latent_gain_fraction = 0.08
     impl Undeclared {
         fn send(&self, out: &mut Vec<hares_control::DispatchRequest>) {
             let signal = ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0,
+                active_power_kw: 0.0000,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
@@ -20394,7 +20413,7 @@ latent_gain_fraction = 0.08
                 out: &mut Vec<hares_control::DispatchRequest>,
             ) {
                 let signal = ControlSignal::PowerSetpoint {
-                    active_power_kw: 0.0,
+                    active_power_kw: 0.0000,
                     reactive_power_kvar: None,
                     min_soc: None,
                     max_soc: None,
@@ -20797,7 +20816,7 @@ latent_gain_fraction = 0.08
                 hysteresis_c: Some(1.0),
                 airflow_m3_s_per_w: Some(hares_equipment::hvac::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
                 duct: DuctConfig::default(),
@@ -21694,7 +21713,7 @@ occupancy = 1.0
                 hysteresis_c: Some(1.0),
                 airflow_m3_s_per_w: Some(hares_equipment::hvac::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
                 fraction_load_served: None,
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
                 duct: DuctConfig::default(),
@@ -22297,7 +22316,7 @@ ach = 0.0
 occupancy = 0.0
 
 [event_load]
-active_power_kw = 0.5
+active_power_w = 500.0
 active_duration_s = 60.0
 cooldown_duration_s = 60.0
 event_probability = 0.5
@@ -22457,7 +22476,7 @@ ach = 0.0
 occupancy = 0.0
 
 [event_load]
-active_power_kw = 0.5
+active_power_w = 500.0
 active_duration_s = 60.0
 cooldown_duration_s = 60.0
 event_probability = 0.5
@@ -23789,7 +23808,7 @@ ach = 0.0
 [schedule]
 occupancy = 1.0
 [event_load]
-active_power_kw = 1.5
+active_power_w = 1500.0
 event_probability = 1.0"#,
         )
         .expect("write synthetic TOML");

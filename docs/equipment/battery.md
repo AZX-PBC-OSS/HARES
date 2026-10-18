@@ -24,7 +24,7 @@ V_terminal = V_oc/2 + sqrt((V_oc/2)^2 + P_dc * R)
 - When discriminant < 0, power clamped to `P_max = V_oc^2 / (4R)`
 - Pack resistance: `R_pack = (R_cell * n_series) / n_parallel` (default R_cell = 0.005 ohm)
 - Inverter efficiency: 0.97 default (applied to AC-DC conversion both directions)
-- **Reactive control**: supports `ReactiveSetpoint`, `PowerFactorSetpoint`, and `PowerSetpoint.reactive_power_kvar` per [power-factor.md](./power-factor.md). kVA clamp with active-power priority: `|Q| ≤ sqrt(max(0, S² − P²))`. Config fields: `power_factor` (default 1.0), `inverter_capacity_kva` (default `max(max_charge_kw, max_discharge_kw)`)
+- **Reactive control**: supports `ReactiveSetpoint`, `PowerFactorSetpoint`, and `PowerSetpoint.reactive_power_kvar` per [power-factor.md](./power-factor.md). kVA clamp with active-power priority: `|Q| ≤ sqrt(max(0, S² − P²))`. Config fields (SI): `power_factor` (default 1.0), `inverter_capacity_va` (default `max(max_charge_w, max_discharge_w)`)
 
 ## SOC Tracking
 
@@ -152,8 +152,8 @@ graph TD
 
 ### Import/Export Limits
 
-- `import_limit_kw`: max charge power from grid (optional)
-- `export_limit_kw`: max discharge power to grid (optional)
+- `import_limit_w`: max charge power from grid (optional, W)
+- `export_limit_w`: max discharge power to grid (optional, W)
 - Enforced as hard minimum with hardware limits (tightest wins)
 - With a configured charging-curve LUT, its temperature axis IS the
   temperature-dependent charge capability — the capacity derate is not

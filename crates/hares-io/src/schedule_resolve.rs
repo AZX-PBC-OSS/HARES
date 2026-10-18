@@ -1723,7 +1723,7 @@ fn inject_power_schedule(
     if spec.parameters.keys().any(|k| {
         k.starts_with("power_schedule_")
             || k.starts_with("power_profile_")
-            || k == "power_constant_kw"
+            || k == "power_constant_w"
     }) {
         return Ok(());
     }
@@ -2083,7 +2083,7 @@ fn inject_event_schedule(
     if spec.parameters.keys().any(|k| {
         k == "event_window_schedule_col"
             || k == "event_window_source"
-            || k == "event_power_kw_series"
+            || k == "event_power_w_series"
     }) {
         return Ok(());
     }
@@ -2107,12 +2107,20 @@ fn inject_event_schedule(
         let mean_fraction: f64 =
             fraction_series.iter().copied().sum::<f64>() / fraction_series.len() as f64;
         if let Some(max_kw) = determine_max_kw(spec, mean_fraction) {
-            let kw_series: Vec<Value> = fraction_series
+            // One conversion per value at the write: the series enters in
+            // W (SI); the load converts back to its kW working value once
+            // at its read.
+            let w_series: Vec<Value> = fraction_series
                 .iter()
-                .map(|f| Value::from(f * max_kw))
+                .map(|f| {
+                    Value::from(
+                        uom::si::f64::Power::new::<uom::si::power::kilowatt>(f * max_kw)
+                            .get::<uom::si::power::watt>(),
+                    )
+                })
                 .collect();
             spec.parameters
-                .insert("event_power_kw_series".to_string(), Value::Array(kw_series));
+                .insert("event_power_w_series".to_string(), Value::Array(w_series));
         }
         Ok(())
     } else if schedule_len > 0 {
@@ -2150,7 +2158,7 @@ fn inject_constant_power_schedule(
     if spec.parameters.keys().any(|k| {
         k.starts_with("power_schedule_")
             || k.starts_with("power_profile_")
-            || k == "power_constant_kw"
+            || k == "power_constant_w"
     }) {
         return Ok(());
     }
@@ -2205,8 +2213,13 @@ fn inject_compact_profile_power(
         "power_schedule_source".to_string(),
         Value::from("daily_profile"),
     );
-    spec.parameters
-        .insert("power_profile_max_kw".to_string(), Value::from(max_kw));
+    spec.parameters.insert(
+        "power_profile_max_w".to_string(),
+        Value::from(
+            uom::si::f64::Power::new::<uom::si::power::kilowatt>(max_kw)
+                .get::<uom::si::power::watt>(),
+        ),
+    );
     spec.parameters.insert(
         "power_profile_weekday".to_string(),
         Value::Array(
@@ -2242,8 +2255,14 @@ fn inject_compact_profile_power(
 fn inject_compact_constant_power(spec: &mut EquipmentSpec, constant_kw: f64) {
     spec.parameters
         .insert("power_schedule_source".to_string(), Value::from("constant"));
-    spec.parameters
-        .insert("power_constant_kw".to_string(), Value::from(constant_kw));
+    // One conversion at the write: the raw key enters in W (SI).
+    spec.parameters.insert(
+        "power_constant_w".to_string(),
+        Value::from(
+            uom::si::f64::Power::new::<uom::si::power::kilowatt>(constant_kw)
+                .get::<uom::si::power::watt>(),
+        ),
+    );
 }
 
 fn normalize_schedule_col_name(name: &str) -> String {
@@ -2774,14 +2793,14 @@ mod tests {
 
         let max_a = specs[0]
             .parameters
-            .get("power_profile_max_kw")
+            .get("power_profile_max_w")
             .and_then(Value::as_f64)
-            .expect("power_profile_max_kw should be set");
+            .expect("power_profile_max_w should be set");
         let max_b = specs[1]
             .parameters
-            .get("power_profile_max_kw")
+            .get("power_profile_max_w")
             .and_then(Value::as_f64)
-            .expect("power_profile_max_kw should be set");
+            .expect("power_profile_max_w should be set");
         assert!((max_b - 2.0 * max_a).abs() < 1e-12);
     }
 
@@ -2875,7 +2894,7 @@ mod tests {
 
     /// A Ventilation Fan spec's rated fan power is a determinable constant
     /// power: `fan_power_w` (or the supply/exhaust pair) sets
-    /// `power_constant_kw` without `power_w` being present.
+    /// `power_constant_w` without `power_w` being present.
     #[test]
     fn constant_power_schedule_reads_the_fan_rated_power() {
         let mut schedule = make_schedule(24);
@@ -2891,12 +2910,12 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("the fan's rated fan power is a determinable power");
-        let kw = specs[0]
+        let w = specs[0]
             .parameters
-            .get("power_constant_kw")
+            .get("power_constant_w")
             .and_then(Value::as_f64)
-            .expect("power_constant_kw injected");
-        assert!((kw - 0.876).abs() < 1e-9, "expected 0.876 kW, got {kw}");
+            .expect("power_constant_w injected");
+        assert!((w - 876.0).abs() < 1e-9, "expected 876 W, got {w}");
     }
 
     #[test]
@@ -2940,9 +2959,9 @@ mod tests {
 
         let peak = specs[0]
             .parameters
-            .get("power_profile_max_kw")
+            .get("power_profile_max_w")
             .and_then(Value::as_f64)
-            .expect("power_profile_max_kw should be present");
+            .expect("power_profile_max_w should be present");
         assert!(
             peak > 0.0,
             "default-profile branch should not produce dead schedule"
@@ -2955,7 +2974,7 @@ mod tests {
             Some("daily_profile")
         );
         assert!(
-            specs[0].parameters.contains_key("power_profile_max_kw"),
+            specs[0].parameters.contains_key("power_profile_max_w"),
             "profile max should be injected"
         );
         assert_eq!(
@@ -3115,9 +3134,9 @@ mod tests {
         .expect("an all-zero HPXML profile resolves to a determined 0 kW");
         let max_kw = specs[0]
             .parameters
-            .get("power_profile_max_kw")
+            .get("power_profile_max_w")
             .and_then(Value::as_f64)
-            .expect("power_profile_max_kw must be present");
+            .expect("power_profile_max_w must be present");
         assert_eq!(max_kw, 0.0);
     }
 
@@ -3293,7 +3312,7 @@ mod tests {
                         ..Default::default()
                     },
                     stage_shrs: None,
-                    crankcase_heater_kw: None,
+                    crankcase_heater_w: None,
                     crankcase_heater_threshold_c: None,
                     min_oat_cooling_c: 10.0,
                 },
@@ -4239,7 +4258,7 @@ mod tests {
                         ..Default::default()
                     },
                     stage_shrs: None,
-                    crankcase_heater_kw: None,
+                    crankcase_heater_w: None,
                     crankcase_heater_threshold_c: None,
                     min_oat_cooling_c: 10.0,
                 },
@@ -4405,7 +4424,7 @@ mod tests {
                         ..Default::default()
                     },
                     stage_shrs: None,
-                    crankcase_heater_kw: None,
+                    crankcase_heater_w: None,
                     crankcase_heater_threshold_c: None,
                     min_oat_cooling_c: 10.0,
                 },
@@ -5070,14 +5089,14 @@ mod tests {
         assert_eq!(schedule_col, 0);
 
         assert!(
-            specs[0].parameters.contains_key("event_power_kw_series"),
-            "non-zero annual energy should produce event_power_kw_series"
+            specs[0].parameters.contains_key("event_power_w_series"),
+            "non-zero annual energy should produce event_power_w_series"
         );
         let kw_series = specs[0]
             .parameters
-            .get("event_power_kw_series")
+            .get("event_power_w_series")
             .and_then(Value::as_array)
-            .expect("event_power_kw_series must be an array");
+            .expect("event_power_w_series must be an array");
         assert_eq!(kw_series.len(), 4);
         let peak_kw: f64 = kw_series
             .iter()

@@ -32,26 +32,6 @@ use checkpoint::EvCheckpoint;
 use config::*;
 use telemetry::{default_telemetry, telemetry_fields};
 
-/// Keep the placeholder value while deferring the parse error to `init()`:
-/// the registry factory must construct, but an invalid raw value must not
-/// silently become the placeholder. The first deferred error wins; later
-/// ones are dropped (init surfaces one cause, not a list).
-fn defer_strict<T>(
-    result: Result<T, HaresError>,
-    fallback: T,
-    deferred: &mut Option<HaresError>,
-) -> T {
-    match result {
-        Ok(value) => value,
-        Err(err) => {
-            if deferred.is_none() {
-                *deferred = Some(err);
-            }
-            fallback
-        }
-    }
-}
-
 fn telemetry_code(level: ChargingLevel) -> f64 {
     match level {
         ChargingLevel::L1 => 1.0,
@@ -94,6 +74,11 @@ pub struct Ev {
     /// `load_state` recomputes `battery_capacity_kwh` from it and the
     /// restored SOH.
     battery_capacity_kwh_rated: f64,
+    /// The config's capacity and charge power as they entered, in SI
+    /// (J, W): the read-back reports them directly, so the stored units
+    /// and the kWh/kW working values above stay separate.
+    battery_capacity_j: f64,
+    max_charging_power_w: f64,
     charging_level: ChargingLevel,
     rated_power_kw: f64,
     charging_efficiency: f64,
@@ -170,6 +155,9 @@ pub struct Ev {
 
     chemistry: BatteryChemistry,
     fuel_economy_kwh_per_mi: f64,
+    /// The config's fuel economy as it entered, in J/m (SI): the
+    /// read-back reports the pack's parameters in SI directly.
+    fuel_economy_j_per_m: f64,
     custom_ocv: bool,
     custom_u_neg: bool,
 
@@ -236,11 +224,6 @@ pub struct Ev {
     /// Guards against post-registration LUT mutation via the `Equipment` trait
     /// setters. Set to `true` by `Dwelling::add_equipment` → `mark_initialized()`.
     initialized: bool,
-
-    /// Deferred raw-config parse error, surfaced by `init()` before the typed
-    /// parse runs (the registry factory cannot fail, so construction-time
-    /// strictness is stored here — the same channel PV uses).
-    init_error: Option<hares_types::HaresError>,
 }
 
 /// The discharge leg a negative `PowerSetpoint` resolves to.
@@ -304,78 +287,23 @@ impl Ev {
             zone_type: None,
         };
 
-        // Raw-config parsing on this path is strict: an invalid value defers
-        // an error that init() surfaces before init_typed runs (the registry
-        // factory contract is infallible, so construction cannot fail — the
-        // same deferred-error channel PV uses). The placeholder keeps the
-        // struct constructible until init rejects it. Production paths supply
-        // a typed config, where init_typed applies the same strict parses.
-        let mut init_error = None;
-        let charging_level = defer_strict(
-            config
-                .get_str(KEY_CHARGING_LEVEL)
-                .or_else(|| config.get_str(KEY_CHARGING_LEVEL_HPXML))
-                .map_or(Ok(ChargingLevel::L2), parse_charging_level),
-            ChargingLevel::L2,
-            &mut init_error,
-        );
-        let battery_capacity_kwh = resolve_capacity_kwh(&config).unwrap_or(DEFAULT_CAPACITY_KWH);
-        let rated_power_kw = resolve_rated_power_kw(&config, charging_level, battery_capacity_kwh)
-            .unwrap_or_else(|| default_max_power_kw(&config, charging_level, battery_capacity_kwh));
-        let soc_max = config.get_f64(KEY_SOC_MAX).unwrap_or(DEFAULT_SOC_MAX);
+        // Raw-config parsing on this path is gone: an EV is built from a
+        // typed `EvConfig` only, and a raw payload stays the
+        // construction error `init` refuses it with. The placeholder the
+        // constructor builds holds the typed defaults until `init_typed`
+        // applies the config.
+        let charging_level = ChargingLevel::L2;
+        let battery_capacity_kwh = DEFAULT_CAPACITY_KWH;
+        let rated_power_kw = DEFAULT_MAX_CHARGING_POWER_KW;
+        let soc_max = DEFAULT_SOC_MAX;
 
-        let initial_connection_state = defer_strict(
-            config.get_str(KEY_INITIAL_CONNECTION_STATE).map_or(
-                Ok(EvConnectionState::HomePluggedIn),
-                |s| {
-                    s.parse::<EvConnectionState>().map_err(|e| {
-                        HaresError::Equipment(format!("invalid initial_connection_state: {e}"))
-                    })
-                },
-            ),
-            EvConnectionState::HomePluggedIn,
-            &mut init_error,
-        );
-
-        let chemistry = defer_strict(
-            config
-                .get_str(KEY_CHEMISTRY)
-                .map_or(Ok(BatteryChemistry::Nmc), |s| {
-                    s.parse::<BatteryChemistry>()
-                        .map_err(|e| HaresError::Equipment(format!("invalid chemistry: {e}")))
-                }),
-            BatteryChemistry::Nmc,
-            &mut init_error,
-        );
-
-        let fuel_economy_kwh_per_mi = config
-            .get_f64(KEY_FUEL_ECONOMY_KWH_PER_MI)
-            .unwrap_or(DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
-
-        let charging_strategy = defer_strict(
-            config.get_str(KEY_CHARGING_STRATEGY).map_or(
-                Ok(ChargingStrategy::Immediate { target_soc: 1.0 }),
-                parse_charging_strategy,
-            ),
-            ChargingStrategy::Immediate { target_soc: 1.0 },
-            &mut init_error,
-        );
-
-        let plug_in_policy = defer_strict(
-            config
-                .get_str(KEY_PLUG_IN_POLICY)
-                .map_or(Ok(PlugInPolicy::Always), parse_plug_in_policy),
-            PlugInPolicy::Always,
-            &mut init_error,
-        );
-
-        let charging_priority = defer_strict(
-            config
-                .get_str(KEY_CHARGING_PRIORITY)
-                .map_or(Ok(ChargingPriority::default()), parse_charging_priority),
-            ChargingPriority::default(),
-            &mut init_error,
-        );
+        let initial_connection_state = EvConnectionState::HomePluggedIn;
+        let chemistry = BatteryChemistry::Nmc;
+        let fuel_economy_kwh_per_mi = DEFAULT_FUEL_ECONOMY_KWH_PER_MI;
+        let fuel_economy_j_per_m = DEFAULT_FUEL_ECONOMY_J_PER_M;
+        let charging_strategy = ChargingStrategy::Immediate { target_soc: 1.0 };
+        let plug_in_policy = PlugInPolicy::Always;
+        let charging_priority = ChargingPriority::default();
 
         let ev = Self {
             descriptor,
@@ -384,67 +312,40 @@ impl Ev {
             core_output: CoreOutput::default(),
             battery_capacity_kwh,
             battery_capacity_kwh_rated: battery_capacity_kwh,
+            battery_capacity_j: uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
+                DEFAULT_CAPACITY_KWH,
+            )
+            .get::<uom::si::energy::joule>(),
+            max_charging_power_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(
+                DEFAULT_MAX_CHARGING_POWER_KW,
+            )
+            .get::<uom::si::power::watt>(),
             charging_level,
             rated_power_kw,
-            charging_efficiency: config.get_f64(KEY_EFFICIENCY).unwrap_or(DEFAULT_EFFICIENCY),
-            l1_current_a: config.get_f64(KEY_L1_CURRENT_A),
-            l1_voltage_v: config
-                .get_f64(KEY_L1_VOLTAGE_V)
-                .unwrap_or(DEFAULT_L1_VOLTAGE_V),
+            charging_efficiency: DEFAULT_EFFICIENCY,
+            l1_current_a: None,
+            l1_voltage_v: DEFAULT_L1_VOLTAGE_V,
             soc_max,
             charging_curve_lut: None,
-            min_charge_temp_c: config
-                .get_f64(KEY_MIN_CHARGE_TEMP_C)
-                .unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C),
-            full_power_temp_c: config
-                .get_f64(KEY_FULL_POWER_TEMP_C)
-                .unwrap_or(DEFAULT_FULL_POWER_TEMP_C),
-            heater_power_w: config
-                .get_f64(KEY_HEATER_POWER_W)
-                .unwrap_or(DEFAULT_HEATER_POWER_W),
-            heater_threshold_c: config
-                .get_f64(KEY_HEATER_THRESHOLD_C)
-                .unwrap_or(DEFAULT_HEATER_THRESHOLD_C),
-            thermal_mass_j_per_k: config
-                .get_f64(KEY_THERMAL_MASS_J_PER_K)
-                .unwrap_or_else(|| default_thermal_mass_j_per_k(battery_capacity_kwh)),
-            ua_w_per_k: config
-                .get_f64(KEY_UA_W_PER_K)
-                .unwrap_or_else(|| default_ua_w_per_k(battery_capacity_kwh)),
-            n_series: config
-                .get_f64(KEY_N_SERIES)
-                .map(|v| v as u32)
-                .unwrap_or(DEFAULT_N_SERIES),
-            n_parallel: config
-                .get_f64(KEY_N_PARALLEL)
-                .map(|v| v as u32)
-                .unwrap_or_else(|| default_n_parallel(battery_capacity_kwh)),
-            cell_resistance_ohm: config
-                .get_f64(KEY_CELL_RESISTANCE_OHM)
-                .unwrap_or(DEFAULT_CELL_RESISTANCE_OHM),
-            v2l_enabled: config.get_bool(KEY_V2L_ENABLED).unwrap_or(false),
-            v2l_soc_reserve: config
-                .get_f64(KEY_V2L_SOC_RESERVE)
-                .unwrap_or(DEFAULT_V2L_SOC_RESERVE),
-            v2l_max_discharge_kw: config
-                .get_f64(KEY_V2L_MAX_DISCHARGE_KW)
-                .unwrap_or(DEFAULT_V2L_MAX_DISCHARGE_KW),
-            v2g_enabled: config.get_bool(KEY_V2G_ENABLED).unwrap_or(false),
-            v2g_soc_reserve: config
-                .get_f64(KEY_V2G_SOC_RESERVE)
-                .unwrap_or(DEFAULT_V2G_SOC_RESERVE),
-            v2g_max_discharge_kw: config
-                .get_f64(KEY_V2G_MAX_DISCHARGE_KW)
-                .unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW),
+            min_charge_temp_c: DEFAULT_MIN_CHARGE_TEMP_C,
+            full_power_temp_c: DEFAULT_FULL_POWER_TEMP_C,
+            heater_power_w: DEFAULT_HEATER_POWER_W,
+            heater_threshold_c: DEFAULT_HEATER_THRESHOLD_C,
+            thermal_mass_j_per_k: default_thermal_mass_j_per_k(battery_capacity_kwh),
+            ua_w_per_k: default_ua_w_per_k(battery_capacity_kwh),
+            n_series: DEFAULT_N_SERIES,
+            n_parallel: default_n_parallel(battery_capacity_kwh),
+            cell_resistance_ohm: DEFAULT_CELL_RESISTANCE_OHM,
+            v2l_enabled: false,
+            v2l_soc_reserve: DEFAULT_V2L_SOC_RESERVE,
+            v2l_max_discharge_kw: DEFAULT_V2L_MAX_DISCHARGE_KW,
+            v2g_enabled: false,
+            v2g_soc_reserve: DEFAULT_V2G_SOC_RESERVE,
+            v2g_max_discharge_kw: DEFAULT_V2G_MAX_DISCHARGE_KW,
             discharge_respects_deadline: true,
             capacity_derate_model: crate::battery::CapacityDerateModel::default(),
-            soc: config
-                .get_f64(KEY_INITIAL_SOC)
-                .unwrap_or(DEFAULT_SOC)
-                .clamp(0.0, 1.0),
-            battery_temp_c: config
-                .get_f64(KEY_BATTERY_TEMP_C)
-                .unwrap_or(DEFAULT_BATTERY_TEMP_C),
+            soc: DEFAULT_SOC.clamp(0.0, 1.0),
+            battery_temp_c: DEFAULT_BATTERY_TEMP_C,
             heater_active: false,
             heater_draw_w: 0.0,
             ohmic_loss_w: 0.0,
@@ -456,18 +357,19 @@ impl Ev {
             away_charge_actual_kw: 0.0,
             active_power_kw: 0.0,
             drive_shortfall_kwh: 0.0,
-            ready_soc: config.get_f64(KEY_READY_SOC).unwrap_or(soc_max),
+            ready_soc: soc_max,
             ready_by_hour: None,
             ready_by_soc: None,
             chemistry,
             fuel_economy_kwh_per_mi,
+            fuel_economy_j_per_m,
             custom_ocv: false,
             custom_u_neg: false,
             v2l_active: false,
             v2l_power_kw: 0.0,
             charging_strategy,
             plug_in_policy,
-            power_limit_kw: config.get_f64(KEY_POWER_LIMIT_KW),
+            power_limit_kw: None,
             power_setpoint_kw: None,
             charging_priority,
             power_setpoint_min_soc: None,
@@ -479,20 +381,15 @@ impl Ev {
             soc_target: None,
             soc_target_min: None,
             soc_target_max: None,
-            cc_cv_transition_soc: config
-                .get_f64(KEY_CC_CV_TRANSITION_SOC)
-                .unwrap_or(DEFAULT_CC_CV_TRANSITION_SOC),
+            cc_cv_transition_soc: DEFAULT_CC_CV_TRANSITION_SOC,
             cc_cv_derating: 1.0,
             q_setpoint_kvar: None,
-            power_factor: config.get_f64(KEY_POWER_FACTOR).unwrap_or(1.0),
-            charger_capacity_kva: config.get_f64(KEY_CHARGER_CAPACITY_KVA).unwrap_or_else(|| {
-                rated_power_kw
-                    .max(config.get_f64(KEY_V2G_MAX_DISCHARGE_KW).unwrap_or(0.0))
-                    .max(config.get_f64(KEY_V2L_MAX_DISCHARGE_KW).unwrap_or(0.0))
-            }),
+            power_factor: 1.0,
+            charger_capacity_kva: rated_power_kw
+                .max(DEFAULT_V2G_MAX_DISCHARGE_KW)
+                .max(DEFAULT_V2L_MAX_DISCHARGE_KW),
             reactive_power_kvar: 0.0,
             initialized: false,
-            init_error,
             degradation: crate::battery::degradation::DegradationState::default(),
             rainflow: crate::battery::degradation::RainflowCounter::default(),
             ocv_table: OcvTable::for_chemistry(chemistry),
@@ -518,8 +415,15 @@ impl Ev {
         let c = config.require_typed::<EvConfig>("EV")?;
         c.validate()?;
 
-        self.battery_capacity_kwh = c.capacity_kwh;
-        self.battery_capacity_kwh_rated = c.capacity_kwh;
+        // One conversion per field at construction: the config enters in
+        // SI (J, W, J/m), the pack still works in kWh and kW until the
+        // run-state commit. The SI values are kept for the read-back,
+        // which reports them directly.
+        self.battery_capacity_j = c.capacity_j;
+        self.battery_capacity_kwh =
+            uom::si::f64::Energy::new::<uom::si::energy::joule>(c.capacity_j)
+                .get::<uom::si::energy::kilowatt_hour>();
+        self.battery_capacity_kwh_rated = self.battery_capacity_kwh;
 
         self.charging_level = match c.charging_level.as_deref() {
             None => ChargingLevel::L2,
@@ -534,22 +438,27 @@ impl Ev {
         // The charging level caps the EVSE hardware: an L1 coupler cannot
         // deliver L2 power. The clamp is correct physics; the warn makes the
         // adjustment observable so a contradictory config is never silent.
-        let (level_label, (min_kw, max_kw)) = match self.charging_level {
-            ChargingLevel::L1 => ("L1", (L1_MIN_POWER_KW, L1_MAX_POWER_KW)),
-            ChargingLevel::L2 => ("L2", (L2_MIN_POWER_KW, L2_MAX_POWER_KW)),
+        // The config enters in W (SI) and clamps against the same hardware
+        // bounds expressed in W; one conversion at construction puts the
+        // clamped value in the kW working value.
+        let (level_label, (min_w, max_w)) = match self.charging_level {
+            ChargingLevel::L1 => ("L1", (L1_MIN_POWER_W, L1_MAX_POWER_W)),
+            ChargingLevel::L2 => ("L2", (L2_MIN_POWER_W, L2_MAX_POWER_W)),
         };
-        let clamped = c.max_charging_power_kw.clamp(min_kw, max_kw);
-        if clamped != c.max_charging_power_kw {
+        let clamped = c.max_charging_power_w.clamp(min_w, max_w);
+        if clamped != c.max_charging_power_w {
             tracing::warn!(
                 equipment = %self.descriptor.name,
                 charging_level = level_label,
-                requested_kw = c.max_charging_power_kw,
-                applied_kw = clamped,
-                bounds = ?[min_kw, max_kw],
-                "max_charging_power_kw adjusted to charging-level hardware bounds"
+                requested_w = c.max_charging_power_w,
+                applied_w = clamped,
+                bounds = ?[min_w, max_w],
+                "max_charging_power_w adjusted to charging-level hardware bounds"
             );
         }
-        self.rated_power_kw = clamped;
+        self.max_charging_power_w = clamped;
+        self.rated_power_kw = uom::si::f64::Power::new::<uom::si::power::watt>(clamped)
+            .get::<uom::si::power::kilowatt>();
 
         self.min_charge_temp_c = c.min_charge_temp_c.unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C);
         self.full_power_temp_c = c.full_power_temp_c.unwrap_or(DEFAULT_FULL_POWER_TEMP_C);
@@ -574,12 +483,20 @@ impl Ev {
         self.v2l_enabled = c.v2l_enabled.unwrap_or(false);
         self.v2l_soc_reserve = c.v2l_soc_reserve.unwrap_or(DEFAULT_V2L_SOC_RESERVE);
         self.v2l_max_discharge_kw = c
-            .v2l_max_discharge_kw
+            .v2l_max_discharge_w
+            .map(|w| {
+                uom::si::f64::Power::new::<uom::si::power::watt>(w)
+                    .get::<uom::si::power::kilowatt>()
+            })
             .unwrap_or(DEFAULT_V2L_MAX_DISCHARGE_KW);
         self.v2g_enabled = c.v2g_enabled.unwrap_or(false);
         self.v2g_soc_reserve = c.v2g_soc_reserve.unwrap_or(DEFAULT_V2G_SOC_RESERVE);
         self.v2g_max_discharge_kw = c
-            .v2g_max_discharge_kw
+            .v2g_max_discharge_w
+            .map(|w| {
+                uom::si::f64::Power::new::<uom::si::power::watt>(w)
+                    .get::<uom::si::power::kilowatt>()
+            })
             .unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW);
 
         self.discharge_respects_deadline = c.discharge_respects_deadline;
@@ -598,19 +515,34 @@ impl Ev {
             self.u_neg_table = UNegTable::for_chemistry(self.chemistry);
         }
 
-        self.fuel_economy_kwh_per_mi = c
-            .fuel_economy_kwh_per_mi
-            .unwrap_or(DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
+        self.fuel_economy_j_per_m = c
+            .fuel_economy_j_per_m
+            .unwrap_or(DEFAULT_FUEL_ECONOMY_J_PER_M);
+        self.fuel_economy_kwh_per_mi = self.fuel_economy_j_per_m
+            * (uom::si::f64::Length::new::<uom::si::length::mile>(1.0)
+                .get::<uom::si::length::meter>()
+                / uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(1.0)
+                    .get::<uom::si::energy::joule>());
         self.ready_soc = c.ready_soc.unwrap_or(self.soc_max);
-        self.power_limit_kw = c.power_limit_kw;
+        self.power_limit_kw = c.power_limit_w.map(|w| {
+            uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
+        });
         self.charging_priority = c.charging_priority.unwrap_or_default();
 
         self.power_factor = c.power_factor.unwrap_or(1.0);
-        self.charger_capacity_kva = c.charger_capacity_kva.unwrap_or_else(|| {
-            self.rated_power_kw
-                .max(self.v2g_max_discharge_kw)
-                .max(self.v2l_max_discharge_kw)
-        });
+        self.charger_capacity_kva = c
+            .charger_capacity_va
+            .map(|va| {
+                // An apparent power, dimensionally W: one conversion at
+                // construction, the working value stays kVA.
+                uom::si::f64::Power::new::<uom::si::power::watt>(va)
+                    .get::<uom::si::power::kilowatt>()
+            })
+            .unwrap_or_else(|| {
+                self.rated_power_kw
+                    .max(self.v2g_max_discharge_kw)
+                    .max(self.v2l_max_discharge_kw)
+            });
         self.q_setpoint_kvar = None;
 
         self.connection_state = match c.initial_connection_state.as_deref() {
@@ -1717,12 +1649,12 @@ impl Equipment for Ev {
         vec![
             hares_types::ResolvedParameter::new(
                 "battery_capacity_j",
-                crate::kwh_to_j(self.battery_capacity_kwh_rated),
+                self.battery_capacity_j,
                 hares_types::Unit::Joule,
             ),
             hares_types::ResolvedParameter::new(
                 "max_charging_power_w",
-                crate::kw_to_w(self.rated_power_kw),
+                self.max_charging_power_w,
                 hares_types::Unit::Watt,
             ),
         ]
@@ -1737,11 +1669,6 @@ impl Equipment for Ev {
     }
 
     fn init(&mut self, config: &EquipmentConfig, env: &EnvironmentState) -> crate::Result<()> {
-        // Surface a deferred raw-config parse error before the typed parse:
-        // an invalid raw value must not silently stand in as its placeholder.
-        if let Some(e) = self.init_error.take() {
-            return Err(e);
-        }
         self.ready_by_power_warned = false;
         self.warnings.clear();
         self.init_typed(config, env)

@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "a66ffa8a583739eeb3924cf9db8bb6480e15e257",
+  "git_head": "d12a8c38aa7736089fea3d9b032f3b6e3609f56a",
   "git_dirty": true,
   "metrics": [],
   "products": {

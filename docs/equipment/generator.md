@@ -33,8 +33,8 @@ Constraint: `eta_electric + eta_thermal <= 1.0` (validated at init).
 
 ## Start/Stop & Ramp Control
 
-- **Minimum operating power** (`capacity_min_kw`): below min -> shuts off (no partial load below minimum)
-- **Ramp rate** (`delta_kw_per_s`): default 1.0 kW/s, applies to power increases only (decreases are instant)
+- **Minimum operating power** (`capacity_min_w`): below min -> shuts off (no partial load below minimum)
+- **Ramp rate** (`delta_w_per_s`): default 1000 W/s, applies to power increases only (decreases are instant)
 
 ## Control Signals
 

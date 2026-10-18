@@ -1,67 +1,26 @@
 use hares_types::HaresError;
 use serde::{Deserialize, Serialize};
 
-use crate::EquipmentConfig;
 use crate::config::EquipmentTypedConfig;
 
 use hares_types::{ChargingLevel, ChargingPriority, ChargingStrategy, PlugInPolicy};
 
-pub(crate) const KEY_BATTERY_CAPACITY_KWH: &str = "capacity_kwh";
-pub(super) const KEY_BATTERY_CAPACITY_HPXML_KWH: &str = "BatteryCapacity";
-pub(crate) const KEY_CHARGING_LEVEL: &str = "charging_level";
-pub(super) const KEY_CHARGING_LEVEL_HPXML: &str = "ChargingLevel";
-pub(crate) const KEY_MAX_CHARGING_POWER_KW: &str = "max_charging_power_kw";
-pub(super) const KEY_MAX_CHARGING_POWER_HPXML_KW: &str = "MaxChargingPower";
-pub(crate) const KEY_VEHICLE_TYPE: &str = "vehicle_type";
-pub(crate) const KEY_RANGE_MILES: &str = "range_miles";
-pub(super) const KEY_INITIAL_SOC: &str = "initial_soc";
-pub(super) const KEY_INITIAL_CONNECTION_STATE: &str = "initial_connection_state";
-pub(super) const KEY_CHEMISTRY: &str = "chemistry";
-pub(super) const KEY_CHARGING_STRATEGY: &str = "charging_strategy";
-pub(super) const KEY_PLUG_IN_POLICY: &str = "plug_in_policy";
-pub(crate) const KEY_CHARGING_PRIORITY: &str = "charging_priority";
-pub(super) const KEY_SOC_MAX: &str = "soc_max";
-pub(super) const KEY_EFFICIENCY: &str = "charging_efficiency";
-pub(super) const KEY_POWER_LIMIT_KW: &str = "power_limit_kw";
-pub(super) const KEY_L1_CURRENT_A: &str = "l1_current_a";
-pub(super) const KEY_L1_VOLTAGE_V: &str = "l1_voltage_v";
-pub(super) const KEY_BATTERY_TEMP_C: &str = "battery_temp_c";
-pub(super) const KEY_MIN_CHARGE_TEMP_C: &str = "min_charge_temp_c";
-pub(super) const KEY_FULL_POWER_TEMP_C: &str = "full_power_temp_c";
-pub(super) const KEY_HEATER_POWER_W: &str = "heater_power_w";
-pub(super) const KEY_HEATER_THRESHOLD_C: &str = "heater_threshold_c";
-pub(super) const KEY_THERMAL_MASS_J_PER_K: &str = "thermal_mass_j_per_k";
-pub(super) const KEY_UA_W_PER_K: &str = "ua_w_per_k";
-pub(super) const KEY_V2L_ENABLED: &str = "v2l_enabled";
-pub(super) const KEY_V2L_SOC_RESERVE: &str = "v2l_soc_reserve";
-pub(super) const KEY_V2L_MAX_DISCHARGE_KW: &str = "v2l_max_discharge_kw";
-pub(super) const KEY_V2G_ENABLED: &str = "v2g_enabled";
-pub(super) const KEY_V2G_SOC_RESERVE: &str = "v2g_soc_reserve";
-pub(super) const KEY_V2G_MAX_DISCHARGE_KW: &str = "v2g_max_discharge_kw";
-pub(super) const KEY_N_SERIES: &str = "n_series";
-pub(super) const KEY_N_PARALLEL: &str = "n_parallel";
-pub(super) const KEY_CELL_RESISTANCE_OHM: &str = "cell_resistance_ohm";
-pub(crate) const KEY_READY_SOC: &str = "ready_soc";
-pub(crate) const KEY_FUEL_ECONOMY_KWH_PER_MI: &str = "fuel_economy_kwh_per_mi";
-pub(super) const KEY_POWER_FACTOR: &str = "power_factor";
-pub(super) const KEY_CHARGER_CAPACITY_KVA: &str = "charger_capacity_kva";
-pub(super) const KEY_CC_CV_TRANSITION_SOC: &str = "cc_cv_transition_soc";
-
 pub(super) const DEFAULT_FUEL_ECONOMY_KWH_PER_MI: f64 = 0.325;
-/// SAE J1772 Level 1 baseline: 120 V × 12 A = 1.44 kW (same value as the
-/// OCHRE Level1 power table, EV.py:14).
-pub(super) const L1_CHARGING_POWER_KW: f64 = 1.4;
-/// SAE J1772 Level 1 circuit range (120 V × 8–15 A); bounds match the
-/// OCHRE Level1 table (EV.py:14, all entries 1.4 kW — the bounds admit
-/// real 8 A and 15 A circuits around it).
-pub(super) const L1_MIN_POWER_KW: f64 = 1.0;
-pub(super) const L1_MAX_POWER_KW: f64 = 1.8;
-/// OCHRE Level2 vehicle-number power table (EV.py:15: [3.6, 3.6, 7.2,
-/// 11.5]) — 3.6 kW = 240 V × 15 A, the minimum practical Level 2 rate;
-/// 11.5 kW = 240 V × 48 A, the upper end of common residential EVSE
-/// circuits (a 48 A EVSE on a 60 A branch per NEC 210.20 sizing rules).
-pub(super) const L2_MIN_POWER_KW: f64 = 3.6;
-pub(super) const L2_MAX_POWER_KW: f64 = 11.5;
+/// The default fuel economy in SI (J/m), the `uom` expression of the
+/// same value (0.3 kWh/mi is 671.08 J/m to the printed digits; the
+/// default is 0.325).
+pub(super) const DEFAULT_FUEL_ECONOMY_J_PER_M: f64 =
+    DEFAULT_FUEL_ECONOMY_KWH_PER_MI * 3.6e6 / 1609.344;
+/// The same hardware bounds in W (SI), the clamp the config's
+/// `max_charging_power_w` runs against.
+pub(super) const L1_MIN_POWER_W: f64 = 1000.0;
+pub(super) const L1_MAX_POWER_W: f64 = 1800.0;
+pub(super) const L2_MIN_POWER_W: f64 = 3600.0;
+pub(super) const L2_MAX_POWER_W: f64 = 11500.0;
+/// The placeholder constructor's Level 2 rate: the top of the OCHRE
+/// vehicle-number table, the deleted raw default rule's value for the
+/// default capacity. `init_typed` replaces it from the config.
+pub(super) const DEFAULT_MAX_CHARGING_POWER_KW: f64 = 11.5;
 /// OCHRE EV.py: default 75 kWh EV battery capacity (vehicle number 4
 /// class, the BEV ≥ 175 mi range tier).
 pub(super) const DEFAULT_CAPACITY_KWH: f64 = 75.0;
@@ -109,7 +68,7 @@ pub(super) const DEFAULT_HEATER_THRESHOLD_C: f64 = 5.0;
 /// Series cell count: 96S ≈ 350–360 V nominal NMC pack, the prevailing
 /// EV architecture (Tesla Model 3/Model Y 96S; Chevrolet Bolt 96S3P).
 pub(super) const DEFAULT_N_SERIES: u32 = 96;
-/// Cell capacity used to derive `n_parallel` from `capacity_kwh` when the
+/// Cell capacity used to derive `n_parallel` from the capacity (kWh) when the
 /// topology is not explicitly configured: the 21700-format NMC cell class
 /// (LG M50: 5.0 Ah nominal).
 pub(super) const DEFAULT_CELL_AH: f64 = 5.0;
@@ -182,7 +141,7 @@ pub(super) const MIN_TIMESTEP_HOURS: f64 = 1e-9;
 
 /// Default pack thermal mass [J/K], derived from rated capacity through
 /// pack mass × cell specific heat:
-/// `C = capacity_kwh × 6.4 kg/kWh × 1000 J/(kg·K)` → ≈480 kJ/K for a
+/// `C = capacity × 6.4 kg/kWh × 1000 J/(kg·K)` (capacity in kWh) → ≈480 kJ/K for a
 /// 75 kWh pack. With the default UA this gives a day-scale relaxation
 /// time constant (τ = C/UA ≈ 8.5 h at 75 kWh), so a pack does not
 /// flash-freeze at sundown — a flat ~20 kJ/K default would give τ ≈ 1.4 h
@@ -226,96 +185,6 @@ pub(super) fn default_n_parallel(capacity_kwh: f64) -> u32 {
     n.max(1)
 }
 
-pub(super) fn resolve_capacity_kwh(config: &EquipmentConfig) -> Option<f64> {
-    let direct = config
-        .get_f64(KEY_BATTERY_CAPACITY_KWH)
-        .or_else(|| config.get_f64(KEY_BATTERY_CAPACITY_HPXML_KWH));
-    if let Some(capacity_kwh) = direct
-        && capacity_kwh.is_finite()
-        && capacity_kwh > 0.0
-    {
-        return Some(capacity_kwh);
-    }
-
-    let range_miles = config.get_f64(KEY_RANGE_MILES)?;
-    if !range_miles.is_finite() || range_miles <= 0.0 {
-        return None;
-    }
-
-    Some(range_miles * DEFAULT_FUEL_ECONOMY_KWH_PER_MI)
-}
-
-pub(super) fn resolve_rated_power_kw(
-    config: &EquipmentConfig,
-    charging_level: ChargingLevel,
-    capacity_kwh: f64,
-) -> Option<f64> {
-    let direct = config
-        .get_f64(KEY_MAX_CHARGING_POWER_KW)
-        .or_else(|| config.get_f64(KEY_MAX_CHARGING_POWER_HPXML_KW));
-
-    if let Some(power_kw) = direct
-        && power_kw.is_finite()
-        && power_kw > 0.0
-    {
-        return Some(match charging_level {
-            ChargingLevel::L1 => power_kw.clamp(L1_MIN_POWER_KW, L1_MAX_POWER_KW),
-            ChargingLevel::L2 => power_kw.clamp(L2_MIN_POWER_KW, L2_MAX_POWER_KW),
-        });
-    }
-
-    Some(default_max_power_kw(config, charging_level, capacity_kwh))
-}
-
-pub(super) fn default_max_power_kw(
-    config: &EquipmentConfig,
-    charging_level: ChargingLevel,
-    capacity_kwh: f64,
-) -> f64 {
-    match charging_level {
-        ChargingLevel::L1 => L1_CHARGING_POWER_KW,
-        ChargingLevel::L2 => {
-            let vehicle_number = vehicle_number_from_config(config, capacity_kwh);
-            match vehicle_number {
-                1 | 2 => 3.6,
-                3 => 7.2,
-                _ => 11.5,
-            }
-        }
-    }
-}
-
-/// Classify the vehicle for the default L2 charge power (OCHRE vehicle
-/// numbers 1-4).
-///
-/// `vehicle_type` is a raw-payload-only key: `EvConfig` does not carry it
-/// (`deny_unknown_fields` rejects it in typed payloads, and raw payloads are
-/// refused at init), so in production the "BEV" default always applies; the
-/// raw read exists for the test fixture builder, which mirrors this default.
-pub(super) fn vehicle_number_from_config(config: &EquipmentConfig, capacity_kwh: f64) -> u8 {
-    let range_miles = config
-        .get_f64(KEY_RANGE_MILES)
-        .or_else(|| (capacity_kwh > 0.0).then_some(capacity_kwh / DEFAULT_FUEL_ECONOMY_KWH_PER_MI))
-        .unwrap_or_default();
-    let vehicle_type = config
-        .get_str(KEY_VEHICLE_TYPE)
-        .unwrap_or("BEV")
-        .trim()
-        .to_ascii_uppercase();
-
-    if vehicle_type == "PHEV" {
-        if range_miles < 35.0 { 1 } else { 2 }
-    } else if range_miles < 175.0 {
-        3
-    } else {
-        4
-    }
-}
-
-/// Parse a `charging_strategy` override JSON string: shape errors (malformed
-/// JSON, unknown fields) and domain errors (`target_soc` out of [0, 1],
-/// off-peak hours ≥ 24, …) both fail. Single source of truth for the raw
-/// and typed construction surfaces.
 pub(super) fn parse_charging_strategy(s: &str) -> Result<ChargingStrategy, HaresError> {
     let strategy: ChargingStrategy = serde_json::from_str(s)
         .map_err(|e| HaresError::Equipment(format!("invalid charging_strategy: {e}")))?;
@@ -334,17 +203,6 @@ pub(super) fn parse_plug_in_policy(s: &str) -> Result<PlugInPolicy, HaresError> 
         .validate()
         .map_err(|e| HaresError::Equipment(format!("invalid plug_in_policy: {e}")))?;
     Ok(policy)
-}
-
-/// Parse a `charging_priority` override string (case/whitespace-insensitive).
-pub(super) fn parse_charging_priority(s: &str) -> Result<ChargingPriority, HaresError> {
-    match crate::config::normalize_config_name(s).as_str() {
-        "externalauthority" => Ok(ChargingPriority::ExternalAuthority),
-        "deadlineguarantee" => Ok(ChargingPriority::DeadlineGuarantee),
-        _ => Err(HaresError::Equipment(format!(
-            "invalid charging_priority '{s}': expected ExternalAuthority or DeadlineGuarantee"
-        ))),
-    }
 }
 
 /// Parse a charging level name into [`ChargingLevel`].
@@ -370,19 +228,21 @@ pub(super) fn parse_charging_level(s: &str) -> Result<ChargingLevel, HaresError>
 
 /// Typed configuration for an electric vehicle charger.
 ///
-/// All power values are in kW, energy in kWh, temperatures in °C.
+/// All power values are in W, energy in J, temperatures in °C (SI): every
+/// quantity enters converted once at its input boundary.
 /// `charging_efficiency` is the AC→DC onboard charger efficiency as a fraction in (0, 1].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvConfig {
     /// Equipment instance identifier.
     pub equipment_id: Option<u32>,
-    /// Battery pack capacity (kWh). Resolvers map "battery_capacity_kwh" to this field.
-    pub capacity_kwh: f64,
+    /// Battery pack capacity (J). Resolvers map the HPXML battery capacity to
+    /// this field.
+    pub capacity_j: f64,
     /// EVSE charging level: "L1" or "L2".
     pub charging_level: Option<String>,
-    /// Maximum charging power (kW). Clamped to level-appropriate bounds.
-    pub max_charging_power_kw: f64,
+    /// Maximum charging power (W). Clamped to level-appropriate bounds.
+    pub max_charging_power_w: f64,
     /// AC→DC onboard charger efficiency [0, 1].
     pub charging_efficiency: Option<f64>,
     /// L1 circuit current (A). Only used when charging_level = "L1".
@@ -439,37 +299,37 @@ pub struct EvConfig {
     pub v2l_enabled: Option<bool>,
     /// Minimum SOC to retain for V2L [0, 1].
     pub v2l_soc_reserve: Option<f64>,
-    /// Maximum V2L discharge power (kW).
-    pub v2l_max_discharge_kw: Option<f64>,
+    /// Maximum V2L discharge power (W).
+    pub v2l_max_discharge_w: Option<f64>,
     /// Enable vehicle-to-grid (V2G) discharge.
     pub v2g_enabled: Option<bool>,
     /// Minimum SOC to retain for V2G [0, 1].
     pub v2g_soc_reserve: Option<f64>,
-    /// Maximum V2G discharge power (kW).
-    pub v2g_max_discharge_kw: Option<f64>,
+    /// Maximum V2G discharge power (W).
+    pub v2g_max_discharge_w: Option<f64>,
     /// Battery chemistry string, e.g. "NMC".
     pub chemistry: Option<String>,
-    /// Fuel economy (kWh/mile) for range estimation.
-    pub fuel_economy_kwh_per_mi: Option<f64>,
+    /// Fuel economy (J/m) for range estimation.
+    pub fuel_economy_j_per_m: Option<f64>,
     /// SOC target when the vehicle must be ready.
     pub ready_soc: Option<f64>,
     /// Charging strategy JSON blob.
     pub charging_strategy: Option<String>,
     /// Plug-in policy JSON blob.
     pub plug_in_policy: Option<String>,
-    /// Hard power limit from external source (kW).
-    pub power_limit_kw: Option<f64>,
+    /// Hard power limit from external source (W).
+    pub power_limit_w: Option<f64>,
     /// Initial connection state string.
     pub initial_connection_state: Option<String>,
     /// Power factor magnitude for the charger/inverter front-end.
     /// Defaults to 1.0 (unity — EV onboard chargers have PFC front-ends at
     /// ~0.99+; default runs bit-identical to pre-reactive behaviour).
     pub power_factor: Option<f64>,
-    /// Charger/inverter AC apparent-power rating (kVA). Used as the kVA
+    /// Charger/inverter AC apparent-power rating (VA). Used as the VA
     /// clamp for reactive power (active-power priority: P never curtailed).
-    /// Defaults to `max(max_charging_power_kw, v2g_max_discharge_kw,
-    /// v2l_max_discharge_kw)` at init time.
-    pub charger_capacity_kva: Option<f64>,
+    /// Defaults to `max(max_charging_power_w, v2g_max_discharge_w,
+    /// v2l_max_discharge_w)` at init time.
+    pub charger_capacity_va: Option<f64>,
     /// SOC above which CC-CV tapering begins (e.g. 0.85 for NMC).
     /// Below this SOC, charging power is constant; above it, power
     /// tapers linearly toward `CC_CV_MIN_MULTIPLIER` at SOC=1.0.
@@ -508,14 +368,14 @@ fn default_true() -> bool {
 impl EvConfig {
     /// Validate all fields for physical plausibility.
     pub fn validate(&self) -> crate::Result<()> {
-        if !self.capacity_kwh.is_finite() || self.capacity_kwh <= 0.0 {
+        if !self.capacity_j.is_finite() || self.capacity_j <= 0.0 {
             return Err(HaresError::Equipment(
-                "EV capacity_kwh must be finite and > 0".to_string(),
+                "EV capacity_j must be finite and > 0".to_string(),
             ));
         }
-        if !self.max_charging_power_kw.is_finite() || self.max_charging_power_kw <= 0.0 {
+        if !self.max_charging_power_w.is_finite() || self.max_charging_power_w <= 0.0 {
             return Err(HaresError::Equipment(
-                "EV max_charging_power_kw must be finite and > 0".to_string(),
+                "EV max_charging_power_w must be finite and > 0".to_string(),
             ));
         }
         if let Some(eff) = self.charging_efficiency
@@ -645,8 +505,8 @@ impl EvConfig {
             }
         }
         for (name, val) in [
-            ("v2l_max_discharge_kw", self.v2l_max_discharge_kw),
-            ("v2g_max_discharge_kw", self.v2g_max_discharge_kw),
+            ("v2l_max_discharge_w", self.v2l_max_discharge_w),
+            ("v2g_max_discharge_w", self.v2g_max_discharge_w),
         ] {
             if let Some(v) = val
                 && (!v.is_finite() || v < 0.0)
@@ -663,11 +523,11 @@ impl EvConfig {
                 "EV power_factor must be finite and within (0, 1]".to_string(),
             ));
         }
-        if let Some(kva) = self.charger_capacity_kva
-            && (!kva.is_finite() || kva <= 0.0)
+        if let Some(va) = self.charger_capacity_va
+            && (!va.is_finite() || va <= 0.0)
         {
             return Err(HaresError::Equipment(
-                "EV charger_capacity_kva must be finite and > 0".to_string(),
+                "EV charger_capacity_va must be finite and > 0".to_string(),
             ));
         }
         if let Some(soc) = self.cc_cv_transition_soc
@@ -693,9 +553,10 @@ impl hares_types::DescribeFields for EvConfig {
                 },
             ),
             (
-                "capacity_kwh",
+                "capacity_j",
                 hares_types::FieldMeta {
-                    description: Some("the pack's capacity, kWh"),
+                    description: Some("the pack's capacity"),
+                    unit: Some("J"),
                     ..Default::default()
                 },
             ),
@@ -707,9 +568,10 @@ impl hares_types::DescribeFields for EvConfig {
                 },
             ),
             (
-                "max_charging_power_kw",
+                "max_charging_power_w",
                 hares_types::FieldMeta {
-                    description: Some("the maximum charging power, kW"),
+                    description: Some("the maximum charging power"),
+                    unit: Some("W"),
                     ..Default::default()
                 },
             ),
@@ -833,9 +695,10 @@ impl hares_types::DescribeFields for EvConfig {
                 },
             ),
             (
-                "v2l_max_discharge_kw",
+                "v2l_max_discharge_w",
                 hares_types::FieldMeta {
-                    description: Some("the vehicle-to-load's maximum discharge, kW"),
+                    description: Some("the vehicle-to-load's maximum discharge"),
+                    unit: Some("W"),
                     ..Default::default()
                 },
             ),
@@ -854,9 +717,10 @@ impl hares_types::DescribeFields for EvConfig {
                 },
             ),
             (
-                "v2g_max_discharge_kw",
+                "v2g_max_discharge_w",
                 hares_types::FieldMeta {
-                    description: Some("the vehicle-to-grid's maximum discharge, kW"),
+                    description: Some("the vehicle-to-grid's maximum discharge"),
+                    unit: Some("W"),
                     ..Default::default()
                 },
             ),
@@ -868,7 +732,7 @@ impl hares_types::DescribeFields for EvConfig {
                 },
             ),
             (
-                "fuel_economy_kwh_per_mi",
+                "fuel_economy_j_per_m",
                 hares_types::FieldMeta {
                     description: Some("the vehicle's consumption, kWh per mile"),
                     ..Default::default()
@@ -896,9 +760,10 @@ impl hares_types::DescribeFields for EvConfig {
                 },
             ),
             (
-                "power_limit_kw",
+                "power_limit_w",
                 hares_types::FieldMeta {
-                    description: Some("the charging power limit, kW"),
+                    description: Some("the charging power limit"),
+                    unit: Some("W"),
                     ..Default::default()
                 },
             ),
@@ -917,9 +782,10 @@ impl hares_types::DescribeFields for EvConfig {
                 },
             ),
             (
-                "charger_capacity_kva",
+                "charger_capacity_va",
                 hares_types::FieldMeta {
-                    description: Some("the charger's capacity, kVA"),
+                    description: Some("the charger's apparent-power capacity"),
+                    unit: Some("VA"),
                     ..Default::default()
                 },
             ),

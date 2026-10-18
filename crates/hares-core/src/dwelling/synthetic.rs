@@ -67,10 +67,11 @@ pub(crate) struct SyntheticTomlConfig {
 /// Configuration for a stochastic event-based load (CookingRange) injected
 /// into a synthetic dwelling for reproducibility and smoke testing.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticEventLoadConfig {
-    /// Active power draw during an event [kW].
-    #[serde(default = "default_event_active_power_kw")]
-    pub(crate) active_power_kw: f64,
+    /// Active power draw during an event [W] (SI).
+    #[serde(default = "default_event_active_power_w")]
+    pub(crate) active_power_w: f64,
     /// Duration of each active event [s].
     #[serde(default = "default_event_active_duration_s")]
     pub(crate) active_duration_s: f64,
@@ -105,8 +106,8 @@ pub(crate) struct SyntheticEventLoadConfig {
     pub(crate) event_probability_schedule: Option<Vec<f64>>,
 }
 
-fn default_event_active_power_kw() -> f64 {
-    1.5
+fn default_event_active_power_w() -> f64 {
+    1500.0
 }
 fn default_event_active_duration_s() -> f64 {
     300.0
@@ -899,9 +900,9 @@ pub(crate) fn build_synthetic_building(
     if let Some(el) = &config.event_load {
         let mut extension_children: Vec<hares_io::hpxml::building::XmlNode> = vec![
             hares_io::hpxml::building::XmlNode {
-                name: "active_power_kw".to_string(),
+                name: "active_power_w".to_string(),
                 attrs: HashMap::new(),
-                text: el.active_power_kw.to_string(),
+                text: el.active_power_w.to_string(),
                 children: Vec::new(),
             },
             hares_io::hpxml::building::XmlNode {
@@ -5167,6 +5168,66 @@ diurnal_amplitude_c = 10.0
         assert!(
             err.to_string().contains("wall_area_m2"),
             "the error names the key, got: {err}"
+        );
+    }
+
+    /// The synthetic TOML's [event_load] table with the old power spelling
+    /// fails naming the replacement; an unknown key fails naming itself.
+    #[test]
+    fn synthetic_event_load_removed_key_names_its_replacement() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("synthetic_removed_key.toml");
+        std::fs::write(
+            &path,
+            r#"
+building_id = 1
+
+[simulation]
+start_time = "2023-06-01T00:00:00-07:00"
+duration = 3600
+time_res = 900
+
+[event_load]
+active_power_kw = 1.0
+"#,
+        )
+        .unwrap();
+        let err = {
+            use crate::dwelling::Dwelling;
+            Dwelling::from_toml_config(&path)
+                .map(|_| ())
+                .expect_err("the old key fails")
+        };
+        assert!(
+            err.to_string()
+                .contains("EventBasedLoad.active_power_w (W)"),
+            "the error must name the replacement, got: {err}"
+        );
+
+        std::fs::write(
+            &path,
+            r#"
+building_id = 1
+
+[simulation]
+start_time = "2023-06-01T00:00:00-07:00"
+duration = 3600
+time_res = 900
+
+[event_load]
+x = 1.0
+"#,
+        )
+        .unwrap();
+        let err = {
+            use crate::dwelling::Dwelling;
+            Dwelling::from_toml_config(&path)
+                .map(|_| ())
+                .expect_err("an unknown key fails")
+        };
+        assert!(
+            err.to_string().contains("unknown field `x`"),
+            "the error must name the key, got: {err}"
         );
     }
 }

@@ -190,7 +190,7 @@ def test_post_build_callback_adds_battery():
     def add_battery_post_build(dw):
         battery_added.append(True)
         assert hasattr(dw, "add_battery"), "Dwelling has no add_battery method"
-        dw.add_battery(Battery("TestBat", capacity_kwh=10))
+        dw.add_battery(Battery("TestBat", capacity_j=36000000))
 
     plan.add_segment(
         start=datetime(2024, 1, 1, 0, 0),

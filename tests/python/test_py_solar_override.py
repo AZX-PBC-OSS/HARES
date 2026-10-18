@@ -383,7 +383,7 @@ class TestSolarOverridePVProduction:
         from hares import Dwelling, PV
 
         dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-07-15T10:00:00", duration=6 * 3600, time_res=3600,master_seed=0))
-        pv = PV(name="roof_pv", capacity_kw=10.0, tilt=30.0, azimuth=180.0)
+        pv = PV(name="roof_pv", capacity_w=10000, tilt=30.0, azimuth=180.0)
         dw.add_pv(pv)
         dw.initialize()
 

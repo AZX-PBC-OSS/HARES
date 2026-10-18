@@ -510,7 +510,13 @@ impl ActorRegistry {
                         solar_only_charging: config
                             .get_bool("solar_only_charging")
                             .unwrap_or(false),
-                        surplus_deadband_kw: config.get_f64("surplus_deadband_kw").unwrap_or(0.0),
+                        // The actor's parameter is kW (until the control
+                        // commit); the payload it fills enters in W (SI),
+                        // converted once with uom.
+                        surplus_deadband_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(
+                            config.get_f64("surplus_deadband_kw").unwrap_or(0.0),
+                        )
+                        .get::<uom::si::power::watt>(),
                     },
                     "tou" | "time_of_use" => BmsMode::TimeOfUseOptimization {
                         reserve_soc: config.get_f64("reserve_soc").unwrap_or(0.2),
@@ -807,8 +813,10 @@ mod tests {
             .err()
             .expect("negative surplus deadband must be rejected");
         let msg = err.to_string();
+        // The offending value reaches the fill's payload field, which is
+        // SI (W): the error names the payload's own field.
         assert!(
-            msg.contains("surplus_deadband_kw"),
+            msg.contains("surplus_deadband_w"),
             "error must name the offending field: {msg}"
         );
     }

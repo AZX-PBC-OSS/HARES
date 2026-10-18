@@ -1278,15 +1278,15 @@ fn try_build_central_ac_config(
         hysteresis_c: None,
         airflow_m3_s_per_w: Some(airflow_m3_s_per_w),
         fraction_load_served,
-        // Crankcase heater: read from HPXML extension (CrankcaseHeaterPowerWatts in W).
-        // Central AC/ASHP defaults: 50 W (0.050 kW) at 12.78°C (55°F) per OCHRE.
-        // Room ACs typically have no crankcase heater (0.0 kW).
-        crankcase_heater_kw: Some(
+        // Crankcase heater: read from HPXML extension (CrankcaseHeaterPowerWatts in W),
+        // stored in W: no conversion on either side.
+        // Central AC/ASHP defaults: 50 W at 12.78°C (55°F) per OCHRE.
+        // Room ACs typically have no crankcase heater (0.0 W).
+        crankcase_heater_w: Some(
             params
                 .get("crankcase_heater_w")
                 .and_then(Value::as_f64)
-                .map(|w| w / 1000.0)
-                .unwrap_or(0.050),
+                .unwrap_or(50.0),
         ),
         crankcase_heater_threshold_c: Some(12.78),
         crankcase_capacity_curve_coeffs: None,
@@ -1396,11 +1396,10 @@ fn try_build_room_ac_config(
         plf_max: curve_bounds.plf_max,
         shr: params.get("shr").and_then(Value::as_f64),
         startup_cd: None,
-        crankcase_heater_kw: params
+        crankcase_heater_w: params
             .get("crankcase_heater_w")
             .and_then(Value::as_f64)
-            .map(|w| Some(w / 1000.0))
-            .unwrap_or(Some(0.0)),
+            .or(Some(0.0)),
         crankcase_heater_threshold_c: None,
         crankcase_capacity_curve_coeffs: None,
         min_oat_compressor_cooling_c: None,
@@ -1825,20 +1824,17 @@ fn try_build_heat_pump_cooler_config(
                 .and_then(Value::as_f64),
         },
         stage_shrs: extract_stage_values(params, "shr"),
-        // Crankcase heater: power (W) from HPXML extension → kW.
-        // ASHP defaults: 50 W (0.050 kW) at 12.78°C (55°F); MSHP defaults: 15 W (0.015 kW) at 0°C (32°F).
+        // Crankcase heater: power (W) from HPXML extension, stored in W:
+        // no conversion on either side.
+        // ASHP defaults: 50 W at 12.78°C (55°F); MSHP defaults: 15 W at 0°C (32°F).
         // OCHRE HVAC.py AirConditioner / MinisplitAHSPCooler classes.
-        crankcase_heater_kw: params
-            .get("crankcase_heater_w")
-            .and_then(Value::as_f64)
-            .map(|w| Some(w / 1000.0))
-            .unwrap_or_else(|| {
-                if is_mini_split {
-                    Some(0.015)
-                } else {
-                    Some(0.050)
-                }
-            }),
+        crankcase_heater_w: params.get("crankcase_heater_w").and_then(Value::as_f64).or(
+            if is_mini_split {
+                Some(15.0)
+            } else {
+                Some(50.0)
+            },
+        ),
         crankcase_heater_threshold_c: if is_mini_split {
             Some(0.0)
         } else {

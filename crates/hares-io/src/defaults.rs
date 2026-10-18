@@ -240,10 +240,12 @@ pub struct VehicleMappingEntry {
     pub vehicle_type: String,
     /// Per-vehicle driving profile archetype (e.g. `pdf_Veh1`).
     pub profile_file: String,
-    /// Battery capacity (kWh).
-    pub capacity_kwh: f64,
-    /// Maximum onboard charger power (kW).
-    pub charger_power_kw: f64,
+    /// Battery capacity (J): the CSV's kWh column converted once, with
+    /// uom, where the loader reads it.
+    pub capacity_j: f64,
+    /// Maximum onboard charger power (W): the CSV's kW column converted
+    /// once, with uom, where the loader reads it.
+    pub charger_power_w: f64,
     /// Grid-to-battery charging efficiency (0.0–1.0).
     pub efficiency: f64,
 }
@@ -2112,23 +2114,30 @@ fn load_vehicle_mapping_csv(
             )));
         }
 
-        let capacity_kwh = vehicle_mapping_numeric_field(
-            &path,
-            &row,
-            "capacity_kwh",
-            capacity_str,
-            "a positive finite number",
-            |v| v > 0.0,
-        )?;
+        // The CSV keeps its own unit columns (kWh, kW); the loader
+        // converts once, with uom, into the entry's SI fields.
+        let capacity_j = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
+            vehicle_mapping_numeric_field(
+                &path,
+                &row,
+                "capacity_kwh",
+                capacity_str,
+                "a positive finite number",
+                |v| v > 0.0,
+            )?,
+        )
+        .get::<uom::si::energy::joule>();
 
-        let charger_power_kw = vehicle_mapping_numeric_field(
-            &path,
-            &row,
-            "charger_power_kw",
-            charger_str,
-            "a positive finite number",
-            |v| v > 0.0,
-        )?;
+        let charger_power_w =
+            uom::si::f64::Power::new::<uom::si::power::kilowatt>(vehicle_mapping_numeric_field(
+                &path,
+                &row,
+                "charger_power_kw",
+                charger_str,
+                "a positive finite number",
+                |v| v > 0.0,
+            )?)
+            .get::<uom::si::power::watt>();
 
         let efficiency = vehicle_mapping_numeric_field(
             &path,
@@ -2143,8 +2152,8 @@ fn load_vehicle_mapping_csv(
             profile_column,
             vehicle_type,
             profile_file,
-            capacity_kwh,
-            charger_power_kw,
+            capacity_j,
+            charger_power_w,
             efficiency,
         });
     }
@@ -2286,10 +2295,13 @@ fn check_ev_mapping_invariants(entries: &[VehicleMappingEntry]) -> Vec<String> {
             "MY2030_PHEV_SUV" => 14.8,
             _ => continue, // unrecognized types flagged above
         };
-        if (entry.capacity_kwh - expected_capacity).abs() > 0.01 {
+        if (entry.capacity_j - expected_capacity * 3.6e6).abs() > 0.01 {
             findings.push(format!(
                 "capacity_kwh {} deviates from expected {} for vehicle_type {} ({})",
-                entry.capacity_kwh, expected_capacity, entry.vehicle_type, entry.profile_column
+                entry.capacity_j,
+                expected_capacity * 3.6e6,
+                entry.vehicle_type,
+                entry.profile_column
             ));
         }
     }
@@ -4804,15 +4816,15 @@ Setpoint,T_set,60.0,degC
         // Verify a BEV entry.
         let veh1 = mapping.get("Vehicle 1").expect("Vehicle 1 should exist");
         assert_eq!(veh1.vehicle_type, "MY2030_BEV_SUV");
-        assert!((veh1.capacity_kwh - 117.6).abs() < 1e-6);
-        assert!((veh1.charger_power_kw - 10.26).abs() < 1e-6);
+        assert!((veh1.capacity_j - 117.6 * 3.6e6).abs() < 1e-4);
+        assert!((veh1.charger_power_w - 10260.0).abs() < 1e-6);
         assert!((veh1.efficiency - 0.9).abs() < 1e-6);
 
         // Verify a PHEV entry.
         let veh50 = mapping.get("Vehicle 50").expect("Vehicle 50 should exist");
         assert_eq!(veh50.vehicle_type, "MY2030_PHEV_SUV");
-        assert!((veh50.capacity_kwh - 14.8).abs() < 1e-6);
-        assert!((veh50.charger_power_kw - 7.2).abs() < 1e-6);
+        assert!((veh50.capacity_j - 14.8 * 3.6e6).abs() < 1e-4);
+        assert!((veh50.charger_power_w - 7200.0).abs() < 1e-6);
     }
 
     #[test]
@@ -5124,11 +5136,11 @@ Inf_Row,InfKey,inf,units
                 "Vehicle {i} profile_file must not be empty"
             );
             assert!(
-                e.capacity_kwh > 0.0,
+                e.capacity_j > 0.0,
                 "Vehicle {i} capacity_kwh must be positive"
             );
             assert!(
-                e.charger_power_kw > 0.0,
+                e.charger_power_w > 0.0,
                 "Vehicle {i} charger_power_kw must be positive"
             );
             assert!(
@@ -5154,25 +5166,25 @@ Inf_Row,InfKey,inf,units
         for entry in mapping.iter() {
             if entry.vehicle_type == "MY2030_BEV_SUV" {
                 assert!(
-                    (entry.capacity_kwh - 117.6).abs() < 0.01,
+                    (entry.capacity_j - 117.6 * 3.6e6).abs() < 0.01,
                     "All BEV entries must have capacity 117.6 kWh, got {}",
-                    entry.capacity_kwh
+                    entry.capacity_j
                 );
                 assert!(
-                    (entry.charger_power_kw - 10.26).abs() < 0.01,
+                    (entry.charger_power_w - 10260.0).abs() < 0.01,
                     "All BEV entries must have charger_power_kw 10.26, got {}",
-                    entry.charger_power_kw
+                    entry.charger_power_w
                 );
             } else if entry.vehicle_type == "MY2030_PHEV_SUV" {
                 assert!(
-                    (entry.capacity_kwh - 14.8).abs() < 0.01,
+                    (entry.capacity_j - 14.8 * 3.6e6).abs() < 0.01,
                     "All PHEV entries must have capacity 14.8 kWh, got {}",
-                    entry.capacity_kwh
+                    entry.capacity_j
                 );
                 assert!(
-                    (entry.charger_power_kw - 7.2).abs() < 0.01,
+                    (entry.charger_power_w - 7200.0).abs() < 0.01,
                     "All PHEV entries must have charger_power_kw 7.2, got {}",
-                    entry.charger_power_kw
+                    entry.charger_power_w
                 );
             }
         }

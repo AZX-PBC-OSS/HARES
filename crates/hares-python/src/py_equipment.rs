@@ -189,11 +189,11 @@ pub struct PyBattery {
     #[pyo3(get)]
     pub name: String,
     #[pyo3(get)]
-    pub capacity_kwh: f64,
+    pub capacity_j: f64,
     #[pyo3(get)]
-    pub max_charge_kw: Option<f64>,
+    pub max_charge_w: Option<f64>,
     #[pyo3(get)]
-    pub max_discharge_kw: Option<f64>,
+    pub max_discharge_w: Option<f64>,
     #[pyo3(get)]
     pub chemistry: Option<PyBatteryChemistry>,
     #[pyo3(get)]
@@ -213,11 +213,11 @@ pub struct PyBattery {
     /// produce lagging reactive power proportional to active power.
     #[pyo3(get)]
     pub power_factor: Option<f64>,
-    /// Inverter apparent-power rating [kVA]. When `None`, defaults to
-    /// `max(max_charge_kw, max_discharge_kw)` at init time. Caps
+    /// Inverter apparent-power rating [VA]. When `None`, defaults to
+    /// `max(max_charge_w, max_discharge_w)` at init time. Caps
     /// `|Q| ≤ sqrt(S² − P²)` (active-power priority).
     #[pyo3(get)]
-    pub inverter_capacity_kva: Option<f64>,
+    pub inverter_capacity_va: Option<f64>,
     #[pyo3(get)]
     pub self_discharge_pct_per_day: Option<f64>,
     #[pyo3(get)]
@@ -254,9 +254,9 @@ impl PyBattery {
         let eta = spec.round_trip_efficiency.sqrt();
         Self {
             name: spec.label.to_string(),
-            capacity_kwh: spec.capacity_kwh,
-            max_charge_kw: Some(spec.max_charge_kw),
-            max_discharge_kw: Some(spec.max_discharge_kw),
+            capacity_j: spec.capacity_j(),
+            max_charge_w: Some(spec.max_charge_w()),
+            max_discharge_w: Some(spec.max_discharge_w()),
             chemistry: Some(PyBatteryChemistry::from(spec.chemistry)),
             initial_soc: None,
             min_soc: Some(spec.min_soc),
@@ -265,7 +265,7 @@ impl PyBattery {
             charge_efficiency: Some(eta),
             discharge_efficiency: Some(eta),
             power_factor: None,
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             self_discharge_pct_per_day: Some(spec.self_discharge_pct_per_day),
             standby_power_w: Some(spec.standby_power_w),
             import_limit_w: None,
@@ -291,9 +291,10 @@ impl PyBattery {
     #[new]
     #[pyo3(signature = (
         name,
-        capacity_kwh,
-        max_charge_kw=None,
-        max_discharge_kw=None,
+        *,
+        capacity_j,
+        max_charge_w=None,
+        max_discharge_w=None,
         chemistry=None,
         initial_soc=None,
         min_soc=None,
@@ -302,7 +303,7 @@ impl PyBattery {
         charge_efficiency=None,
         discharge_efficiency=None,
         power_factor=None,
-        inverter_capacity_kva=None,
+        inverter_capacity_va=None,
         self_discharge_pct_per_day=None,
         standby_power_w=None,
         import_limit_w=None,
@@ -319,15 +320,16 @@ impl PyBattery {
         charging_curve_lut=None,
         ocv_table=None,
         uneg_table=None,
+        **unexpected,
     ))]
     // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         name: String,
-        capacity_kwh: f64,
-        max_charge_kw: Option<f64>,
-        max_discharge_kw: Option<f64>,
+        capacity_j: f64,
+        max_charge_w: Option<f64>,
+        max_discharge_w: Option<f64>,
         chemistry: Option<PyBatteryChemistry>,
         initial_soc: Option<f64>,
         min_soc: Option<f64>,
@@ -336,7 +338,7 @@ impl PyBattery {
         charge_efficiency: Option<f64>,
         discharge_efficiency: Option<f64>,
         power_factor: Option<f64>,
-        inverter_capacity_kva: Option<f64>,
+        inverter_capacity_va: Option<f64>,
         self_discharge_pct_per_day: Option<f64>,
         standby_power_w: Option<f64>,
         import_limit_w: Option<f64>,
@@ -353,7 +355,9 @@ impl PyBattery {
         charging_curve_lut: Option<&Bound<'_, PyAny>>,
         ocv_table: Option<&Bound<'_, PyAny>>,
         uneg_table: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        crate::utils::check_equipment_unexpected_kwargs("Battery", "BatteryConfig", unexpected)?;
         let lut = match charging_curve_lut {
             Some(obj) => Some(extract_charging_lut(py, obj)?),
             None => None,
@@ -368,9 +372,9 @@ impl PyBattery {
         };
         Ok(Self {
             name,
-            capacity_kwh,
-            max_charge_kw,
-            max_discharge_kw,
+            capacity_j,
+            max_charge_w,
+            max_discharge_w,
             chemistry,
             initial_soc,
             min_soc,
@@ -379,7 +383,7 @@ impl PyBattery {
             charge_efficiency,
             discharge_efficiency,
             power_factor,
-            inverter_capacity_kva,
+            inverter_capacity_va,
             self_discharge_pct_per_day,
             standby_power_w,
             import_limit_w,
@@ -473,13 +477,13 @@ impl PyBattery {
     fn __repr__(&self) -> String {
         let mut parts = vec![
             format!("name={:?}", self.name),
-            format!("capacity_kwh={}", self.capacity_kwh),
+            format!("capacity_j={}", self.capacity_j),
         ];
-        if let Some(v) = self.max_charge_kw {
-            parts.push(format!("max_charge_kw={v}"));
+        if let Some(v) = self.max_charge_w {
+            parts.push(format!("max_charge_w={v}"));
         }
-        if let Some(v) = self.max_discharge_kw {
-            parts.push(format!("max_discharge_kw={v}"));
+        if let Some(v) = self.max_discharge_w {
+            parts.push(format!("max_discharge_w={v}"));
         }
         if let Some(c) = self.chemistry {
             parts.push(format!("chemistry={c:?}"));
@@ -505,8 +509,8 @@ impl PyBattery {
         if let Some(v) = self.power_factor {
             parts.push(format!("power_factor={v}"));
         }
-        if let Some(v) = self.inverter_capacity_kva {
-            parts.push(format!("inverter_capacity_kva={v}"));
+        if let Some(v) = self.inverter_capacity_va {
+            parts.push(format!("inverter_capacity_va={v}"));
         }
         if let Some(v) = self.self_discharge_pct_per_day {
             parts.push(format!("self_discharge_pct_per_day={v}"));
@@ -611,7 +615,7 @@ pub struct PyPv {
     #[pyo3(get)]
     pub name: String,
     #[pyo3(get)]
-    pub capacity_kw: f64,
+    pub capacity_w: f64,
     #[pyo3(get)]
     pub tilt: f64,
     #[pyo3(get)]
@@ -625,29 +629,31 @@ pub struct PyPv {
 #[pymethods]
 impl PyPv {
     #[new]
-    #[pyo3(signature = (name, capacity_kw, tilt, azimuth, sam_lut_path=None, soiling=None))]
+    #[pyo3(signature = (name, *, capacity_w, tilt, azimuth, sam_lut_path=None, soiling=None, **unexpected))]
     fn new(
         name: String,
-        capacity_kw: f64,
+        capacity_w: f64,
         tilt: f64,
         azimuth: f64,
         sam_lut_path: Option<String>,
         soiling: Option<PyPvSoilingConfig>,
-    ) -> Self {
-        Self {
+        unexpected: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::utils::check_equipment_unexpected_kwargs("PV", "PvConfig", unexpected)?;
+        Ok(Self {
             name,
-            capacity_kw,
+            capacity_w,
             tilt,
             azimuth,
             sam_lut_path,
             soiling,
-        }
+        })
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "PV(name={:?}, capacity_kw={}, tilt={}, azimuth={}, sam_lut_path={:?})",
-            self.name, self.capacity_kw, self.tilt, self.azimuth, self.sam_lut_path
+            "PV(name={:?}, capacity_w={}, tilt={}, azimuth={}, sam_lut_path={:?})",
+            self.name, self.capacity_w, self.tilt, self.azimuth, self.sam_lut_path
         )
     }
 }
@@ -658,9 +664,9 @@ pub struct PyEv {
     #[pyo3(get)]
     pub name: String,
     #[pyo3(get)]
-    pub capacity_kwh: Option<f64>,
+    pub capacity_j: Option<f64>,
     #[pyo3(get)]
-    pub max_charging_kw: Option<f64>,
+    pub max_charging_power_w: Option<f64>,
     #[pyo3(get)]
     pub initial_soc: Option<f64>,
     #[pyo3(get)]
@@ -668,7 +674,7 @@ pub struct PyEv {
     #[pyo3(get)]
     pub power_factor: Option<f64>,
     #[pyo3(get)]
-    pub charger_capacity_kva: Option<f64>,
+    pub charger_capacity_va: Option<f64>,
     /// Explicit initial pack temperature [°C]; `None` → ambient-aware
     /// cascade at init (outdoor weather).
     #[pyo3(get)]
@@ -709,18 +715,18 @@ pub struct PyEv {
 #[pymethods]
 impl PyEv {
     #[new]
-    #[pyo3(signature = (name, capacity_kwh=None, max_charging_kw=None, initial_soc=None, initial_connection_state=None, power_factor=None, charger_capacity_kva=None, battery_temp_c=None, min_charge_temp_c=None, full_power_temp_c=None, heater_power_w=None, heater_threshold_c=None, thermal_mass_j_per_k=None, ua_w_per_k=None, n_series=None, n_parallel=None, cell_resistance_ohm=None, charging_curve_lut=None))]
+    #[pyo3(signature = (name, *, capacity_j=None, max_charging_power_w=None, initial_soc=None, initial_connection_state=None, power_factor=None, charger_capacity_va=None, battery_temp_c=None, min_charge_temp_c=None, full_power_temp_c=None, heater_power_w=None, heater_threshold_c=None, thermal_mass_j_per_k=None, ua_w_per_k=None, n_series=None, n_parallel=None, cell_resistance_ohm=None, charging_curve_lut=None, **unexpected))]
     // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         name: String,
-        capacity_kwh: Option<f64>,
-        max_charging_kw: Option<f64>,
+        capacity_j: Option<f64>,
+        max_charging_power_w: Option<f64>,
         initial_soc: Option<f64>,
         initial_connection_state: Option<PyEvConnectionState>,
         power_factor: Option<f64>,
-        charger_capacity_kva: Option<f64>,
+        charger_capacity_va: Option<f64>,
         battery_temp_c: Option<f64>,
         min_charge_temp_c: Option<f64>,
         full_power_temp_c: Option<f64>,
@@ -732,19 +738,21 @@ impl PyEv {
         n_parallel: Option<u32>,
         cell_resistance_ohm: Option<f64>,
         charging_curve_lut: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        crate::utils::check_equipment_unexpected_kwargs("EV", "EvConfig", unexpected)?;
         let lut = match charging_curve_lut {
             Some(obj) => Some(extract_charging_lut(py, obj)?),
             None => None,
         };
         Ok(Self {
             name,
-            capacity_kwh,
-            max_charging_kw,
+            capacity_j,
+            max_charging_power_w,
             initial_soc,
             initial_connection_state,
             power_factor,
-            charger_capacity_kva,
+            charger_capacity_va,
             battery_temp_c,
             min_charge_temp_c,
             full_power_temp_c,
@@ -771,20 +779,20 @@ impl PyEv {
         let rust_aid: EvArchetypeId = archetype_id.into();
         let spec = rust_vid.spec();
         let preset = rust_aid.preset();
-        let max_power = match preset.charging_level {
+        let max_power_w = match preset.charging_level {
             hares_types::ChargingLevel::L1 => spec
-                .max_l2_power_kw
-                .min(hares_equipment::ev::catalog::L1_CAP_KW),
-            hares_types::ChargingLevel::L2 => spec.max_l2_power_kw,
+                .charger_power_w()
+                .min(hares_equipment::ev::catalog::L1_CAP_W),
+            hares_types::ChargingLevel::L2 => spec.charger_power_w(),
         };
         Self {
             name: spec.label.to_string(),
-            capacity_kwh: Some(spec.capacity_kwh),
-            max_charging_kw: Some(max_power),
+            capacity_j: Some(spec.capacity_j()),
+            max_charging_power_w: Some(max_power_w),
             initial_soc: None,
             initial_connection_state: None,
             power_factor: None,
-            charger_capacity_kva: None,
+            charger_capacity_va: None,
             battery_temp_c: None,
             min_charge_temp_c: None,
             full_power_temp_c: None,
@@ -875,8 +883,8 @@ impl PyEv {
             ""
         };
         format!(
-            "EV(name={:?}, capacity_kwh={:?}, max_charging_kw={:?}{lut_info})",
-            self.name, self.capacity_kwh, self.max_charging_kw
+            "EV(name={:?}, capacity_j={:?}, max_charging_power_w={:?}{lut_info})",
+            self.name, self.capacity_j, self.max_charging_power_w
         )
     }
 }
@@ -885,12 +893,12 @@ impl PyEv {
     fn from_spec(spec: &VehicleSpec) -> Self {
         Self {
             name: spec.label.to_string(),
-            capacity_kwh: Some(spec.capacity_kwh),
-            max_charging_kw: Some(spec.max_l2_power_kw),
+            capacity_j: Some(spec.capacity_j()),
+            max_charging_power_w: Some(spec.charger_power_w()),
             initial_soc: None,
             initial_connection_state: None,
             power_factor: None,
-            charger_capacity_kva: None,
+            charger_capacity_va: None,
             battery_temp_c: None,
             min_charge_temp_c: None,
             full_power_temp_c: None,

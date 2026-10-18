@@ -197,15 +197,219 @@ pub static REMOVED_KEYS: &[RemovedKey] = &[
         key: "hpxml_dir",
         replacement: "pass the unpacked buildings directory as the `buildings_dir` argument",
     },
+    // ── Equipment config fields stored in SI ────────────────────────────
+    // Every row names its config type (the class an override is keyed by
+    // maps to it through the registry entry that builds the class), the
+    // old key path and the replacement's unit.
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "PvConfig.capacity_kw",
+        replacement: "PvConfig.capacity_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "PvConfig.inverter_capacity_kw",
+        replacement: "PvConfig.inverter_capacity_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "PvConfig.arrays[].capacity_kw",
+        replacement: "PvConfig.arrays[].capacity_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "BatteryConfig.capacity_kwh",
+        replacement: "BatteryConfig.capacity_j (J)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "BatteryConfig.max_charge_kw",
+        replacement: "BatteryConfig.max_charge_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "BatteryConfig.max_discharge_kw",
+        replacement: "BatteryConfig.max_discharge_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "BatteryConfig.inverter_capacity_kva",
+        replacement: "BatteryConfig.inverter_capacity_va (VA)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "BatteryConfig.bms_mode.SelfConsumption.surplus_deadband_kw",
+        replacement: "BatteryConfig.bms_mode.SelfConsumption.surplus_deadband_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EvConfig.capacity_kwh",
+        replacement: "EvConfig.capacity_j (J)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EvConfig.max_charging_kw",
+        replacement: "EvConfig.max_charging_power_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EvConfig.max_charging_power_kw",
+        replacement: "EvConfig.max_charging_power_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EvConfig.v2l_max_discharge_kw",
+        replacement: "EvConfig.v2l_max_discharge_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EvConfig.v2g_max_discharge_kw",
+        replacement: "EvConfig.v2g_max_discharge_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EvConfig.power_limit_kw",
+        replacement: "EvConfig.power_limit_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EvConfig.fuel_economy_kwh_per_mi",
+        replacement: "EvConfig.fuel_economy_j_per_m (J/m)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EvConfig.charger_capacity_kva",
+        replacement: "EvConfig.charger_capacity_va (VA)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EvConfig.charging_strategy.SolarSurplus.min_charge_rate_kw",
+        replacement: "EvConfig.charging_strategy.SolarSurplus.min_charge_rate_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EvConfig.charging_strategy.V2G.max_export_kw",
+        replacement: "EvConfig.charging_strategy.V2G.max_export_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "GeneratorConfig.rated_power_kw",
+        replacement: "GeneratorConfig.rated_power_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "GeneratorConfig.capacity_min_kw",
+        replacement: "GeneratorConfig.capacity_min_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "GeneratorConfig.grid_import_limit_kw",
+        replacement: "GeneratorConfig.grid_import_limit_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "GeneratorConfig.export_limit_kw",
+        replacement: "GeneratorConfig.export_limit_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "GeneratorConfig.delta_kw_per_s",
+        replacement: "GeneratorConfig.delta_w_per_s (W/s)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "CentralAirConditionerConfig.crankcase_heater_kw",
+        replacement: "CentralAirConditionerConfig.crankcase_heater_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "RoomAcConfig.crankcase_heater_kw",
+        replacement: "RoomAcConfig.crankcase_heater_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "HeatPumpCoolerConfig.crankcase_heater_kw",
+        replacement: "HeatPumpCoolerConfig.crankcase_heater_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EventBasedLoad.active_power_kw",
+        replacement: "EventBasedLoad.active_power_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EventBasedLoad.phase_<n>_power_kw",
+        replacement: "EventBasedLoad.phase_<n>_power_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EventBasedLoad.cycle_phase_<n>_power_kw",
+        replacement: "EventBasedLoad.cycle_phase_<n>_power_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "EventBasedLoad.event_power_kw_series",
+        replacement: "EventBasedLoad.event_power_w_series (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "WetAppliance.active_power_kw",
+        replacement: "WetAppliance.active_power_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "WetAppliance.phase_<n>_power_kw",
+        replacement: "WetAppliance.phase_<n>_power_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "WetAppliance.cycle_phase_<n>_power_kw",
+        replacement: "WetAppliance.cycle_phase_<n>_power_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "ScheduledLoad.power_profile_max_kw",
+        replacement: "ScheduledLoad.power_profile_max_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "ScheduledLoad.power_constant_kw",
+        replacement: "ScheduledLoad.power_constant_w (W)",
+    },
 ];
 
-/// The replacement text of the removed key matching `scope` and `key`, if any.
+/// The replacement text of the removed key matching `scope` and `key`, if
+/// any. A pattern row writes `<n>` where the key carries a number (a
+/// phase index): `<n>` matches a run of ASCII digits and every other
+/// character matches exactly.
 #[must_use]
 pub fn removed_key(scope: KeyScope, key: &str) -> Option<&'static str> {
     REMOVED_KEYS
         .iter()
-        .find(|removed| removed.scope == scope && removed.key == key)
+        .find(|removed| removed.scope == scope && key_matches(removed.key, key))
         .map(|removed| removed.replacement)
+}
+
+/// Whether the table's row key matches the lookup key: equal strings, or
+/// a pattern row's `<n>` matching a run of ASCII digits at that spot.
+fn key_matches(row_key: &str, key: &str) -> bool {
+    match (row_key.split_once("<n>"), key) {
+        (Some((prefix, suffix)), _) => {
+            let Some(rest) = key.strip_prefix(prefix) else {
+                return false;
+            };
+            let Some(digits_end) = rest.find(|c: char| !c.is_ascii_digit()) else {
+                // All digits to the end.
+                return rest.ends_with(suffix) && rest.len() >= suffix.len() && {
+                    let digits = &rest[..rest.len() - suffix.len()];
+                    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+                };
+            };
+            let (digits, tail) = rest.split_at(digits_end);
+            !digits.is_empty() && tail == suffix
+        }
+        (None, _) => row_key == key,
+    }
 }
 
 /// Reject the removed keys among a TOML table's top-level keys before the

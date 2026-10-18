@@ -25,8 +25,13 @@ use hares_physics::units as conv;
 use super::elements::*;
 use crate::defaults::DefaultsStore;
 
-/// OCHRE EV fuel economy: 1/325 * 1000 miles per kWh (for sedans).
-const EV_FUEL_ECONOMY: f64 = 1000.0 / 325.0;
+/// OCHRE EV fuel economy: 325 Wh per mile (for sedans), the parent's
+/// 1000/325 miles per kWh written in SI (J/m) with uom.
+fn ev_fuel_economy_j_per_m() -> f64 {
+    (uom::si::f64::Energy::new::<uom::si::energy::watt_hour>(325.0)
+        / uom::si::f64::Length::new::<uom::si::length::mile>(1.0))
+    .get::<uom::si::force::newton>()
+}
 /// Fraction of dryer energy exhausted to outdoors when the dryer is vented,
 /// and the sensible share of the rest, for every fuel and for the electric
 /// and fuel input alike: OpenStudio-HPXML v1.12.0
@@ -612,13 +617,13 @@ pub(super) fn resolve_scheduled_loads(
 
                         // Multi-phase cycle: fill, wash, rinse, spin.
                         params.insert("phase_len".to_string(), json!(4));
-                        params.insert("phase_0_power_kw".to_string(), json!(0.02));
+                        params.insert("phase_0_power_w".to_string(), json!(20.0));
                         params.insert("phase_0_duration_s".to_string(), json!(300.0));
-                        params.insert("phase_1_power_kw".to_string(), json!(0.4));
+                        params.insert("phase_1_power_w".to_string(), json!(400.0));
                         params.insert("phase_1_duration_s".to_string(), json!(900.0));
-                        params.insert("phase_2_power_kw".to_string(), json!(0.02));
+                        params.insert("phase_2_power_w".to_string(), json!(20.0));
                         params.insert("phase_2_duration_s".to_string(), json!(300.0));
-                        params.insert("phase_3_power_kw".to_string(), json!(0.8));
+                        params.insert("phase_3_power_w".to_string(), json!(800.0));
                         params.insert("phase_3_duration_s".to_string(), json!(600.0));
                     }
                     ApplianceTag::ClothesDryer => {
@@ -748,13 +753,13 @@ pub(super) fn resolve_scheduled_loads(
 
                         // Multi-phase cycle: fill, wash, drain, dry.
                         params.insert("phase_len".to_string(), json!(4));
-                        params.insert("phase_0_power_kw".to_string(), json!(0.05));
+                        params.insert("phase_0_power_w".to_string(), json!(50.0));
                         params.insert("phase_0_duration_s".to_string(), json!(120.0));
-                        params.insert("phase_1_power_kw".to_string(), json!(0.6));
+                        params.insert("phase_1_power_w".to_string(), json!(600.0));
                         params.insert("phase_1_duration_s".to_string(), json!(1200.0));
-                        params.insert("phase_2_power_kw".to_string(), json!(0.3));
+                        params.insert("phase_2_power_w".to_string(), json!(300.0));
                         params.insert("phase_2_duration_s".to_string(), json!(60.0));
-                        params.insert("phase_3_power_kw".to_string(), json!(0.8));
+                        params.insert("phase_3_power_w".to_string(), json!(800.0));
                         params.insert("phase_3_duration_s".to_string(), json!(900.0));
                     }
                     ApplianceTag::CookingRange
@@ -1184,15 +1189,21 @@ pub(super) fn resolve_scheduled_loads(
                     if let Some(kwh) = child_load_kwh(plug) {
                         // Splits the two EV size options from ResStock (matches OCHRE parse_ev)
                         let range_miles = if kwh < 1500.0 { 100.0 } else { 250.0 };
-                        // OCHRE: capacity = range / EV_FUEL_ECONOMY where
-                        // EV_FUEL_ECONOMY = 1/325 * 1000 miles/kWh
-                        let battery_capacity_kwh = range_miles / EV_FUEL_ECONOMY;
-                        let max_charging_power_kw = if range_miles < 175.0 { 7.2 } else { 11.5 };
+                        // OCHRE: capacity = range × fuel economy. The range
+                        // is held in m, the capacity in J, and the fuel
+                        // economy is 325 Wh per mile written in SI (J/m)
+                        // with uom (the parent's 1000/325 miles per kWh).
+                        let range_m =
+                            uom::si::f64::Length::new::<uom::si::length::mile>(range_miles)
+                                .get::<uom::si::length::meter>();
+                        let battery_capacity_j = range_m * ev_fuel_economy_j_per_m();
+                        let max_charging_power_w =
+                            if range_miles < 175.0 { 7200.0 } else { 11500.0 };
                         let cfg = EvConfig {
                             equipment_id: None,
-                            capacity_kwh: battery_capacity_kwh,
+                            capacity_j: battery_capacity_j,
                             charging_level: Some("Level 2".to_string()),
-                            max_charging_power_kw,
+                            max_charging_power_w,
                             charging_efficiency: None,
                             l1_current_a: None,
                             l1_voltage_v: None,
@@ -1210,19 +1221,19 @@ pub(super) fn resolve_scheduled_loads(
                             cell_resistance_ohm: None,
                             v2l_enabled: None,
                             v2l_soc_reserve: None,
-                            v2l_max_discharge_kw: None,
+                            v2l_max_discharge_w: None,
                             v2g_enabled: None,
                             v2g_soc_reserve: None,
-                            v2g_max_discharge_kw: None,
+                            v2g_max_discharge_w: None,
                             chemistry: None,
-                            fuel_economy_kwh_per_mi: None,
+                            fuel_economy_j_per_m: None,
                             ready_soc: None,
                             charging_strategy: None,
                             plug_in_policy: None,
-                            power_limit_kw: None,
+                            power_limit_w: None,
                             initial_connection_state: None,
                             power_factor: None,
-                            charger_capacity_kva: None,
+                            charger_capacity_va: None,
                             cc_cv_transition_soc: None,
                             charging_priority: None,
                             discharge_respects_deadline: true,

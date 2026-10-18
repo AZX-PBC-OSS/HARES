@@ -26,7 +26,7 @@ graph TD
 
 **Source**: `pv/array_config.rs`
 
-- **Single array**: config parsed with unindexed keys (`capacity_kw`, `tilt_deg`, `azimuth_deg`)
+- **Single array**: config parsed with unindexed keys (`capacity_w` (SI), `tilt_deg`, `azimuth_deg`)
 - **Multi-array** (via `array_count`): each array indexed as `array_0_*`, `array_1_*`, etc.
 - Each array's (tilt, azimuth) quantized to a `surface_id` for irradiance lookup
 - Module types: Standard (gamma=-0.0047/C), Premium (-0.0035), ThinFilm (-0.0020)

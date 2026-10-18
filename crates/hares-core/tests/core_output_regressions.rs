@@ -293,7 +293,7 @@ fn actors_observe_previous_equipment_core_snapshot() {
                 min_soc: 0.1,
                 max_soc: 0.8,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             },
             grid_export_rule: GridExportRule::Unrestricted,
             max_charge_kw: 5.0,

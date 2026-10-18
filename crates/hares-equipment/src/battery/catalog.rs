@@ -94,6 +94,30 @@ impl std::str::FromStr for BatteryProductId {
     }
 }
 
+impl BatterySpec {
+    /// The datasheet capacity in SI (J), converted once for a config
+    /// fill: the catalogue keeps datasheet units as data.
+    #[must_use]
+    pub fn capacity_j(&self) -> f64 {
+        uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(self.capacity_kwh)
+            .get::<uom::si::energy::joule>()
+    }
+
+    /// The datasheet maximum charge power in SI (W).
+    #[must_use]
+    pub fn max_charge_w(&self) -> f64 {
+        uom::si::f64::Power::new::<uom::si::power::kilowatt>(self.max_charge_kw)
+            .get::<uom::si::power::watt>()
+    }
+
+    /// The datasheet maximum discharge power in SI (W).
+    #[must_use]
+    pub fn max_discharge_w(&self) -> f64 {
+        uom::si::f64::Power::new::<uom::si::power::kilowatt>(self.max_discharge_kw)
+            .get::<uom::si::power::watt>()
+    }
+}
+
 pub struct BatterySpec {
     pub id: BatteryProductId,
     pub label: &'static str,
@@ -188,9 +212,9 @@ impl BatterySpec {
             BatteryConfig {
                 equipment_id: None,
                 zone_id: None,
-                capacity_kwh: self.capacity_kwh,
-                max_charge_kw: self.max_charge_kw,
-                max_discharge_kw: self.max_discharge_kw,
+                capacity_j: self.capacity_j(),
+                max_charge_w: self.max_charge_w(),
+                max_discharge_w: self.max_discharge_w(),
                 n_series: Some(self.n_series_cells),
                 n_parallel: Some(self.n_parallel_cells),
                 ah_cell: None,
@@ -219,7 +243,7 @@ impl BatterySpec {
                 bms_mode: None,
                 grid_export_rule: None,
                 power_factor: None,
-                inverter_capacity_kva: None,
+                inverter_capacity_va: None,
                 grid_forming: None,
                 min_dwell_steps: 0,
             },
@@ -717,9 +741,9 @@ mod tests {
         let cfg = BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 5.0,
-            max_charge_kw: 3.84,
-            max_discharge_kw: 3.84,
+            capacity_j: 5.0 * 3.6e6,
+            max_charge_w: 3840.0,
+            max_discharge_w: 3840.0,
             n_series: None,
             n_parallel: None,
             ah_cell: Some(100.0),
@@ -748,7 +772,7 @@ mod tests {
             bms_mode: None,
             grid_export_rule: None,
             power_factor: None,
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
         };
@@ -1391,9 +1415,9 @@ mod tests {
                 BatteryConfig {
                     equipment_id: None,
                     zone_id: None,
-                    capacity_kwh: spec.capacity_kwh,
-                    max_charge_kw: spec.max_charge_kw,
-                    max_discharge_kw: spec.max_discharge_kw,
+                    capacity_j: spec.capacity_j(),
+                    max_charge_w: spec.max_charge_w(),
+                    max_discharge_w: spec.max_discharge_w(),
                     n_series: Some(spec.n_series_cells),
                     n_parallel: Some(spec.n_parallel_cells),
                     ah_cell: None,
@@ -1422,7 +1446,7 @@ mod tests {
                     bms_mode: None,
                     grid_export_rule: None,
                     power_factor: None,
-                    inverter_capacity_kva: None,
+                    inverter_capacity_va: None,
                     grid_forming: None,
                     min_dwell_steps: 0,
                 },
@@ -1513,5 +1537,28 @@ mod tests {
             "IQ 5P dropped only {small_drop:.1} °C in 2 h; expected > 5 °C \
              cooling for τ ≈ 1.9 h at −5 °C ambient",
         );
+    }
+
+    /// The catalogue fill converts with uom: the config's SI fields equal,
+    /// on bits, the spec's uom methods, and the Python surface built from
+    /// the same entry carries the same values (the Python side pinned in
+    /// tests/python).
+    #[test]
+    fn battery_catalogue_fill_converts_with_uom() {
+        let spec = BatteryProductId::LgResu10h.spec();
+        let config = spec.to_config().unwrap();
+        let typed: BatteryConfig = config.typed().unwrap();
+        assert_eq!(typed.capacity_j.to_bits(), spec.capacity_j().to_bits());
+        assert_eq!(typed.max_charge_w.to_bits(), spec.max_charge_w().to_bits());
+        assert_eq!(
+            typed.max_discharge_w.to_bits(),
+            spec.max_discharge_w().to_bits()
+        );
+        // The fill moves no value: the SI value is the datasheet kWh
+        // value times exactly 3.6e6 (one rounding).
+        let expected =
+            uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(spec.capacity_kwh)
+                .get::<uom::si::energy::joule>();
+        assert_eq!(spec.capacity_j().to_bits(), expected.to_bits());
     }
 }

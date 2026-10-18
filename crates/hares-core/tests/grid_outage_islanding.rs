@@ -90,7 +90,7 @@ fn build_dwelling_with_base_load(tag: &str) -> Dwelling {
     let env = dwelling.latest_env().clone();
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -114,9 +114,9 @@ fn add_battery_with_discharge_limit(
     let cfg = BatteryConfig {
         equipment_id: None,
         zone_id: None,
-        capacity_kwh: 10.0,
-        max_charge_kw: 5.0,
-        max_discharge_kw,
+        capacity_j: 10.0 * 3.6e6,
+        max_charge_w: 5000.0,
+        max_discharge_w: max_discharge_kw * 1000.0,
         n_series: None,
         n_parallel: None,
         ah_cell: None,
@@ -145,7 +145,7 @@ fn add_battery_with_discharge_limit(
         bms_mode: None,
         grid_export_rule: None,
         power_factor: None,
-        inverter_capacity_kva: None,
+        inverter_capacity_va: None,
         grid_forming: None,
         min_dwell_steps: 0,
     };
