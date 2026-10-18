@@ -537,6 +537,7 @@ fn pv_config_from_py(pv: &PyPv) -> Result<EquipmentConfig, HaresError> {
         capacity_w: pv.capacity_w,
         tilt_deg: Some(pv.tilt),
         azimuth_deg: Some(pv.azimuth),
+        attached_boundary_id: None,
         module_type: None,
         noct_c: None,
         array_type: None,

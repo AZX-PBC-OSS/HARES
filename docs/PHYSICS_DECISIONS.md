@@ -836,3 +836,44 @@ The rule removes the per-equipment hand-written conversion factors and
 the caller's need to know which fields are not SI: every config a caller
 builds or reads is SI, and the read-back reports the resolved parameters
 directly from the SI fields.
+## PV roof attachment and coverage follow the envelope's own orientation
+
+The roof a PV array shades is decided once at assembly, from the
+orientation the envelope already registered for that roof's solar gains
+(the environment's surface geometry: tilt, azimuth and the
+omnidirectional flag), never from the PV code's own defaults. The
+matching rule: a roof with an azimuth matches a PV within 15° of azimuth
+and 10° of tilt, the closest by summed difference; an omnidirectional
+roof (the envelope registers an exterior roof with no azimuth as
+omnidirectional, azimuth-averaged Perez irradiance) has no azimuth to
+compare, so it matches by tilt alone, every PV within 10° of its tilt
+attaching whatever the PV's azimuth, and the arrays' coverages sum on
+that roof. A PV without a tilt or an azimuth is an assembly error naming
+the PV and the HPXML element (`ArrayTilt`, `ArrayAzimuth`): OpenStudio-
+HPXML requires both (`EPvalidator.sch`, through
+`defaults.rb` `apply_pv_systems`). A PV that matches no roof attaches to
+none, and the run's warning log names it and the nearest roof's azimuth
+(when it has one) and tilt differences.
+
+The coverage an attached array registers on the roof is its collector
+area over the roof's area, and the collector area per watt of DC
+nameplate is a named constant, `COLLECTOR_AREA_PER_W` = 2/420 m²/W: a
+420 W panel presents about 2 m² of collector, the area of a
+20 %-efficient module at standard test conditions (1000 W/m²), the
+module efficiency PVWatts assumes for its area-free capacity form. A
+roof whose summed coverage exceeds 1 is an assembly error naming the
+roof, its area and the PVs on it; nothing clamps it silently.
+
+OCHRE does not couple its PV to the roof's solar gains at all: the
+envelope model carries no PV shading, and a PV without a tilt or an
+azimuth takes the roof closest to south with preference to west
+(`PV.py` `__init__`, `(roof_data["Az"] - 185).abs().idxmax()`), or the
+site latitude and south when the model has no roof. HARES shades the
+matched roof by `(1 - coverage)` because its envelope solves the roof's
+heat balance explicitly; the attachment rule above keeps the array and
+the shaded surface on the same orientation. Direction of the delta: a
+covered roof's solar gains fall on the sunlit steps; at this commit no
+golden fixture's numbers move (the attachment and coverage values are
+bitwise those the previous bag-key plumbing computed; the entry that
+introduced the typed-config read recorded the proof in the measurement
+log).

@@ -48,8 +48,8 @@ use hares_envelope::{
     ThermalSolver,
 };
 use hares_equipment::{
-    ActorSeed, BatteryLutType, Equipment, EquipmentConfig, EquipmentRegistry, OcvTable,
-    RegularGridInterpolator, SetpointReconciliation, UNegTable,
+    ActorSeed, BatteryLutType, ConfigPayload, Equipment, EquipmentConfig, EquipmentRegistry,
+    OcvTable, RegularGridInterpolator, SetpointReconciliation, UNegTable,
 };
 use hares_io::output::OutputError;
 use hares_io::output::callback::{BatchCallback, CallbackAttachment};
@@ -2247,89 +2247,191 @@ fn pv_orientations(spec: &hares_io::EquipmentSpec) -> Result<Vec<hares_equipment
         .array_orientations(owner)
 }
 
-/// Auto-attach PV arrays to the closest matching roof boundary by orientation.
-/// Sets `attached_boundary_id` on matching specs so the thermal model can
-/// account for PV shading.
-fn attach_pv_to_roofs(specs: &mut [hares_io::EquipmentSpec], building: &Building) -> Result<()> {
+/// Collector area per watt of DC nameplate capacity: 2 m² of collector per
+/// 420 W panel. The source is recorded in `docs/PHYSICS_DECISIONS.md`
+/// (PV roof coverage).
+pub const COLLECTOR_AREA_PER_W: f64 = 2.0 / 420.0;
+
+/// Auto-attach PV arrays to the closest matching roof boundary by
+/// orientation. The roof's orientation is the one the envelope registered
+/// for that roof's solar gains (the environment's surface geometry: tilt,
+/// azimuth, the omnidirectional flag), so the roof a PV is matched to and
+/// the roof surface whose solar its coverage scales agree; the PV code
+/// holds no orientation of its own and no constant stands in for a missing
+/// value. The attachment is recorded on the resolved PV's typed config,
+/// never a JSON key.
+///
+/// Matching rule: a roof with an azimuth matches a PV within 15° of
+/// azimuth and 10° of tilt, the closest by summed difference. An
+/// omnidirectional roof (no azimuth) has no azimuth to compare, because
+/// the envelope averages its solar gain over every azimuth, so it matches
+/// by tilt alone: every PV within 10° of its tilt attaches to it, whatever
+/// the PV's azimuth, and their coverages sum on that roof. A PV that
+/// matches no roof attaches to none, and the run's warning log names it
+/// and the nearest roof's azimuth (when it has one) and tilt differences.
+fn attach_pv_to_roofs(
+    specs: &mut [hares_io::EquipmentSpec],
+    building: &Building,
+    geometry: &[crate::environment::SurfaceGeometry],
+    warnings: &mut WarningLog,
+) -> Result<()> {
     use hares_io::hpxml::building::BoundaryType;
 
-    // Roof candidates carry their azimuth from the input. A roof with no
-    // azimuth models in all four directions when pitched, or at an
-    // arbitrary azimuth when flat, per OS-HPXML v1.12.0
-    // (geometry.rb:20-25, `apply_roofs`): either way the azimuth cannot
-    // exclude it, so such a roof matches on tilt alone. No azimuth is ever
-    // invented here. A roof with no tilt has no OS-HPXML default (the pitch
-    // comes from its geometry) and is an input defect when a PV needs to
-    // attach.
-    let roofs: Vec<(u32, Option<f64>, f64, f64)> = building
+    // The roof candidates as the envelope registered them: the surface
+    // geometry is index-aligned with the building's boundaries and each
+    // entry's `surface_id` is the boundary index, the id the environment
+    // scales the roof's solar by.
+    struct Roof<'a> {
+        /// The boundary index, the surface id the environment scales the
+        /// roof's solar by.
+        index: u32,
+        id: &'a str,
+        tilt_deg: f64,
+        azimuth_deg: Option<f64>,
+    }
+    let roofs: Vec<Roof<'_>> = building
         .boundaries
         .iter()
         .enumerate()
         .filter(|(_, b)| b.boundary_type == BoundaryType::Roof)
-        .map(|(idx, b)| {
-            (
-                idx as u32,
-                b.azimuth_deg,
-                b.tilt_deg.unwrap_or(0.0),
-                b.area_m2,
-            )
+        .filter_map(|(idx, b)| {
+            let geom = geometry.get(idx)?;
+            Some(Roof {
+                index: geom.surface_id,
+                id: b.id.as_str(),
+                tilt_deg: geom.tilt_deg,
+                azimuth_deg: if geom.omni_directional {
+                    None
+                } else {
+                    Some(geom.azimuth_deg)
+                },
+            })
         })
         .collect();
 
+    /// The azimuth difference on the circle, in [0, 180].
+    fn azimuth_difference(a: f64, b: f64) -> f64 {
+        let d = (a - b).abs().rem_euclid(360.0);
+        d.min(360.0 - d)
+    }
+
     for spec in specs.iter_mut().filter(|s| s.name == "PV") {
-        if spec.parameters.contains_key("attached_boundary_id") {
-            continue;
-        }
-        // A multi-array PV attaches each array through its own spec.
+        // A multi-array PV is not attached automatically: each array's own
+        // `attached_boundary_id` attaches it.
         let [orientation] = pv_orientations(spec)?[..] else {
             continue;
         };
-        let (pv_az, pv_tilt) = (orientation.azimuth_deg, orientation.tilt_deg);
+        let pv_name = spec
+            .instance_name
+            .as_deref()
+            .unwrap_or(&spec.name)
+            .to_string();
+        let pv_az = orientation.azimuth_deg;
+        let pv_tilt = orientation.tilt_deg;
 
-        let tiltless: Vec<String> = building
-            .boundaries
-            .iter()
-            .filter(|b| b.boundary_type == BoundaryType::Roof && b.tilt_deg.is_none())
-            .map(|b| b.id.clone())
-            .collect();
-        if !tiltless.is_empty() {
-            return Err(HaresError::Dwelling(format!(
-                "PV '{}': roof boundary '{}' has no tilt; a PV cannot attach to \
-                 a roof whose orientation the input does not state",
-                spec.instance_name.as_deref().unwrap_or(&spec.name),
-                tiltless.join(", "),
-            )));
+        // The candidates: oriented roofs within both tolerances,
+        // omnidirectional roofs within the tilt tolerance alone.
+        let mut best: Option<(&Roof<'_>, f64)> = None;
+        for roof in &roofs {
+            let tilt_diff = (roof.tilt_deg - pv_tilt).abs();
+            if tilt_diff > 10.0 {
+                continue;
+            }
+            let azimuth_diff = match roof.azimuth_deg {
+                Some(az) if azimuth_difference(az, pv_az) > 15.0 => continue,
+                Some(az) => azimuth_difference(az, pv_az),
+                // An omnidirectional roof has no azimuth to compare: the
+                // envelope averages its solar gain over every azimuth.
+                None => 0.0,
+            };
+            let sum = azimuth_diff + tilt_diff;
+            if best.is_none_or(|(_, best_sum)| sum < best_sum) {
+                best = Some((roof, sum));
+            }
         }
 
-        // Find the closest roof within tolerance (15° azimuth where the
-        // azimuth is known, 10° tilt).
-        let best = roofs
-            .iter()
-            .filter(|(_, az, tilt, _)| {
-                let tilt_ok = (*tilt - pv_tilt).abs() <= 10.0;
-                match az {
-                    Some(az) => {
-                        let az_diff = (*az - pv_az).abs().min(360.0 - (*az - pv_az).abs());
-                        tilt_ok && az_diff <= 15.0
-                    }
-                    None => tilt_ok,
-                }
-            })
-            .min_by(|(_, az_a, tilt_a, _), (_, az_b, tilt_b, _)| {
-                let da = az_a
-                    .map(|az| (az - pv_az).abs().min(360.0 - (az - pv_az).abs()))
-                    .unwrap_or(0.0)
-                    + (*tilt_a - pv_tilt).abs();
-                let db = az_b
-                    .map(|az| (az - pv_az).abs().min(360.0 - (az - pv_az).abs()))
-                    .unwrap_or(0.0)
-                    + (*tilt_b - pv_tilt).abs();
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            });
+        tracing::debug!(
+            pv = %pv_name,
+            pv_azimuth_deg = pv_az,
+            pv_tilt_deg = pv_tilt,
+            attached = best.is_some(),
+            roof = best.map(|(roof, _)| roof.id),
+            roof_azimuth_diff_deg = best.and_then(|(roof, _)| roof.azimuth_deg)
+                .map(|az| azimuth_difference(az, pv_az)),
+            roof_tilt_diff_deg = best.map(|(roof, _)| (roof.tilt_deg - pv_tilt).abs()),
+            "PV attachment decision: the roof's registered orientation against \
+             the array's"
+        );
 
-        if let Some(&(roof_id, _, _, _)) = best {
-            spec.parameters
-                .insert("attached_boundary_id".into(), serde_json::json!(roof_id));
+        let Some((roof, _)) = best else {
+            // The nearest roof by the summed difference, for the warning's
+            // differences: an omnidirectional roof contributes no azimuth
+            // difference (it has none to compare).
+            let nearest = roofs.iter().min_by(|a, b| {
+                let diff = |r: &Roof<'_>| {
+                    r.azimuth_deg
+                        .map_or(0.0, |az| azimuth_difference(az, pv_az))
+                        + (r.tilt_deg - pv_tilt).abs()
+                };
+                diff(a)
+                    .partial_cmp(&diff(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let message = match nearest {
+                Some(roof) => match roof.azimuth_deg {
+                    Some(az) => format!(
+                        "PV '{pv_name}' attaches to no roof: the nearest roof \
+                         '{}' is {:.1}° away in azimuth and {:.1}° away in tilt",
+                        roof.id,
+                        azimuth_difference(az, pv_az),
+                        (roof.tilt_deg - pv_tilt).abs()
+                    ),
+                    None => format!(
+                        "PV '{pv_name}' attaches to no roof: the nearest roof \
+                         '{}' has no azimuth to compare and is {:.1}° away in tilt",
+                        roof.id,
+                        (roof.tilt_deg - pv_tilt).abs()
+                    ),
+                },
+                None => format!("PV '{pv_name}' attaches to no roof: the building has no roof"),
+            };
+            warnings.push_from("PV", message);
+            continue;
+        };
+
+        // The attachment lands on the resolved PV's typed config: the
+        // equipment reads it at init and the coverage step reads it back,
+        // so no JSON key carries it.
+        let Some(typed) = spec.typed_config.as_mut() else {
+            return Err(HaresError::Dwelling(format!(
+                "PV '{pv_name}': no typed config to record the roof \
+                 attachment in"
+            )));
+        };
+        let ConfigPayload::Typed { data, .. } = &mut typed.payload else {
+            return Err(HaresError::Dwelling(format!(
+                "PV '{pv_name}': no typed config to record the roof \
+                 attachment in"
+            )));
+        };
+        let value = serde_json::Value::from(roof.index);
+        if data.get("attached_boundary_id") == Some(&value) {
+            continue;
+        }
+        if let Some(existing) = data.get("attached_boundary_id") {
+            return Err(HaresError::Dwelling(format!(
+                "PV '{pv_name}': already attached to boundary {} and cannot \
+                 also attach to {value}",
+                existing
+            )));
+        }
+        if let serde_json::Value::Object(map) = data {
+            map.insert("attached_boundary_id".to_string(), value);
+        } else {
+            return Err(HaresError::Dwelling(format!(
+                "PV '{pv_name}': its typed config is not an object and \
+                 cannot carry the roof attachment"
+            )));
         }
     }
     Ok(())
@@ -2337,52 +2439,115 @@ fn attach_pv_to_roofs(specs: &mut [hares_io::EquipmentSpec], building: &Building
 
 /// Compute PV panel coverage on attached roofs and register shading with the
 /// environment. Reduces incident solar on envelope surfaces proportionally.
+///
+/// The capacity and the attachment are read from the resolved PV's typed
+/// config (the single-array path's top-level fields, the multi-array
+/// path's per-array ones); a roof whose summed coverage exceeds 1 is an
+/// assembly error naming the roof, its area and the PVs on it, and the
+/// coverage registers on the surface id the environment scales (the
+/// envelope's registered surface geometry's id for that roof).
 fn register_pv_roof_shading(
     specs: &[hares_io::EquipmentSpec],
     building: &Building,
+    geometry: &[crate::environment::SurfaceGeometry],
     env: &mut EnvironmentManager,
 ) -> Result<()> {
     let mut coverage_by_roof: std::collections::HashMap<u32, f64> =
         std::collections::HashMap::new();
+    let mut pv_names_by_roof: std::collections::HashMap<u32, Vec<String>> =
+        std::collections::HashMap::new();
 
     for spec in specs.iter().filter(|s| s.name == "PV") {
-        let boundary_id = spec
-            .parameters
-            .get("attached_boundary_id")
-            .and_then(|v| v.as_u64());
-        // The spec's raw bag carries the config's own (SI) spellings: the
-        // capacity enters in W and the collector-area expression takes
-        // the W value in place of its own kW-to-W factor.
-        let capacity_w = spec.parameters.get("capacity_w").and_then(|v| v.as_f64());
-
-        if let (Some(bid), Some(cap)) = (boundary_id, capacity_w) {
+        let pv_name = spec
+            .instance_name
+            .as_deref()
+            .unwrap_or(&spec.name)
+            .to_string();
+        let config = conversions::equipment_config_from_spec(spec)?
+            .require_typed::<hares_equipment::PvConfig>("PV")?;
+        // The attached (roof boundary index, collector capacity) pairs this
+        // spec contributes: the multi-array path carries both per array,
+        // the single-array path at the top level.
+        let attached: Vec<(u32, f64)> = match &config.arrays {
+            Some(arrays) => arrays
+                .iter()
+                .filter_map(|a| a.attached_boundary_id.map(|bid| (bid, a.capacity_w)))
+                .collect(),
+            None => config
+                .attached_boundary_id
+                .map(|bid| (bid, config.capacity_w))
+                .into_iter()
+                .collect(),
+        };
+        for (bid, capacity_w) in attached {
             let Some(boundary) = building.boundaries.get(bid as usize) else {
                 return Err(HaresError::Dwelling(format!(
-                    "PV '{}' attaches to boundary {} which does not exist; the \
-                     roof's area is required to register its shading coverage",
-                    spec.instance_name.as_deref().unwrap_or(&spec.name),
-                    bid
+                    "PV '{pv_name}' attaches to boundary {bid} which does not exist; the \
+                     roof's area is required to register its shading coverage"
                 )));
             };
-            let roof_area = boundary.area_m2;
+            let geom = geometry.get(bid as usize).ok_or_else(|| {
+                HaresError::Dwelling(format!(
+                    "PV '{pv_name}' attaches to boundary {bid} whose \
+                         surface the environment did not register"
+                ))
+            })?;
+            let roof_area = geom.area_m2;
             if !(roof_area.is_finite() && roof_area > 0.0) {
                 return Err(HaresError::Dwelling(format!(
-                    "PV '{}' attaches to roof '{}' whose area is not positive \
+                    "PV '{pv_name}' attaches to roof '{}' whose area is not positive \
                      ({} m²); the roof's area is required to register its \
                      shading coverage",
-                    spec.instance_name.as_deref().unwrap_or(&spec.name),
-                    boundary.id,
-                    roof_area
+                    boundary.id, roof_area
                 )));
             }
-            // ~2 m² per 420 W panel
-            let collector_area = cap / 420.0 * 2.0;
-            *coverage_by_roof.entry(bid as u32).or_default() += collector_area / roof_area;
+            let collector_area = capacity_w * COLLECTOR_AREA_PER_W;
+            *coverage_by_roof.entry(bid).or_default() += collector_area / roof_area;
+            pv_names_by_roof
+                .entry(bid)
+                .or_default()
+                .push(pv_name.clone());
         }
     }
 
-    for (surface_id, coverage) in coverage_by_roof {
-        env.set_pv_roof_coverage(surface_id, coverage);
+    // A roof whose summed coverage exceeds 1 is an assembly error naming
+    // the roof, its area and the PVs on it: the array cannot shade more
+    // surface than the roof has, and the run must not hide the
+    // over-subscription behind a clamp.
+    for (bid, coverage) in &coverage_by_roof {
+        if *coverage <= 1.0 {
+            continue;
+        }
+        let boundary = building.boundaries.get(*bid as usize).ok_or_else(|| {
+            HaresError::Dwelling(format!(
+                "PV attaches to boundary {bid} which does not exist"
+            ))
+        })?;
+        return Err(HaresError::Dwelling(format!(
+            "roof '{}' ({} m²) carries PV collector area above its area: the \
+             PVs on it are {} and their summed coverage is {}; the array \
+             cannot shade more surface than the roof has",
+            boundary.id,
+            boundary.area_m2,
+            pv_names_by_roof
+                .get(bid)
+                .map(|names| names.join(", "))
+                .unwrap_or_default(),
+            coverage
+        )));
+    }
+
+    for (boundary_idx, coverage) in coverage_by_roof {
+        let Some(geom) = geometry.get(boundary_idx as usize) else {
+            continue;
+        };
+        tracing::debug!(
+            surface_id = geom.surface_id,
+            roof_boundary = boundary_idx,
+            coverage,
+            "PV roof coverage registered on the surface the environment scales"
+        );
+        env.set_pv_roof_coverage(geom.surface_id, coverage);
     }
     Ok(())
 }
@@ -3585,9 +3750,22 @@ fn assemble_from_blueprint_with_seed(
     register_pv_surfaces(&equipment_specs, &mut environment)?;
 
     // Auto-attach PV arrays to the closest matching roof surface and
-    // register shading coverage on attached roofs.
-    attach_pv_to_roofs(&mut equipment_specs, &bp.building)?;
-    register_pv_roof_shading(&equipment_specs, &bp.building, &mut environment)?;
+    // register shading coverage on attached roofs. The roof's orientation
+    // is the one the environment registered for it, so the match and the
+    // scaled surface agree.
+    let surface_geometry: Vec<_> = environment.surface_geometry().to_vec();
+    attach_pv_to_roofs(
+        &mut equipment_specs,
+        &bp.building,
+        &surface_geometry,
+        warnings,
+    )?;
+    register_pv_roof_shading(
+        &equipment_specs,
+        &bp.building,
+        &surface_geometry,
+        &mut environment,
+    )?;
 
     let initial_env = environment.update(&clock, &[])?;
 
@@ -17270,6 +17448,7 @@ occupancy = 0.0
             capacity_w: 5000.0,
             tilt_deg,
             azimuth_deg: Some(200.0),
+            attached_boundary_id: None,
             module_type: None,
             noct_c: None,
             array_type: None,

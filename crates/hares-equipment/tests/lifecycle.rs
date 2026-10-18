@@ -1128,6 +1128,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 capacity_w: 5000.0,
                 tilt_deg: Some(0.0),
                 azimuth_deg: Some(0.0),
+                attached_boundary_id: None,
                 module_type: None,
                 noct_c: None,
                 array_type: None,

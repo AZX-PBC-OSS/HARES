@@ -1043,3 +1043,14 @@ golden fixtures re-captured.
   every golden's HPXML declares all three elements and every golden
   compares bitwise (compare-all 8 identical, the dst set identical); the
   delta on the fixtures that lack them is in the measurement log.
+- 2026-10-18: the PV roof attachment and coverage are read from the typed
+  `PvConfig` (capacity, tilt, azimuth and the attachment decided at
+  assembly against the envelope's registered roof orientation), replacing
+  the untyped bag-key plumbing; a roof whose summed PV coverage exceeds
+  its area is an assembly error where the coverage was silently clamped,
+  and a PV that matches no roof warns with the nearest roof's
+  differences. No golden fixture moves: the typed values are bitwise
+  those the bag carried, the matching picks the same roofs on every
+  fixture, no fixture over-subscribes, and the collector-area constant's
+  per-watt rounding is absorbed by the coverage division (compare-all 10
+  bitwise, the dst set's 1 included). No golden re-captured.

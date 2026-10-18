@@ -536,6 +536,7 @@ fn sample_pv_config() -> PvConfig {
         capacity_w: 5000.0,
         tilt_deg: Some(30.0),
         azimuth_deg: Some(180.0),
+        attached_boundary_id: None,
         module_type: Some("standard".to_string()),
         noct_c: Some(45.0),
         array_type: None,

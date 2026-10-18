@@ -389,6 +389,7 @@ fn pv_cell_temperature_noct_model() {
             capacity_w: 5000.0,
             tilt_deg: Some(20.0),
             azimuth_deg: Some(180.0),
+            attached_boundary_id: None,
             module_type: None,
             noct_c: Some(47.0),
             array_type: None,
@@ -501,6 +502,7 @@ fn pv_peak_generation_in_good_conditions() {
                 .get::<uom::si::power::watt>(),
             tilt_deg: Some(tilt),
             azimuth_deg: Some(azimuth),
+            attached_boundary_id: None,
             module_type: None,
             // Open-rack default NOCT (PVWatts v8).
             noct_c: Some(45.0),
@@ -606,6 +608,7 @@ fn pv_power_temperature_derating() {
                 capacity_w: 5000.0,
                 tilt_deg: Some(0.0),
                 azimuth_deg: Some(180.0),
+                attached_boundary_id: None,
                 module_type: None,
                 noct_c: Some(47.0),
                 array_type: None,

@@ -95,6 +95,7 @@ fn full_pv_config() -> PvConfig {
         capacity_w: 5000.0,
         tilt_deg: Some(30.0),
         azimuth_deg: Some(180.0),
+        attached_boundary_id: None,
         module_type: Some("Standard".to_string()),
         noct_c: Some(45.0),
         array_type: Some("OpenRack".to_string()),

@@ -47,6 +47,7 @@ pub use actor::{Actor, ActorEquipment, ActorInterest, ActorTarget};
 pub use actor_registry::{ActorConfig, ActorFactory, ActorRegistry};
 pub use checkpoint::DwellingCheckpoint;
 pub use clock::SimClock;
+pub use dwelling::COLLECTOR_AREA_PER_W;
 pub use dwelling::{
     BatteryLutData, Dwelling, DwellingBlueprint, DwellingBlueprintBuilder, DwellingConfig,
     DwellingSettings, HpxmlInputs, PremiseZip, StepResult, building_to_boundary_inputs,

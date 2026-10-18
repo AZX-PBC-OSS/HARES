@@ -1876,6 +1876,58 @@ its equipment config commit renames the key this entry replaces);
 in); M-1 and M-2. In the numeric block it follows B-14's control-layer
 commit (row 94h) and precedes `08-consumer.md` CN-3.
 
+**State:** FIXED (2026-10-18, branch `row/r94ij`, worktree `r94ij`,
+based on `6a5d9769`, one commit). The three functions read the typed
+`PvConfig` through the spec's typed config: the attachment is a new
+`PvConfig.attached_boundary_id` field (the single-array path; the
+multi-array path keeps each array's own field), written by the
+attachment decision at assembly and read back by the coverage step, and
+no JSON key carries either. The roof a PV matches is the envelope's
+registered surface geometry for that boundary (tilt, azimuth, the
+omnidirectional flag): the matching rule is the entry's (15° azimuth and
+10° tilt, closest by summed difference; an omnidirectional roof matches
+by tilt alone), the tiltless-roof error of the bag plumbing goes with
+the PV code's own orientation constants, and a PV that matches no roof
+attaches to none with the run's warning log naming it and the nearest
+roof's azimuth (when it has one) and tilt differences. Coverage reads
+the typed capacity through the named constant `COLLECTOR_AREA_PER_W`
+(2/420 m²/W, the source in `docs/PHYSICS_DECISIONS.md` under "PV roof
+attachment and coverage follow the envelope's own orientation"), and a
+roof whose summed coverage exceeds 1 is an assembly error naming the
+roof, its area and the PVs on it; the environment's silent clamp is
+gone. `tracing` at debug logs each attachment decision with the
+orientations compared and each coverage registration.
+
+Triage (the acceptance tests written first and run at the parent): the
+parent's bag plumbing attached base-pv.xml's two arrays (4000 W, 1500 W)
+to its omnidirectional roof (surface 2) and registered coverage
+0.18678323692125798; bldg0176227's 7000 W PV to its tilt-0 garage roof
+(surface 9), coverage 0.41527432163231953; bldg0352714's 11000 W PV to
+its 180° roof (surface 12), coverage 0.7532717153914619. So the read
+this entry replaces was alive (B-14's rename kept it), and the defects
+the entry's tests witnessed at the parent are the two silent ones:
+`pv_on_an_oriented_roof_matches_by_azimuth` failed on the warning (an
+array that matches no roof attached to none with no word), and
+`roof_coverage_above_one_is_an_assembly_error` failed on the clamp (a
+summed coverage of 1.0188 was silently clipped to 1). The other three
+tests pass at the parent and pin the parse-time `ArrayTilt` error and
+the omnidirectional sum.
+
+Movement: no golden moves. compare-all is bitwise identical on all ten
+default-feature fixtures and the dst fixture, at the row: the typed
+values are on bits the bag's, the geometry read picks the same roofs the
+boundary read did on every fixture, no fixture over-subscribes, and the
+constant's per-watt spelling of the 4000 W collector area (1 ulp from
+the old expression) is absorbed by the coverage division's rounding on
+the fixture roofs' areas. No golden re-captured; the delta record is in
+`02-measurement.md`.
+
+Gates at the commit: fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; `cargo nextest run --workspace
+--all-features -j 2` 8211 passed, 8 skipped, 0 failed; pytest and
+pyright on the rebuilt wheel (counts in the schedule row's cell); the
+goldens bitwise (compare-all 10 + dst 1).
+
 ## OD-21: HPXML attribute handling and the time-zone lookup have no pinning test, and a malformed attribute is dropped
 
 **Kind:** fix (found defect, `dl-i08-process.found_defects`; the two notes

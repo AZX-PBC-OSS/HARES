@@ -1140,9 +1140,19 @@ impl EnvironmentManager {
     ///
     /// When nonzero, `update()` reduces incident solar irradiance on the
     /// corresponding envelope surface by `(1 - coverage)` to model shading.
+    /// The caller guarantees the fraction: assembly sums the attached
+    /// arrays' collector areas over the roof's area and a sum above 1 is
+    /// its error, so no clamp stands between an over-subscribed roof and
+    /// the report of it.
     pub fn set_pv_roof_coverage(&mut self, surface_id: u32, fraction: f64) {
-        self.pv_roof_coverage
-            .insert(surface_id, fraction.clamp(0.0, 1.0));
+        self.pv_roof_coverage.insert(surface_id, fraction);
+    }
+
+    /// The registered coverage fraction of a roof surface, `None` when the
+    /// surface carries none.
+    #[must_use]
+    pub fn pv_roof_coverage(&self, surface_id: u32) -> Option<f64> {
+        self.pv_roof_coverage.get(&surface_id).copied()
     }
 
     /// Override default grid state for subsequent updates.

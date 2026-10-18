@@ -39,6 +39,15 @@ pub struct PvConfig {
     pub tilt_deg: Option<f64>,
     pub azimuth_deg: Option<f64>,
 
+    /// The envelope boundary index of the roof this array attaches to, so
+    /// its collector area shades that roof's solar gains. Decided at
+    /// assembly by the attachment rule (the roof's orientation read from
+    /// the envelope's registered surface geometry); `None` when the array
+    /// matched no roof. The multi-array path carries the attachment on
+    /// each [`PvArraySpec`] instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_boundary_id: Option<u32>,
+
     // Module characteristics
     pub module_type: Option<String>,
     pub noct_c: Option<f64>,
@@ -268,6 +277,17 @@ impl hares_types::DescribeFields for PvConfig {
                 },
             ),
             (
+                "attached_boundary_id",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the envelope boundary index of the roof the array \
+                         attaches to, decided at assembly by the attachment \
+                         rule; absent when the array matched no roof",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
                 "module_type",
                 hares_types::FieldMeta {
                     description: Some("the module type"),
@@ -360,6 +380,7 @@ mod tests {
             capacity_w: 5.0,
             tilt_deg: None,
             azimuth_deg: None,
+            attached_boundary_id: None,
             module_type: None,
             noct_c: None,
             array_type: None,

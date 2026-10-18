@@ -667,7 +667,7 @@ impl PV {
                     noct_c: c.noct_c,
                     array_type: c.array_type.clone(),
                     sam_lut_path: c.sam_lut_path.clone(),
-                    attached_boundary_id: None,
+                    attached_boundary_id: c.attached_boundary_id,
                 }];
                 &single_array[..]
             }
@@ -1665,6 +1665,7 @@ mod tests {
             capacity_w: 5000.0,
             tilt_deg: Some(30.0),
             azimuth_deg: Some(180.0),
+            attached_boundary_id: None,
             module_type: None,
             noct_c: Some(DEFAULT_NOCT_C),
             array_type: None,
@@ -2250,6 +2251,7 @@ mod tests {
                 capacity_w: 4200.0,
                 tilt_deg: Some(27.0),
                 azimuth_deg: Some(200.0),
+                attached_boundary_id: None,
                 module_type: Some("thin_film".to_string()),
                 noct_c: Some(DEFAULT_NOCT_C),
                 array_type: None,
@@ -4593,6 +4595,7 @@ mod tests {
                     .get::<uom::si::power::watt>(),
                 tilt_deg: Some(30.0),
                 azimuth_deg: Some(180.0),
+                attached_boundary_id: None,
                 module_type: Some("Standard".to_string()),
                 noct_c: Some(DEFAULT_NOCT_C),
                 system_losses_fraction: Some(hares_losses),

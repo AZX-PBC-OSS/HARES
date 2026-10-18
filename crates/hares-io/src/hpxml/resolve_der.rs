@@ -139,6 +139,7 @@ pub(super) fn resolve_pv(
             capacity_w,
             tilt_deg: Some(tilt_deg),
             azimuth_deg: Some(azimuth_deg),
+            attached_boundary_id: None,
             module_type: child_text(pv, &MODULE_TYPE),
             noct_c: None,
             array_type: None,

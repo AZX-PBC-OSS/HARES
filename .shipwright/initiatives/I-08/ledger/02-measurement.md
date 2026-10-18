@@ -4337,3 +4337,37 @@ where one ulp of SOC is worth 37 ulps of power. The first differing rows
 match `frame_golden`'s diff (226 to 288). No scaled difference above
 1e-9 and no scale ratio near a unit factor anywhere: the movement is the
 conversion pairs, and nothing else.
+
+## The PV roof coverage's typed-config read, 2026-10-18
+
+The PV roof coverage entry (OD-20, row 94i) at its parent `6a5d9769` and
+at its commit, on the same worktree and wheel. The parent's triage (the
+acceptance tests run at the parent, the probe read from the blueprint's
+specs and the environment's coverage map): base-pv.xml's two arrays
+attach to its omnidirectional roof (surface 2) with coverage
+0.18678323692125798 registered; bldg0176227's 7000 W array attaches to
+its tilt-0 garage roof (surface 9) with coverage 0.41527432163231953;
+bldg0352714's 11000 W array attaches to its 180° roof (surface 12) with
+coverage 0.7532717153914619. The attachment and the coverage the typed
+read computes are on bits those values: the typed config's capacity and
+attachment are the bag's serialized values, the geometry read picks the
+same roofs, and no fixture over-subscribes.
+
+| Golden | Movement | Cause |
+|---|---|---|
+| `consumer_shape_900s` | bitwise | as above |
+| `fleet_same_offset_300s` | bitwise | as above |
+| `fleet_mixed_offset` | bitwise | as above |
+| `resstock_2025_fleet` | bitwise | as above |
+| `der_pv_battery_900s` | bitwise | as above |
+| `der_pv_battery_ev_900s` | bitwise | as above |
+| every other fixture (4 default + dst) | bitwise | as above |
+
+The collector-area constant's per-watt spelling moves the 4000 W
+collector area by one f64 ulp from the old `cap / 420.0 * 2.0`
+expression; the coverage division on the fixture roofs' areas absorbs it
+(the quotients' bits are equal for 4000 W, 1500 W, 4200 W and 11000 W
+against the parsed roof areas), which is why no fixture's roof solar
+moves. No golden re-captured. compare-all: 10 default-feature fixtures
+and the dst fixture, bitwise identical, run twice (at the row and at the
+final tree).

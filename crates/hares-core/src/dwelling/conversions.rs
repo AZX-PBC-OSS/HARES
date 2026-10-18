@@ -2596,6 +2596,7 @@ mod tests {
             capacity_w: 5000.0,
             tilt_deg: Some(30.0),
             azimuth_deg: Some(180.0),
+            attached_boundary_id: None,
             module_type: None,
             noct_c: None,
             array_type: None,
