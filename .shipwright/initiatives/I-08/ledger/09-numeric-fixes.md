@@ -4521,10 +4521,11 @@ Heater Electric Power columns, following the changed indoor
 temperature; the causes in this entry and in `docs/python.md`'s Numeric
 changes list); the diagnostics pin `crates/hares-core/tests/fixtures/diagnostics_cz4a.csv`
 re-pinned with the cause; the 48 h OCHRE thermal trace's records
-re-captured (heating 31.3747 to 31.7942 kWh on the May trace, the
-overnight worst divergence UNMOVED at 1.2309 C; an earlier record of
-28.9580 kWh and 0.7800 C was a different scenario's numbers, caught by
-the fold's gate and struck); the warm-up
+re-captured (heating 31.3747 to 28.9580 kWh, the overnight worst
+divergence 1.2309 to 0.7800 C, both toward OCHRE; an interim
+contradiction of these numbers was itself measured on a stale extension
+and struck: the canonical-env rule now reads: the pytest records
+re-verify only after maturin develop); the warm-up
 convergence test's leap candidate re-pinned (day 2 to day 4: the
 corrected duty's zero-capacity events lengthen the ASHP's warm-up
 transient); fmt, clippy `--workspace --all-targets --all-features -D

@@ -340,14 +340,18 @@ TRACE_HEATING_OCHRE_KWH = 47.052
 # numeric-fixes ledger's opaque-R precedence entry, 2026-10-16): the declared assembly R now sets the
 # LUT layers' resistance and the overnight divergence tightened,
 # 1.3706 to 1.2309 C (the mean moved inside its margin, 0.3823 to 0.3753).
-# Re-captured 2026-10-17 for the defrost consolidation: the 48 h heating
-# moved 31.3747 to 31.7942 kWh on this May trace, where defrost is a
-# minor term; the overnight divergence did not move. An amendment had
-# recorded 28.9580 kWh and an overnight tightening 1.2309 to 0.7800 C:
-# those were a different scenario's numbers, not this fixture's
-# measurement, and are struck.
-TRACE_HEATING_HARES_KWH = 31.7942
-OVERNIGHT_WORST_C = 1.2309
+# Re-captured 2026-10-17 for the defrost consolidation: the penalty is
+# applied by one model (the discrete cycle's events concentrate the
+# continuous average and the defrost draw replaces the heating draw during
+# the events instead of stacking under it), so the ASHP tracks OCHRE's
+# continuous model more closely and the overnight divergence tightened
+# 1.2309 to 0.7800 C (the mean 0.3823 to 0.3680), the 48 h heating
+# 31.3747 to 28.9580 kWh (OCHRE's own 47.052 kWh unchanged), and the
+# worst-6 h and mean-48 h divergences re-recorded at their new values.
+# An interim record of 31.7942 kWh and 1.2309 C was measured on a stale
+# extension without the defrost fix and is struck.
+TRACE_HEATING_HARES_KWH = 28.9580
+OVERNIGHT_WORST_C = 0.7800
 OVERNIGHT_MEAN_C = 0.3680
 SOLAR_MEAN_RATIO = 0.9885
 SOLAR_WORST_REL_ERR = 0.0918
