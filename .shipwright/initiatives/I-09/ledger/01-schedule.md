@@ -19,8 +19,8 @@ Columns: # | axis | row | title | size | spec | depends on | state
 | # | axis | row | title | size | spec | depends on | state |
 |---|---|---|---|---|---|---|---|
 | 1 | E | E2 | the whole-step allocation assertion | S | 12-axis-d-e.md | none | draft |
-| 2 | E | E5 | CHANGELOG and the version contract | S | 12-axis-d-e.md | none | review |
-| 3 | E | E6 | the submodule and reproducibility posture | S | 12-axis-d-e.md | none | review |
+| 2 | E | E5 | CHANGELOG and the version contract | S | 12-axis-d-e.md | none | landed 35e4a3c7 (folded at the head); the changelog seeded from python.md (the section moved as a link), the versioning contract, the version-sync check (the python script the offline guard allows, the self-test in ci.yml and pytest), the tracked pytest bytecode untracked and ignored |
+| 3 | E | E6 | the submodule and reproducibility posture | S | 12-axis-d-e.md | none | landed 0aea75f3 (folded at the head); the EnergyPlus URL https, the OCHRE branch hint removed, the pins documented with the update procedure, the reproducibility workflow widened to main PRs, the fresh-clone probe green with SSH disabled |
 | 4 | E | E3 | the checkpoint bench and the CI bench gate set | S | 12-axis-d-e.md | none | draft |
 | 5 | A | A8 | the HELICS wheel-workaround watchdog | S | 10-axis-a-cosim.md | none | draft |
 | 6 | D | D4 | schedule-driven DCV (occupancy-modulated OA) | S | 12-axis-d-e.md | none | draft |
