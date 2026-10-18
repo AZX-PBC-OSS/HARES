@@ -1367,6 +1367,26 @@ impl Ev {
         env: &EnvironmentState,
         dt: Duration,
     ) -> crate::Result<ChargeStepPower> {
+        // An unavailable period zeroing the EV's rows (`Vacancy` or
+        // `Power Outage`, the `electric_vehicle_charging` and
+        // `electric_vehicle_discharging` table rows) leaves the vehicle
+        // idle for the step: no charge leg, no discharge leg, no pack
+        // heater. An HPXML `Power Outage` is OpenStudio-HPXML's end-use
+        // convention, not a bus state, so this gates beside the bus gate
+        // below rather than replacing it.
+        if env.unavailable_periods.zeroes_electric_vehicle() {
+            tracing::debug!(
+                connection = ?self.connection_state,
+                "the step's unavailable periods zero the EV's rows: the \
+                 vehicle is idle for the step"
+            );
+            return Ok(ChargeStepPower {
+                charge_leg_ac_kw: 0.0,
+                heater_draw_w: 0.0,
+                export_ac_kw: 0.0,
+                is_discharge: false,
+            });
+        }
         let charge_derate = self.charge_derate_factor();
 
         // Discharge leg: a negative setpoint at home with V2G/V2L enabled.

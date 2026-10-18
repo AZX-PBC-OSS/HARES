@@ -785,7 +785,26 @@ impl Equipment for EventBasedLoad {
         // row, delay_remaining_s decrements and phase timers run. Cycles that
         // fall during the outage are missed, not deferred. Islanded homes keep
         // an energized bus and are not affected. See docs/outage-behavior.md.
-        let bus_energized = env.grid.bus_energized();
+        // An unavailable period zeroing the load's table row (a Vacancy for
+        // the occupant-driven rows, a Power Outage for the rest) zeroes the
+        // step's outputs the same way, beside the column zeroing the
+        // resolution applies.
+        let period_zeroed =
+            crate::unavailable_period_rows_for_equipment(self.descriptor.name.as_str())
+                .iter()
+                .any(|row| {
+                    row.zeroed_by
+                        .iter()
+                        .any(|kind| kind.zeroed(env.unavailable_periods))
+                });
+        if period_zeroed {
+            tracing::debug!(
+                load = %self.descriptor.name,
+                "the step's unavailable periods zero the event load's table \
+                 row: the load's outputs are zero for the step"
+            );
+        }
+        let bus_energized = env.grid.bus_energized() && !period_zeroed;
 
         let dt_s = dt.as_secs_f64();
         if self.delay_remaining_s > 0.0 {
@@ -1926,6 +1945,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

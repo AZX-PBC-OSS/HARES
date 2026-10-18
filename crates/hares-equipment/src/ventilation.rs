@@ -624,9 +624,27 @@ impl Equipment for Ventilation {
         // cannot run (no airflow, no recovery, no draw) — gated at the root
         // of the on/off decision (WH precedent). Islanded homes keep an
         // energized bus and are not affected. See docs/outage-behavior.md.
+        // An unavailable period zeroing the `house_fan` row (a Power
+        // Outage) stops the unit the same way for the step.
+        let period_zeroed =
+            crate::unavailable_period_rows_for_equipment(self.descriptor.name.as_str())
+                .iter()
+                .any(|row| {
+                    row.zeroed_by
+                        .iter()
+                        .any(|kind| kind.zeroed(env.unavailable_periods))
+                });
+        if period_zeroed {
+            tracing::debug!(
+                unit = %self.descriptor.name,
+                "the step's unavailable periods zero the house_fan row: the \
+                 mechanical ventilation is off for the step"
+            );
+        }
         let is_running = self.mode != OperatingMode::Off
             && self.dr_level != DRLevel::GridEmergency
-            && env.grid.bus_energized();
+            && env.grid.bus_energized()
+            && !period_zeroed;
 
         if !is_running {
             // Clear stored effective effectiveness so that the thermal solver
@@ -1219,6 +1237,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -2581,6 +2600,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

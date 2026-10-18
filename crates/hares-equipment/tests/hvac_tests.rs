@@ -58,6 +58,7 @@ fn env_with_zone_temp(temp_c: f64) -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
+        unavailable_periods: hares_types::UnavailablePeriodState::default(),
         domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),

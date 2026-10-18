@@ -439,6 +439,7 @@ pub mod testing {
                     island_bus_voltage_pu: None,
                 },
                 schedule_row: None,
+                unavailable_periods: hares_types::UnavailablePeriodState::default(),
                 domains: hares_types::DomainSlots::default(),
                 current_time: FixedOffset::east_opt(0)
                     .expect("offset")

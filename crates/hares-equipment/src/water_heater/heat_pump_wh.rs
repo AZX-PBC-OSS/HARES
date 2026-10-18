@@ -33,8 +33,8 @@ use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::wh_config::HeatPumpWaterHeaterConfig;
 use super::{
-    hysteresis_call, parse_usize, restored_tank_deadband_c, tank_thermostat_update,
-    weighted_average_tank_temp,
+    hysteresis_call, parse_usize, restored_tank_deadband_c, step_setpoint_c,
+    tank_thermostat_update, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 use crate::hvac::helpers::loop_id_from_config;
@@ -370,14 +370,16 @@ impl HeatPumpWH {
         0.75 * t_upper + 0.25 * t_lower
     }
 
-    fn effective_setpoint_c(&self) -> f64 {
-        self.setpoint_c + self.dr_setpoint_offset_c
+    fn effective_setpoint_c(&self, env: &EnvironmentState) -> f64 {
+        // The freeze protection: a period zeroing the water_heater row
+        // holds the tank at 2 C, not off, so standby losses continue.
+        step_setpoint_c(env, self.setpoint_c + self.dr_setpoint_offset_c)
     }
 
-    fn call_for_heat(&self) -> bool {
+    fn call_for_heat(&self, env: &EnvironmentState) -> bool {
         hysteresis_call(
             self.control_temp_c(),
-            self.effective_setpoint_c(),
+            self.effective_setpoint_c(env),
             self.deadband_c,
             self.compressor_on || self.backup_on,
         )
@@ -838,7 +840,7 @@ impl Equipment for HeatPumpWH {
             return OperatingMode::Off;
         }
 
-        let call_for_heat = self.call_for_heat() && self.duty_cycle > 0.0;
+        let call_for_heat = self.call_for_heat(env) && self.duty_cycle > 0.0;
         // An unresolvable inlet keeps the compressor off here; `step` reads
         // the same inlet first and fails the step with the reason.
         let ambient_in_range = self
@@ -883,7 +885,7 @@ impl Equipment for HeatPumpWH {
                     self.backup_on = call_for_heat && backup_allowed;
                 } else {
                     let below_backup_threshold = self.control_temp_c()
-                        <= self.effective_setpoint_c() - self.backup_enable_offset_c;
+                        <= self.effective_setpoint_c(env) - self.backup_enable_offset_c;
                     match self.element_hp_control {
                         ElementHpControlMode::MutuallyExclusive => {
                             if self.compressor_on {
@@ -1656,6 +1658,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -2504,6 +2507,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -3727,6 +3731,7 @@ mod mutual_exclusion_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -4083,6 +4088,7 @@ mod dr_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -4399,6 +4405,7 @@ mod new_feature_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

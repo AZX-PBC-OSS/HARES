@@ -488,6 +488,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -566,4 +567,170 @@ pub fn config_type_for_class(class: &str) -> Option<&'static str> {
         | "Exterior Lighting" | "Basement Lighting" | "Garage Lighting" => Some("ScheduledLoad"),
         _ => None,
     }
+}
+
+/// One row of OpenStudio-HPXML's `unavailable_periods.csv` an equipment
+/// class answers to: the row's `Schedule Name` and the period kinds whose
+/// flag zeroes it (the row's 1s in the reference table,
+/// `resources/data/unavailable_periods.csv:1-40`, v1.12.0).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnavailableRow {
+    pub schedule_name: &'static str,
+    pub zeroed_by: &'static [hares_types::UnavailableKind],
+}
+
+/// Every kind, spelled once per arm for the declarations below.
+const OUTAGE_ONLY: &[hares_types::UnavailableKind] = &[hares_types::UnavailableKind::PowerOutage];
+const VACANCY_OR_OUTAGE: &[hares_types::UnavailableKind] = &[
+    hares_types::UnavailableKind::Vacancy,
+    hares_types::UnavailableKind::PowerOutage,
+];
+const OUTAGE_OR_NO_HEATING: &[hares_types::UnavailableKind] = &[
+    hares_types::UnavailableKind::PowerOutage,
+    hares_types::UnavailableKind::NoSpaceHeating,
+];
+const OUTAGE_OR_NO_COOLING: &[hares_types::UnavailableKind] = &[
+    hares_types::UnavailableKind::PowerOutage,
+    hares_types::UnavailableKind::NoSpaceCooling,
+];
+
+/// The declaration's slice literal: promoted to `'static` at each arm.
+macro_rules! rows {
+    ($name:literal, $by:expr) => {
+        &[UnavailableRow {
+            schedule_name: $name,
+            zeroed_by: $by,
+        }][..]
+    };
+    ($first:literal, $second:literal, $by:expr) => {
+        &[
+            UnavailableRow {
+                schedule_name: $first,
+                zeroed_by: $by,
+            },
+            UnavailableRow {
+                schedule_name: $second,
+                zeroed_by: $by,
+            },
+        ][..]
+    };
+}
+
+const IDEAL_ROWS: &[UnavailableRow] = &[
+    UnavailableRow {
+        schedule_name: "space_heating",
+        zeroed_by: OUTAGE_OR_NO_HEATING,
+    },
+    UnavailableRow {
+        schedule_name: "space_cooling",
+        zeroed_by: OUTAGE_OR_NO_COOLING,
+    },
+];
+const NONE: &[UnavailableRow] = &[];
+
+/// The `unavailable_periods.csv` rows each equipment class answers to, or
+/// none: one exhaustive match over the canonical class names, so a new
+/// class must choose. A class answers a row when its operation follows
+/// the row's schedule (heating equipment `space_heating`, cooling
+/// equipment `space_cooling`, a heat pump each by mode, water heaters
+/// `water_heater`, refrigerators and freezers their rows, the
+/// dehumidifier, mechanical ventilation `house_fan`, kitchen and bath
+/// fans, batteries `battery_charging` and `battery_discharging`, EVs
+/// `electric_vehicle_charging` and `electric_vehicle_discharging`); PV
+/// and generators answer none and keep running through every period.
+#[must_use]
+pub fn unavailable_period_rows(class: &str) -> &'static [UnavailableRow] {
+    match class {
+        // HVAC heating equipment
+        "Gas Furnace" | "Electric Furnace" | "Electric Baseboard" | "Gas Boiler"
+        | "Electric Boiler" | "Heat Pump Heater" | "ASHP Heater" | "MSHP Heater"
+        | "GSHP Heater" | "WSHP Heater" => rows!("space_heating", OUTAGE_OR_NO_HEATING),
+        // HVAC cooling equipment
+        "Air Conditioner" | "Room AC" | "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler"
+        | "WSHP Cooler" => rows!("space_cooling", OUTAGE_OR_NO_COOLING),
+        // The ideal unit serves both axes by mode.
+        "Ideal HVAC" => IDEAL_ROWS,
+        "Dehumidifier" => rows!("dehumidifier", OUTAGE_ONLY),
+        // Water heaters: the setpoint holds 2 C through the period, so
+        // standby losses continue.
+        "Gas Water Heater"
+        | "Resistance Water Heater"
+        | "Electric Resistance Water Heater"
+        | "Tankless Water Heater"
+        | "Gas Tankless Water Heater"
+        | "Heat Pump Water Heater"
+        | "HPWH"
+        | "Indirect Tank" => rows!("water_heater", OUTAGE_ONLY),
+        "Battery" => rows!("battery_charging", "battery_discharging", OUTAGE_ONLY),
+        "EV" | "Electric Vehicle" | "Scheduled EV" => rows!(
+            "electric_vehicle_charging",
+            "electric_vehicle_discharging",
+            VACANCY_OR_OUTAGE
+        ),
+        // Mechanical ventilation answers the house fan's row.
+        "Ventilation Fan" | "HRV" | "ERV" => rows!("house_fan", OUTAGE_ONLY),
+        // Scheduled and event-based loads answer the row their schedule
+        // column names; a column that is no row of the table (basement
+        // lighting, the microwave) answers none, as the reference's own
+        // lookup warns.
+        "Refrigerator" => rows!("refrigerator", OUTAGE_ONLY),
+        "Freezer" => rows!("freezer", OUTAGE_ONLY),
+        "Clothes Washer" => rows!("clothes_washer", VACANCY_OR_OUTAGE),
+        "Clothes Dryer" => rows!("clothes_dryer", VACANCY_OR_OUTAGE),
+        "Dishwasher" => rows!("dishwasher", VACANCY_OR_OUTAGE),
+        "Cooking Range" => rows!("cooking_range", VACANCY_OR_OUTAGE),
+        "Lighting" | "Indoor Lighting" => rows!("lighting_interior", VACANCY_OR_OUTAGE),
+        "Exterior Lighting" => rows!("lighting_exterior", VACANCY_OR_OUTAGE),
+        "Garage Lighting" => rows!("lighting_garage", VACANCY_OR_OUTAGE),
+        "Ceiling Fan" => rows!("ceiling_fan", VACANCY_OR_OUTAGE),
+        "Plug Loads" | "Other" | "MELs" => rows!("plug_loads_other", VACANCY_OR_OUTAGE),
+        "TV" => rows!("plug_loads_tv", VACANCY_OR_OUTAGE),
+        "Well Pump" => rows!("plug_loads_well_pump", VACANCY_OR_OUTAGE),
+        "Pool Pump" => rows!("pool_pump", VACANCY_OR_OUTAGE),
+        "Pool Heater" => rows!("pool_heater", VACANCY_OR_OUTAGE),
+        "Spa Pump" => rows!("permanent_spa_pump", VACANCY_OR_OUTAGE),
+        "Spa Heater" => rows!("permanent_spa_heater", VACANCY_OR_OUTAGE),
+        "Gas Grill" => rows!("fuel_loads_grill", VACANCY_OR_OUTAGE),
+        "Gas Fireplace" => rows!("fuel_loads_fireplace", VACANCY_OR_OUTAGE),
+        "Gas Lighting" => rows!("fuel_loads_lighting", VACANCY_OR_OUTAGE),
+        // PV and generators are in no row and keep running; a protocol
+        // bridge is not an end use; the remaining loads' columns are no
+        // rows of the table.
+        "PV" | "Gas Generator" | "Gas Fuel Cell" | "Protocol Bridge" | "EventBasedLoad"
+        | "Microwave" | "Basement Lighting" => NONE,
+        _ => NONE,
+    }
+}
+
+/// The canonical classes whose declared rows the kind zeroes: the
+/// equipment the period gates.
+#[must_use]
+pub fn unavailable_period_gated_classes(kind: hares_types::UnavailableKind) -> Vec<&'static str> {
+    CANONICAL_EQUIPMENT_NAMES
+        .iter()
+        .filter(|class| {
+            unavailable_period_rows(class)
+                .iter()
+                .any(|row| row.zeroed_by.contains(&kind))
+        })
+        .copied()
+        .collect()
+}
+
+/// The rows an equipment answers to, by the equipment's own name: the
+/// canonical class name, or the multi-instance rename's "Class #2"
+/// spelling through its class.
+#[must_use]
+pub fn unavailable_period_rows_for_equipment(name: &str) -> &'static [UnavailableRow] {
+    let declared = unavailable_period_rows(name);
+    if !declared.is_empty() {
+        return declared;
+    }
+    if let Some((class, suffix)) = name.rsplit_once(" #")
+        && !suffix.is_empty()
+        && suffix.bytes().all(|b| b.is_ascii_digit())
+    {
+        return unavailable_period_rows(class);
+    }
+    declared
 }

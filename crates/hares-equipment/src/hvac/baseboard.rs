@@ -25,8 +25,8 @@ use super::{
     helpers::{
         apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
         apply_simple_mode_override_in_control, outage_forces_off, register_ebm_telemetry_keys,
-        served_zone_ports, step_equivalent_battery, update_heating_control, write_ebm_telemetry,
-        zone_id_from_config,
+        served_zone_ports, step_equivalent_battery, unavailable_period_forces_off,
+        update_heating_control, write_ebm_telemetry, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -177,7 +177,9 @@ impl Equipment for ElectricBaseboard {
         // calls or overrides. Gated before override handling; islanded
         // (battery/generator-backed) homes keep an energized bus and are
         // not affected. See docs/outage-behavior.md.
-        if outage_forces_off(&mut self.hvac, env) {
+        if outage_forces_off(&mut self.hvac, env)
+            || unavailable_period_forces_off(&mut self.hvac, env, true, false)
+        {
             self.operating_mode = OperatingMode::Off;
             return OperatingMode::Off;
         }
@@ -542,6 +544,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

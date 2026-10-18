@@ -434,6 +434,131 @@ impl GridState {
     }
 }
 
+/// The four OpenStudio-HPXML unavailable-period types
+/// (`HPXMLtoOpenStudio/resources/data/unavailable_periods.csv`, v1.12.0:
+/// the CSV's period columns, each a `ColumnName` an HPXML period names).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UnavailableKind {
+    Vacancy,
+    PowerOutage,
+    NoSpaceHeating,
+    NoSpaceCooling,
+}
+
+impl UnavailableKind {
+    /// The HPXML `ColumnName` spelling.
+    #[must_use]
+    pub fn column_name(self) -> &'static str {
+        match self {
+            Self::Vacancy => "Vacancy",
+            Self::PowerOutage => "Power Outage",
+            Self::NoSpaceHeating => "No Space Heating",
+            Self::NoSpaceCooling => "No Space Cooling",
+        }
+    }
+
+    /// The kind a `ColumnName` spelling names, `None` when it is no
+    /// period type (OpenStudio-HPXML fails such a run:
+    /// `resources/schedules.rb` `unavailable_period_applies`, the `fail`
+    /// on a column the table does not carry).
+    #[must_use]
+    pub fn parse(column: &str) -> Option<Self> {
+        match column {
+            "Vacancy" => Some(Self::Vacancy),
+            "Power Outage" => Some(Self::PowerOutage),
+            "No Space Heating" => Some(Self::NoSpaceHeating),
+            "No Space Cooling" => Some(Self::NoSpaceCooling),
+            _ => None,
+        }
+    }
+
+    /// The kind's flag in the state.
+    #[must_use]
+    pub fn zeroed(self, state: UnavailablePeriodState) -> bool {
+        match self {
+            Self::Vacancy => state.vacancy,
+            Self::PowerOutage => state.power_outage,
+            Self::NoSpaceHeating => state.no_space_heating,
+            Self::NoSpaceCooling => state.no_space_cooling,
+        }
+    }
+
+    /// The four kinds, in the reference table's column order.
+    #[must_use]
+    pub fn all() -> [Self; 4] {
+        [
+            Self::Vacancy,
+            Self::PowerOutage,
+            Self::NoSpaceHeating,
+            Self::NoSpaceCooling,
+        ]
+    }
+}
+
+/// The per-step unavailable-period state an equipment reads beside
+/// `bus_energized`: which of the four period kinds flag the step (the
+/// period zeroes the schedule columns and the end uses its
+/// `unavailable_periods.csv` row names), and the natural-ventilation
+/// availability the periods set. An HPXML `Power Outage` period is the
+/// end-use convention the reference applies (PV runs, occupants stay);
+/// it does not de-energize the bus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnavailablePeriodState {
+    #[serde(default)]
+    pub vacancy: bool,
+    #[serde(default)]
+    pub power_outage: bool,
+    #[serde(default)]
+    pub no_space_heating: bool,
+    #[serde(default)]
+    pub no_space_cooling: bool,
+    /// The step's natural-ventilation availability: `None` when every
+    /// applying period leaves the regular schedule, `Some(false)` when a
+    /// period's `NaturalVentilation` makes it unavailable, `Some(true)`
+    /// when made available.
+    #[serde(default)]
+    pub natural_ventilation: Option<bool>,
+}
+
+impl UnavailablePeriodState {
+    /// Whether the step zeroes the `space_heating` row: a `Power Outage`
+    /// or a `No Space Heating` period.
+    #[must_use]
+    pub fn zeroes_space_heating(self) -> bool {
+        self.power_outage || self.no_space_heating
+    }
+
+    /// Whether the step zeroes the `space_cooling` row: a `Power Outage`
+    /// or a `No Space Cooling` period.
+    #[must_use]
+    pub fn zeroes_space_cooling(self) -> bool {
+        self.power_outage || self.no_space_cooling
+    }
+
+    /// Whether the step zeroes the `water_heater` row: a `Power Outage`
+    /// period (the water heater's setpoint then holds 2 C, freeze
+    /// protection, so standby losses continue).
+    #[must_use]
+    pub fn zeroes_water_heater(self) -> bool {
+        self.power_outage
+    }
+
+    /// Whether the step zeroes the battery's rows (`battery_charging`,
+    /// `battery_discharging`): a `Power Outage` period.
+    #[must_use]
+    pub fn zeroes_battery(self) -> bool {
+        self.power_outage
+    }
+
+    /// Whether the step zeroes the EV's rows
+    /// (`electric_vehicle_charging`, `electric_vehicle_discharging`): a
+    /// `Vacancy` or a `Power Outage` period.
+    #[must_use]
+    pub fn zeroes_electric_vehicle(self) -> bool {
+        self.vacancy || self.power_outage
+    }
+}
+
 /// An HPXML equipment `Location` that names space with no modeled thermal
 /// zone. OS-HPXML runs equipment there against an ambient air series instead
 /// of a zone's state (`geometry.rb`, `get_space_or_schedule_from_location`
@@ -529,6 +654,13 @@ pub struct EnvironmentState {
     /// only in a state built without one.
     #[serde(default)]
     pub schedule_row: Option<usize>,
+    /// The step's unavailable-period state beside
+    /// [`GridState::bus_energized`]: the period kinds flagging the step
+    /// and the periods' natural-ventilation availability. All-default
+    /// (no period flags) in a state built without an environment
+    /// manager.
+    #[serde(default)]
+    pub unavailable_periods: crate::environment::UnavailablePeriodState,
     /// Air states for the scheduled-space placements in use, computed once
     /// per step; equipment in an "other ..." HPXML location reads these
     /// instead of a zone's state.
@@ -720,6 +852,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: crate::environment::UnavailablePeriodState::default(),
             domains: crate::domain_solver::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -769,6 +902,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: crate::environment::UnavailablePeriodState::default(),
             domains: crate::domain_solver::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

@@ -4258,6 +4258,66 @@ changes" line names the periods and the re-captured goldens.
 this replaces); `12-inputs.md` IN-3 (`HPXML_ELEMENTS`); `11-other-defects.md`
 OD-2 (strict inputs); B-1c (the calendar of the simulated year).
 
+**State:** FIXED (2026-10-18, branch `row/r94ij`, worktree `r94ij`,
+based on `6a5d9769`, one commit; the schedule-side slice the entry's
+parser, table, calendar flags, column zeroing and pre-period design
+levels already carried at that base, re-verified by this entry's tests).
+
+The commit adds what the entry's remaining surface names:
+`hares_types::UnavailablePeriodState` on `EnvironmentState` beside
+`bus_energized` (the four kind flags and the natural-ventilation
+availability the flagged periods set, the last non-regular option
+winning), computed by the environment manager once per construction
+over the run's calendar schedule rows and set per step beside
+`schedule_row`; the equipment classes' declaration of the table rows
+they answer to, one exhaustive match (`hares-equipment`'s
+`unavailable_period_rows`, the multi-instance "Class #N" spelling
+through its class), pinned against the reference table by the
+cross-check test; and the gates that close on it the same way an
+outage closes: HVAC duty 0 with the setpoints unchanged
+(`unavailable_period_forces_off` beside `outage_forces_off` at every
+HVAC caller, the ideal unit's gate beside its bus gate), the water
+heater's control setpoint 2 C for the step (the freeze protection,
+`step_setpoint_c` in every water-heater type; the unit test fires a
+tank the period caught below 2 C, so the protection is not an off), a
+battery idle, an EV idle, mechanical ventilation off under its row,
+and the schedule- and profile-driven loads zeroed by the row their
+class declares (the profile-driven loads are the point: the columns'
+zeroing cannot reach them, which the vacant home's exterior lighting
+witnessed at the parent). The four schedule flag columns stop being
+`NotUsed`: `check_schedule_flag_columns` runs at the blueprint freeze
+on the file's own resolution, and a column that disagrees with the
+periods fails construction naming the column, the first differing row
+and the periods. `tracing` at debug: each period's first and last
+flagged step with the equipment classes and columns it gates, each
+gated load's step, and each flag column's verdict.
+
+RED first at the parent: `vacancy_zeroes_the_occupant_loads` failed on
+the exterior lighting's 3.1 W (the profile-driven load the column
+zeroing cannot reach), `no_space_heating_stops_heating_only` and
+`power_outage_keeps_pv_and_holds_the_water_heater_at_2c` failed on
+their gates (heating delivered through the period; no freeze setpoint
+channel), and `schedule_flag_column_must_match_the_periods` failed on
+the check's absence. GREEN at the row; `design_level_ignores_flagged_steps`
+and `natural_ventilation_option_applies_to_every_period` pin the
+pre-period design level and the availability option.
+
+Movement: no golden moves. The only golden whose home carries a period
+in its window is `consumer_shape_900s` (bldg0176227's No Space Heating
+day, 2018-10-04): the differential run over the window delivers zero
+heating with and without the period (the home does not call for heat
+on those steps), so every flagged step is bitwise unchanged and
+compare-all is identical on the ten default-feature fixtures and the
+dst fixture. No golden re-captured; the delta record is in
+`02-measurement.md`.
+
+Gates at the commit: fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; `cargo nextest run --workspace
+--all-features -j 2` 8222 passed, 8 skipped, 0 failed; `pytest -m ''`
+on the rebuilt wheel 1783 passed, 6 xfailed, 0 failed, 0 errors;
+pyright 0 errors, 0 warnings; the goldens bitwise (compare-all 10 +
+dst 1).
+
 **Measurement:** per golden, before and after; on `consumer_shape_900s` the
 heating energy of 2018-10-04 and the year; the consumer-shaped delta feeds
 B1's attribution (`08-consumer.md` CN-4), and CN-3 carries the consumer

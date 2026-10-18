@@ -68,6 +68,27 @@ pub(crate) const DEFAULT_CONDUCTIVITY_W_M_K: f64 = 0.6;
 pub(crate) const DEFAULT_TANK_VOLUME_M3: f64 = 0.189_270_589_2;
 pub(crate) const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
 
+/// The freeze-protection setpoint an unavailable period holds a water
+/// heater's tank at: OpenStudio-HPXML sets the water heater's setpoint to
+/// 2 C for the flagged steps of a period whose table row zeroes
+/// `water_heater` (`resources/schedules.rb:673-676`, the
+/// `WaterHeaterSetpoint` branch: "Temperature of tank < 2C indicates of
+/// possibility of freeze"; `:1452-1454` in the detailed-schedule path),
+/// and does not switch the heater off, so standby losses continue
+/// (`resources/waterheater.rb:18, 183-188, 2053`, v1.12.0).
+pub(crate) const FREEZE_PROTECTION_SETPOINT_C: f64 = 2.0;
+
+/// A water heater's control setpoint for the step: the equipment's own
+/// effective setpoint, or the freeze-protection 2 C when the step's
+/// unavailable periods zero the `water_heater` row.
+pub(crate) fn step_setpoint_c(env: &EnvironmentState, effective_setpoint_c: f64) -> f64 {
+    if env.unavailable_periods.zeroes_water_heater() {
+        FREEZE_PROTECTION_SETPOINT_C
+    } else {
+        effective_setpoint_c
+    }
+}
+
 #[cfg(test)]
 use hares_types::BoundaryPolicy;
 use hares_types::{
@@ -521,6 +542,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
@@ -801,6 +823,7 @@ mod dhw_integration_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

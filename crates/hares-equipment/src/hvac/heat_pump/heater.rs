@@ -23,7 +23,7 @@ use super::super::{
     helpers::{
         cycling_load_fraction, lookup_zone, netted_cycling_duty, outage_forces_off,
         register_ebm_telemetry_keys, served_zone_ports, step_equivalent_battery,
-        write_ebm_telemetry, zone_id_from_config,
+        unavailable_period_forces_off, write_ebm_telemetry, zone_id_from_config,
     },
 };
 use super::constants::{
@@ -1242,7 +1242,9 @@ impl HeatPumpHeaterCore {
         // honoured at restoration. Islanded (battery/generator-backed) homes
         // keep an energized bus and are not affected.
         // See docs/outage-behavior.md.
-        if outage_forces_off(&mut self.hvac, env) {
+        if outage_forces_off(&mut self.hvac, env)
+            || unavailable_period_forces_off(&mut self.hvac, env, true, false)
+        {
             self.hvac.runtime.last_speed_index = 0;
             if self.er_was_on {
                 self.last_er_off_at = Some(env.current_time);
@@ -2928,6 +2930,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -5010,6 +5013,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -8453,6 +8457,7 @@ mod ideal_capacity_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

@@ -113,6 +113,7 @@ pub use site_location::{FieldSource, SiteLocation, SiteLocationOverride, resolve
 pub use tmy3::parse_tmy3;
 pub use unavailable_periods::{
     NaturalVentilation, UnavailableKind, UnavailablePeriod, apply_unavailable_periods,
+    check_schedule_flag_columns, row_zeroed_by, rows_zeroed_by_kind, unavailable_period_flags,
 };
 pub use weather::{
     DataPeriod, FirstHour, RecordLabel, RecordStamp, WeatherAddressing, WeatherField, WeatherMeta,

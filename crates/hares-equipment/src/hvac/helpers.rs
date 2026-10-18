@@ -185,6 +185,34 @@ pub fn outage_forces_off(hvac: &mut HvacEquipment, env: &EnvironmentState) -> bo
     true
 }
 
+/// The unavailable-period gate shared by all HVAC `update_control`
+/// implementations, beside the outage gate: a step whose
+/// [`UnavailablePeriodState`] zeroes the unit's axis's row (`space_heating`
+/// under a `Power Outage` or a `No Space Heating` period, `space_cooling`
+/// likewise) forces the duty cycle to 0 with the setpoint unchanged.
+/// OpenStudio-HPXML zeroes every system's heating (cooling) load fraction
+/// during the period and leaves the thermostat setpoints alone
+/// (`resources/hvac.rb:42-71`, `resources/schedules.rb:1438-1441, 1455`,
+/// v1.12.0). `heating_axis` and `cooling_axis` state the axes this unit
+/// serves.
+///
+/// Returns `true` and zeroes the duty cycle when the gate closes.
+pub fn unavailable_period_forces_off(
+    hvac: &mut HvacEquipment,
+    env: &EnvironmentState,
+    heating_axis: bool,
+    cooling_axis: bool,
+) -> bool {
+    let flags = env.unavailable_periods;
+    let period_off = (heating_axis && flags.zeroes_space_heating())
+        || (cooling_axis && flags.zeroes_space_cooling());
+    if !period_off {
+        return false;
+    }
+    hvac.runtime.duty_cycle = 0.0;
+    true
+}
+
 /// Floor for the band span a cycling unit's runtime fraction divides by, so
 /// a narrow hysteresis does not saturate the fraction a hair's breadth past
 /// the release edge.

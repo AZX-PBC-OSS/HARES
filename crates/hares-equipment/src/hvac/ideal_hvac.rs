@@ -586,7 +586,20 @@ impl Equipment for IdealHvac {
         // the FSM mode) and clear any solver-driven ideal target so no
         // capacity is delivered (WH precedent). Islanded homes keep an
         // energized bus and are not affected. See docs/outage-behavior.md.
-        if !env.grid.bus_energized() {
+        // An unavailable period zeroing the unit's rows forces off the
+        // same way with the setpoints unchanged (the ideal unit is one
+        // dispatch for both axes, so either row's flag closes the gate).
+        let flags = env.unavailable_periods;
+        let period_off = flags.zeroes_space_heating() || flags.zeroes_space_cooling();
+        if !env.grid.bus_energized() || period_off {
+            if period_off && env.grid.bus_energized() {
+                tracing::debug!(
+                    heating_zeroed = flags.zeroes_space_heating(),
+                    cooling_zeroed = flags.zeroes_space_cooling(),
+                    "the ideal HVAC unit's step is flagged unavailable: duty \
+                     forced to 0 with the setpoints unchanged"
+                );
+            }
             self.cached_ideal_target = None;
             self.ideal_capacity_w = 0.0;
             self.ideal_capacity_degraded = false;
@@ -1259,6 +1272,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

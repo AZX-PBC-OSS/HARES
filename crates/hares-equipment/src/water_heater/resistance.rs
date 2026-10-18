@@ -22,7 +22,7 @@ use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, restored_tank_deadband_c,
-    tank_thermostat_update, weighted_average_tank_temp,
+    step_setpoint_c, tank_thermostat_update, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 use crate::hvac::helpers::loop_id_from_config;
@@ -245,16 +245,18 @@ impl ResistanceWH {
         }
     }
 
-    fn effective_setpoint_c(&self) -> f64 {
-        self.setpoint_c + self.dr_setpoint_offset_c
+    fn effective_setpoint_c(&self, env: &EnvironmentState) -> f64 {
+        // The freeze protection: a period zeroing the water_heater row
+        // holds the tank at 2 C, not off, so standby losses continue.
+        step_setpoint_c(env, self.setpoint_c + self.dr_setpoint_offset_c)
     }
 
-    fn thermostat_calls(&self) -> (bool, bool) {
+    fn thermostat_calls(&self, env: &EnvironmentState) -> (bool, bool) {
         let upper_temp = self.tank.node_temps()[self.upper_node];
         // OCHRE averages the lower node with the node directly above it (when n_nodes >= 3)
         // to reduce sensitivity to single-node temperature spikes.
         let lower_temp = self.lower_sensor_temp();
-        let effective_sp = self.effective_setpoint_c();
+        let effective_sp = self.effective_setpoint_c(env);
         let upper_call = hysteresis_call(
             upper_temp,
             effective_sp,
@@ -542,7 +544,7 @@ impl Equipment for ResistanceWH {
             return OperatingMode::Off;
         }
 
-        let (upper_call, lower_call) = self.thermostat_calls();
+        let (upper_call, lower_call) = self.thermostat_calls(env);
         match self.element_priority {
             ElementPriorityMode::MasterSlave => {
                 self.upper_element_on = upper_call;
@@ -1130,6 +1132,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1870,6 +1873,44 @@ mod tests {
         assert!(!eq.lower_element_on);
     }
 
+    /// The freeze protection: an unavailable period zeroing the
+    /// `water_heater` row (a `Power Outage`) holds the step's control
+    /// setpoint at 2 C, not off: a tank the period catches below the
+    /// freeze setpoint fires (standby losses continue), and a warm tank
+    /// never fires through the period.
+    #[test]
+    fn unavailable_period_holds_the_water_heater_at_2c() {
+        let mut outage = env(21.0);
+        outage.unavailable_periods.power_outage = true;
+
+        // A tank below the freeze setpoint: the element fires at the 2 C
+        // control setpoint, where a forced off would leave it cold.
+        let cold_cfg = config_from_typed(ElectricResistanceWaterHeaterConfig {
+            initial_tank_temp_c: Some(-5.0),
+            ..typed_config()
+        });
+        let mut cold = ResistanceWH::new(cold_cfg.clone());
+        cold.init(&cold_cfg, &env(21.0)).expect("init");
+        assert_eq!(cold.effective_setpoint_c(&outage), 2.0);
+        assert_eq!(
+            cold.update_control(&outage),
+            hares_types::OperatingMode::Heating
+        );
+        // Without the period the same tank's control setpoint is the
+        // configured one.
+        assert_eq!(cold.effective_setpoint_c(&env(21.0)), 52.0);
+
+        // A warm tank never fires through the period: the 2 C control
+        // setpoint is below the tank.
+        let warm_cfg = config_from_typed(typed_config());
+        let mut warm = ResistanceWH::new(warm_cfg.clone());
+        warm.init(&warm_cfg, &env(21.0)).expect("init");
+        assert_eq!(
+            warm.update_control(&outage),
+            hares_types::OperatingMode::Off
+        );
+    }
+
     /// Stratified tank: lower node exceeds max_tank_temp_c but upper node is cool.
     /// Safety cutout must still trigger (checks max of all nodes).
     #[test]
@@ -2270,6 +2311,7 @@ mod element_priority_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -2957,6 +2999,7 @@ mod ambient_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -3109,3 +3152,5 @@ mod ambient_tests {
         );
     }
 }
+// (appended by the unavailable-periods row: the freeze-protection unit
+// test lives below the test module's own tests)

@@ -468,6 +468,13 @@ impl DwellingBlueprintBuilder {
         } = self;
 
         let step_secs = super::conversions::duration_to_u32_secs(settings.sim_config.time_res)?;
+        // The schedule file's four unavailable-period flag columns must
+        // match the HPXML periods on the file's own resolution, before
+        // any resample: HARES reads the columns and ignores nothing.
+        hares_io::check_schedule_flag_columns(
+            &inputs.schedule.schedule(),
+            &building.unavailable_periods,
+        )?;
         let resampled_weather = inputs.weather.resampled(
             step_secs,
             settings.sim_config.first_hour_interpolation,

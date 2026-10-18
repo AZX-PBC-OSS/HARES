@@ -1240,8 +1240,16 @@ impl Equipment for Battery {
         // normally. See docs/outage-behavior.md.
         let bus_dead = !env.grid.bus_energized();
 
+        // An unavailable period zeroing the battery's rows (`Power Outage`:
+        // `battery_charging` and `battery_discharging`) leaves the battery
+        // idle for the step, whatever the bus: an HPXML `Power Outage` is
+        // OpenStudio-HPXML's end-use convention, not a bus state, and the
+        // battery neither charges nor discharges through it. See
+        // `docs/PHYSICS_DECISIONS.md` (unavailable periods).
+        let period_idle = env.unavailable_periods.zeroes_battery();
+
         // -- Determine target power --
-        let mut target_power_kw = if self.grid_connected && !bus_dead {
+        let mut target_power_kw = if self.grid_connected && !bus_dead && !period_idle {
             self.determine_target_power(net_load_kw, dt_hours)?
         } else {
             0.0
@@ -2258,6 +2266,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

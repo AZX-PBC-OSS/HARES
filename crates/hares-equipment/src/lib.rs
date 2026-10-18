@@ -93,7 +93,9 @@ pub use pv::{PvConfig, PvOrientation};
 pub use raw_params::{IndexCount, ParamForm, ParamKind, RawParam, RawParams, raw_params_for_class};
 pub use registry::{
     CANONICAL_EQUIPMENT_NAMES, ClassDeclaredSurface, EquipmentFactory, EquipmentRegistry,
-    class_declared_surface, config_type_for_class,
+    UnavailableRow, class_declared_surface, config_type_for_class,
+    unavailable_period_gated_classes, unavailable_period_rows,
+    unavailable_period_rows_for_equipment,
 };
 pub use ventilation::VentilationConfig;
 pub use water_heater::DHW_DEMAND_LOOP;
@@ -809,6 +811,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),

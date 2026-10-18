@@ -29,7 +29,7 @@ use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, restored_tank_deadband_c,
-    tank_thermostat_update, weighted_average_tank_temp,
+    step_setpoint_c, tank_thermostat_update, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 
@@ -192,8 +192,10 @@ impl IndirectTank {
         }
     }
 
-    fn effective_setpoint_c(&self) -> f64 {
-        self.setpoint_c + self.dr_setpoint_offset_c
+    fn effective_setpoint_c(&self, env: &EnvironmentState) -> f64 {
+        // The freeze protection: a period zeroing the water_heater row
+        // holds the tank at 2 C, not off, so standby losses continue.
+        step_setpoint_c(env, self.setpoint_c + self.dr_setpoint_offset_c)
     }
 
     fn bottom_temp_c(&self) -> f64 {
@@ -424,7 +426,7 @@ impl Equipment for IndirectTank {
         }
 
         let bottom_temp = self.bottom_temp_c();
-        let effective_sp = self.effective_setpoint_c();
+        let effective_sp = self.effective_setpoint_c(env);
         self.heating_on =
             hysteresis_call(bottom_temp, effective_sp, self.deadband_c, self.heating_on);
 
@@ -857,6 +859,7 @@ mod control_domain_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1168,6 +1171,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

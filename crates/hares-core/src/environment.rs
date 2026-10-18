@@ -26,7 +26,7 @@ use hares_physics::{
 use hares_physics::water_mains::water_mains_raw_fahrenheit;
 use hares_types::{
     AmbientLocation, AmbientOtherSpaceTemps, EnvironmentState, GridState, HaresError,
-    SurfaceIrradiance, WeatherState, ZoneId, ZoneState,
+    SurfaceIrradiance, UnavailablePeriodState, WeatherState, ZoneId, ZoneState,
 };
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
@@ -778,6 +778,11 @@ pub struct EnvironmentManager {
     /// surface, the covered fraction reduces incident solar irradiance on that
     /// envelope surface (shading effect).
     pv_roof_coverage: std::collections::HashMap<u32, f64>,
+    /// The unavailable periods' per-schedule-row flags, from the parsed
+    /// building's periods over the run's calendar schedule rows: row `i`
+    /// is the state every step reading schedule row `i` sees beside
+    /// `bus_energized`.
+    unavailable_flags: Vec<UnavailablePeriodState>,
     // Pre-allocated buffers reused each step to avoid per-step allocations.
     solar_irradiance_buf: Vec<SurfaceIrradiance>,
     schedule_values_buf: Vec<f64>,
@@ -974,6 +979,7 @@ impl EnvironmentManager {
             .iter()
             .map(|zone| zone.zone_type.clone())
             .collect();
+        let unavailable_flags = unavailable_period_flags(building, &schedule);
         let conditioned_zone = building
             .conditioned_zone_index()?
             .map(|idx| ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)));
@@ -1036,6 +1042,7 @@ impl EnvironmentManager {
             conditioned_zone,
             ambient_locations: Vec::new(),
             surfaces,
+            unavailable_flags,
             grid_override: None,
             zones,
             #[cfg(feature = "observe")]
@@ -1564,6 +1571,11 @@ impl EnvironmentManager {
         mains_payload.clear();
         mains_payload.push(weather.mains_temp_c);
         state.schedule_row = Some(schedule_idx);
+        state.unavailable_periods = self
+            .unavailable_flags
+            .get(schedule_idx)
+            .copied()
+            .unwrap_or_default();
         #[cfg(test)]
         if let (Some(before), Some(after)) =
             (alloc_before, hares_types::alloc_count::thread_allocations())
@@ -1628,6 +1640,7 @@ impl EnvironmentManager {
             },
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1863,6 +1876,45 @@ fn simple_range(values: &[f64]) -> f64 {
     let min = values.iter().copied().fold(f64::INFINITY, f64::min);
     let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     (max - min).max(0.0)
+}
+
+/// The unavailable periods' per-schedule-row flags over the manager's
+/// schedule, from the parsed building's periods. Once per construction:
+/// the debug log names each period's first and last flagged step and the
+/// equipment classes and schedule columns it gates (the registry's
+/// end-use rows and the zeroed table rows).
+fn unavailable_period_flags(
+    building: &Building,
+    schedule: &hares_io::ScheduleTimeSeries,
+) -> Vec<UnavailablePeriodState> {
+    let periods = &building.unavailable_periods;
+    if periods.is_empty() {
+        return Vec::new();
+    }
+    let flags = hares_io::unavailable_period_flags(schedule, periods);
+    for period in periods {
+        let kind_flag = |flag: &UnavailablePeriodState| match period.kind {
+            hares_types::UnavailableKind::Vacancy => flag.vacancy,
+            hares_types::UnavailableKind::PowerOutage => flag.power_outage,
+            hares_types::UnavailableKind::NoSpaceHeating => flag.no_space_heating,
+            hares_types::UnavailableKind::NoSpaceCooling => flag.no_space_cooling,
+        };
+        let first = flags.iter().position(kind_flag);
+        let last = flags.iter().rposition(kind_flag);
+        let gated_classes: Vec<&str> =
+            hares_equipment::unavailable_period_gated_classes(period.kind);
+        let gated_columns: Vec<&str> = hares_io::rows_zeroed_by_kind(period.kind);
+        tracing::debug!(
+            period = period.kind.column_name(),
+            first_flagged_step = first,
+            last_flagged_step = last,
+            gated_equipment = ?gated_classes,
+            gated_columns = ?gated_columns,
+            "unavailable period gates the schedule columns and the equipment \
+             classes answering to their table rows",
+        );
+    }
+    flags
 }
 
 fn build_surface_geometry(

@@ -628,6 +628,7 @@ mod tests {
             },
             domains: hares_types::DomainSlots::default(),
             schedule_row: Some(0),
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

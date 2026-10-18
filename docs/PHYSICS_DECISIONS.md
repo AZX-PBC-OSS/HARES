@@ -877,3 +877,49 @@ golden fixture's numbers move (the attachment and coverage values are
 bitwise those the previous bag-key plumbing computed; the entry that
 introduced the typed-config read recorded the proof in the measurement
 log).
+## Unavailable periods apply to the end uses their table rows name
+
+OpenStudio-HPXML's unavailable periods
+(`/HPXML/SoftwareInfo/extension/UnavailablePeriods/UnavailablePeriod`,
+v1.12.0) are applied with the reference's semantics: the four period
+types (`Vacancy`, `Power Outage`, `No Space Heating`, `No Space
+Cooling`) become per-step flags on the run's calendar schedule rows, by
+the half-open rule (begin month/day at the begin hour to end month/day
+at the end hour, both dates inclusive as days, an end before the begin
+wrapping through the year end), and every schedule column whose row in
+`resources/data/unavailable_periods.csv` the period applies to zeroes
+on the flagged steps, for a schedule file and a generated schedule
+alike (`resources/schedules.rb` `set_unavailable_periods`, the two-step
+column lookup that remaps the hot-water columns to their energy-use
+rows). A schedule file's own four flag columns must match the periods
+on the file's own resolution: HARES reads the columns and ignores
+nothing.
+
+The design level of a column is computed from its mean over the steps
+no applying period flags (the pre-period column), because
+OpenStudio-HPXML computes every design level and peak from the
+schedules before the periods are applied (`schedules.rb` `:1242,
+:1296`); the two agree when the file's unflagged values are the
+unmodified schedule, as in an OpenStudio-HPXML export.
+
+The setpoint-driven end uses gate at the equipment through the step's
+flags, beside `bus_energized`: space heating and cooling duty forced to
+0 with the thermostat setpoints unchanged (`resources/hvac.rb:42-71`,
+`schedules.rb:1438-1441, 1455`); the water heater's control setpoint
+held at 2 C for the step, freeze protection and not off, so standby
+losses continue (`schedules.rb:673-676, 1452-1454`,
+`resources/waterheater.rb:18, 183-188, 2053`); a battery or an EV idle
+through the step; mechanical ventilation off under its row. The loads
+that follow a schedule column or a profile are gated by the table row
+their class declares, so a profile the columns cannot reach stops with
+them. PV and generators are in no row and keep running: an HPXML
+`Power Outage` period is the reference's end-use convention (the
+occupants stay too), and it does not de-energize the bus; the physical
+outage model (`Dwelling::set_grid_voltage`,
+`docs/outage-behavior.md`) is unchanged.
+
+The natural-ventilation availability rides every period whatever its
+type (`resources/airflow.rb:337, 570-597`): `always unavailable`
+closes the step's natural ventilation, `always available` and `regular
+schedule` leave it. Direction of the delta: less heating, cooling and
+occupant energy on the flagged days, never a renormalized remainder.

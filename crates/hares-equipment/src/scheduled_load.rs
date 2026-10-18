@@ -349,7 +349,27 @@ impl Equipment for ScheduledLoad {
         // fireplaces with electronic ignition) need electricity to operate.
         // Islanded (battery/generator-backed) homes keep an energized bus and
         // are not affected. See docs/outage-behavior.md.
-        if !env.grid.bus_energized() {
+        // An unavailable period zeroing the load's table row (a Vacancy for
+        // the occupant-driven rows, a Power Outage for the rest) zeroes the
+        // step's outputs the same way, whatever feeds the load's power: a
+        // schedule column zeroed at the resolution and a profile the
+        // columns cannot reach both stop for the step.
+        let period_zeroed =
+            crate::unavailable_period_rows_for_equipment(self.descriptor.name.as_str())
+                .iter()
+                .any(|row| {
+                    row.zeroed_by
+                        .iter()
+                        .any(|kind| kind.zeroed(env.unavailable_periods))
+                });
+        if period_zeroed {
+            tracing::debug!(
+                load = %self.descriptor.name,
+                "the step's unavailable periods zero the load's table row: \
+                 the load's outputs are zero for the step"
+            );
+        }
+        if !env.grid.bus_energized() || period_zeroed {
             self.last_non_zero_power_kw = 0.0;
             self.last_non_zero_gas_w = 0.0;
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
@@ -1108,6 +1128,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

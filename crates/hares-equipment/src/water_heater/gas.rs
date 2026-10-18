@@ -22,7 +22,7 @@ use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, restored_tank_deadband_c,
-    tank_thermostat_update, weighted_average_tank_temp,
+    step_setpoint_c, tank_thermostat_update, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 use crate::hvac::helpers::loop_id_from_config;
@@ -255,8 +255,10 @@ impl GasWH {
         }
     }
 
-    fn effective_setpoint_c(&self) -> f64 {
-        self.setpoint_c + self.dr_setpoint_offset_c
+    fn effective_setpoint_c(&self, env: &EnvironmentState) -> f64 {
+        // The freeze protection: a period zeroing the water_heater row
+        // holds the tank at 2 C, not off, so standby losses continue.
+        step_setpoint_c(env, self.setpoint_c + self.dr_setpoint_offset_c)
     }
 
     fn burner_efficiency(&self, part_load_ratio: f64) -> f64 {
@@ -270,7 +272,7 @@ impl GasWH {
         }
     }
 
-    fn should_fire(&self) -> bool {
+    fn should_fire(&self, env: &EnvironmentState) -> bool {
         if self.dr_load_fraction <= 0.0
             || matches!(self.mode_override, Some(OperatingMode::Off))
             || self.duty_cycle <= 0.0
@@ -280,7 +282,7 @@ impl GasWH {
         let lower_temp = self.tank.node_temps()[self.burner_node];
         hysteresis_call(
             lower_temp,
-            self.effective_setpoint_c(),
+            self.effective_setpoint_c(env),
             self.deadband_c,
             self.burner_on,
         )
@@ -536,7 +538,7 @@ impl Equipment for GasWH {
             self.burner_on = false;
             return OperatingMode::Off;
         }
-        self.burner_on = self.should_fire();
+        self.burner_on = self.should_fire(env);
         if self.burner_on {
             OperatingMode::Heating
         } else {
@@ -567,7 +569,7 @@ impl Equipment for GasWH {
             if effective_capacity_w > 0.0 {
                 let ideal_w = self.tank.ideal_capacity_for_node(
                     self.burner_node,
-                    self.effective_setpoint_c(),
+                    self.effective_setpoint_c(env),
                     ambient_c,
                     dt_s,
                 );
@@ -1183,6 +1185,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

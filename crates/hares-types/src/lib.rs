@@ -118,6 +118,7 @@ pub mod test_utils {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: crate::environment::UnavailablePeriodState::default(),
             domains: crate::domain_solver::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

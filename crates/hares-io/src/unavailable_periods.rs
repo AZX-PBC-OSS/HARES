@@ -21,38 +21,9 @@ use crate::hpxml::building::XmlNode;
 use crate::hpxml::elements::*;
 use crate::hpxml::xml_helpers::{child_f64, child_text, element_id};
 use crate::schedule::ScheduleTimeSeries;
-use hares_types::HaresError;
+use hares_types::{HaresError, UnavailablePeriodState};
 
-/// The four unavailable-period types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnavailableKind {
-    Vacancy,
-    PowerOutage,
-    NoSpaceHeating,
-    NoSpaceCooling,
-}
-
-impl UnavailableKind {
-    /// The HPXML `ColumnName` spelling.
-    pub fn column_name(self) -> &'static str {
-        match self {
-            Self::Vacancy => "Vacancy",
-            Self::PowerOutage => "Power Outage",
-            Self::NoSpaceHeating => "No Space Heating",
-            Self::NoSpaceCooling => "No Space Cooling",
-        }
-    }
-
-    pub(crate) fn parse(column: &str) -> Option<Self> {
-        match column {
-            "Vacancy" => Some(Self::Vacancy),
-            "Power Outage" => Some(Self::PowerOutage),
-            "No Space Heating" => Some(Self::NoSpaceHeating),
-            "No Space Cooling" => Some(Self::NoSpaceCooling),
-            _ => None,
-        }
-    }
-}
+pub use hares_types::UnavailableKind;
 
 /// What happens to natural ventilation during the period.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,20 +165,178 @@ fn flagged_at(period: &UnavailablePeriod, day_ordinal_of_row: u32, hour: u32) ->
     }
 }
 
-/// The per-row flags of a schedule: row `i` is flagged when the row's
-/// 365-day-calendar day (`schedule_day_ordinal` of the row timestamp: the
-/// period dates live on the non-leap calendar the schedule rows are
-/// indexed by) and hour-of-day fall in any period.
-fn flagged_rows(schedule: &ScheduleTimeSeries, periods: &[UnavailablePeriod]) -> Vec<bool> {
-    let mut flags = vec![false; schedule.len()];
-    for (i, timestamp) in schedule.timestamps.iter().enumerate() {
-        let ordinal = hares_types::schedule_day_ordinal(timestamp);
-        let hour = timestamp.hour();
-        flags[i] = periods
-            .iter()
-            .any(|period| flagged_at(period, ordinal, hour));
+/// The per-row flags of a schedule: row `i` carries the kinds flagging it
+/// (the row's 365-day-calendar day, `schedule_day_ordinal` of the row
+/// timestamp: the period dates live on the non-leap calendar the schedule
+/// rows are indexed by, and the hour-of-day) and the natural-ventilation
+/// availability the flagged periods set, the last flagged period with a
+/// non-regular option winning.
+fn flagged_rows(
+    schedule: &ScheduleTimeSeries,
+    periods: &[UnavailablePeriod],
+) -> Vec<UnavailablePeriodState> {
+    let mut flags: Vec<UnavailablePeriodState> =
+        vec![UnavailablePeriodState::default(); schedule.len()];
+    for period in periods {
+        for (i, timestamp) in schedule.timestamps.iter().enumerate() {
+            let ordinal = hares_types::schedule_day_ordinal(timestamp);
+            let hour = timestamp.hour();
+            if !flagged_at(period, ordinal, hour) {
+                continue;
+            }
+            let flag = &mut flags[i];
+            match period.kind {
+                UnavailableKind::Vacancy => flag.vacancy = true,
+                UnavailableKind::PowerOutage => flag.power_outage = true,
+                UnavailableKind::NoSpaceHeating => flag.no_space_heating = true,
+                UnavailableKind::NoSpaceCooling => flag.no_space_cooling = true,
+            }
+            if let Some(available) = natural_ventilation_availability(period.natural_ventilation) {
+                flag.natural_ventilation = Some(available);
+            }
+        }
     }
     flags
+}
+
+/// The availability a period's `NaturalVentilation` option sets on its
+/// flagged steps, `None` when it leaves the regular schedule.
+fn natural_ventilation_availability(option: NaturalVentilation) -> Option<bool> {
+    match option {
+        NaturalVentilation::RegularSchedule => None,
+        NaturalVentilation::AlwaysAvailable => Some(true),
+        NaturalVentilation::AlwaysUnavailable => Some(false),
+    }
+}
+
+/// The periods' per-schedule-row flags over a schedule series: row `i`
+/// carries the kinds flagging the row and the natural-ventilation
+/// availability the flagged periods set. The per-step state the
+/// environment publishes beside `bus_energized` reads these by the step's
+/// schedule row.
+pub fn unavailable_period_flags(
+    schedule: &ScheduleTimeSeries,
+    periods: &[UnavailablePeriod],
+) -> Vec<UnavailablePeriodState> {
+    flagged_rows(schedule, periods)
+}
+
+/// The table rows the kind zeroes: the `Schedule Name`s whose flag under
+/// the kind is 1.
+pub fn rows_zeroed_by_kind(kind: UnavailableKind) -> Vec<&'static str> {
+    UNAVAILABLE_PERIOD_ROWS
+        .iter()
+        .filter(|row| match kind {
+            UnavailableKind::Vacancy => row.vacancy,
+            UnavailableKind::PowerOutage => row.power_outage,
+            UnavailableKind::NoSpaceHeating => row.no_space_heating,
+            UnavailableKind::NoSpaceCooling => row.no_space_cooling,
+        })
+        .map(|row| row.schedule_name)
+        .collect()
+}
+
+/// Whether the named `unavailable_periods.csv` row is zeroed by `kind`
+/// (the row's flag for the kind), `None` when the name is no row of the
+/// table.
+pub fn row_zeroed_by(schedule_name: &str, kind: UnavailableKind) -> Option<bool> {
+    let row = UNAVAILABLE_PERIOD_ROWS
+        .iter()
+        .find(|row| row.schedule_name == schedule_name)?;
+    Some(match kind {
+        UnavailableKind::Vacancy => row.vacancy,
+        UnavailableKind::PowerOutage => row.power_outage,
+        UnavailableKind::NoSpaceHeating => row.no_space_heating,
+        UnavailableKind::NoSpaceCooling => row.no_space_cooling,
+    })
+}
+
+/// The four unavailable-period flag columns a schedule file may carry
+/// (`Vacancy`, `Power Outage`, `No Space Heating`, `No Space Cooling`,
+/// OpenStudio-HPXML's own export spellings) must match the HPXML periods:
+/// on every row of the file's own resolution (before resampling) the
+/// column's value must be 1 exactly when a period of the column's kind
+/// flags the row, and 0 exactly otherwise. A difference, including a
+/// nonzero column with no HPXML period, fails construction naming the
+/// column, the first differing row and the periods: HARES reads the
+/// column and ignores nothing.
+pub fn check_schedule_flag_columns(
+    schedule: &ScheduleTimeSeries,
+    periods: &[UnavailablePeriod],
+) -> Result<(), HaresError> {
+    let flags = flagged_rows(schedule, periods);
+    for column in UnavailableKind::all() {
+        // The file's header spelling normalizes to the kind's name
+        // ("Vacancy" and "vacancy" alike): the same lowercase-and-
+        // underscore rule the column mappings match by.
+        let wanted = column
+            .column_name()
+            .to_ascii_lowercase()
+            .replace([' ', '-'], "_");
+        let Some(key) = schedule
+            .column_index
+            .keys()
+            .find(|name| name.to_ascii_lowercase().replace([' ', '-'], "_") == wanted)
+            .cloned()
+        else {
+            continue;
+        };
+        let idx = schedule.column_index[&key];
+        for (row, value) in schedule.columns[idx].iter().enumerate() {
+            let expected = match column {
+                UnavailableKind::Vacancy => flags[row].vacancy,
+                UnavailableKind::PowerOutage => flags[row].power_outage,
+                UnavailableKind::NoSpaceHeating => flags[row].no_space_heating,
+                UnavailableKind::NoSpaceCooling => flags[row].no_space_cooling,
+            };
+            let flagged = match value {
+                1.0 => true,
+                0.0 => false,
+                other => {
+                    return Err(HaresError::Dwelling(format!(
+                        "schedule column '{}' row {row}: the value {other} is \
+                         neither 0 nor 1; the column records the unavailable \
+                         periods {} as OpenStudio-HPXML's export writes them",
+                        column.column_name(),
+                        describe_periods(periods),
+                    )));
+                }
+            };
+            if flagged != expected {
+                return Err(HaresError::Dwelling(format!(
+                    "schedule column '{}' row {row}: the file's flag is \
+                     {flagged} where the HPXML periods give {expected}; the \
+                     periods are {}",
+                    column.column_name(),
+                    describe_periods(periods),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The periods as an error names them.
+fn describe_periods(periods: &[UnavailablePeriod]) -> String {
+    if periods.is_empty() {
+        return "none".to_string();
+    }
+    periods
+        .iter()
+        .map(|p| {
+            format!(
+                "{} {}/{} {}h to {}/{} {}h",
+                p.kind.column_name(),
+                p.begin_month,
+                p.begin_day,
+                p.begin_hour,
+                p.end_month,
+                p.end_day,
+                p.end_hour,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Zero every schedule column whose `unavailable_periods.csv` row a period
@@ -230,9 +359,12 @@ pub fn apply_unavailable_periods(
     let pre_period_columns = schedule.columns.clone();
     let flags = flagged_rows(schedule, periods);
     for period in periods {
-        let count = flags.iter().filter(|f| **f).count();
-        let first = flags.iter().position(|f| *f);
-        let last = flags.iter().rposition(|f| *f);
+        let count = flags
+            .iter()
+            .filter(|f| kind_flagged(f, period.kind))
+            .count();
+        let first = flags.iter().position(|f| kind_flagged(f, period.kind));
+        let last = flags.iter().rposition(|f| kind_flagged(f, period.kind));
         tracing::debug!(
             period = period.kind.column_name(),
             flagged_rows = count,
@@ -246,18 +378,24 @@ pub fn apply_unavailable_periods(
         let Some(row) = unavailable_period_row_for_column(name) else {
             continue;
         };
-        let applies = periods.iter().any(|period| match period.kind {
-            UnavailableKind::Vacancy => row.vacancy,
-            UnavailableKind::PowerOutage => row.power_outage,
-            UnavailableKind::NoSpaceHeating => row.no_space_heating,
-            UnavailableKind::NoSpaceCooling => row.no_space_cooling,
-        });
-        if !applies {
+        // The column zeroes on the steps a period of a kind that applies
+        // to its table row flags.
+        let kinds: Vec<UnavailableKind> = [
+            (row.vacancy, UnavailableKind::Vacancy),
+            (row.power_outage, UnavailableKind::PowerOutage),
+            (row.no_space_heating, UnavailableKind::NoSpaceHeating),
+            (row.no_space_cooling, UnavailableKind::NoSpaceCooling),
+        ]
+        .iter()
+        .filter(|(applies, _)| *applies)
+        .map(|(_, kind)| *kind)
+        .collect();
+        if kinds.is_empty() {
             continue;
         }
         let mut touched = false;
         for (i, flagged) in flags.iter().enumerate() {
-            if *flagged {
+            if kinds.iter().any(|kind| kind_flagged(flagged, *kind)) {
                 schedule.columns[col_idx][i] = 0.0;
                 touched = true;
             }
@@ -275,6 +413,16 @@ pub fn apply_unavailable_periods(
         "unavailable periods applied to the schedule columns",
     );
     Ok(Some(pre_period_columns))
+}
+
+/// Whether the row flags carry `kind`.
+fn kind_flagged(flag: &UnavailablePeriodState, kind: UnavailableKind) -> bool {
+    match kind {
+        UnavailableKind::Vacancy => flag.vacancy,
+        UnavailableKind::PowerOutage => flag.power_outage,
+        UnavailableKind::NoSpaceHeating => flag.no_space_heating,
+        UnavailableKind::NoSpaceCooling => flag.no_space_cooling,
+    }
 }
 
 /// Parse `SoftwareInfo/extension/UnavailablePeriods` with OpenStudio-HPXML's

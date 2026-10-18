@@ -39,7 +39,7 @@ use super::{
     helpers::{
         cycling_load_fraction, lookup_zone, netted_cycling_duty, outage_forces_off,
         register_ebm_telemetry_keys, served_zone_ports, step_equivalent_battery,
-        write_ebm_telemetry, zone_id_from_config,
+        unavailable_period_forces_off, write_ebm_telemetry, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -1080,7 +1080,9 @@ impl CoolingCore {
         // compressor and blower — force off before any override handling
         // (WH precedent). Islanded (battery/generator-backed) homes keep an
         // energized bus and are not affected. See docs/outage-behavior.md.
-        if outage_forces_off(&mut self.hvac, env) {
+        if outage_forces_off(&mut self.hvac, env)
+            || unavailable_period_forces_off(&mut self.hvac, env, false, true)
+        {
             self.operating_mode = OperatingMode::Off;
             self.hvac.update_prev_zone_temp(None);
             return OperatingMode::Off;
@@ -2284,6 +2286,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -5043,6 +5046,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -5443,6 +5447,7 @@ mod dr_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -5857,6 +5862,7 @@ mod crankcase_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -5953,6 +5959,7 @@ mod crankcase_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -6296,6 +6303,7 @@ mod ideal_capacity_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -6751,6 +6759,7 @@ mod defaults_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -6795,6 +6804,7 @@ mod defaults_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -7124,6 +7134,7 @@ mod speed_selection_parity_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

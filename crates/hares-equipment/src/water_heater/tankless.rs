@@ -22,6 +22,7 @@ use hares_physics::water_density_kg_m3;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::siting::Siting;
+use super::step_setpoint_c;
 use super::tank_thermostat_update;
 use super::wh_config::TanklessWaterHeaterConfig;
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
@@ -160,8 +161,10 @@ impl TanklessWH {
         }
     }
 
-    fn effective_setpoint_c(&self) -> f64 {
-        self.setpoint_c + self.dr_setpoint_offset_c
+    fn effective_setpoint_c(&self, env: &EnvironmentState) -> f64 {
+        // The freeze protection: a period zeroing the water_heater row
+        // holds the delivery setpoint at 2 C for the step.
+        step_setpoint_c(env, self.setpoint_c + self.dr_setpoint_offset_c)
     }
 
     fn is_enabled(&self) -> bool {
@@ -388,7 +391,7 @@ impl Equipment for TanklessWH {
         let duty =
             (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
         // DR may offset setpoint; use effective setpoint for thermal calculation.
-        let setpoint_c = self.effective_setpoint_c();
+        let setpoint_c = self.effective_setpoint_c(env);
         let draw_flow_rate_kg_s_source = self.draw_flow_rate_kg_s_source.as_mut();
         let mains_temp_c_source = self.mains_temp_c_source.as_mut();
         let (inlet_temp_c, schedule_draw_kg_s) = super::resolve_storage_step_inputs(
@@ -839,6 +842,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -2001,6 +2005,7 @@ mod tests {
                     island_bus_voltage_pu: None,
                 },
                 schedule_row: None,
+                unavailable_periods: hares_types::UnavailablePeriodState::default(),
                 domains: hares_types::DomainSlots::default(),
                 equipment_telemetry: std::collections::HashMap::new(),
                 equipment_core: std::collections::HashMap::new(),

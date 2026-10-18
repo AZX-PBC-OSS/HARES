@@ -1054,3 +1054,19 @@ golden fixtures re-captured.
   fixture, no fixture over-subscribes, and the collector-area constant's
   per-watt rounding is absorbed by the coverage division (compare-all 10
   bitwise, the dst set's 1 included). No golden re-captured.
+- 2026-10-18: the OpenStudio-HPXML unavailable periods apply to the end
+  uses their table rows name: the four period types become per-step
+  flags on the run's calendar schedule rows, the schedule columns their
+  rows apply to zero on the flagged steps (file and generated schedule
+  alike, the profile-driven loads gated by the class's declared row),
+  the design levels come from the pre-period column, the schedule
+  files' own four flag columns must match the periods, the HVAC's duty
+  forces to 0 with the setpoints unchanged, the water heater's control
+  setpoint holds 2 C (freeze protection, standby losses continue), a
+  battery or an EV idles, and the natural-ventilation availability
+  rides every period. No golden fixture moves: the only golden home
+  whose window carries a period (consumer_shape_900s, the 2018-10-04
+  No Space Heating day) does not call for heat on those steps (the
+  differential run over the window delivers zero heating with and
+  without the period), so compare-all 10 + dst 1 are bitwise identical.
+  No golden re-captured.

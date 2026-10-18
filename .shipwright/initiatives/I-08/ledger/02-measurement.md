@@ -4371,3 +4371,26 @@ against the parsed roof areas), which is why no fixture's roof solar
 moves. No golden re-captured. compare-all: 10 default-feature fixtures
 and the dst fixture, bitwise identical, run twice (at the row and at the
 final tree).
+
+## The unavailable periods applied, 2026-10-18
+
+The unavailable-periods entry (B-15, row 94j) at its parent `6a5d9769`
+(the schedule-side slice already carried there: the parser, the table,
+the calendar flags, the column zeroing and the pre-period design
+levels) and at its commit.
+
+The parent's RED triage: the vacant home's exterior lighting drew 3.1 W
+through the all-year vacancy (the profile-driven load the column
+zeroing cannot reach); the bldg0000003 differential delivered heating
+through its No Space Heating period; the check columns did not exist.
+The commit's gates close them; the acceptance tests' details are in the
+entry's State.
+
+| Golden | Movement | Cause |
+|---|---|---|
+| `consumer_shape_900s` | bitwise | the home's only period window (2018-10-04, No Space Heating) flags steps the home does not call for heat on: the differential run over Oct 3 to Oct 5 delivers zero heating with and without the period (the heating setpoint 18.33 C, the zone above it throughout) |
+| every other fixture (9 default + dst) | bitwise | no period in any home's window; the gates are all-default false without a period |
+
+compare-all: 10 default-feature fixtures and the dst fixture, bitwise
+identical, run at the row and again at the final tree. No golden
+re-captured.
