@@ -65,6 +65,35 @@ fn dwelling(hpxml: PathBuf) -> Dwelling {
     build(hpxml).expect("the dwelling builds")
 }
 
+fn build_with_overrides(
+    hpxml: PathBuf,
+    overrides: serde_json::Value,
+) -> Result<Dwelling, hares_types::HaresError> {
+    let sim_toml = r#"
+start_time = "2023-01-15T00:00:00-07:00"
+duration = 3600
+time_res = 900
+warmup = "disabled"
+master_seed = 0
+"#
+    .to_string();
+    let config = DwellingConfig {
+        hpxml: InputSource::Path(hpxml),
+        schedule: None,
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            hares_io::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
+            Some(overrides),
+            1,
+            None,
+        ),
+    };
+    Dwelling::from_config(config)
+}
+
 /// base.xml with one element's text replaced, written to a temporary
 /// directory.
 fn edited_base(dir: &tempfile::TempDir, replace: &str, with: &str) -> PathBuf {
@@ -164,6 +193,40 @@ fn missing_flue_follows_openstudio_hpxml() {
         has_flue,
         "the AFUE 0.80 gas furnace in conditioned space is atmospheric: flue"
     );
+}
+
+/// The flue rule reads the POST-merge efficiency: the flag follows the
+/// efficiency the engine runs, so an `afue` override that lifts the
+/// furnace out of the flue range clears it and one that drops it below
+/// sets it. The pre-merge read would leave the flag on the resolved
+/// efficiency while the engine ran the override.
+#[test]
+fn the_flue_rule_reads_the_overridden_efficiency() {
+    use serde_json::json;
+
+    // The 0.78 AFUE home: the rule fires. The 0.90 override lifts the
+    // furnace out of the flue range: the flag clears.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let edited = edited_base(&dir, "<Value>0.92</Value>", "<Value>0.78</Value>");
+    let (_, has_flue, _) = infiltration_record(&dwelling(edited.clone()));
+    assert!(has_flue, "the resolved AFUE 0.78 is below 0.89: flue");
+    let overridden = build_with_overrides(edited, json!({"Gas Furnace": {"afue": 0.90}}))
+        .expect("the dwelling builds");
+    let (_, has_flue, _) = infiltration_record(&overridden);
+    assert!(
+        !has_flue,
+        "the engine runs the overridden AFUE 0.90: no flue"
+    );
+
+    // The committed home's AFUE 0.92: no flue. The 0.78 override drops it
+    // into the flue range: the flag sets.
+    let base = project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml");
+    let (_, has_flue, _) = infiltration_record(&dwelling(base.clone()));
+    assert!(!has_flue, "the resolved AFUE 0.92 clears 0.89: no flue");
+    let overridden = build_with_overrides(base, json!({"Gas Furnace": {"afue": 0.78}}))
+        .expect("the dwelling builds");
+    let (_, has_flue, _) = infiltration_record(&overridden);
+    assert!(has_flue, "the engine runs the overridden AFUE 0.78: flue");
 }
 
 /// The shielding follows the facility type when the HPXML declares no

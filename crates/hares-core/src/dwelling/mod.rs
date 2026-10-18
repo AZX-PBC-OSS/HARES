@@ -3602,6 +3602,7 @@ fn assemble_from_blueprint_with_seed(
             defaults: &defaults,
             weather_avgs: &bp.weather_avgs,
             equipment_specs: &equipment_specs,
+            overrides: config.overrides.as_ref(),
             site_elevation_m: site_location.elevation_m,
             envelope_scales: &envelope_scales,
         },

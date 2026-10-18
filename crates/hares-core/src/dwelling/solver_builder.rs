@@ -18,6 +18,8 @@ use hares_physics::film_coefficients::{SurfaceRoughness, film_resistances};
 use hares_physics::infiltration::{ShieldingClass, TerrainClass};
 use hares_types::{EnvironmentState, HaresError, ZoneId};
 
+use serde_json::Value;
+
 use super::Result;
 #[cfg(feature = "observe")]
 use super::conversions::zone_type_to_label;
@@ -844,6 +846,10 @@ pub(crate) struct SolverInputs<'a> {
     pub defaults: &'a DefaultsStore,
     pub weather_avgs: &'a WeatherAverages,
     pub equipment_specs: &'a [EquipmentSpec],
+    /// The dwelling-level equipment overrides, which the flue rule reads
+    /// the systems' post-merge efficiencies through (`None` is the empty
+    /// map).
+    pub overrides: Option<&'a Value>,
     pub site_elevation_m: f64,
     pub envelope_scales: &'a hares_io::EnvelopeScales,
 }
@@ -861,6 +867,7 @@ pub(crate) fn build_default_solvers(
         defaults,
         weather_avgs,
         equipment_specs,
+        overrides,
         site_elevation_m,
         envelope_scales,
     } = inputs;
@@ -1392,11 +1399,11 @@ pub(crate) fn build_default_solvers(
     // aim2_coefficients_from_ach50; attic and garage via the
     // parameterized convenience functions). A missing site type or
     // shielding takes OS-HPXML's default;
-    // `conversions::envelope_input_warnings` reports it. The parser rejects
-    // any value outside each element's allowed list. The shielding
-    // resolves where a method consumes it: a dwelling whose infiltration
-    // reads no shielding (a constant ACH) never needs the facility type
-    // the default reads.
+    // `conversions::envelope_input_warnings` reports it. The shielding
+    // resolves where a method consumes it: the conditioned zone's AIM-2
+    // record, a vented attic's ELA coefficients and a garage's ELA
+    // coefficients; an unvented attic exchanges its 0.1 ACH and reads
+    // neither the shielding nor the facility type its default reads.
     let terrain = site_type_to_terrain(building.site.site_type.as_ref());
     let shielding_of = || {
         shielding_to_class(
@@ -1464,16 +1471,20 @@ pub(crate) fn build_default_solvers(
                         };
                         // The flue flag the AIM-2 model runs at: the
                         // declared element, else OS-HPXML's rule
-                        // (defaults.rb:5096-5132).
+                        // (defaults.rb:5096-5132) over the systems'
+                        // post-merge efficiencies.
                         let flue = match building.has_flue_or_chimney {
                             Some(has_flue) => has_flue,
                             None => {
+                                let empty_root = Value::Object(serde_json::Map::new());
+                                let overrides_root = overrides.unwrap_or(&empty_root);
                                 let has_flue =
                                     super::conversions::flue_or_chimney_in_conditioned_space(
                                         env,
                                         building,
                                         equipment_specs,
-                                    );
+                                        overrides_root,
+                                    )?;
                                 tracing::debug!(
                                     has_flue,
                                     "the HPXML declares no HasFlueOrChimneyInConditionedSpace; the AIM-2 flue flag is the OpenStudio-HPXML rule over the resolved heating systems and water heaters"
@@ -1534,7 +1545,7 @@ pub(crate) fn build_default_solvers(
                     bz,
                     || height_above_grade(walls_top_m(building)),
                     weather_avgs.wsf,
-                    shielding_of()?,
+                    shielding_of,
                     terrain,
                     zone_idx,
                 )?,
@@ -1542,7 +1553,7 @@ pub(crate) fn build_default_solvers(
                     bz,
                     exterior_ach50,
                     height_above_grade(foundation_top_m(building))?,
-                    shielding_of()?,
+                    shielding_of,
                     terrain,
                     zone_idx,
                 )?,
@@ -1824,7 +1835,7 @@ fn attic_infiltration_method(
     zone: &hares_io::hpxml::Zone,
     walls_top_m: impl FnOnce() -> Result<f64>,
     wsf: Option<f64>,
-    shielding: ShieldingClass,
+    shielding: impl FnOnce() -> Result<ShieldingClass>,
     terrain: TerrainClass,
     _zone_idx: usize,
 ) -> Result<hares_envelope::InfiltrationMethod> {
@@ -1840,6 +1851,9 @@ fn attic_infiltration_method(
             ach / (1000.0 * wsf)
         }
         (None, None) => {
+            // An unvented attic exchanges its 0.1 ACH: no ELA coefficients,
+            // so no shielding is resolved (a missing ShieldingofHome and a
+            // missing facility type behind its default cost nothing here).
             return Ok(InfiltrationMethod::Ach {
                 ach: UNVENTED_SPACE_ACH,
             });
@@ -1851,6 +1865,7 @@ fn attic_infiltration_method(
                 "a vented attic has no floor area or height to infiltrate by".into(),
             )
         })?;
+    let shielding = shielding()?;
     let ela_m2 = sla * floor_area_m2;
     let (stack_coeff, wind_coeff) =
         attic_ela_coefficients(attic_height_m, walls_top_m()?, shielding, terrain)?;
@@ -1913,7 +1928,7 @@ fn garage_infiltration_method(
     zone: &hares_io::hpxml::Zone,
     unit_exterior_ach50: Option<f64>,
     foundation_top_m: f64,
-    shielding: ShieldingClass,
+    shielding: impl FnOnce() -> Result<ShieldingClass>,
     terrain: TerrainClass,
     zone_idx: usize,
 ) -> Result<hares_envelope::InfiltrationMethod> {
@@ -1939,6 +1954,7 @@ fn garage_infiltration_method(
     })?;
     let floor_area_m2 = volume_m3 / garage_height_m;
 
+    let shielding = shielding()?;
     let ela_m2 = sla_from_ach50(ach50, garage_height_m, N_I_DEFAULT) * floor_area_m2;
     let (stack_coeff, wind_coeff) =
         garage_ela_coefficients(garage_height_m, foundation_top_m, shielding, terrain)?;
@@ -2140,6 +2156,7 @@ mod tests {
                 defaults: &hares_io::DefaultsStore::empty(),
                 weather_avgs: &weather_avgs,
                 equipment_specs: &[],
+                overrides: None,
                 site_elevation_m: 0.0,
                 envelope_scales: &hares_io::EnvelopeScales::default(),
             },
@@ -2209,6 +2226,7 @@ mod tests {
                 defaults: &hares_io::DefaultsStore::empty(),
                 weather_avgs: &weather_avgs,
                 equipment_specs: &[],
+                overrides: None,
                 site_elevation_m: 0.0,
                 envelope_scales: &hares_io::EnvelopeScales::default(),
             },
@@ -2978,7 +2996,7 @@ mod tests {
             &zone,
             || Ok(5.0),
             None,
-            ShieldingClass::Normal,
+            || Ok(ShieldingClass::Normal),
             TerrainClass::Suburban,
             3,
         )
@@ -3021,7 +3039,7 @@ mod tests {
             attic,
             || Ok(walls_top_m),
             None,
-            ShieldingClass::Normal,
+            || Ok(ShieldingClass::Normal),
             TerrainClass::Suburban,
             0,
         )
@@ -3059,7 +3077,10 @@ mod tests {
         );
     }
 
-    /// An attic with no ventilation rate is unvented: 0.1 ACH.
+    /// An attic with no ventilation rate is unvented: 0.1 ACH. The
+    /// shielding resolves only where a method consumes it, so the
+    /// unvented attic's closure is never called: a missing ShieldingofHome
+    /// behind its default costs the build nothing here.
     #[test]
     fn attic_without_a_rate_is_unvented() {
         let zone = space_zone(
@@ -3075,7 +3096,7 @@ mod tests {
                 &zone,
                 || Ok(5.0),
                 None,
-                ShieldingClass::Normal,
+                || panic!("the unvented attic must not resolve the shielding"),
                 TerrainClass::Suburban,
                 3
             )
@@ -3103,7 +3124,7 @@ mod tests {
             &zone,
             || Ok(5.0),
             Some(0.5),
-            ShieldingClass::Normal,
+            || Ok(ShieldingClass::Normal),
             TerrainClass::Suburban,
             3,
         )
@@ -3116,7 +3137,7 @@ mod tests {
             &zone,
             || Ok(5.0),
             None,
-            ShieldingClass::Normal,
+            || Ok(ShieldingClass::Normal),
             TerrainClass::Suburban,
             3,
         )
@@ -3143,7 +3164,7 @@ mod tests {
             &zone,
             || Ok(5.0),
             None,
-            ShieldingClass::Normal,
+            || Ok(ShieldingClass::Normal),
             TerrainClass::Suburban,
             3,
         )
@@ -3225,7 +3246,7 @@ mod tests {
             &zone,
             Some(4.0),
             0.3,
-            ShieldingClass::Normal,
+            || Ok(ShieldingClass::Normal),
             TerrainClass::Suburban,
             0,
         )
@@ -3283,15 +3304,16 @@ mod tests {
                 Some(4.0),
             ),
         ] {
-            garage_infiltration_method(
+            let error = garage_infiltration_method(
                 &zone,
                 ach50,
                 0.0,
-                ShieldingClass::Normal,
+                || panic!("the shielding must not resolve before the garage's own inputs"),
                 TerrainClass::Suburban,
                 0,
             )
             .expect_err("a garage without its inputs must fail");
+            let _ = error;
         }
     }
 

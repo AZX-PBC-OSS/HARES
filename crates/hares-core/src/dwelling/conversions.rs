@@ -2017,14 +2017,22 @@ pub(crate) fn shielding_to_class(
 /// "In conditioned space" reads the spec's resolved zone: the zone it
 /// serves is the conditioned zone (the merged conditioned foundation is
 /// part of it); a system serving no declared zone is resolved to the
-/// conditioned zone at init and reads conditioned here.
+/// conditioned zone at init and reads conditioned here. The efficiency
+/// each system's arm reads is the POST-merge one: the value an override
+/// layer's own entry, else the wildcard's, sets over the spec's resolved
+/// payload, so the flag follows the efficiency the engine runs (an
+/// `afue` override on a furnace whose resolved AFUE sits below 0.89 can
+/// lift the system out of the flue, and one above 0.89 can drop a
+/// system into it).
 pub(crate) fn flue_or_chimney_in_conditioned_space(
     env: &EnvironmentState,
     building: &Building,
     specs: &[hares_io::EquipmentSpec],
-) -> bool {
+    overrides: &Value,
+) -> Result<bool> {
     use hares_types::FuelType;
 
+    let override_root = overrides.as_object();
     // The spec's zone_id is the environment zone's id (one past the
     // building zone's index, environment.rs's ZoneId(idx + 1)); the
     // conditioned-space test reads the building zone it names. A spec
@@ -2046,6 +2054,7 @@ pub(crate) fn flue_or_chimney_in_conditioned_space(
             None => true,
         }
     };
+    let empty_root = Map::new();
     for spec in specs {
         let atmospheric_heating = matches!(spec.name.as_str(), "Gas Furnace" | "Gas Boiler");
         if !atmospheric_heating
@@ -2062,28 +2071,39 @@ pub(crate) fn flue_or_chimney_in_conditioned_space(
         if !zone_is_conditioned(spec) {
             continue;
         }
+        // The efficiency the merged config carries: the override layers'
+        // value when one reaches the spec (the merge writes it over the
+        // payload), else the resolved payload's.
+        let layers =
+            hares_io::hpxml::override_layers(override_root.unwrap_or(&empty_root), &spec.name)?;
+        let effective_value = |key: &str| -> Option<f64> {
+            layers
+                .own
+                .and_then(|own| own.get(key))
+                .or_else(|| layers.wildcard.and_then(|(_, wildcard)| wildcard.get(key)))
+                .and_then(Value::as_f64)
+                .or_else(|| spec_payload_f64(spec, key))
+        };
         if atmospheric_heating {
             // The AFUE or percent efficiency, typed payload first, then
             // the raw parameter bag a spec pending autosizing carries
             // (the units are read beside it and both thresholds are
             // 0.89, the rule's "AFUE/Percent").
-            let afue = spec_payload_f64(spec, "afue")
-                .or_else(|| spec_payload_f64(spec, "heating_efficiency"));
+            let afue = effective_value("afue").or_else(|| effective_value("heating_efficiency"));
             if afue.is_none_or(|afue| afue < 0.89) {
-                return true;
+                return Ok(true);
             }
             continue;
         }
-        let energy_factor = spec_payload_f64(spec, "energy_factor");
+        let energy_factor = effective_value("energy_factor");
         let effective = energy_factor.or_else(|| {
-            spec_payload_f64(spec, "uniform_energy_factor")
-                .map(|uef| calc_ef_from_uef(&spec.name, uef))
+            effective_value("uniform_energy_factor").map(|uef| calc_ef_from_uef(&spec.name, uef))
         });
         if effective.is_none_or(|ef| ef < 0.63) {
-            return true;
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
 
 /// The `zone_id` a spec's typed payload or raw parameters carry.
