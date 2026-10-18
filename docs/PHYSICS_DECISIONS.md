@@ -289,6 +289,29 @@ column, the HPXML control, or the default profile. OCHRE lets the column
 win silently (`vendors/OCHRE/ochre/utils/schedule.py:408-427`); the
 warning follows OS-HPXML, not OCHRE.
 
+## A constant setpoint override replaces the resolved setpoint sources
+
+A dwelling-level equipment override that sets a constant setpoint
+(`setpoint.heating_setpoint_c` or `setpoint.cooling_setpoint_c`) replaces
+the setpoint source the resolution stamped for that side (the schedule
+column, the HPXML control's setpoints, or the default profile): the merge
+removes the matching `*_setpoint_source`, so the constant is the tier the
+thermostat reads. OpenStudio-HPXML has no equipment-override channel; the
+override is HARES's configuration surface, and "accepted means applied"
+(the engine's own rule) is what makes it a setpoint the thermostat
+follows rather than a value the sources outrank. The equipment init's
+deadband reconciliation never moves a side the config names a constant
+for: the unnamed axis opens the gap, the same named-axis rule the
+thermostat's control signals follow. OCHRE's thermostat resolves its
+heating and cooling setpoints from its schedule and control signals the
+same way every step (`vendors/OCHRE/ochre/Equipment/HVAC.py`), with no
+constant-override tier; the record of the active source names the
+override when it applies. The direction of the change: a run that sets a
+constant setpoint override moves from the resolved tier to the constant
+(the acceptance run's heating setpoint 20 C to 25 C, the delivered
+heating and gas power up with it); no committed golden sets one, and no
+golden moved.
+
 ## Weather reads follow the EnergyPlus interpolation rules
 
 A weather step's values are the EnergyPlus weather rules' values, read

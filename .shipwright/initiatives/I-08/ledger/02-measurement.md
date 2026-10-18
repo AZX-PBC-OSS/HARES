@@ -4051,3 +4051,86 @@ committed golden.
 - Draft disposition (not landed): auto-select the continuous model when
   dt exceeds the cycle duration, or document a max dt for the discrete
   cycle. No golden moves from this record; the row is a draft.
+
+### The constant setpoint override row, 2026-10-17 (the worktree `r94ef`, branch `row/r94ef`)
+
+The OD-2 site 6 delta: a constant setpoint override now replaces the
+schedule and HPXML setpoint sources, so the acceptance run's frame moves
+where the override is set. The run is the acceptance test's own
+(`tests/fixtures/hpxml/ochre_samples/base.xml`, no schedule file, weather
+`USA_CO_Denver.Intl.AP.725650_TMY3.epw`, start `2023-01-15T00:00:00-07:00`,
+24 h at 900 s, no warm-up, one verbosity-8 frame report, the dwelling-level
+override `{"Gas Furnace": {"setpoint": {"heating_setpoint_c": 25.0}}}`),
+dumped every report column's every step to parquet once at the parent
+`7e78923d` (the tree plus only the dump harness, an untracked scratch test
+since deleted) and once at the row's final state.
+
+RED at the parent: `constant_setpoint_override_applies` and
+`constant_setpoint_override_replaces_the_schedule_column` both fail with
+the furnace's heating setpoint 20.0 where 25.0 is wanted (the HPXML tier
+in the first test: base.xml's `SetpointTempHeatingSeason` 68 F expanded to
+a daily profile and stamped as the side's source; the schedule tier in the
+second: a constant 68 F `heating_setpoint` column read in Fahrenheit and
+stamped as the source). The second test is a compile error at the parent
+in its final shape (the merge's shadow removal did not exist); its
+behavioral RED is witnessed by running the same run through the unmodified
+merge, which reads the column's 20.0 every step.
+
+GREEN at the row: both pass, with the merge-level pins
+(`constant_setpoint_override_removes_the_matching_schedule_source`,
+`constant_setpoint_override_from_the_wildcard_layer_shadows_too`,
+`a_null_constant_does_not_shadow_the_schedule_source`), the reconciliation
+pin `reconciliation_keeps_the_named_axis_and_opens_the_gap_on_the_other`
+and the three column-source error pins around them.
+
+The delta, per variable: 165 report columns, 36 move, 129 identical. The
+36 moved columns, as means over the 96 steps (before to after):
+
+- `Gas Furnace Setpoint (C)`: 20 to 25, `Scheduled Heating Setpoint (C)`:
+  20 to 25 (the override applies, on every step).
+- `Temperature - Indoor (C)`: 20.4723 to 24.841; `Temperature - Attic (C)`:
+  5.86387 to 6.02538 (the zone is held at the override's constant).
+- `HVAC Heating Delivered (W)` and `HVAC Heating Delivered - Indoor (W)`:
+  1661.5 to 3971.35; `Gas Furnace Capacity (W)`: 1661.5 to 3971.35;
+  `Gas Furnace Main Power (kW)`: 2.21657 to 5.2981;
+  `Gas Furnace Gas Power (therms/hour)` and `Total Gas Power
+  (therms/hour)`: 0.0756325 to 0.180779; `Gas Furnace Energy (kWh)`:
+  0.0185189 to 0.0442644; `HVAC Heating End Use Electric Power (kW)`,
+  `Gas Furnace Electric Power (kW)`, `Gas Furnace Fan Power (kW)`:
+  0.0740757 to 0.177058; `Total Electric Power (kW)`: 1.22019 to 1.32064.
+- `Gas Furnace Mode (-)` and `Gas Furnace Schedule (-)`: heating on 35
+  more steps (mean 0 to 1); `Gas Furnace Runtime Fraction (-)`: 0.193283
+  to 0.46199; `Gas Furnace Reactive Power (kVAR)`: 0.0419806 to 0.100343;
+  `Total Reactive Power (kVAR)`: 0.374095 to 0.432458;
+  `Gas Furnace Power Factor (-)`: 67 steps' value changes, the mean holds
+  0.87.
+- The envelope and balance columns follow the warmer zone:
+  `HVAC Duct Losses (W)`: 435.986 to 1042.11; `Infiltration Heat Gain -
+  Indoor (W)`: -273.883 to -390.829; `Natural Ventilation Heat Gain -
+  Indoor (W)`: 0 to -2041.14 on the 13 steps the warmer zone crosses the
+  ventilation threshold (0 on the rest); `Opaque Surface Heat Gain -
+  Indoor (W)`: -992.091 to -1722.02; `Roof Heat Gain - Indoor (W)`:
+  -238.975 to -424.802; `Floor Heat Gain - Indoor (W)`: -140.694 to
+  -259.686; `Wall Heat Gain - Indoor (W)`: -612.421 to -1037.53; `Window
+  Heat Gain - Indoor (W)`: -1031.02 to -1304.81; `Internal Mass Heat Gain
+  - Indoor (W)`: 68.0709 to -134.768; `Net Sensible Heat Gain - Indoor
+  (W)`: 3241.18 to 5155.34; `Zone Air Heat Balance Residual (W)`: -309.782
+  to -569.296; `Infiltration Heat Gain - Attic (W)`: -7.6657 to -8.3357.
+- `Electric Resistance Water Heater Electric Power (kW)` and `Water
+  Heating End Use Electric Power (kW)`: 0.519528 to 0.516235 (74 of 96
+  steps; the warmer house cools the colder-inlet hours' draw slightly).
+
+The direction is the override's: every moved column is the heating
+setpoint's own chain or a flow the warmer zone drives. No equipment
+parameter moved; the read-back's resolved sources record the override
+tier on the overridden side and are unchanged on every other equipment.
+
+Goldens: compare-all 8 (`consumer_shape_900s`, `fleet_mixed_offset`,
+`fleet_same_offset_300s`, `full_year_hourly`, `leap_year_february_900s`,
+`month_boundary_billing_3600s`, `resstock_2025_fleet`,
+`weather_wrap_900s`) and the dst set's `full_year_900s_dst` are bitwise
+identical on the row's final state. No golden manifest sets a setpoint
+override, so none is expected to move and none is re-captured. The
+resolved product: the golden tool at this base carries no resolved
+product (B-14's first commit, row 94c, adds it); the run above's own
+read-back is recorded instead, unchanged outside the overridden side.

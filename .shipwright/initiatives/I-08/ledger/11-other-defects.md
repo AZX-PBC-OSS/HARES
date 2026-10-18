@@ -257,9 +257,9 @@ is not on the DE-trace path, so the B0 check and the consumer-shaped golden
 are unaffected. `12-inputs.md` IN-3 later makes site 3's accepted field
 set the `DescribeFields` lists.
 
-**State:** FIXED for sites 1 to 5 and 7 to 9 (2026-10-09, commit
-`24f4dafe`, branch `row/r31-od2`, cut from `56ae417e`), site 6 still open
-in row 94e. Verified site by site at that head first: two sites had
+**State:** FIXED for all sites: sites 1 to 5 and 7 to 9 (2026-10-09, commit
+`24f4dafe`, branch `row/r31-od2`, cut from `56ae417e`), site 6 in row 94e
+(2026-10-17, branch `row/r94ef`, its record at the foot of this State). Verified site by site at that head first: two sites had
 already landed through earlier rows and are recorded rather than
 re-errored:
 
@@ -321,6 +321,37 @@ Gate counts: 7586 nextest tests green with all features, 1519 pytest
 green, pyright 0, clippy and `fmt --check` clean; the goldens bitwise
 in both feature sets (`compare-all` seven manifests identical, `-F
 dst` `full_year_900s_dst` identical); no golden moved.
+
+Site 6 FIXED (2026-10-17, branch `row/r94ef`, worktree `r94ef`, based on
+`7e78923d`), the numeric commit in row 94e. The merge
+(`merged_equipment_config`) removes the matching per-side
+`*_setpoint_source` when an override layer (the equipment's own entry or
+the wildcard) sets `setpoint.heating_setpoint_c` or
+`cooling_setpoint_c`, so the constant is the tier the engine's setpoint
+chain reads instead of the schedule column, the HPXML setpoints or the
+default profile the resolution stamped; a `null` constant does not
+shadow (it unsets), and the removal logs each replacement at debug. The
+resolved read-back records the override tier (`SetpointSource::OverrideConstant`)
+on the overridden side, so the model the physics uses names it. The
+equipment init's deadband reconciliation never moves a side the config
+names a constant for (`reconcile_for_deadband_keeping_named`, the
+OD-16 named-axis rule carried to the static pair; the cycling and ideal
+inits alike), which the acceptance's "25 °C on every step" requires: the
+unnamed axis opens the gap. `set_typed_setpoint_source` returns
+`Result` and its three silent cases (no typed config, a non-typed
+payload, non-object payload data) plus an unserializable source and a
+missing `setpoint` block are errors naming the equipment and the case.
+RED first: `constant_setpoint_override_applies` and
+`constant_setpoint_override_replaces_the_schedule_column` fail at the
+parent (the furnace's heating setpoint 20.0, the HPXML and schedule
+tiers respectively, where 25.0 is wanted); GREEN at the row with the
+merge, reconciliation and error pins around them. Movement: the
+acceptance run's delta, 36 of 165 report columns, in
+`02-measurement.md`'s log; the goldens bitwise (compare-all 8 + dst 1,
+no golden sets a setpoint override), none re-captured. Gates: fmt
+clean; clippy `--workspace --all-targets --all-features -D warnings`
+clean; nextest `--workspace --all-features` 8160/8160 (8 skipped);
+`pytest -m ''` 1766 passed + 6 xfailed, 0 failed, 0 errors; pyright 0.
 
 ## OD-3: indirect water-heater loop wiring fails silently
 

@@ -48,6 +48,13 @@ pub enum SetpointSource {
         /// Which default profile was applied.
         profile: String,
     },
+    /// A constant setpoint a dwelling-level override layer set: the merge
+    /// removed the resolution's schedule source for the side (the constant
+    /// replaces it), so the equipment holds the constant from its config.
+    OverrideConstant {
+        /// The constant setpoint, in Celsius.
+        setpoint_c: f64,
+    },
 }
 
 impl SetpointSource {
@@ -66,6 +73,9 @@ impl SetpointSource {
             Self::Hpxml { .. } => "HPXML HVACControl setpoints".to_string(),
             Self::DefaultProfile { profile } => {
                 format!("default profile '{profile}'")
+            }
+            Self::OverrideConstant { setpoint_c } => {
+                format!("constant setpoint override ({setpoint_c} °C)")
             }
         }
     }

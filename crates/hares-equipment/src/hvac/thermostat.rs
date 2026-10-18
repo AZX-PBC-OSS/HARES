@@ -156,6 +156,51 @@ impl ThermalSetpoints {
         }
     }
 
+    /// `reconcile_for_deadband`, keeping the axis the config named: a
+    /// constant setpoint the config (an override's constant among them)
+    /// sets is a named axis and is never moved, so a deadband violation
+    /// opens on the unnamed axis alone. With no axis named this is
+    /// `reconcile_for_deadband` exactly.
+    pub fn reconcile_for_deadband_keeping_named(
+        self,
+        hysteresis_c: f64,
+        heating_named: bool,
+        cooling_named: bool,
+    ) -> Self {
+        let min_gap = 2.0 * hysteresis_c;
+        let gap = self.cooling_c - self.heating_c;
+        if gap >= min_gap || (heating_named == cooling_named) {
+            return self.reconcile_for_deadband(hysteresis_c);
+        }
+        if heating_named {
+            tracing::warn!(
+                heating_setpoint_c = self.heating_c,
+                original_cooling_c = self.cooling_c,
+                new_cooling_c = self.heating_c + min_gap,
+                "setpoints too close or inverted; the cooling setpoint moved to keep \
+                 the named heating setpoint with {} C separation",
+                min_gap,
+            );
+            Self {
+                heating_c: self.heating_c,
+                cooling_c: self.heating_c + min_gap,
+            }
+        } else {
+            tracing::warn!(
+                original_heating_c = self.heating_c,
+                cooling_setpoint_c = self.cooling_c,
+                new_heating_c = self.cooling_c - min_gap,
+                "setpoints too close or inverted; the heating setpoint moved to keep \
+                 the named cooling setpoint with {} C separation",
+                min_gap,
+            );
+            Self {
+                heating_c: self.cooling_c - min_gap,
+                cooling_c: self.cooling_c,
+            }
+        }
+    }
+
     pub fn with_schedule_override(self, schedule: Option<ScheduleSetpoints>) -> Self {
         let Some(schedule) = schedule else {
             return self;
@@ -916,6 +961,47 @@ pub(super) mod tests {
         for db in [0.0, 1.0, 5.0] {
             assert_rejected_without_state_change(&mut fsm, &thermal_setpoint(None, None, Some(db)));
         }
+    }
+
+    #[test]
+    fn reconciliation_keeps_the_named_axis_and_opens_the_gap_on_the_other() {
+        // Heating named at 25 C against an unnamed cooling axis seeded at
+        // 25.5556: the cooling axis opens the gap, the named axis stays.
+        let kept = ThermalSetpoints {
+            heating_c: 25.0,
+            cooling_c: 25.5556,
+        }
+        .reconcile_for_deadband_keeping_named(1.0, true, false);
+        assert_eq!(kept.heating_c, 25.0);
+        assert_eq!(kept.cooling_c, 27.0);
+
+        // Cooling named: the heating axis opens the gap.
+        let kept = ThermalSetpoints {
+            heating_c: 25.0,
+            cooling_c: 25.5556,
+        }
+        .reconcile_for_deadband_keeping_named(1.0, false, true);
+        assert_eq!(kept.heating_c, 23.5556);
+        assert_eq!(kept.cooling_c, 25.5556);
+
+        // No axis named: the midpoint re-center, exactly
+        // `reconcile_for_deadband`'s behavior.
+        let recentred = ThermalSetpoints {
+            heating_c: 25.0,
+            cooling_c: 25.5556,
+        }
+        .reconcile_for_deadband_keeping_named(1.0, false, false);
+        assert_eq!(recentred, recentred.reconcile_for_deadband(1.0));
+
+        // A pair already outside the gap passes through untouched.
+        let wide = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        };
+        assert_eq!(
+            wide.reconcile_for_deadband_keeping_named(1.0, true, false),
+            wide
+        );
     }
 
     #[test]

@@ -635,10 +635,31 @@ impl HvacEquipment {
             self.thermostat_fsm.static_setpoints.cooling_c = weekday[0];
         }
 
+        // The constant setpoints the config names (an override's constant
+        // among them) are named axes and are never moved: the deadband
+        // reconciliation opens on the unnamed axis alone. A side whose
+        // source seeded the static no longer carries the config's constant
+        // there, so it is not a named axis.
+        let heating_seeded = matches!(
+            &self.thermostat_fsm.heating_setpoint_source,
+            Some(ScheduleSource::DailyProfile { .. })
+        );
+        let cooling_seeded = matches!(
+            &self.thermostat_fsm.cooling_setpoint_source,
+            Some(ScheduleSource::DailyProfile { .. })
+        );
+        let heating_named =
+            extract_numeric(config, "heating_setpoint_c").is_some() && !heating_seeded;
+        let cooling_named =
+            extract_numeric(config, "cooling_setpoint_c").is_some() && !cooling_seeded;
         self.thermostat_fsm.static_setpoints = self
             .thermostat_fsm
             .static_setpoints
-            .reconcile_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c);
+            .reconcile_for_deadband_keeping_named(
+                self.thermostat_fsm.thermostat.hysteresis_c,
+                heating_named,
+                cooling_named,
+            );
 
         let explicit_airflow_m3_s_per_w = extract_numeric(config, "airflow_m3_s_per_w")
             .or_else(|| extract_numeric(config, "duct_airflow_m3_s_per_w"));

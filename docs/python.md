@@ -986,3 +986,15 @@ golden fixtures re-captured.
   previous conversion's rounding sat an epsilon above the floor and
   never met the exclusive bound; 0 C is the weather's own value, not a
   stand-in, and negatives stay rejected.
+
+- 2026-10-17: a constant setpoint override (`setpoint.heating_setpoint_c`
+  or `setpoint.cooling_setpoint_c` in an equipment's override) replaces
+  the schedule column, the HPXML setpoints and the default profile the
+  resolution stamped for that side, instead of being accepted and never
+  applied: the merge removes the matching `*_setpoint_source` when the
+  override sets the constant, and the resolved read-back records the
+  constant as the side's active source. The deadband reconciliation at
+  equipment init never moves a side the config names a constant for. No
+  golden re-captured: no golden sets a setpoint override and every golden
+  compares bitwise (compare-all 8 identical, the dst set identical); the
+  override's own delta is in the measurement log.

@@ -4079,14 +4079,28 @@ fn assemble_from_blueprint_with_seed(
     // infiltration inputs, the resolved site and the clock. No step and no
     // warm-up has run, so this is the model the physics will use.
     let resolved = {
-        let mut spec_setpoints: HashMap<&str, (&Option<SetpointSource>, &Option<SetpointSource>)> =
+        let override_root_empty = Map::new();
+        let mut spec_setpoints: HashMap<&str, (Option<SetpointSource>, Option<SetpointSource>)> =
             HashMap::with_capacity(equipment_specs.len());
         for spec in &equipment_specs {
             let display = spec.instance_name.as_deref().unwrap_or(&spec.name);
-            spec_setpoints.insert(
-                display,
-                (&spec.heating_setpoint_source, &spec.cooling_setpoint_source),
-            );
+            // The read-back names the tier the engine reads: where the
+            // override layers set a constant setpoint on a side, the merge
+            // removed the resolution's source for that side and the
+            // constant replaces it in the record.
+            let layers = hares_io::hpxml::override_layers(
+                override_root.as_object().unwrap_or(&override_root_empty),
+                &spec.name,
+            )?;
+            let heating = match conversions::override_constant_setpoint_value(layers, "heating") {
+                Some(setpoint_c) => Some(SetpointSource::OverrideConstant { setpoint_c }),
+                None => spec.heating_setpoint_source.clone(),
+            };
+            let cooling = match conversions::override_constant_setpoint_value(layers, "cooling") {
+                Some(setpoint_c) => Some(SetpointSource::OverrideConstant { setpoint_c }),
+                None => spec.cooling_setpoint_source.clone(),
+            };
+            spec_setpoints.insert(display, (heating, cooling));
         }
         let equipment_read_back = equipment
             .iter()
@@ -4094,8 +4108,7 @@ fn assemble_from_blueprint_with_seed(
                 let desc = eq.descriptor();
                 let (heating, cooling) = spec_setpoints
                     .get(desc.name.as_str())
-                    .copied()
-                    .unwrap_or((&None, &None));
+                    .unwrap_or(&(None, None));
                 crate::resolved::ResolvedEquipment {
                     name: desc.name.clone(),
                     id: desc.id,

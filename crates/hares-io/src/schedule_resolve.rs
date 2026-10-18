@@ -1030,18 +1030,17 @@ fn inject_setpoint_schedules(
             match heating_col {
                 // Schedule CSV provides a per-timestep heating column.
                 Some(col_idx) => {
-                    if set_typed_setpoint_source(spec, "heating", col_idx) {
-                        let source = SetpointSource::ScheduleColumn {
-                            column: "heating_setpoint".to_string(),
-                        };
-                        tracing::debug!(
-                            equipment = %spec.name,
-                            side = "heating",
-                            source = %source.label(),
-                            "setpoint source chosen",
-                        );
-                        spec.heating_setpoint_source = Some(source);
-                    }
+                    set_typed_setpoint_source(spec, "heating", col_idx)?;
+                    let source = SetpointSource::ScheduleColumn {
+                        column: "heating_setpoint".to_string(),
+                    };
+                    tracing::debug!(
+                        equipment = %spec.name,
+                        side = "heating",
+                        source = %source.label(),
+                        "setpoint source chosen",
+                    );
+                    spec.heating_setpoint_source = Some(source);
                 }
                 None => match hpxml_setpoint_profile(spec, "heating") {
                     Some((weekday_c, weekend_c)) => {
@@ -1082,18 +1081,17 @@ fn inject_setpoint_schedules(
             match cooling_col {
                 // Schedule CSV provides a per-timestep cooling column.
                 Some(col_idx) => {
-                    if set_typed_setpoint_source(spec, "cooling", col_idx) {
-                        let source = SetpointSource::ScheduleColumn {
-                            column: "cooling_setpoint".to_string(),
-                        };
-                        tracing::debug!(
-                            equipment = %spec.name,
-                            side = "cooling",
-                            source = %source.label(),
-                            "setpoint source chosen",
-                        );
-                        spec.cooling_setpoint_source = Some(source);
-                    }
+                    set_typed_setpoint_source(spec, "cooling", col_idx)?;
+                    let source = SetpointSource::ScheduleColumn {
+                        column: "cooling_setpoint".to_string(),
+                    };
+                    tracing::debug!(
+                        equipment = %spec.name,
+                        side = "cooling",
+                        source = %source.label(),
+                        "setpoint source chosen",
+                    );
+                    spec.cooling_setpoint_source = Some(source);
                 }
                 None => match hpxml_setpoint_profile(spec, "cooling") {
                     Some((weekday_c, weekend_c)) => {
@@ -1153,28 +1151,61 @@ fn hpxml_setpoint_profile(spec: &EquipmentSpec, prefix: &str) -> Option<(Vec<f64
     Some((weekday.to_vec(), weekend.to_vec()))
 }
 
-/// Set the config's `{prefix}_setpoint_source` to the schedule column;
-/// false when the spec's config cannot carry it, in which case the column
-/// is not the spec's active source and nothing records it as one.
-fn set_typed_setpoint_source(spec: &mut EquipmentSpec, prefix: &str, col_idx: usize) -> bool {
+/// Set the config's `{prefix}_setpoint_source` to the schedule column.
+///
+/// Every spec the resolution reaches must be able to carry the source the
+/// column resolves to: a spec whose config cannot hold it (no typed
+/// config, a raw payload, a non-object payload, no `setpoint` block, a
+/// source that does not serialize) would run the column in silence while
+/// nothing recorded it as the active tier, so each case is an error naming
+/// the equipment and the case.
+fn set_typed_setpoint_source(
+    spec: &mut EquipmentSpec,
+    prefix: &str,
+    col_idx: usize,
+) -> Result<(), HaresError> {
+    let cannot_apply = |detail: String| {
+        HaresError::Equipment(format!(
+            "equipment '{}': the schedule's '{prefix}_setpoint' column cannot apply: {detail}",
+            spec.name,
+            prefix = prefix,
+        ))
+    };
     let Some(typed) = spec.typed_config.as_mut() else {
-        return false;
+        return Err(cannot_apply(format!(
+            "the spec carries no typed config to hold the '{prefix}_setpoint_source' \
+             the column resolves to",
+            prefix = prefix,
+        )));
     };
     let ConfigPayload::Typed { data, .. } = &mut typed.payload else {
-        return false;
+        return Err(cannot_apply(format!(
+            "the spec's config payload is not a typed config and cannot hold the \
+             '{prefix}_setpoint_source' the column resolves to",
+            prefix = prefix,
+        )));
     };
     let Some(obj) = data.as_object_mut() else {
-        return false;
+        return Err(cannot_apply(format!(
+            "the spec's typed payload is not a JSON object and cannot hold the \
+             '{prefix}_setpoint_source' the column resolves to",
+            prefix = prefix,
+        )));
     };
 
     let source = ScheduleSourceConfig::ColumnRef {
         col_idx,
         boundary: BoundaryPolicy::Clamp,
     };
-    match serde_json::to_value(source) {
-        Ok(json) => insert_setpoint_into_obj(obj, &format!("{prefix}_setpoint_source"), json),
-        Err(_) => false,
+    let json = serde_json::to_value(source)
+        .map_err(|err| cannot_apply(format!("the column source does not serialize: {err}")))?;
+    let key = format!("{prefix}_setpoint_source");
+    if !insert_setpoint_into_obj(obj, &key, json) {
+        return Err(cannot_apply(format!(
+            "the spec's typed config has no 'setpoint' block to hold the '{key}'",
+        )));
     }
+    Ok(())
 }
 
 fn set_typed_schedule_source(spec: &mut EquipmentSpec, field: &str, col_idx: usize) {
@@ -3320,6 +3351,61 @@ mod tests {
                 col_idx: 1,
                 boundary: BoundaryPolicy::Clamp
             }
+        );
+    }
+
+    #[test]
+    fn setpoint_column_without_typed_config_is_an_error() {
+        let mut spec = make_spec("Gas Furnace", 100.0);
+        let err = super::set_typed_setpoint_source(&mut spec, "heating", 0)
+            .expect_err("a spec with no typed config cannot hold the source");
+        assert!(
+            err.to_string().contains("Gas Furnace") && err.to_string().contains("no typed config"),
+            "the error names the equipment and the case: {err}"
+        );
+    }
+
+    #[test]
+    fn setpoint_column_with_raw_payload_is_an_error() {
+        let mut spec = make_spec("Gas Furnace", 100.0);
+        spec.typed_config = Some(hares_equipment::EquipmentConfig::with_payload(
+            "Gas Furnace".to_string(),
+            "Gas Furnace".to_string(),
+            hares_equipment::ConfigPayload::Raw {
+                data: std::collections::HashMap::new(),
+            },
+        ));
+        let err = super::set_typed_setpoint_source(&mut spec, "heating", 0)
+            .expect_err("a raw payload cannot hold the source");
+        assert!(
+            err.to_string().contains("Gas Furnace")
+                && err.to_string().contains("not a typed config"),
+            "the error names the equipment and the case: {err}"
+        );
+    }
+
+    #[test]
+    fn setpoint_column_with_non_object_payload_data_is_an_error() {
+        let mut spec = make_spec("Gas Furnace", 100.0);
+        let mut typed = hares_equipment::EquipmentConfig::with_payload(
+            "Gas Furnace".to_string(),
+            "Gas Furnace".to_string(),
+            hares_equipment::ConfigPayload::Raw {
+                data: std::collections::HashMap::new(),
+            },
+        );
+        typed.payload = hares_equipment::ConfigPayload::Typed {
+            type_name: "Gas Furnace".to_string(),
+            version: 1,
+            data: serde_json::Value::Bool(false),
+        };
+        spec.typed_config = Some(typed);
+        let err = super::set_typed_setpoint_source(&mut spec, "heating", 0)
+            .expect_err("a non-object payload cannot hold the source");
+        assert!(
+            err.to_string().contains("Gas Furnace")
+                && err.to_string().contains("not a JSON object"),
+            "the error names the equipment and the case: {err}"
         );
     }
 

@@ -1098,6 +1098,7 @@ pub(crate) fn merged_equipment_config(
     }
 
     let mut merged = raw_load_parameters(spec, layers)?;
+    remove_override_shadowed_setpoint_sources(&mut merged, layers, &spec.name);
     // Raw equipment honor the reserved "zip" override object too, for
     // consistency with typed equipment: it is merged field-wise over the
     // spec's zip_params base and folded back into `zip_params`, which
@@ -1480,7 +1481,69 @@ fn apply_typed_overrides(
         reject_shadowed_wh_efficiency(type_name, merged, key, equipment)?;
         nested_insert(merged, key, value);
     }
+    remove_override_shadowed_setpoint_sources(merged, layers, equipment);
     Ok(())
+}
+
+/// The `setpoint` block's sides and the config key each side's schedule
+/// source is read from: the thermostat reads the source ahead of the
+/// constant setpoint (`hvac_core.rs` init's "Build setpoint sources: CSV
+/// column > daily profile > constant"), so a constant setpoint an override
+/// layer sets could never apply while the resolution's source stood. The
+/// merge removes the matching source when the override sets the constant,
+/// making the override the tier the engine reads.
+const SETPOINT_SOURCE_SHADOWS: [(&str, &str); 2] = [
+    ("heating", "heating_setpoint_source"),
+    ("cooling", "cooling_setpoint_source"),
+];
+
+/// The constant setpoint, in Celsius, that the override layers set on one
+/// thermostat side, when they set one: the equipment's own entry's
+/// `setpoint` object first, then the wildcard's. A `null` value does not
+/// set a constant (it unsets one), and a non-numeric value fails the
+/// merged payload's schema at the validation that follows the merge.
+pub(crate) fn override_constant_setpoint_value(
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+    prefix: &str,
+) -> Option<f64> {
+    let key = format!("{prefix}_setpoint_c");
+    let constant = |layer: &Map<String, Value>| {
+        layer
+            .get("setpoint")
+            .and_then(Value::as_object)
+            .and_then(|sp| sp.get(&key))
+            .and_then(Value::as_f64)
+    };
+    layers
+        .own
+        .and_then(constant)
+        .or_else(|| layers.wildcard.and_then(|(_, wildcard)| constant(wildcard)))
+}
+
+/// Remove the merged config's per-side schedule sources that a constant
+/// setpoint the override layer set shadows, logging each replacement at
+/// debug. Runs after the override layers land, so the constant the layer
+/// set is the tier the engine's setpoint chain reads.
+fn remove_override_shadowed_setpoint_sources(
+    merged: &mut Map<String, Value>,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+    equipment: &str,
+) {
+    let Some(sp_obj) = merged.get_mut("setpoint").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for (prefix, source_key) in SETPOINT_SOURCE_SHADOWS {
+        if override_constant_setpoint_value(layers, prefix).is_some()
+            && sp_obj.remove(source_key).is_some()
+        {
+            tracing::debug!(
+                equipment,
+                side = prefix,
+                removed_source = source_key,
+                "a constant setpoint override replaces the schedule source"
+            );
+        }
+    }
 }
 
 /// The gas water heater reads `conversion_efficiency` ahead of the EF/UEF
@@ -1782,9 +1845,6 @@ pub(crate) fn shielding_to_class(
     }
 }
 
-/// Check if any Foundation zone has `vented == true` (vented crawlspace).
-///
-/// Used to select [`FoundationLeakageClass`] for AIM-2 leakage distribution.
 pub(crate) fn has_vented_crawlspace(building: &Building) -> bool {
     use hares_io::hpxml::ZoneType;
     building
@@ -1814,7 +1874,7 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use hares_equipment::{
-        SetpointReconciliation,
+        ConfigPayload, SetpointReconciliation,
         hvac::heating_config::{DuctConfig, GasFurnaceConfig, HvacSetpointConfig},
     };
     use hares_io::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
@@ -2031,6 +2091,125 @@ mod tests {
 
         assert!((cfg.afue - 0.96).abs() < 1e-12);
         assert!((cfg.capacity_w - 12_000.0).abs() < 1e-12);
+    }
+
+    /// A 24-hour constant daily profile, the shape the resolver stamps.
+    fn constant_profile(value: f64) -> Value {
+        Value::Array(vec![Value::from(value); 24])
+    }
+
+    #[test]
+    fn constant_setpoint_override_removes_the_matching_schedule_source() {
+        // The resolver's shape: the payload's setpoint block carries the
+        // per-side sources the resolution stamped, and the constant
+        // override lands beside them. The merge removes the shadowed
+        // side's source, and only that side's.
+        let mut spec = gas_furnace_spec();
+        if let Some(typed) = spec.typed_config.as_mut()
+            && let ConfigPayload::Typed { data, .. } = &mut typed.payload
+        {
+            let obj = data.as_object_mut().expect("furnace payload object");
+            obj.insert(
+                "setpoint".to_string(),
+                json!({
+                    "heating_setpoint_source": {
+                        "kind": "daily_profile",
+                        "weekday": constant_profile(20.0),
+                        "weekend": constant_profile(20.0)
+                    },
+                    "cooling_setpoint_source": {
+                        "kind": "daily_profile",
+                        "weekday": constant_profile(25.5556),
+                        "weekend": constant_profile(25.5556)
+                    }
+                }),
+            );
+        }
+        let overrides = json!({
+            "Gas Furnace": {
+                "setpoint": {"heating_setpoint_c": 25.0}
+            }
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("the merged config decodes");
+
+        assert_eq!(cfg.setpoint.heating_setpoint_c, Some(25.0));
+        assert!(
+            cfg.setpoint.heating_setpoint_source.is_none(),
+            "the constant shadows the heating source: it must be removed"
+        );
+        assert!(
+            cfg.setpoint.cooling_setpoint_source.is_some(),
+            "the cooling side's source stands: the override named the heating side only"
+        );
+    }
+
+    #[test]
+    fn constant_setpoint_override_from_the_wildcard_layer_shadows_too() {
+        let mut spec = gas_furnace_spec();
+        if let Some(typed) = spec.typed_config.as_mut()
+            && let ConfigPayload::Typed { data, .. } = &mut typed.payload
+        {
+            let obj = data.as_object_mut().expect("furnace payload object");
+            obj.insert(
+                "setpoint".to_string(),
+                json!({
+                    "heating_setpoint_source": {
+                        "kind": "daily_profile",
+                        "weekday": constant_profile(20.0),
+                        "weekend": constant_profile(20.0)
+                    }
+                }),
+            );
+        }
+        let overrides = json!({
+            "all": {"setpoint": {"cooling_setpoint_c": 26.0}}
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("the merged config decodes");
+
+        assert_eq!(cfg.setpoint.cooling_setpoint_c, Some(26.0));
+        assert!(cfg.setpoint.cooling_setpoint_source.is_none());
+        assert!(cfg.setpoint.heating_setpoint_source.is_some());
+    }
+
+    #[test]
+    fn a_null_constant_does_not_shadow_the_schedule_source() {
+        // An explicit null unsets the constant; it does not set one, so
+        // the resolution's source keeps governing.
+        let mut spec = gas_furnace_spec();
+        if let Some(typed) = spec.typed_config.as_mut()
+            && let ConfigPayload::Typed { data, .. } = &mut typed.payload
+        {
+            let obj = data.as_object_mut().expect("furnace payload object");
+            obj.insert(
+                "setpoint".to_string(),
+                json!({
+                    "heating_setpoint_source": {
+                        "kind": "daily_profile",
+                        "weekday": constant_profile(20.0),
+                        "weekend": constant_profile(20.0)
+                    }
+                }),
+            );
+        }
+        let overrides = json!({
+            "Gas Furnace": {"setpoint": {"heating_setpoint_c": null}}
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("the merged config decodes");
+
+        assert_eq!(cfg.setpoint.heating_setpoint_c, None);
+        assert!(cfg.setpoint.heating_setpoint_source.is_some());
     }
 
     // ── the spec's parameter bag as an override layer on typed specs ────
