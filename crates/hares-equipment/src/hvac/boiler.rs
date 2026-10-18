@@ -556,11 +556,13 @@ impl Equipment for ElectricBoiler {
         EquipmentHealthCounts {
             curve_index_clamps: 0,
             fluid_payload_absences: std::mem::take(&mut self.fluid_payload_absences),
+            cross_tier_deadband_events: self.hvac.take_cross_tier_deadband_count(),
         }
     }
 
     fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
         out.append(&mut self.warnings);
+        self.hvac.take_warnings(out);
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1123,11 +1125,13 @@ impl Equipment for GasBoiler {
         EquipmentHealthCounts {
             curve_index_clamps: 0,
             fluid_payload_absences: std::mem::take(&mut self.fluid_payload_absences),
+            cross_tier_deadband_events: self.hvac.take_cross_tier_deadband_count(),
         }
     }
 
     fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
         out.append(&mut self.warnings);
+        self.hvac.take_warnings(out);
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {

@@ -3972,6 +3972,14 @@ fn assemble_from_blueprint_with_seed(
             merged_cfg.name.clone(),
             merged_cfg.setpoints_reconciled.clone(),
         );
+        // The merged config's surviving schedule tier against the constant
+        // the override named: a knowable crossing warns at construction,
+        // naming the equipment and both values (the runtime's cross-tier
+        // count is the backstop for the schedule kinds this scan cannot
+        // read).
+        for warning in conversions::cross_tier_setpoint_warnings(&merged_cfg.name, &merged_cfg) {
+            warnings.push_warning(warning);
+        }
         merged_cfg.zone_map = Some(zone_map.clone());
         if eq.uses_rng_stream() {
             let rng_stream = RngStream::event_load(rng.get_seed(), rng_identity);
@@ -7390,6 +7398,7 @@ impl Dwelling {
         // surface on the equipment's next successful step, take semantics
         // reset per take), and their step already failed the port contract.
         let mut step_fluid_payload_absences: u64 = 0;
+        let mut step_cross_tier_deadband_events: u64 = 0;
         // The equipment whose curve-index clamps drained this step, with
         // each one's count: the policy is evaluated per source, so a limit
         // set on the counter fails the run naming the equipment.
@@ -7402,6 +7411,7 @@ impl Dwelling {
                         .push((eq.descriptor().name.clone(), counts.curve_index_clamps));
                 }
                 step_fluid_payload_absences += counts.fluid_payload_absences;
+                step_cross_tier_deadband_events += counts.cross_tier_deadband_events;
             }
             // Warnings raised this step drain beside the health counts,
             // from failed-and-rolled-back equipment too (warnings only, no
@@ -7426,6 +7436,11 @@ impl Dwelling {
             )?;
         }
         self.health.fluid_payload_absences += step_fluid_payload_absences;
+        // The cross-tier deadband collisions: the run's first raised the
+        // equipment's warning beside this drain; the count totals every
+        // collision the run hit, with no policy limit (the event escalates
+        // nothing: the warning is the signal).
+        self.health.cross_tier_deadband_events += step_cross_tier_deadband_events;
 
         // Step 3c: propagate per-timestep ventilation recovery effectiveness
         // from equipment to the thermal solver config.  The Ventilation equipment
@@ -20770,7 +20785,11 @@ latent_gain_fraction = 0.08
                 fan_power_w_per_cfm: None,
                 setpoint: HvacSetpointConfig {
                     cooling_setpoint_c: Some(0.0),
-                    heating_setpoint_c: Some(18.0),
+                    // Cooling alone is named: a heating constant below it
+                    // would be the both-named deadband violation the init
+                    // errors on, and the unnamed heating axis opens the
+                    // gap away from cooling.
+                    heating_setpoint_c: None,
                     heating_setpoint_source: None,
                     cooling_setpoint_source: None,
                 },
@@ -21663,7 +21682,11 @@ occupancy = 1.0
                 fan_power_w_per_cfm: None,
                 setpoint: HvacSetpointConfig {
                     cooling_setpoint_c: Some(0.0),
-                    heating_setpoint_c: Some(18.0),
+                    // Cooling alone is named: a heating constant below it
+                    // would be the both-named deadband violation the init
+                    // errors on, and the unnamed heating axis opens the
+                    // gap away from cooling.
+                    heating_setpoint_c: None,
                     heating_setpoint_source: None,
                     cooling_setpoint_source: None,
                 },

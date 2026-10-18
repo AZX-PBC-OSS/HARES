@@ -9,10 +9,10 @@ use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_physics::units::power_kw_to_w;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
-    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, IdealCapacityMode, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory,
-    ThermostatBandClass, ZoneId,
+    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentHealthCounts,
+    EquipmentId, ExecutionStage, FuelType, HaresError, IdealCapacityMode, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
+    ThermalCategory, ThermostatBandClass, Warning, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +99,10 @@ pub struct IdealHvac {
     /// The zone the unit conditions; `None` until `init` resolves it.
     zone_id: Option<ZoneId>,
     thermostat_fsm: ThermostatFsm,
+    /// Run warnings the unit raised (the cross-tier deadband collision's
+    /// warning among them), drained into the run's log through
+    /// `drain_warnings`.
+    warnings: Vec<Warning>,
     ideal_capacity_w: f64,
     ideal_capacity_degraded: bool,
     current_target_c: f64,
@@ -194,6 +198,7 @@ impl IdealHvac {
                 heating_c: 20.0,
                 cooling_c: 24.0,
             }),
+            warnings: Vec::new(),
             ideal_capacity_w: 0.0,
             ideal_capacity_degraded: false,
             current_target_c: 20.0,
@@ -300,6 +305,36 @@ impl IdealHvac {
         })
     }
 
+    /// Raises the thermostat FSM's parked cross-tier deadband collision as
+    /// a run warning naming this unit and both resolved tiers: the step
+    /// itself the dwelling stamps when it drains the warning. Warn once
+    /// per run (the FSM parks the first collision only); the count of
+    /// every collision flows separately through the health counts.
+    fn record_cross_tier_warning(&mut self) {
+        let Some((heating_c, cooling_c, required_gap_c)) =
+            self.thermostat_fsm.take_cross_tier_warning()
+        else {
+            return;
+        };
+        let message = format!(
+            "{}: the resolved heating setpoint {heating_c} °C and cooling setpoint \
+             {cooling_c} °C sit {gap} °C apart, below the required deadband \
+             {required_gap_c} °C: the constant override and the surviving schedule \
+             tier cross, and the run can deliver heating and cooling on the same step",
+            self.descriptor.name,
+            gap = cooling_c - heating_c
+        );
+        tracing::warn!(
+            equipment = %self.descriptor.name,
+            heating_c,
+            cooling_c,
+            required_gap_c,
+            "{message}"
+        );
+        self.warnings
+            .push(Warning::new(self.descriptor.name.clone(), message));
+    }
+
     /// The zone temperature is read once: the FSM's transition and the ideal
     /// solver's target in the deadband both use it.
     fn update_mode(&mut self, env: &EnvironmentState) -> crate::Result<ThermostatMode> {
@@ -308,6 +343,7 @@ impl IdealHvac {
             .thermostat_fsm
             .update_mode_at(env, zone_temp)
             .map_err(|err| HaresError::Equipment(format!("{}: {err}", self.descriptor.name)))?;
+        self.record_cross_tier_warning();
 
         let setpoints = self.thermostat_fsm.effective_setpoints();
         match self.thermostat_fsm.mode {
@@ -898,6 +934,17 @@ impl Equipment for IdealHvac {
 
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
+    }
+
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            cross_tier_deadband_events: self.thermostat_fsm.take_cross_tier_deadband_count(),
+            ..Default::default()
+        }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {

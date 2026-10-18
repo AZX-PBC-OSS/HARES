@@ -70,6 +70,10 @@ macro_rules! delegate_equipment {
                 self.$inner.take_health_counts()
             }
 
+            fn drain_warnings(&mut self, out: &mut Vec<hares_types::Warning>) {
+                self.$inner.drain_warnings(out)
+            }
+
             fn rename(&mut self, name: String) {
                 self.$inner.rename(name)
             }

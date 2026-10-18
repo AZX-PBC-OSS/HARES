@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use chrono::Duration as ChronoDuration;
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::CFM_PER_M3_S;
-use hares_types::{ControlSignal, EnvironmentState, HaresError, ScheduleSource, ZoneId};
+use hares_types::{ControlSignal, EnvironmentState, HaresError, ScheduleSource, Warning, ZoneId};
 
 use crate::EquipmentConfig;
 
@@ -485,6 +485,10 @@ pub struct HvacEquipment {
     /// returns a mode): the following step fails with it before changing
     /// any state, the IdealHvac contract.
     control_error: Option<HaresError>,
+    /// Run warnings the unit raised (the cross-tier deadband collision's
+    /// warning among them), drained into the run's log through the
+    /// owning equipment's `drain_warnings`.
+    warnings: Vec<Warning>,
 }
 
 impl HvacConfig {
@@ -580,6 +584,7 @@ impl HvacEquipment {
                 max_enabled_speed: 0,
             },
             control_error: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -590,6 +595,46 @@ impl HvacEquipment {
     /// that follows takes it and fails before changing any state.
     pub fn record_control_error(&mut self, err: HaresError) {
         self.control_error = Some(err);
+    }
+
+    /// Raises the thermostat FSM's parked cross-tier deadband collision as
+    /// a run warning naming `equipment_name` and both resolved tiers: the
+    /// step itself the dwelling stamps when it drains the warning. Warn
+    /// once per run (the FSM parks the first collision only); the count of
+    /// every collision flows separately through the health counts.
+    pub fn record_cross_tier_warning(&mut self, equipment_name: &str) {
+        let Some((heating_c, cooling_c, required_gap_c)) =
+            self.thermostat_fsm.take_cross_tier_warning()
+        else {
+            return;
+        };
+        let message = format!(
+            "{equipment_name}: the resolved heating setpoint {heating_c} °C and cooling \
+             setpoint {cooling_c} °C sit {gap} °C apart, below the required deadband \
+             {required_gap_c} °C: the constant override and the surviving schedule tier \
+             cross, and the run can deliver heating and cooling on the same step",
+            gap = cooling_c - heating_c
+        );
+        tracing::warn!(
+            equipment = equipment_name,
+            heating_c,
+            cooling_c,
+            required_gap_c,
+            "{message}"
+        );
+        self.warnings.push(Warning::new(equipment_name, message));
+    }
+
+    /// Moves this unit's run warnings into `out`: the owning equipment's
+    /// `drain_warnings` delegates here.
+    pub fn take_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
+    }
+
+    /// Takes and resets the cross-tier collision count: the owning
+    /// equipment's `take_health_counts` reports it.
+    pub fn take_cross_tier_deadband_count(&mut self) -> u64 {
+        self.thermostat_fsm.take_cross_tier_deadband_count()
     }
 
     /// Takes the recorded control error, if any.
@@ -1332,6 +1377,9 @@ mod tests {
 
     #[test]
     fn thermostat_setpoint_deadband_reconciled_when_too_close() {
+        // Both sides named by constants whose gap sits below the required
+        // deadband: the construction error, since named constants never
+        // move and no unnamed axis exists to open the gap on.
         let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
         let mut config = EquipmentConfig::default();
         config
@@ -1343,11 +1391,37 @@ mod tests {
         config
             .test_extras_mut()
             .insert("cooling_setpoint_c".to_string(), 22.0.into());
+        let err = hvac
+            .init(&config, &env(20.0, 60, 0))
+            .expect_err("the both-named violation cannot reconcile");
+        assert!(
+            err.to_string().contains("21") && err.to_string().contains("22"),
+            "the error names both constants: {err}"
+        );
+
+        // With no axis named, the statics' too-close pair still re-centers
+        // at init: the default statics are too close only when a test
+        // builder made them so, and the pair the config did not name is
+        // the engine's to keep sane.
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config
+            .test_extras_mut()
+            .insert("hysteresis_c".to_string(), 1.0.into());
+        hvac.thermostat_fsm.static_setpoints = ThermalSetpoints {
+            heating_c: 21.0,
+            cooling_c: 22.0,
+        };
         hvac.init(&config, &env(20.0, 60, 0))
-            .expect("init should succeed with reconciliation");
+            .expect("the unnamed pair re-centers");
         let gap = hvac.thermostat_fsm.static_setpoints.cooling_c
             - hvac.thermostat_fsm.static_setpoints.heating_c;
         assert!(gap >= 2.0, "reconciled gap must be >= 2.0 C, got {gap:.3}");
+        assert_eq!(
+            hvac.thermostat_fsm.static_setpoints.heating_c, 20.5,
+            "the unnamed pair re-centers on its midpoint: 21 and 22 to 20.5 and 22.5"
+        );
+        assert_eq!(hvac.thermostat_fsm.static_setpoints.cooling_c, 22.5);
     }
 
     #[test]

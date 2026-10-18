@@ -9,6 +9,7 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
+    Warning,
 };
 use serde::{Deserialize, Serialize};
 
@@ -503,8 +504,13 @@ impl Equipment for HeatPumpHeaterCore {
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
         EquipmentHealthCounts {
             curve_index_clamps: self.hvac.take_biquadratic_clamp_count(),
+            cross_tier_deadband_events: self.hvac.take_cross_tier_deadband_count(),
             ..Default::default()
         }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        self.hvac.take_warnings(out);
     }
 }
 
@@ -2345,7 +2351,11 @@ impl HeatPumpHeaterCore {
     }
 
     fn resolve_control(&mut self, env: &EnvironmentState) -> crate::Result<HeaterControl> {
+        // The FSM's zone read failing returns before the cross-tier check
+        // can run, so a recorded warning here means the check saw a
+        // collision.
         let mode = self.hvac.update_mode(env)?;
+        self.hvac.record_cross_tier_warning(&self.descriptor.name);
         let ideal_heating_call = self.use_ideal && self.ideal_capacity_w > f64::EPSILON;
         let heating_call = mode == ThermostatMode::Heating || ideal_heating_call;
 

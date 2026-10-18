@@ -11,7 +11,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory, Warning,
 };
 use serde::{Deserialize, Serialize};
 
@@ -364,8 +364,13 @@ impl Equipment for AirConditioner {
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
         EquipmentHealthCounts {
             curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
+            cross_tier_deadband_events: self.core.hvac.take_cross_tier_deadband_count(),
             ..Default::default()
         }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        self.core.hvac.take_warnings(out);
     }
 }
 
@@ -454,8 +459,13 @@ impl Equipment for RoomAC {
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
         EquipmentHealthCounts {
             curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
+            cross_tier_deadband_events: self.core.hvac.take_cross_tier_deadband_count(),
             ..Default::default()
         }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        self.core.hvac.take_warnings(out);
     }
 }
 
@@ -1109,6 +1119,7 @@ impl CoolingCore {
                 None
             }
         };
+        self.hvac.record_cross_tier_warning(&self.descriptor.name);
         if let Some(zone_temp) = cooling_zone_temp_c {
             let base_setpoint = self.hvac.effective_setpoints().cooling_c;
             let setpoint = base_setpoint + self.dr_setpoint_offset_c;

@@ -1546,6 +1546,129 @@ fn remove_override_shadowed_setpoint_sources(
     }
 }
 
+/// The coldest and warmest value a surviving schedule source can read,
+/// when its year of values is knowable from the config alone: a
+/// constant's own value; a daily profile's or a solar-aware profile's
+/// extremes over its fractions, monthly multipliers and maximum (the
+/// product `value_at` evaluates). `None` for the kinds whose values the
+/// runtime reads from data the config does not carry (a schedule-file
+/// column and the time windows), which the runtime's cross-tier check
+/// catches instead.
+fn schedule_source_extremes(source: &hares_types::ScheduleSourceConfig) -> Option<(f64, f64)> {
+    use hares_types::ScheduleSourceConfig as S;
+    fn extremes<'a>(
+        fractions: impl Iterator<Item = &'a f64>,
+        multipliers: &'a [f64],
+        max_value: f64,
+    ) -> Option<(f64, f64)> {
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for fraction in fractions {
+            for multiplier in multipliers {
+                let value = fraction * multiplier * max_value;
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+        Some((min, max))
+    }
+    match source {
+        S::Constant(value) => Some((*value, *value)),
+        S::DailyProfile {
+            weekday,
+            weekend,
+            month_multipliers,
+            max_value,
+        } => extremes(
+            weekday.iter().chain(weekend.iter()),
+            month_multipliers,
+            *max_value,
+        ),
+        S::SolarAware {
+            daytime_fraction,
+            evening_fraction,
+            overnight_fraction,
+            month_multipliers,
+            max_value,
+            ..
+        } => extremes(
+            [*daytime_fraction, *evening_fraction, *overnight_fraction].iter(),
+            month_multipliers,
+            *max_value,
+        ),
+        S::ColumnRef { .. } | S::TimeWindows { .. } => None,
+    }
+}
+
+/// The cross-tier deadband warnings a merged config's setpoint block
+/// carries: a constant setpoint (an override layer's among them) named on
+/// one side against the surviving schedule source on the other, whose
+/// knowable coldest or warmest step crosses the constant. The init's
+/// deadband reconciliation reads the static pair alone, so this is the
+/// construction-time check that can see the surviving tier; the run's
+/// cross-tier count is the backstop for the kinds this scan cannot read.
+pub(crate) fn cross_tier_setpoint_warnings(
+    equipment: &str,
+    config: &hares_equipment::EquipmentConfig,
+) -> Vec<hares_types::Warning> {
+    use hares_types::ScheduleSourceConfig;
+
+    let hares_equipment::ConfigPayload::Typed { data, .. } = &config.payload else {
+        return Vec::new();
+    };
+    let Some(sp) = data.get("setpoint").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let named_constant = |side: &str| {
+        sp.get(&format!("{side}_setpoint_c"))
+            .and_then(Value::as_f64)
+    };
+    let surviving_source = |side: &str| {
+        sp.get(&format!("{side}_setpoint_source"))
+            .and_then(|value| serde_json::from_value::<ScheduleSourceConfig>(value.clone()).ok())
+    };
+    let mut warnings = Vec::new();
+    // Heating named against the surviving cooling schedule: the schedule's
+    // coldest step below the constant asks heating and cooling at once.
+    if let (Some(heating_c), (min_c, _)) = (
+        named_constant("heating"),
+        surviving_source("cooling")
+            .and_then(|source| schedule_source_extremes(&source))
+            .unwrap_or((f64::INFINITY, f64::NEG_INFINITY)),
+    ) && min_c < heating_c
+    {
+        warnings.push(hares_types::Warning::new(
+            equipment,
+            format!(
+                "the heating setpoint constant {heating_c} °C crosses the surviving cooling \
+                 schedule's coldest step {min_c} °C: the tiers ask heating and cooling at \
+                 once, the collision the init's static check cannot see; the run counts \
+                 every step both deliver"
+            ),
+        ));
+    }
+    // Cooling named against the surviving heating schedule: the schedule's
+    // warmest step above the constant asks both at once.
+    if let (Some(cooling_c), (_, max_c)) = (
+        named_constant("cooling"),
+        surviving_source("heating")
+            .and_then(|source| schedule_source_extremes(&source))
+            .unwrap_or((f64::INFINITY, f64::NEG_INFINITY)),
+    ) && max_c > cooling_c
+    {
+        warnings.push(hares_types::Warning::new(
+            equipment,
+            format!(
+                "the cooling setpoint constant {cooling_c} °C crosses the surviving heating \
+                 schedule's warmest step {max_c} °C: the tiers ask heating and cooling at \
+                 once, the collision the init's static check cannot see; the run counts \
+                 every step both deliver"
+            ),
+        ));
+    }
+    warnings
+}
+
 /// The gas water heater reads `conversion_efficiency` ahead of the EF/UEF
 /// test-procedure fields, so an override of those could never apply on a
 /// config that carries the conversion efficiency: it is rejected naming the
@@ -3033,6 +3156,72 @@ mod tests {
             sr[1].adjusted_cooling_c, [22.5; 24],
             "adjusted cooling setpoints must be preserved"
         );
+    }
+
+    /// The merge-time scan fires on a knowable surviving schedule whose
+    /// coldest step sits below the constant the config names, and stays
+    /// silent on the kinds whose values the config does not carry.
+    #[test]
+    fn cross_tier_scan_names_both_values_and_skips_unreadable_kinds() {
+        use hares_types::ScheduleSourceConfig;
+        use hares_types::schedule::BoundaryPolicy;
+
+        let base_cfg = gas_furnace_spec()
+            .typed_config
+            .expect("the spec carries its typed config")
+            .typed::<GasFurnaceConfig>()
+            .expect("the furnace's typed config reads");
+        let source_config = |cooling_source: ScheduleSourceConfig| {
+            let typed_cfg = GasFurnaceConfig {
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(26.0),
+                    cooling_setpoint_source: Some(cooling_source),
+                    ..HvacSetpointConfig::default()
+                },
+                ..base_cfg.clone()
+            };
+            hares_equipment::EquipmentConfig::from_typed(
+                "Gas Furnace".to_string(),
+                "Gas Furnace".to_string(),
+                typed_cfg,
+            )
+            .unwrap()
+        };
+
+        // A daily profile whose coldest step (18 C) sits below the 26 C
+        // constant: the warning names the equipment and both values.
+        let profile = source_config(ScheduleSourceConfig::DailyProfile {
+            weekday: [18.0; 24],
+            weekend: [18.0; 24],
+            month_multipliers: [1.0; 12],
+            max_value: 1.0,
+        });
+        let warnings = super::cross_tier_setpoint_warnings("Gas Furnace", &profile);
+        assert_eq!(warnings.len(), 1, "the profile's crossing warns");
+        assert_eq!(warnings[0].source.as_ref(), "Gas Furnace");
+        assert!(
+            warnings[0].message.contains("26") && warnings[0].message.contains("18"),
+            "the warning names both values: {}",
+            warnings[0].message
+        );
+
+        // A schedule-file column's values the config does not carry: the
+        // scan is silent, the runtime count is the guard.
+        let column = source_config(ScheduleSourceConfig::ColumnRef {
+            col_idx: 7,
+            boundary: BoundaryPolicy::Clamp,
+        });
+        assert!(super::cross_tier_setpoint_warnings("Gas Furnace", &column).is_empty());
+
+        // A surviving schedule whose every step is above the constant does
+        // not warn.
+        let high = source_config(ScheduleSourceConfig::DailyProfile {
+            weekday: [28.0; 24],
+            weekend: [28.0; 24],
+            month_multipliers: [1.0; 12],
+            max_value: 1.0,
+        });
+        assert!(super::cross_tier_setpoint_warnings("Gas Furnace", &high).is_empty());
     }
 
     #[test]

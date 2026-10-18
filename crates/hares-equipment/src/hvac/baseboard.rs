@@ -6,9 +6,10 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
-    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    Warning,
 };
 use serde::{Deserialize, Serialize};
 
@@ -293,6 +294,17 @@ impl Equipment for ElectricBaseboard {
 
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
+    }
+
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            cross_tier_deadband_events: self.hvac.take_cross_tier_deadband_count(),
+            ..Default::default()
+        }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        self.hvac.take_warnings(out);
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {

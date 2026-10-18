@@ -100,6 +100,11 @@ pub struct RunHealth {
     /// Actors evicted because a roster change left one of their targets
     /// with no equipment to act on; each is also a dwelling warning.
     pub evicted_actors: u64,
+    /// Runtime steps whose resolved thermostat setpoints sat below the
+    /// required deadband: a constant override against the surviving
+    /// schedule tier, the collision the init's static check cannot see.
+    /// The run's first collision also raises a run warning.
+    pub cross_tier_deadband_events: u64,
     /// Outcome of the warm-up convergence loop (Disabled until warm-up runs).
     pub warmup: WarmupOutcome,
 }
@@ -113,6 +118,7 @@ impl Default for RunHealth {
             curve_index_clamps: 0,
             fluid_payload_absences: 0,
             evicted_actors: 0,
+            cross_tier_deadband_events: 0,
             warmup: WarmupOutcome::Disabled,
         }
     }
@@ -253,6 +259,7 @@ mod tests {
         assert_eq!(health.curve_index_clamps, 0);
         assert_eq!(health.fluid_payload_absences, 0);
         assert_eq!(health.evicted_actors, 0);
+        assert_eq!(health.cross_tier_deadband_events, 0);
         assert_eq!(health.warmup, WarmupOutcome::Disabled);
     }
 
@@ -265,6 +272,7 @@ mod tests {
             curve_index_clamps: 4,
             fluid_payload_absences: 6,
             evicted_actors: 5,
+            cross_tier_deadband_events: 7,
             warmup: WarmupOutcome::Ran {
                 days_run: 3,
                 converged: false,

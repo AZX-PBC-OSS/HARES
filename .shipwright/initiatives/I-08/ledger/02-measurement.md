@@ -4213,3 +4213,21 @@ is expected to move and none is re-captured. The resolved product: the
 golden tool at this base carries no resolved product (B-14's first
 commit, row 94c, adds it); the read-back's own new fields are recorded
 above, none moving on the goldens' fixtures.
+
+### The review round's cross-tier deadband guard, 2026-10-17 (the worktree `r94ef`, branch `row/r94ef`)
+
+The runtime guard observes only: the cross-tier deadband detection reads
+the resolved setpoint pair each step and raises no delivery, so no
+report column moves on any run. The probe (base.xml over the Denver
+TMY3 weather, 24 h at 900 s, no warm-up, the schedule file carrying a
+`cooling_setpoint` column of 68 F and the override's heating constant
+25 C): the January day delivers heating and cooling on the same steps
+(the furnace's override crosses its surviving HPXML cooling profile at
+25.5556 C, the air conditioner's HPXML heating profile meets the
+schedule column at 20 C), 94 of 96 steps both positive, and the run
+warns once per equipment naming the equipment, the step and both tiers,
+with the collision steps counted in `RunHealth.cross_tier_deadband_events`.
+The merge-time scan's construction warning names the equipment and both
+values and moves no number. The checkpoint's run-health section gained
+the counter: `CHECKPOINT_VERSION` 18 to 19, the schema fingerprint
+re-pinned. Goldens bitwise (compare-all 8 + dst 1), none re-captured.

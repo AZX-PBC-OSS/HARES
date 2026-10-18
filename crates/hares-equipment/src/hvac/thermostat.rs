@@ -203,7 +203,7 @@ impl ThermalSetpoints {
                     cooling_c: self.heating_c + min_gap,
                 })
             }
-            (false, _) => {
+            (false, true) => {
                 tracing::warn!(
                     original_heating_c = self.heating_c,
                     cooling_setpoint_c = self.cooling_c,
@@ -216,6 +216,7 @@ impl ThermalSetpoints {
                     cooling_c: self.cooling_c,
                 })
             }
+            (false, false) => Ok(self.reconcile_for_deadband(hysteresis_c)),
         }
     }
 
@@ -318,6 +319,18 @@ pub struct ThermostatFsm {
     /// Count of setpoint overrides whose unnamed axis was moved to keep the
     /// required deadband from the named one.
     pub setpoint_violation_count: u64,
+    /// Count of runtime steps whose resolved setpoint pair sat below the
+    /// required deadband: an override constant against the surviving
+    /// schedule tier, or two schedule columns, the collision the init's
+    /// static check cannot see. Warn-once per run beside the count; the
+    /// dwelling totals the count into the run health.
+    pub cross_tier_deadband_events: u64,
+    /// Whether the run's first cross-tier deadband collision already
+    /// raised its warning.
+    cross_tier_warned: bool,
+    /// The run's first collision's resolved pair, waiting for the owning
+    /// equipment to raise the warning with its name.
+    pending_cross_tier_warning: Option<(f64, f64, f64)>,
     /// The configured band, which the release form restores after a named
     /// signal set the band for an event.
     configured_hysteresis_c: f64,
@@ -384,6 +397,9 @@ impl ThermostatFsm {
             min_on_time_s: 0.0,
             min_off_time_s: 0.0,
             setpoint_violation_count: 0,
+            cross_tier_deadband_events: 0,
+            cross_tier_warned: false,
+            pending_cross_tier_warning: None,
             #[cfg(feature = "observe")]
             deadband_collision_count: 0,
         }
@@ -410,6 +426,38 @@ impl ThermostatFsm {
         self.static_setpoints
             .with_schedule_override(self.schedule_setpoints)
             .with_control_override(self.runtime_setpoints)
+    }
+
+    /// The runtime cross-tier deadband check: the resolved pair (the
+    /// override constants and the surviving schedule tier among them)
+    /// sat below the required deadband, the collision the init's static
+    /// check cannot see because it reads the statics alone. Every such
+    /// step counts; the run's first also parks the pair for the owning
+    /// equipment to raise as a run warning naming both tiers.
+    fn note_cross_tier_deadband(&mut self, setpoints: &ThermalSetpoints) {
+        let required_gap_c = 2.0 * self.thermostat.hysteresis_c;
+        if setpoints.cooling_c - setpoints.heating_c >= required_gap_c {
+            return;
+        }
+        self.cross_tier_deadband_events = self.cross_tier_deadband_events.saturating_add(1);
+        if !self.cross_tier_warned {
+            self.cross_tier_warned = true;
+            self.pending_cross_tier_warning =
+                Some((setpoints.heating_c, setpoints.cooling_c, required_gap_c));
+        }
+    }
+
+    /// Takes the run's first cross-tier collision's resolved pair, if it
+    /// has not been taken: the owning equipment turns it into the run
+    /// warning with its own name.
+    pub fn take_cross_tier_warning(&mut self) -> Option<(f64, f64, f64)> {
+        self.pending_cross_tier_warning.take()
+    }
+
+    /// Takes and resets the cross-tier collision count: the per-step
+    /// delta the owner's `take_health_counts` hands the dwelling.
+    pub fn take_cross_tier_deadband_count(&mut self) -> u64 {
+        std::mem::take(&mut self.cross_tier_deadband_events)
     }
 
     /// Resolve the current setpoint from config-owned schedule data and inject
@@ -519,6 +567,7 @@ impl ThermostatFsm {
     ) -> crate::Result<ThermostatMode> {
         self.resolve_profile_setpoints(env)?;
         let setpoints = self.effective_setpoints();
+        self.note_cross_tier_deadband(&setpoints);
 
         tracing::debug!(
             zone_temp,

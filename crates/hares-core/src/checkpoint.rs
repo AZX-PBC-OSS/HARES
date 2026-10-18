@@ -78,7 +78,12 @@ use serde::{Deserialize, Serialize};
 /// is resolution-free, and two distinct resolutions can size the rolling
 /// peak's ring identically). Checkpoints written by v16 builds are
 /// rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 18;
+///
+/// v19: the run health totals carry the cross-tier deadband event count
+/// (the runtime collision the init's static deadband check cannot see),
+/// the count's equipment-side counter in `EquipmentHealthCounts` beside
+/// it. Checkpoints written by v18 builds are rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 19;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -487,6 +492,7 @@ mod tests {
                 curve_index_clamps: 4,
                 fluid_payload_absences: 5,
                 evicted_actors: 6,
+                cross_tier_deadband_events: 7,
                 warmup: crate::health::WarmupOutcome::Disabled,
             },
             warnings: crate::dwelling::WarningLogSnapshot {
@@ -531,9 +537,9 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 18;
+    const PINNED_VERSION: u32 = 19;
     const PINNED_SCHEMA_SHA256: &str =
-        "e8403cff44bd93fcc8b5312f54a5d4a492c711974e5a4ae09f0eae1f26ea4aff";
+        "aff064cfac915a29ddef48afedca0e77fc5060932c2ee60f8d4cfb9b44d23ce0";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the

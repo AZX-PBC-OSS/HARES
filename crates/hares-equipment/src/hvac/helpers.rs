@@ -337,6 +337,7 @@ pub fn update_heating_control(
         }
         Err(err) => Err(HaresError::Equipment(format!("{equipment_name}: {err}"))),
     };
+    hvac.record_cross_tier_warning(equipment_name);
 
     hvac.thermostat_fsm.runtime_setpoints = saved_runtime_setpoints;
     result

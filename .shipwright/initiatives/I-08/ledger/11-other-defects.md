@@ -339,7 +339,17 @@ OD-16 named-axis rule carried to the static pair; the cycling and ideal
 inits alike), which the acceptance's "25 °C on every step" requires: the
 unnamed axis opens the gap, and a violation with both sides named is a
 construction error (there is no axis to open it on; the review round
-pinned the both-named error). `set_typed_setpoint_source` returns
+pinned the both-named error). The cross-tier case the static check
+cannot see (the constant against the surviving schedule tier: the
+schedule file's column, the HPXML profile the other side keeps) has two
+guards: the merge-time scan warns at construction when the surviving
+schedule's knowable extremes cross the constant, naming the equipment
+and both values (a daily profile's or solar-aware profile's year is
+knowable from the config; a schedule-file column's is not), and the run
+counts every step whose resolved setpoint pair sits below the required
+deadband in `RunHealth.cross_tier_deadband_events`, the run's first
+raising a warning once per equipment, naming the equipment, the step
+and both tiers. `set_typed_setpoint_source` returns
 `Result` and its three silent cases (no typed config, a non-typed
 payload, non-object payload data) plus an unserializable source and a
 missing `setpoint` block are errors naming the equipment and the case.
