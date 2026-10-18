@@ -67,7 +67,11 @@ foot of rim joist and subfloor per added storey above the first
 foundation height within the infiltration volume, the foundation term
 raised by its rim joist and sill plate (9 in, ASHRAE 140,
 defaults.rb:5834-5835) and dropped for a walkout basement
-(defaults.rb:5845-5848). HARES's previous default was the average ceiling
+(defaults.rb:5845-5848); a foundation with no FoundationWall element
+contributes the assumed zone height instead
+(`geometry.rb:1352-1359` `calculate_zone_height`'s assumption, since
+HPXML's Wall elements carry no height: 8 ft for a basement or a garage,
+3 ft for a crawlspace). HARES's previous default was the average ceiling
 height times the floors above grade, which drops the foundation and
 attic terms. The estimate reads the engine's own ceiling height, so a
 building whose terms are all zero keeps its height on bits. The

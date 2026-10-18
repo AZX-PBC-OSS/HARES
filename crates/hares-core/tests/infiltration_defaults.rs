@@ -175,6 +175,45 @@ fn missing_infiltration_height_follows_openstudio_hpxml() {
     );
 }
 
+/// A foundation with no FoundationWall contributes the assumed zone
+/// height the reference assumes for it (geometry.rb:1352-1359: 8 ft for a
+/// basement or garage, 3 ft for a crawlspace), raised by the rim joist
+/// and sill plate: base.xml with its one foundation wall removed runs the
+/// 8 ft base term plus the basement's assumed 8 ft plus 0.75 ft, 16.75 ft
+/// (5.1054 m), where the wall's 1 ft above grade gave 9.75 ft.
+#[test]
+fn a_foundation_without_a_wall_takes_the_assumed_height() {
+    let original =
+        std::fs::read_to_string(project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"))
+            .expect("the fixture reads");
+    let wall_block = original
+        .split("<FoundationWalls>")
+        .nth(1)
+        .and_then(|rest| rest.split("</FoundationWalls>").next())
+        .expect("the fixture carries a FoundationWalls block")
+        .to_string();
+    let stripped = original
+        .replace(&wall_block, "")
+        .replace("<FoundationWalls></FoundationWalls>", "")
+        .replace("            <AttachedToFoundationWall idref='FoundationWall1'/>\n", "");
+    assert!(
+        !stripped.contains("FoundationWall1"),
+        "the edit removes the foundation wall and its idref"
+    );
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("base-no-foundation-wall.xml");
+    std::fs::write(&path, stripped).expect("the edited HPXML writes");
+
+    let dwelling = dwelling(path);
+    let (height_m, _, _) = infiltration_record(&dwelling);
+    let expected_m = 16.75_f64 * 0.3048;
+    assert!(
+        (height_m - expected_m).abs() < 1e-6,
+        "the no-wall foundation contributes the assumed 8 ft plus the 9 in raise: \
+         {height_m} m against {expected_m} m"
+    );
+}
+
 /// The flue rule over the resolved systems: at the fixture's own AFUE 0.92
 /// (and an electric water heater) no atmospheric system qualifies and the
 /// flag is false; with the furnace's AFUE edited to 0.80 the furnace is

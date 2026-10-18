@@ -323,7 +323,10 @@ pub fn walls_top_m(building: &Building) -> Result<f64, HpxmlError> {
 /// above-grade foundation height over the foundations within the volume,
 /// raised by their rim joist and sill plate (9 in, a 2x8 rim joist at
 /// 7.5 in plus a 1.5 in sill plate, per ASHRAE 140,
-/// defaults.rb:5834-5835). The foundation term drops for a walkout
+/// defaults.rb:5834-5835); a foundation with no FoundationWall
+/// contributes the assumed zone height instead (geometry.rb:1352-1359,
+/// 8 ft for a basement or garage, 3 ft for a crawlspace). The foundation
+/// term drops for a walkout
 /// basement, whose height the base term already carries
 /// (defaults.rb:5845-5848: a conditioned basement with every conditioned
 /// floor above grade). The arithmetic is SI-native (the heights HARES
@@ -396,8 +399,10 @@ pub fn infiltration_height_estimate_m(building: &Building) -> Result<f64, HpxmlE
     // above-grade height, raised by the rim joist and sill plate
     // (defaults.rb:5833-5843). The above-grade height is the tallest
     // foundation wall's height less its depth below grade
-    // (geometry.rb:1347-1348); with no foundation wall, OS-HPXML's assumed
-    // zone height (geometry.rb:1352-1359).
+    // (geometry.rb:1347-1348); a foundation with no FoundationWall
+    // contributes the assumed zone height instead (geometry.rb:1352-1359:
+    // 8 ft for a basement or a garage, 3 ft for a crawlspace, the
+    // assumption HPXML's Wall elements carry no height).
     let mut foundation_height_m = 0.0_f64;
     let mut foundation_locations: Vec<(String, f64)> = Vec::new();
     for (location, wall) in surfaces(details, &FOUNDATION_WALLS, &FOUNDATION_WALL) {
@@ -417,13 +422,31 @@ pub fn infiltration_height_estimate_m(building: &Building) -> Result<f64, HpxmlE
         }
     }
     for location in within_locations.iter() {
-        let Some((_, above_grade_m)) = foundation_locations
+        let Some(above_grade_m) = foundation_locations
             .iter()
             .find(|(known, _)| known == location)
+            .map(|(_, above_grade_m)| *above_grade_m)
+            .or_else(|| {
+                // The no-foundation-wall assumption, in the location names
+                // HARES's parse resolves (a vented crawlspace resolves
+                // elsewhere): a basement or garage is 8 ft, a crawlspace
+                // 3 ft (geometry.rb:1352-1359). A location that is no
+                // foundation kind (the conditioned space, an attic) has no
+                // term here at all.
+                match *location {
+                    "basement - conditioned" | "basement - unconditioned" | "garage" => {
+                        Some(conv::length_ft_to_m(8.0))
+                    }
+                    "crawlspace - unvented" | "crawlspace - conditioned" => {
+                        Some(conv::length_ft_to_m(3.0))
+                    }
+                    _ => None,
+                }
+            })
         else {
             continue;
         };
-        let raised_m = *above_grade_m + conv::length_ft_to_m(RIM_JOIST_SILL_PLATE_FT);
+        let raised_m = above_grade_m + conv::length_ft_to_m(RIM_JOIST_SILL_PLATE_FT);
         foundation_height_m = foundation_height_m.max(raised_m);
     }
     let has_conditioned_basement = details
