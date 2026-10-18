@@ -1074,7 +1074,22 @@ unchanged" premise yields to the flue flag following the edited AFUE
 Gates: fmt clean; clippy `--workspace --all-targets --all-features -D
 warnings` clean; nextest `--workspace --all-features` 8163/8163 (8
 skipped); `pytest -m ''` 1766 passed + 6 xfailed, 0 failed, 0 errors;
-pyright 0.
+pyright 0. Disclosed, the review round: the conditioned-basement pin's
+migration raised the fixture's ideal capacity from 10 kW to 100 kW
+alongside the pin's rewrite, without a record. It was needed: at 10 kW
+the ideal solve's delivery pinned at capacity on the cold steps in both
+variants (the merged model's larger infiltration load drew the same
+saturated delivery), so the delivered sums tied and the pin could not
+separate the models on delivery. At 100 kW the delivery follows the
+loads and the basement's contribution shows where the delivery cannot
+carry it, the zone temperature, which the pin reads now. The capacity
+is the test fixture's own (tests/conditioned_basement.rs builds its
+HVAC in Rust); no product surface, no committed HPXML fixture, and no
+golden carries it, so nothing outside the pin moves. The census of the
+element-less fixtures the row's delta did not cover (the 13 beyond
+base.xml and the two multifamily files) is in `02-measurement.md`:
+every fixture's height, flue and shielding parent-to-row, one table,
+with each run's bitwise-or-moved consequence.
 
 **Dependencies:** M-2 (the goldens that prove no fixture relied on a
 default). The numeric commit follows `06-runtime-memory.md` RT-6 (the

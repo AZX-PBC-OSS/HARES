@@ -4231,3 +4231,45 @@ The merge-time scan's construction warning names the equipment and both
 values and moves no number. The checkpoint's run-health section gained
 the counter: `CHECKPOINT_VERSION` 18 to 19, the schema fingerprint
 re-pinned. Goldens bitwise (compare-all 8 + dst 1), none re-captured.
+
+### The element-less fixtures' census, 2026-10-17 (the worktree `r94ef`, branch `row/r94ef`)
+
+The infiltration-defaults row's delta covered the entry's own three
+fixtures (base.xml and the two `base-bldgtype-multifamily*` files); the
+census covers the rest of the corpus that lacks the elements, one row
+per fixture: the air infiltration measurement declares no
+`InfiltrationHeight` in all 14 `ochre_samples` fixtures and no
+`HasFlueOrChimneyInConditionedSpace` in any, and `ShieldingofHome` is
+declared only in base.xml and base-battery (both `normal`). The old
+height is the parent fallback's exact expression (the ceiling height
+times the floors above grade), the old flue the parent's constant
+false, the shielding the same facility-type rule both sides ran. A run
+moves exactly when its height or flue moved: the AIM-2 coefficients read
+those (and the unchanged shielding and terrain), so the rest of each
+run is bitwise.
+
+| fixture | height (parent to row, m) | flue (parent to row) | shielding | run |
+|---|---|---|---|---|
+| base-appliances-dehumidifier | 2.4384 to 2.4384 | false to false | normal, the rule | bitwise |
+| base-battery | 2.4384 to 2.9718 | false to false | normal, declared | moved |
+| base-bldgtype-multifamily | 2.4384 to 2.4384 | false to false | well-shielded, the rule | bitwise |
+| base-bldgtype-multifamily-shared-boiler-only-baseboard | 2.4384 to 2.4384 | false to false | well-shielded, the rule | bitwise |
+| base-dhw-multiple | 2.4384 to 2.9718 | false to true | normal, the rule | moved |
+| base-enclosure-garage | 2.4384 to 2.9718 | false to false | normal, the rule | moved |
+| base-enclosure-windows-physical-properties | not runnable standalone: the window-property rule rejects the parse before any infiltration read; its declared geometry is base.xml's (21600 ft3 over 2700 ft2, two floors with one above grade, the conditioned basement), so its terms are the 9.75 ft form, flue false (the AFUE 0.92 furnace, the 0.95 EF water heater) |
+| base-foundation-basement-garage | 2.4384 to 2.9718 | false to false | normal, the rule | moved |
+| base-hvac-multiple | 2.4384 to 2.9718 | false to true | normal, the rule | moved |
+| base-lighting-mixed | 2.4384 to 2.9718 | false to false | normal, the rule | moved |
+| base-misc-loads-large-uncommon | 2.4384 to 2.9718 | false to false | normal, the rule | moved |
+| base-pv | 2.4384 to 2.9718 | false to false | normal, the rule | moved |
+| base-pv-battery | 2.4384 to 2.9718 | false to false | normal, the rule | moved |
+| base.xml (the row's own record) | 2.4384 to 2.9718 | false to false | normal, declared | moved |
+
+The two flue risers: `base-dhw-multiple`'s second water heater is a gas
+storage tank at EF 0.59, below the 0.63 threshold, and
+`base-hvac-multiple`'s second furnace is below 0.89; the parent's
+constant false ran over them. The height risers: the estimate's
+foundation term (the conditioned basements), the same cause base.xml's
+recorded delta runs. The battery fixtures build with a `bms_mode`
+override in the census harness (the battery rule's own requirement);
+the runs are otherwise the fixtures'.
