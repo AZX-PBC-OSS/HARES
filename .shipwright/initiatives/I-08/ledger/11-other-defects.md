@@ -337,7 +337,9 @@ equipment init's deadband reconciliation never moves a side the config
 names a constant for (`reconcile_for_deadband_keeping_named`, the
 OD-16 named-axis rule carried to the static pair; the cycling and ideal
 inits alike), which the acceptance's "25 °C on every step" requires: the
-unnamed axis opens the gap. `set_typed_setpoint_source` returns
+unnamed axis opens the gap, and a violation with both sides named is a
+construction error (there is no axis to open it on; the review round
+pinned the both-named error). `set_typed_setpoint_source` returns
 `Result` and its three silent cases (no typed config, a non-typed
 payload, non-object payload data) plus an unserializable source and a
 missing `setpoint` block are errors naming the equipment and the case.

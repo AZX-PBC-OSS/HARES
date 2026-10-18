@@ -122,6 +122,71 @@ fn constant_setpoint_override_applies() {
     }
 }
 
+/// Both sides named by constants whose gap violates the deadband is a
+/// construction error: named-constant sides never move, so there is no
+/// axis to open the gap on and a silent re-center would run a pair the
+/// config did not set while the read-back recorded the constants as the
+/// tiers the engine reads. The same both-named rule the control-signal
+/// tier raises.
+#[test]
+fn both_named_constant_deadband_violation_is_a_construction_error() {
+    let err = build_err(Some(json!({
+        "Gas Furnace": {"setpoint": {
+            "heating_setpoint_c": 25.0,
+            "cooling_setpoint_c": 25.0,
+        }},
+    })));
+    let message = err.to_string();
+    assert!(
+        message.contains("'Gas Furnace'"),
+        "the error names the equipment: {message}"
+    );
+    assert!(
+        message.contains("heating setpoint 25") && message.contains("cooling setpoint 25"),
+        "the error names both constants: {message}"
+    );
+    assert!(
+        message.contains("named constants are never moved"),
+        "the error states the rule: {message}"
+    );
+}
+
+fn build_err(overrides: Option<serde_json::Value>) -> hares_types::HaresError {
+    let sim_toml = r#"
+start_time = "2023-01-15T00:00:00-07:00"
+duration = 86400
+time_res = 900
+warmup = "disabled"
+master_seed = 0
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 8 }
+destination = "memory"
+"#
+    .to_string();
+    let config = DwellingConfig {
+        hpxml: InputSource::Path(
+            project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+        ),
+        schedule: None,
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            hares_io::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
+            overrides,
+            1,
+            None,
+        ),
+    };
+    match Dwelling::from_config(config) {
+        Err(err) => err,
+        Ok(_) => panic!("the dwelling must not build"),
+    }
+}
+
 /// A schedule column's setpoint is no exemption: the override replaces the
 /// schedule-file source the same way. The run carries a constant
 /// `heating_setpoint` column of 68 F (20 C after the parse's Fahrenheit

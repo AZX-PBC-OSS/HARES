@@ -361,7 +361,9 @@ override is HARES's configuration surface, and "accepted means applied"
 follows rather than a value the sources outrank. The equipment init's
 deadband reconciliation never moves a side the config names a constant
 for: the unnamed axis opens the gap, the same named-axis rule the
-thermostat's control signals follow. OCHRE's thermostat resolves its
+thermostat's control signals follow, and a violation with both sides
+named is a construction error, since named constants never move and
+there is no unnamed axis to open the gap on. OCHRE's thermostat resolves its
 heating and cooling setpoints from its schedule and control signals the
 same way every step (`vendors/OCHRE/ochre/Equipment/HVAC.py`), with no
 constant-override tier; the record of the active source names the

@@ -513,7 +513,8 @@ impl Equipment for IdealHvac {
         self.thermostat_fsm.validate_configuration(env)?;
         // The constant setpoints the config names are named axes and are
         // never moved: the deadband reconciliation opens on the unnamed
-        // axis alone (the same rule the cycling units' init applies).
+        // axis alone (the same rule the cycling units' init applies), and
+        // a both-named violation is the error the control tier raises.
         let heating_named = typed.setpoint.heating_setpoint_c.is_some();
         let cooling_named = typed.setpoint.cooling_setpoint_c.is_some();
         self.thermostat_fsm.static_setpoints = self
@@ -522,7 +523,7 @@ impl Equipment for IdealHvac {
                 self.thermostat_fsm.thermostat.hysteresis_c,
                 heating_named,
                 cooling_named,
-            );
+            )?;
         // End-use routing reads the descriptor before the first step: label
         // the unit by the comfort bound its zone starts beyond.
         if let Ok(zone_temp_c) = lookup_zone_temp(env, zone) {

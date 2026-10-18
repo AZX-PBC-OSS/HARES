@@ -160,43 +160,61 @@ impl ThermalSetpoints {
     /// constant setpoint the config (an override's constant among them)
     /// sets is a named axis and is never moved, so a deadband violation
     /// opens on the unnamed axis alone. With no axis named this is
-    /// `reconcile_for_deadband` exactly.
+    /// `reconcile_for_deadband` exactly. With both axes named there is no
+    /// axis to open the gap on, so a violation is the error the control
+    /// tier's both-named rule raises (`apply_thermal_setpoint_signal`):
+    /// named-constant sides never move, and silently re-centering them
+    /// would run a pair the config did not set.
+    ///
+    /// # Errors
+    ///
+    /// The both-named case whose cooling-heating gap is below the required
+    /// deadband: the error names both constants, the gap and the required
+    /// band, and the dwelling's init wrapper prefixes the equipment.
     pub fn reconcile_for_deadband_keeping_named(
         self,
         hysteresis_c: f64,
         heating_named: bool,
         cooling_named: bool,
-    ) -> Self {
+    ) -> crate::Result<Self> {
         let min_gap = 2.0 * hysteresis_c;
         let gap = self.cooling_c - self.heating_c;
-        if gap >= min_gap || (heating_named == cooling_named) {
-            return self.reconcile_for_deadband(hysteresis_c);
+        if gap >= min_gap {
+            return Ok(self);
         }
-        if heating_named {
-            tracing::warn!(
-                heating_setpoint_c = self.heating_c,
-                original_cooling_c = self.cooling_c,
-                new_cooling_c = self.heating_c + min_gap,
-                "setpoints too close or inverted; the cooling setpoint moved to keep \
-                 the named heating setpoint with {} C separation",
-                min_gap,
-            );
-            Self {
-                heating_c: self.heating_c,
-                cooling_c: self.heating_c + min_gap,
+        match (heating_named, cooling_named) {
+            (true, true) => Err(HaresError::Equipment(format!(
+                "the heating setpoint {} °C and the cooling setpoint {} °C are both named \
+                 constants and their gap {gap} °C is below the required deadband \
+                 {min_gap} °C: named constants are never moved, so the pair cannot be \
+                 reconciled; widen the gap between them or leave one side unnamed",
+                self.heating_c, self.cooling_c
+            ))),
+            (true, false) => {
+                tracing::warn!(
+                    heating_setpoint_c = self.heating_c,
+                    original_cooling_c = self.cooling_c,
+                    new_cooling_c = self.heating_c + min_gap,
+                    "setpoints too close or inverted; the cooling setpoint moved to keep \
+                     the named heating setpoint with {min_gap} C separation"
+                );
+                Ok(Self {
+                    heating_c: self.heating_c,
+                    cooling_c: self.heating_c + min_gap,
+                })
             }
-        } else {
-            tracing::warn!(
-                original_heating_c = self.heating_c,
-                cooling_setpoint_c = self.cooling_c,
-                new_heating_c = self.cooling_c - min_gap,
-                "setpoints too close or inverted; the heating setpoint moved to keep \
-                 the named cooling setpoint with {} C separation",
-                min_gap,
-            );
-            Self {
-                heating_c: self.cooling_c - min_gap,
-                cooling_c: self.cooling_c,
+            (false, _) => {
+                tracing::warn!(
+                    original_heating_c = self.heating_c,
+                    cooling_setpoint_c = self.cooling_c,
+                    new_heating_c = self.cooling_c - min_gap,
+                    "setpoints too close or inverted; the heating setpoint moved to keep \
+                     the named cooling setpoint with {min_gap} C separation"
+                );
+                Ok(Self {
+                    heating_c: self.cooling_c - min_gap,
+                    cooling_c: self.cooling_c,
+                })
             }
         }
     }
@@ -971,7 +989,8 @@ pub(super) mod tests {
             heating_c: 25.0,
             cooling_c: 25.5556,
         }
-        .reconcile_for_deadband_keeping_named(1.0, true, false);
+        .reconcile_for_deadband_keeping_named(1.0, true, false)
+        .expect("the one-named case reconciles");
         assert_eq!(kept.heating_c, 25.0);
         assert_eq!(kept.cooling_c, 27.0);
 
@@ -980,7 +999,8 @@ pub(super) mod tests {
             heating_c: 25.0,
             cooling_c: 25.5556,
         }
-        .reconcile_for_deadband_keeping_named(1.0, false, true);
+        .reconcile_for_deadband_keeping_named(1.0, false, true)
+        .expect("the one-named case reconciles");
         assert_eq!(kept.heating_c, 23.5556);
         assert_eq!(kept.cooling_c, 25.5556);
 
@@ -990,7 +1010,8 @@ pub(super) mod tests {
             heating_c: 25.0,
             cooling_c: 25.5556,
         }
-        .reconcile_for_deadband_keeping_named(1.0, false, false);
+        .reconcile_for_deadband_keeping_named(1.0, false, false)
+        .expect("the unnamed case re-centers");
         assert_eq!(recentred, recentred.reconcile_for_deadband(1.0));
 
         // A pair already outside the gap passes through untouched.
@@ -999,7 +1020,41 @@ pub(super) mod tests {
             cooling_c: 24.0,
         };
         assert_eq!(
-            wide.reconcile_for_deadband_keeping_named(1.0, true, false),
+            wide.reconcile_for_deadband_keeping_named(1.0, true, false)
+                .expect("a wide pair passes through"),
+            wide
+        );
+    }
+
+    /// Both axes named and the gap below the deadband: the error the
+    /// control tier's both-named rule raises, not a re-center. Named
+    /// constants never move, so there is no axis to open the gap on.
+    #[test]
+    fn a_both_named_deadband_violation_is_an_error_naming_both_constants() {
+        let err = ThermalSetpoints {
+            heating_c: 25.0,
+            cooling_c: 25.0,
+        }
+        .reconcile_for_deadband_keeping_named(1.0, true, true)
+        .expect_err("both named at a 0 C gap cannot reconcile");
+        let message = err.to_string();
+        assert!(
+            message.contains("25") && message.contains("heating") && message.contains("cooling"),
+            "the error names both constants: {message}"
+        );
+        assert!(
+            message.contains("2"),
+            "the error names the required deadband: {message}"
+        );
+
+        // A both-named pair inside the band reconciles to itself.
+        let wide = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        };
+        assert_eq!(
+            wide.reconcile_for_deadband_keeping_named(1.0, true, true)
+                .expect("a wide pair passes through"),
             wide
         );
     }

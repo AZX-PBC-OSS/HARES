@@ -659,7 +659,7 @@ impl HvacEquipment {
                 self.thermostat_fsm.thermostat.hysteresis_c,
                 heating_named,
                 cooling_named,
-            );
+            )?;
 
         let explicit_airflow_m3_s_per_w = extract_numeric(config, "airflow_m3_s_per_w")
             .or_else(|| extract_numeric(config, "duct_airflow_m3_s_per_w"));

@@ -994,7 +994,9 @@ golden fixtures re-captured.
   applied: the merge removes the matching `*_setpoint_source` when the
   override sets the constant, and the resolved read-back records the
   constant as the side's active source. The deadband reconciliation at
-  equipment init never moves a side the config names a constant for. No
+  equipment init never moves a side the config names a constant for, and
+  a violation with both sides named is a construction error (named
+  constants never move; only the unnamed axis opens the gap). No
   golden re-captured: no golden sets a setpoint override and every golden
   compares bitwise (compare-all 8 identical, the dst set identical); the
   override's own delta is in the measurement log.
