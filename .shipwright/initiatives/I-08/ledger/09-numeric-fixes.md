@@ -4411,3 +4411,66 @@ resolves). The defrost EIR curve coefficients now feature in the discrete
 event draw only through the Timed control's continuous model (the
 OnDemand model has no curve input, matching OCHRE), where the old
 discrete branch read them for both controls.
+
+## Hardening 2: the boiler routes the flue loss outdoors, the jacket loss to the zone
+
+**Kind:** numeric fix (the post-initiative hardening phase's combustion
+entry: the boiler's loss destination, with the shared combustion module
+extracted).
+
+**Problem:** the gas boiler routed its entire combustion residual (fuel
+input plus pump electric minus useful thermal output) into the zone as
+jacket loss (`boiler.rs:1009-1023` at the defrost commit's parent): the
+non-condensing boiler's `eir_max = 1/AFUE` (AFUE 0.80 default,
+`boiler.rs:738`) leaves a residual near 20 percent of the fuel input, so
+about a sixth of the burned gas returned to the zone as free heat. The
+gas water heater already splits its losses (the flue fraction of the
+combustion heat outdoors, `gas.rs:595-596`, default 0.10) and the
+furnace keeps its losses out of the zone entirely; the boiler was the
+odd one. Measured at the acceptance test's operating point (a
+non-condensing AFUE 0.80 boiler at 10 kW, full load, steady state): the
+zone's JacketLoss gain was 2179.6 W, the entire residual.
+
+**Change:** the shared module `crates/hares-equipment/src/combustion.rs`:
+`combustion_loss_split(fuel_input_w, useful_w, flue_fraction,
+skin_fraction) -> (zone_w, outdoor_w)` splits the residual between the
+two destinations it has, validating both fractions in [0, 1] and their
+sum at 1 (a typed error naming the fractions otherwise). The boiler
+gains `flue_loss_fraction` (default 0.9: ASHRAE puts a boiler's jacket
+loss at a few percent of the fuel input, so the flue carries the balance
+of the residual; the complement is the jacket share) and routes only the
+jacket share plus the pump's electric dissipation to the zone; the flue
+share leaves outdoors. The gas water heater's own flue-versus-tank
+arithmetic is untouched: it is the efficiency model the helper's pattern
+extracts, and adopting the residual helper there would reorder its
+floating-point operations and move its fixtures by rounding noise. The
+condensing boiler's residual floors at zero (the helper's floor), so its
+jacket heat stays the pump dissipation only, as before.
+
+**Acceptance test:** `boiler_jacket_gain_is_a_share_of_the_loss_not_the_whole_loss`
+and `boiler_jacket_gain_equals_the_configured_share_of_the_loss`
+(`crates/hares-equipment/tests/combustion_tests.rs`): a non-condensing
+AFUE 0.80 boiler at 10 kW, steady state, 5 measured steps: the zone's
+JacketLoss category gain is the configured jacket share of the residual
+(0.1 by default, 218.0 W at this operating point) plus the pump's
+dissipation (zero here), never the whole loss; the unit tests in
+`combustion.rs` pin the split, the zero floor for the condensing
+surplus, and the fraction validation. RED first at the defrost commit
+(the zone's jacket gain was the entire residual, 2179.6 W).
+
+**Verification:** the jacket numbers above; `frame_golden compare-all`
+twice byte-identical on the default and dst feature sets with only
+`fleet_mixed_offset` moving (the fleet's gas-boiler homes' gas power and
+the coupled indoor temperatures; the flue share is no longer free zone
+heat), re-captured deliberately; the gas water heater's split
+bit-identical; fmt, clippy `--workspace --all-targets --all-features -D
+warnings` clean; nextest `--workspace --all-features -j 2` 8164/8164 (8
+skipped); `pytest -m ''` 1766 passed + 6 xfailed, 0 failed, 0 errors;
+pyright 0.
+
+**Commit:** `fix: the boiler routes flue loss outdoors, jacket loss to the zone`
+
+**Dependencies:** none outside the equipment and io crates.
+
+**State:** landed on `row/hw1-defrost-boiler` (worktree
+`hw1-defrost-boiler`), the defrost consolidation's commit ahead of it.

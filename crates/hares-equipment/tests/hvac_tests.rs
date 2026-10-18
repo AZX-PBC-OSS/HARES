@@ -208,6 +208,7 @@ fn gas_boiler_config(name: &str) -> EquipmentConfig {
             number_of_speeds: 1,
             setpoint: HvacSetpointConfig::default(),
             condensing: false,
+            ..Default::default()
         },
     )
     .unwrap()

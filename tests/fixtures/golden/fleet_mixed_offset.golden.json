@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "7e78923d510d565ab28eedacb64cb6ac30b0f3bb",
+  "git_head": "f76ed637d6df89d00cb1932592200eb37a7552e5",
   "git_dirty": true,
   "metrics": [
     {
@@ -21,8 +21,8 @@
         "value": null
       },
       "efficiency.hvac_heating_cop": {
-        "bits": "0x40435dd2e1e2ffb3",
-        "value": 38.732998119200964
+        "bits": "0x40489087f4f6c00f",
+        "value": 49.129149075015555
       },
       "efficiency.water_heater_cop": {
         "bits": null,
@@ -38,12 +38,12 @@
           "value": 0.0
         },
         "hvac_heating_kwh": {
-          "bits": "0x4085820b6e8e8fa0",
-          "value": 688.2555819642621
+          "bits": "0x408b47e5c2834403",
+          "value": 872.9871874098902
         },
         "infiltration_kwh": {
-          "bits": "0xc07c82206dd9bc7e",
-          "value": -456.1329172616314
+          "bits": "0xc07c81de5217780f",
+          "value": -456.1167775074727
         },
         "interior_lwr_kwh": {
           "bits": "0x0000000000000000",
@@ -54,20 +54,20 @@
           "value": 78.68233808805108
         },
         "internal_mass_kwh": {
-          "bits": "0x4061dd6b27eba4f3",
-          "value": 142.91933055900844
+          "bits": "0x4061c708d8506190",
+          "value": 142.21982970904764
         },
         "opaque_conduction_kwh": {
-          "bits": "0xc08062727115ff87",
-          "value": -524.3058797567945
+          "bits": "0xc08063a1603e91f4",
+          "value": -524.4537968529025
         },
         "ventilation_kwh": {
           "bits": "0x0000000000000000",
           "value": 0.0
         },
         "window_conduction_kwh": {
-          "bits": "0xc0738a987efef4b6",
-          "value": -312.6622304877486
+          "bits": "0xc0738ad3fa70bc4e",
+          "value": -312.6767525104268
         },
         "window_solar_kwh": {
           "bits": "0x40545ab088c5120b",
@@ -829,10 +829,10 @@
         },
         {
           "name": "Total Gas Power (therms/hour)",
-          "digest": "a409288825d403ac2eedec4280b04ba1087422ee5e138db995c804a9ba2e97a5",
+          "digest": "87b07979e17a3a70e388a9f9cda2a7466b25ed43218108a527ef097592a3043a",
           "blocks": [
-            "16cf5d500a77e8d3c12da3f3e7f704c092f42dcb8cd4a437aa18aeb5638df616",
-            "fdf1d6c13c10498c42cd68e7973c2daa5bf516925e612b573a4b9fa129404011"
+            "533dcd561a2c2e6ee02191252bd2f490ed70d56ee79dbef72203fd0eae3dd45f",
+            "c438fc0d882eb2a98659f6013c272323214c78c77b9ee38737021694dfc59e20"
           ]
         },
         {
@@ -853,10 +853,10 @@
         },
         {
           "name": "Temperature - Indoor (C)",
-          "digest": "9c95df773fa07336f088ac88bd180aa9a68cc4392bc7288a6dca723eb9bcc95f",
+          "digest": "7f6ece707e648b4ad9ec1e68200242daf53557a018f9b8b637436bcb739f36e5",
           "blocks": [
-            "7622a660cc5f7a367a29630518d8a4d0bb7503ac2c17319c905636e8dafd601d",
-            "c77102e881c4154aff1f6e0a4bc394ffcf62c2c0239edc8048cce14e29bcd38c"
+            "39f9e91a6be4b8445fa2b97b08f8667e1e30879a4ba687c101a880b269868d87",
+            "bf89baf275198a5dab05864ac915b86652b0a034503f88c4fff7b92eb9bd02ae"
           ]
         },
         {
@@ -869,10 +869,10 @@
         },
         {
           "name": "Gas Boiler Gas Power (therms/hour)",
-          "digest": "864960a08319982a00384456a0f9095ff2f6e3660a5fddf0b431c185b217daf9",
+          "digest": "49ad00176b92d922f45b15aae7c8abe4b3ae1205f857073c5150ad3dfea86662",
           "blocks": [
-            "e7043b83a5cee6f6ccdaab6ee8f4d0923602482433758927ccd676e792d363f5",
-            "ca2f799ec4640614fca345635eda886039fdecc04ebe303a3ebf7976e4d7ec37"
+            "fcae46690bf01fbc7a4417dd6b03b6247d375ee79ac1be06ae45f09d83a76774",
+            "ddaae2f5a09a73bdacc3f46c148ea5d9e0ae4ceb21e11a2311924e7b85982515"
           ]
         },
         {
@@ -893,10 +893,10 @@
         },
         {
           "name": "Gas Water Heater Gas Power (therms/hour)",
-          "digest": "ca3e54b7b27506f0f33a12edcc8ff1248132faaa7f8500a34f85b2e92727aa59",
+          "digest": "43d603d8cda12e7c2f0939391a2bb2130a800968f86ebc549eb28472b73cff7e",
           "blocks": [
-            "7b49f0bbe1cf450b18d9b44c3ddf282f20a46d295b2614f26fa44f19bedf3ae6",
-            "b294df560d075f68dfbea4aad526eeca43a0540a59b876e7acaaffc85cab0576"
+            "6073580d7da7b38245d191372b860b9fbe8ad148f33b29c1d60e4fd30581d9e3",
+            "e4f183719e94857fa5defe336e2608015c92d8052b094bad445445bac989d8ba"
           ]
         },
         {

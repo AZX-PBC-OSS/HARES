@@ -105,6 +105,7 @@ pub fn sample_config_for_class(class: &str) -> Option<EquipmentConfig> {
                 fluid_type: hares_types::FluidType::Water,
                 setpoint: HvacSetpointConfig::default(),
                 condensing: false,
+                ..Default::default()
             },
         ),
         "Electric Boiler" => typed_alias_config(

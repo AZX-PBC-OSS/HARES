@@ -174,6 +174,17 @@ pub struct GasBoilerConfig {
     /// OCHRE HVAC.py GasBoiler class: `condensing = eir_max < 1 / 0.9`.
     #[serde(default)]
     pub condensing: bool,
+    /// Share of the combustion residual that leaves through the flue,
+    /// outdoors [0..1]. The complement is the jacket share that heats the
+    /// boiler's surrounding space. ASHRAE: the flue carries the dominant
+    /// share of a non-condensing boiler's loss (jacket losses are a few
+    /// percent of the fuel input). Default 0.9.
+    #[serde(default = "default_boiler_flue_loss_fraction")]
+    pub flue_loss_fraction: f64,
+}
+
+fn default_boiler_flue_loss_fraction() -> f64 {
+    0.9
 }
 
 impl EquipmentTypedConfig for GasBoilerConfig {
@@ -197,6 +208,7 @@ impl Default for GasBoilerConfig {
             number_of_speeds: 1,
             setpoint: HvacSetpointConfig::default(),
             condensing: false,
+            flue_loss_fraction: default_boiler_flue_loss_fraction(),
         }
     }
 }
@@ -237,6 +249,12 @@ impl GasBoilerConfig {
             return Err(HaresError::Equipment(format!(
                 "GasBoilerConfig: condensing=true expects return_temp_c < 70 °C, got {} °C",
                 self.return_temp_c
+            )));
+        }
+        if !(0.0..=1.0).contains(&self.flue_loss_fraction) {
+            return Err(HaresError::Equipment(format!(
+                "GasBoilerConfig: flue_loss_fraction must be in [0.0, 1.0], got {}",
+                self.flue_loss_fraction
             )));
         }
         Ok(())
@@ -648,6 +666,16 @@ impl hares_types::DescribeFields for GasBoilerConfig {
                 "condensing",
                 hares_types::FieldMeta {
                     description: Some("whether the boiler runs in condensing mode"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "flue_loss_fraction",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the flue's share of the combustion residual (outdoors); \
+                         the complement is the jacket share that heats the zone",
+                    ),
                     ..Default::default()
                 },
             ),

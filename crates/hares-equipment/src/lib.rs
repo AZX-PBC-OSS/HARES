@@ -4,6 +4,7 @@
 mod macros;
 
 pub mod battery;
+pub mod combustion;
 pub mod config;
 pub mod describe_fields;
 pub mod ev;

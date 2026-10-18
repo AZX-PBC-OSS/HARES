@@ -82,6 +82,7 @@ fn sample_gas_boiler_config() -> GasBoilerConfig {
         number_of_speeds: 1,
         setpoint: HvacSetpointConfig::default(),
         condensing: false,
+        flue_loss_fraction: 0.9,
     }
 }
 

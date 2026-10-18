@@ -4004,3 +4004,26 @@ then `frame_golden compare-all` (default and dst feature sets).
   0.3823 to 0.3680 C): the discrete cycle's events concentrate the
   continuous average instead of stacking a second duty factor under it, so
   the ASHP tracks OCHRE's continuous model more closely.
+
+### Hardening, 2026-10-17, the boiler's combustion-loss split (branch `row/hw1-defrost-boiler`)
+
+Load average at write time: 17.24 (1 min) at the defrost entry's write,
+the same session. Command: the jacket-vs-flue destination tests
+(`crates/hares-equipment/tests/combustion_tests.rs`, a non-condensing
+AFUE 0.80 boiler at 10 kW, full load, steady state), then
+`frame_golden compare-all` (default and dst feature sets).
+
+- The zone's JacketLoss gain at the test's operating point: 2179.6 W
+  (the entire combustion residual) to 218.0 W (the jacket share, 0.1 of
+  the residual under the default flue fraction 0.9; the flue share
+  leaves outdoors). The defect at this operating point put about a sixth
+  of the burned gas back into the zone as free heat.
+- The gas water heater's split is bit-identical (its flue-versus-tank
+  arithmetic is the efficiency model the helper's pattern extracts, and
+  adopting the residual helper would reorder its floating-point
+  operations).
+- Goldens: `fleet_mixed_offset` moved again (the fleet's gas boiler
+  homes: the flue share is no longer free zone heat, so the boilers'
+  gas power and the coupled indoor temperatures move), re-captured
+  twice byte-identical. Every other golden bit-identical, compared
+  twice on both feature sets.

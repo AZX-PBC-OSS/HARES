@@ -992,6 +992,7 @@ fn try_build_gas_boiler_config(
         // Condensing boilers operate at lower return water temperatures (~150 °F)
         // with a 6-coefficient efficiency curve vs 10 coefficients for non-condensing.
         condensing: afue > 0.90,
+        ..Default::default()
     };
     // When condensing is inferred from AFUE, adjust return_temp_c to a
     // condensing-safe value (65 °C / 150 °F) to avoid validation failure.

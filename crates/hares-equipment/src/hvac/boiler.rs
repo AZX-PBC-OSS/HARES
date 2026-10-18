@@ -54,6 +54,11 @@ const DEFAULT_RETURN_TEMP_C: f64 = 70.0;
 
 /// Default gas boiler AFUE. DOE 10 CFR Part 430, federal minimum.
 const DEFAULT_GAS_BOILER_AFUE: f64 = 0.8;
+/// The flue's share of the combustion residual (the balance is the jacket
+/// share that heats the boiler's space). ASHRAE: a non-condensing boiler's
+/// jacket loses a few percent of the fuel input while the flue carries the
+/// balance of the ~20 percent residual.
+const DEFAULT_GAS_BOILER_FLUE_LOSS_FRACTION: f64 = 0.9;
 
 const DEFAULT_CONDENSING_EIR_COEFFS: [f64; 6] = [
     1.058_343_061,
@@ -143,6 +148,9 @@ pub struct GasBoiler {
     eir_max: f64,
     pump_kw: f64,
     condensing: bool,
+    /// Share of the combustion residual leaving through the flue (outdoors);
+    /// the complement is the jacket share that heats the surrounding space.
+    flue_loss_fraction: f64,
     condensing_eir_coeffs: [f64; 6],
     non_condensing_eir_coeffs: [f64; 10],
     operating_mode: OperatingMode,
@@ -738,6 +746,7 @@ impl GasBoiler {
             eir_max: 1.0 / DEFAULT_GAS_BOILER_AFUE,
             pump_kw: 0.0,
             condensing: false,
+            flue_loss_fraction: DEFAULT_GAS_BOILER_FLUE_LOSS_FRACTION,
             condensing_eir_coeffs: DEFAULT_CONDENSING_EIR_COEFFS,
             non_condensing_eir_coeffs: DEFAULT_NON_CONDENSING_EIR_COEFFS,
             operating_mode: OperatingMode::Off,
@@ -823,6 +832,7 @@ impl Equipment for GasBoiler {
         // explicit override and round-trip fidelity; the runtime computation from
         // AFUE guarantees correctness regardless of config source.
         self.condensing = typed.condensing || fuel_efficiency > 0.9;
+        self.flue_loss_fraction = typed.flue_loss_fraction;
         self.outlet_temp_c = if self.condensing {
             DEFAULT_CONDENSING_OUTLET_TEMP_C
         } else {
@@ -1006,10 +1016,20 @@ impl Equipment for GasBoiler {
             )?;
         }
 
-        // Jacket loss: fuel energy minus useful thermal output, plus pump electrical.
-        // For condensing boilers (EIR < 1), jacket loss is zero -- the extra output
-        // comes from latent heat recovery, not from the room.
-        let jacket_loss_w = (fuel_input_w + electric_kw * 1e3 - thermal_output_w).max(0.0);
+        // Combustion loss split: the residual (fuel input minus useful thermal
+        // output) leaves the cabinet through the flue (outdoors) and the
+        // jacket (the zone). Only the jacket share is zone heat; routing the
+        // whole residual to the zone would manufacture free heat from the
+        // flue. The pump's electric dissipation joins the jacket share. For
+        // condensing boilers (EIR < 1) the residual floors at zero -- the
+        // extra output comes from latent heat recovery, not from the room.
+        let (jacket_share_w, _flue_outdoor_w) = crate::combustion::combustion_loss_split(
+            fuel_input_w,
+            thermal_output_w,
+            self.flue_loss_fraction,
+            1.0 - self.flue_loss_fraction,
+        )?;
+        let jacket_loss_w = jacket_share_w + electric_kw * 1e3;
         if let Some(zone) = self.descriptor.zone
             && jacket_loss_w > 0.0
         {
@@ -1509,8 +1529,8 @@ mod tests {
     };
 
     use super::{
-        DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_NON_CONDENSING_EIR_COEFFS, DEFAULT_RETURN_TEMP_C,
-        ElectricBoiler, GasBoiler,
+        DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_GAS_BOILER_FLUE_LOSS_FRACTION,
+        DEFAULT_NON_CONDENSING_EIR_COEFFS, DEFAULT_RETURN_TEMP_C, ElectricBoiler, GasBoiler,
     };
 
     /// The per-fluid cp table must be positive and finite for every fluid
@@ -2360,7 +2380,10 @@ mod tests {
 
     #[test]
     fn gas_boiler_jacket_loss_writes_to_thermal_port_and_conserves_energy() {
-        // Non-condensing boiler at 80% AFUE: jacket loss = fuel_input - thermal_output.
+        // Non-condensing boiler at 80% AFUE: the combustion residual
+        // (fuel_input - thermal_output) splits by the flue/jacket shares; the
+        // zone's JacketLoss is the jacket share only (the flue share leaves
+        // outdoors).
         let cfg = gb_config(10_000.0, 0.80);
         let mut eq = GasBoiler::new(cfg.clone());
         let env = env(18.0);
@@ -2390,11 +2413,13 @@ mod tests {
             "fuel_input_w={fuel_input_w} should exceed thermal_output_w={thermal_output_w}"
         );
 
-        // Energy conservation: jacket_loss = fuel_input - thermal_output.
-        let expected_jacket = fuel_input_w - thermal_output_w;
+        // Energy conservation: the jacket gets its share of the combustion
+        // residual (default flue 0.9 -> jacket 0.1; no pump here).
+        let loss_w = fuel_input_w - thermal_output_w;
+        let expected_jacket = (1.0 - DEFAULT_GAS_BOILER_FLUE_LOSS_FRACTION) * loss_w;
         assert!(
             (jacket_loss_w - expected_jacket).abs() < 1e-6,
-            "jacket_loss_w={jacket_loss_w} != fuel_input_w - thermal_output_w={expected_jacket}"
+            "jacket_loss_w={jacket_loss_w} != the jacket share of the residual {expected_jacket}"
         );
 
         // Jacket loss appears in the zone thermal port under JacketLoss category.
@@ -2405,8 +2430,8 @@ mod tests {
             "thermal port jacket loss={zone_jacket} != telemetry jacket_loss_w={jacket_loss_w}"
         );
 
-        // Total sensible gain equals thermal output + jacket loss:
-        // both the useful heat and the waste heat end up in the zone.
+        // Total sensible gain equals thermal output + jacket share: the flue
+        // share does not reach the zone.
         let total_sensible = ports.thermal[0].sensible_gain_w;
         let expected_total = thermal_output_w + jacket_loss_w;
         assert!(

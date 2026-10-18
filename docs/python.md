@@ -687,6 +687,12 @@ golden fixtures re-captured.
   Re-captured: `fleet_mixed_offset`, `leap_year_february_900s`,
   `weather_wrap_900s`, `full_year_900s_dst`.
 
+- 2026-10-17: a gas boiler's combustion residual (fuel input minus
+  useful output) splits by the shared `combustion_loss_split` between
+  the flue (outdoors, `flue_loss_fraction` default 0.9) and the jacket
+  (the zone share); the residual was routed 100 percent to the zone as
+  jacket loss. Re-captured: `fleet_mixed_offset`.
+
 - 2026-10-08: the wet appliances' daily hot-water volume and annual energy
   follow the OpenStudio-HPXML v1.12.0
   `calc_clothes_washer_energy_gpd` / `calc_dishwasher_energy_gpd` cycles
