@@ -4387,7 +4387,10 @@ the continuous Resistive zone share as a negative q. RED first: the duty
 compare-all` twice byte-identical on the default and dst feature sets,
 `fleet_mixed_offset`, `leap_year_february_900s`, `weather_wrap_900s` and
 `full_year_900s_dst` re-captured deliberately (the ASHP-bearing
-fixtures; the causes in this entry and in `docs/python.md`'s Numeric
+fixtures; the movement includes the coupled water-heater columns, the
+Water Heating End Use Electric Power and Electric Resistance Water
+Heater Electric Power columns, following the changed indoor
+temperature; the causes in this entry and in `docs/python.md`'s Numeric
 changes list); the diagnostics pin `crates/hares-core/tests/fixtures/diagnostics_cz4a.csv`
 re-pinned with the cause; the 48 h OCHRE thermal trace's records
 re-captured (heating 31.3747 to 28.9580 kWh, the overnight worst
@@ -4461,8 +4464,10 @@ surplus, and the fraction validation. RED first at the defrost commit
 **Verification:** the jacket numbers above; `frame_golden compare-all`
 twice byte-identical on the default and dst feature sets with only
 `fleet_mixed_offset` moving (the fleet's gas-boiler homes' gas power and
-the coupled indoor temperatures; the flue share is no longer free zone
-heat), re-captured deliberately; the gas water heater's split
+the coupled indoor temperatures; the Gas Water Heater Gas Power column
+moves with them, the water heater's gas draw coupled to the changed
+indoor temperature; the flue share is no longer free zone heat),
+re-captured deliberately; the gas water heater's split
 bit-identical; fmt, clippy `--workspace --all-targets --all-features -D
 warnings` clean; nextest `--workspace --all-features -j 2` 8164/8164 (8
 skipped); `pytest -m ''` 1766 passed + 6 xfailed, 0 failed, 0 errors;

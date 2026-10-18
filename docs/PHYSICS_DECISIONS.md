@@ -721,24 +721,3 @@ stack to its air node; the gas water heater's split
 the pattern the helper extracts. Direction of the delta: the heating gas
 in boiler-bearing fixtures rises (the flue share is no longer free zone
 heat) and the zone's free heat falls; `fleet_mixed_offset` re-captured.
-
-## A gas boiler's flue loss leaves outdoors, the jacket share heats the zone
-
-The boiler's combustion residual (fuel input minus useful output) is
-split by the shared `combustion_loss_split` (the gas water heater's
-flue-versus-delivered pattern, generalised to the two destinations the
-residual has): the flue share (`flue_loss_fraction`, default 0.9) leaves
-outdoors and the jacket share (the complement) heats the boiler's
-surrounding space. Before, the entire residual was routed to the zone as
-jacket loss, which manufactured free heat: a non-condensing boiler at
-AFUE 0.80 has a residual near 20 percent of its fuel input, so about a
-sixth of the burned gas came back as zone heat. ASHRAE puts a boiler's
-jacket loss at a few percent of the fuel input; the 0.9/0.1 split of the
-residual puts the jacket there.
-
-OCHRE's gas boiler is a stub and EnergyPlus's `Boilers.cc` loses the
-stack to its air node; the gas water heater's split
-(`flue_loss_fraction`, default 0.10 of the combustion heat, outdoors) is
-the pattern the helper extracts. Direction of the delta: the heating gas
-in boiler-bearing fixtures rises (the flue share is no longer free zone
-heat) and the zone's free heat falls; `fleet_mixed_offset` re-captured.

@@ -93,6 +93,11 @@ pub struct GasWaterHeaterConfig {
     /// temperature (never mixed with cold mains).
     pub appliance_draw_flow_rate_source: Option<ScheduleSourceConfig>,
     pub pilot_power_w: Option<f64>,
+    /// Share of the gas burner's gross combustion heat that leaves
+    /// through the flue, outdoors (default 0.10 when unset). Not the gas
+    /// boiler's same-named `flue_loss_fraction`
+    /// (`hvac::heating_config`): that one is a share of the combustion
+    /// residual (default 0.9).
     pub flue_loss_fraction: Option<f64>,
     pub skin_loss_fraction: Option<f64>,
     pub ignition_type: Option<String>,

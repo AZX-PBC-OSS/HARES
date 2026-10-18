@@ -179,6 +179,10 @@ pub struct GasBoilerConfig {
     /// boiler's surrounding space. ASHRAE: the flue carries the dominant
     /// share of a non-condensing boiler's loss (jacket losses are a few
     /// percent of the fuel input). Default 0.9.
+    ///
+    /// Not the gas water heater's same-named `flue_loss_fraction`
+    /// (`water_heater::wh_config`): that one is a share of the gross
+    /// combustion heat (default 0.10), this one a share of the residual.
     #[serde(default = "default_boiler_flue_loss_fraction")]
     pub flue_loss_fraction: f64,
 }

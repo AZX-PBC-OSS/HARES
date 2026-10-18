@@ -4027,3 +4027,23 @@ AFUE 0.80 boiler at 10 kW, full load, steady state), then
   gas power and the coupled indoor temperatures move), re-captured
   twice byte-identical. Every other golden bit-identical, compared
   twice on both feature sets.
+
+### Hardening, 2026-10-17, the defrost discrete cycle's coarse-dt duty (branch `row/hw1-defrost-boiler`)
+
+The independent review's measurement at this branch's tip, recorded as
+the draft row's evidence: at timesteps coarse against the 210 s defrost
+event the event occupies whole steps, so the realized duty quantizes
+upward, and at 3600 s the ASHP delivers zero heat every other frost hour.
+`fleet_mixed_offset` runs 7 d at 3600 s, so the magnitude lands on a
+committed golden.
+
+- The reviewer's coarse-dt duty table (the realized duty as a multiple
+  of the documented time fraction): 1.00 at 10 s, 1.12 at 60 s, 1.33 at
+  300 s, 2.66 at 900 s, 5.32 at 3600 s. The duty itself at 3600 s is 0.5.
+- The pre-fix coarse-dt duty was about 0.125 at 3600 s, so the fix
+  quadrupled the coarse-dt over-application while fixing the fine-dt
+  duty (the pre-fix fine-dt duty 0.01053 against the documented 0.094,
+  the fix bringing it to 0.09442).
+- Draft disposition (not landed): auto-select the continuous model when
+  dt exceeds the cycle duration, or document a max dt for the discrete
+  cycle. No golden moves from this record; the row is a draft.
