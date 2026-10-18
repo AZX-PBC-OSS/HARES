@@ -5,7 +5,7 @@
   ],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "7e78923d510d565ab28eedacb64cb6ac30b0f3bb",
+  "git_head": "7101953e6a6e1f814f8a55ba4e3f5cf177f20a76",
   "git_dirty": true,
   "metrics": [
     {
@@ -11491,6 +11491,7 @@
   },
   "health": {
     "clamped_actions": 0,
+    "cross_tier_deadband_events": 0,
     "curve_index_clamps": 0,
     "evicted_actors": 0,
     "fluid_payload_absences": 0,
