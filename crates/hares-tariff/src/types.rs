@@ -451,29 +451,63 @@ impl ElectricTariff {
         Ok(())
     }
 
-    /// Coverage validation for a tariff that prices energy through TOU
-    /// periods: the evaluator's unmatched-period and missing-rate fallbacks
-    /// price the step's import at $0/kWh, so a schedule or rate gap is
-    /// silently free electricity. Two gaps are rejected here, both resolved
-    /// exactly as the evaluator resolves them (first period whose season
-    /// claims the month and whose windows contain the weekday and
-    /// minute-of-day; first rate matching the period and the month):
+    /// Coverage validation for the period and rate tables the evaluator
+    /// resolves per step: the evaluator's unmatched-period and missing-rate
+    /// fallbacks price the step's import at $0/kWh, so a schedule or rate
+    /// gap is silently free electricity. The gaps rejected here, resolved
+    /// exactly as the evaluator resolves them (first rate matching the
+    /// period and the month; first period whose season claims the month
+    /// and whose windows contain the weekday and minute-of-day):
     ///
-    /// - every hour of the week is covered in every month some period
-    ///   claims, and every month is claimed by some period;
-    /// - every (period, month) pair the schedule claims carries an energy
-    ///   rate, as does the EV sub-tariff's period when configured.
+    /// - the EV sub-tariff's period carries an energy rate in every month
+    ///   whenever the tariff configures one, real-time pricing or not: the
+    ///   per-step EV price always resolves from `energy_rates`, so a gap
+    ///   bills EV energy at $0/kWh even while the import price rides the
+    ///   RTP schedule;
+    /// - for a tariff that prices imports through the TOU machinery, every
+    ///   hour of the week is covered in every month some period claims,
+    ///   every month is claimed by some period, and every (period, month)
+    ///   pair the schedule claims carries an energy rate.
     ///
-    /// Real-time-pricing tariffs price energy from `rtp_schedule` instead,
-    /// so the period machinery is not their import-price source and the
-    /// checks do not apply. A tariff with no TOU periods at all prices no
-    /// energy through them by construction (its billing rests on demand,
-    /// fixed and tiered charges) and is likewise outside this contract.
+    /// Real-time-pricing tariffs price the import from `rtp_schedule`
+    /// instead (validated for length, finiteness and sign at
+    /// construction, so every hour prices), the period machinery is not
+    /// their import-price source, and the import-price checks do not
+    /// apply; only the EV check runs before that early-return. The RTP
+    /// schedule leaves no other period-table consumer unchecked that
+    /// could make import energy free: the remaining consumers of the TOU
+    /// tables under RTP (demand-peak attribution slots and NetBilling
+    /// export credits) were never coverage-checked for any tariff kind
+    /// and cannot price import energy. A tariff with no TOU periods at
+    /// all prices no energy through them by construction (its billing
+    /// rests on demand, fixed and tiered charges) and is likewise
+    /// outside this contract.
     fn validate_energy_coverage(&self) -> Result<(), HaresError> {
+        let split = self.seasonal_split.as_ref();
+        // The EV sub-tariff's month-rate coverage runs for every tariff
+        // carrying an `ev_tou_period_name`, before the RTP early-return:
+        // the evaluator's EV-price precompute resolves (period name,
+        // month) from `energy_rates` unconditionally of RTP and falls
+        // back to $0/kWh on a gap.
+        if let Some(ev_name) = &self.ev_tou_period_name
+            && !ev_name.is_empty()
+        {
+            for month in 1..=12u8 {
+                let rated = self.energy_rates.iter().any(|er| {
+                    er.period_name == *ev_name && season_contains_month(er.season, split, month)
+                });
+                if !rated {
+                    return Err(HaresError::Tariff(format!(
+                        "ev_tou_period_name '{ev_name}' has no energy rate for month \
+                         {month}: the EV sub-tariff must carry a rate in every month, \
+                         or its hours price EV energy at $0/kWh"
+                    )));
+                }
+            }
+        }
         if self.rtp_schedule.is_some() || self.tou_schedule.is_empty() {
             return Ok(());
         }
-        let split = self.seasonal_split.as_ref();
         let claims = |month: u8| -> Vec<&TouPeriod> {
             self.tou_schedule
                 .iter()
@@ -521,22 +555,6 @@ impl ElectricTariff {
                          period-month pair the schedule claims must carry a rate, or \
                          its hours price electricity at $0/kWh",
                         period.name
-                    )));
-                }
-            }
-        }
-        if let Some(ev_name) = &self.ev_tou_period_name
-            && !ev_name.is_empty()
-        {
-            for month in 1..=12u8 {
-                let rated = self.energy_rates.iter().any(|er| {
-                    er.period_name == *ev_name && season_contains_month(er.season, split, month)
-                });
-                if !rated {
-                    return Err(HaresError::Tariff(format!(
-                        "ev_tou_period_name '{ev_name}' has no energy rate for month \
-                         {month}: the EV sub-tariff must carry a rate in every month, \
-                         or its hours price EV energy at $0/kWh"
                     )));
                 }
             }
@@ -1419,6 +1437,89 @@ mod tests {
                 .contains("ev_tou_period_name 'ev' has no energy rate"),
             "the error names the EV period: {err}"
         );
+    }
+
+    /// The EV sub-tariff's month-rate coverage holds under real-time
+    /// pricing too: the evaluator resolves the per-step EV price from
+    /// `energy_rates` by (period name, month) regardless of
+    /// `rtp_schedule`, so a rate that misses a month bills that month's
+    /// EV energy at $0/kWh while the import price rides the RTP schedule.
+    #[test]
+    fn rtp_tariff_ev_subtariff_missing_month_rate_fails_validate() {
+        let err = ElectricTariff {
+            tou_schedule: vec![
+                TouPeriod {
+                    name: "flat".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::All,
+                },
+                TouPeriod {
+                    name: "ev".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::Summer,
+                },
+            ],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "flat".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.15,
+                },
+                EnergyRate {
+                    period_name: "ev".into(),
+                    season: SeasonFilter::Summer,
+                    rate_per_kwh: 0.05,
+                },
+            ],
+            ev_tou_period_name: Some("ev".into()),
+            rtp_schedule: Some(vec![0.10; 8760]),
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("an RTP tariff's EV rate gap must fail");
+        assert!(
+            err.to_string()
+                .contains("ev_tou_period_name 'ev' has no energy rate for month 1"),
+            "the error names the EV period and the uncovered month: {err}"
+        );
+    }
+
+    /// Full EV coverage under real-time pricing validates: the RTP
+    /// schedule relieves only the import-price checks, not the EV
+    /// sub-tariff's month-rate check.
+    #[test]
+    fn rtp_tariff_with_full_ev_coverage_validates() {
+        ElectricTariff {
+            tou_schedule: vec![
+                TouPeriod {
+                    name: "flat".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::All,
+                },
+                TouPeriod {
+                    name: "ev".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::All,
+                },
+            ],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "flat".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.15,
+                },
+                EnergyRate {
+                    period_name: "ev".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.05,
+                },
+            ],
+            ev_tou_period_name: Some("ev".into()),
+            rtp_schedule: Some(vec![0.10; 8760]),
+            ..Default::default()
+        }
+        .validate()
+        .expect("full EV coverage under RTP must validate");
     }
 
     /// The covered tariff's shape: a schedule whose windows cover every
