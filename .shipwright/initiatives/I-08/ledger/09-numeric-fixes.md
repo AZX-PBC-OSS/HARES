@@ -4746,3 +4746,242 @@ pyright 0.
 
 **State:** landed on `row/hw1-defrost-boiler` (worktree
 `hw1-defrost-boiler`), the defrost consolidation's commit ahead of it.
+
+## Hardening 4: the EV forms an island only when it can deliver power, and islanded charging pays the surplus clamp
+
+**Kind:** numeric fix (the post-initiative hardening phase's grid entry:
+the EV's island-source availability and the islanded EV charging clamp).
+
+**Problem:** the EV's `island_source_available()` keyed on a commanded
+discharge, not a delivered one: the check was `HomePluggedIn &&
+v2l_active && soc > 0.0`, but `v2l_active` latches on the COMMANDED
+discharge (`run_charging_physics` returns `is_discharge` true whenever a
+negative setpoint resolves to a discharge leg, even when
+`compute_discharge` returns `(0, 0)` at the floor or under a DR full
+shed), so an EV drained to its V2L/V2G reserve with a latched export
+vote held the home bus at 1.0 pu for the whole outage while delivering
+zero watts: every load ran at full power on energy from nothing, the
+deficit surfacing only as `island_unserved_w`. The stationary battery's
+availability check was already rigorous (SOC above its effective floor,
+the derate positive, the DR fraction positive); the EV's was not. And
+the islanded EV charging leg was gated only on a dead bus: while the
+bus was energized (islanded), the charge leg ran at the full EVSE rate
+and `apply_soc_and_thermal` credited the pack the full charge energy —
+an 11.5 kW EVSE islanded on a 5 kW battery credited the pack 11.5 kW of
+charging while the island's sources delivered a fraction of it, the
+deficit landing in `island_unserved_w` — the same phantom-energy defect
+the battery's own surplus clamp had closed.
+
+**Change:** `island_source_available()` requires delivered export: the
+previous step's `v2l_power_w > 0.0` (the dispatch is producing, not
+merely latched), the pack above the commanded leg's effective discharge
+floor (`max(reserve, commanded min_soc, ready_by_soc)` — the leg
+resolved by the same V2G-over-V2L precedence the charge physics
+applies, extracted as `commanded_discharge_leg()`), and
+`dr_power_fraction() > 0.0` — mirroring the battery's check shape.
+Islanding takes effect one step after export begins (as before) and
+collapses the first step delivery stops. The islanded charge leg (bus
+energized under `grid_outage()`) clamps to the visible Stage-1 surplus
+exactly as the battery's target does (the same
+`(-net_load_w).max(0.0)` read of the accumulator at the equipment's own
+step); away charging is off-site and unaffected; the discharge leg
+carries no charge leg and passes through untouched.
+
+**Interaction found by the probe, handled honestly:** the
+auto-registered EV driver re-asserts a standing `SOCTarget` every
+plugged-in step at the Schedule tier, and the EV's `SOCTarget` arm
+clears a latched `PowerSetpoint` (the explicit-hold contract: a fresh
+charge target supersedes a zero-power hold). An externally latched
+negative setpoint therefore cannot coexist with the auto-registered
+driver's own dispatch — same tier, the driver's write lands later and
+clears the external one. The tier fight is resolved by configuration,
+not by a priority change: a manual-control household supplies an actor
+holding the `EvDriver:<equipment>` name (the documented
+`add_equipment_with_actors` replacement), and the driver-in-the-loop
+scenario runs the driver's own V2G vote, which holds by the composer's
+own signal order (the target-of-record is dispatched before the
+rate-of-record, so the same-batch rate survives its own target's
+clear). The tests exercise both shapes; no dispatch-priority machinery
+changed.
+
+**Acceptance tests:** equipment level, `ev/tests.rs`:
+`island_availability_requires_delivered_export` (at the reserve the
+commanded export delivers zero and the EV is no island source; above
+the floor the same command delivers and is — RED at the parent: the
+availability read true at the reserve),
+`island_availability_ends_at_dr_full_shed` (a GridEmergency shed zeroes
+the delivered export and the availability with it — RED at the parent),
+`islanded_charging_clamps_to_visible_surplus` (an 11.5 kW EVSE on a
+2.5 kW surplus draws the surplus and the SOC credit stays under the
+clamped charge energy — RED at the parent: full rate),
+`grid_connected_charging_is_not_clamped` (the same bus state on a live
+grid draws the full EVSE rate; the clamp is outage-only). Dwelling
+level, `tests/grid_outage_islanding.rs`:
+`ev_at_discharge_floor_with_latched_export_does_not_hold_bus` and
+`dr_shed_ev_does_not_island` (the bus stays dead with a phantom source
+— RED at the parent: the bus held at 1.0 pu delivering nothing),
+`island_follows_ev_delivery_and_collapses_when_it_stops` (the driver's
+own V2G vote discharges the pack to its strategy floor during the
+outage; every energized step is preceded by delivered watts and the
+island collapses when delivery stops — RED at the parent),
+`islanded_pack_energy_is_bounded_by_island_sources` (the conservation
+property: every islanded step, neither the EV pack nor the battery
+pack gains more energy than the island's sources delivered — RED at
+the parent: the first islanded step credited the EV pack the full
+11.5 kW rate against the battery's 1.5 kW delivery). The two
+pre-existing tests that pinned the old behavior were re-pinned to the
+corrected contract: `floor_held_discharge_checkpoint_restores_the_published_v2l_state`'s
+availability precondition (the floor-held corner publishes the
+dispatch-active state with zero delivered watts and is now
+unavailable) and `grid_outage_stops_home_charging_and_islanded_bus_allows_it`'s
+islanded arm (charging resumes clamped to the injected surplus, not at
+the rating).
+
+**Verification:** RED first (the six behavioral failures above
+witnessed at the parent with the tests applied); GREEN after; fmt,
+clippy `--workspace --all-targets --all-features -D warnings` clean;
+nextest `--workspace --all-features -j 2` 8254/8254 (8 skipped);
+`pytest -m ''` after `maturin develop` 1800 passed + 6 xfailed, 0
+failed, 0 errors; pyright 0; the goldens compare-all 10 + dst 1
+bitwise identical (no golden runs an outage with an EV, and the clamp
+and the availability gate key on `grid_outage()`, which no nominal
+fixture fires).
+
+**Commit:** `fix: the EV forms an island only when it can deliver power, and islanded charging pays the surplus clamp`
+
+**Dependencies:** none outside the equipment crate.
+
+## Hardening 5: the grid voltage override is validated at the setter
+
+**Kind:** numeric fix (the post-initiative hardening phase's grid
+entry: the outage setter's input contract).
+
+**Problem:** `Dwelling::set_grid_voltage` stored its override raw and
+`GridState::bus_energized()` keyed on `bus_voltage_pu() != 0.0` — a
+NaN override passed `NaN != 0.0`, read as energized, and un-gated every
+load: an intended outage signaled with one non-finite value (a gym or
+co-sim caller computing voltage from a model that produces one NaN)
+ran the house at full load, islands nothing, errors nowhere.
+
+**Change:** the setter accepts exactly `0.0` (the utility-outage
+signal) or a finite per-unit voltage in `[0.5, 1.5]` — the band the
+HELICS voltage contract and its subscriptions already admit — and
+rejects everything else with `HaresError::Dwelling` naming the value
+and the band, before any state is written (a rejected override leaves
+the stored grid state untouched). `bus_energized()` is NaN-robust as
+the second belt: `bus_voltage_pu() > 0.0`, so a non-finite voltage that
+reached the state by any other route de-energizes the bus (every load
+off) instead of un-gating it. Callers propagate the typed error: the
+fleet's `set_grid_voltage` maps it to a new `FleetError::InvalidGridVoltage`
+naming the home, `set_grid_voltage_all` returns it (the first home's
+rejection, every home running the same validation), the Python
+bindings surface it through their existing mappings, and the HELICS
+fleet adapter's out-of-band branch (which warned but still applied)
+now fails the apply the same way the dwelling adapter's does.
+
+**Acceptance tests:** `tests/grid_voltage_override.rs`:
+`in_contract_overrides_are_accepted` (0.0, the band's edges, a sagged
+nominal) and `out_of_contract_overrides_are_rejected` (NaN, both
+infinities, a negative, 0.2, 1.8 and a volts-vs-per-unit 240.0 each
+rejected with the value- and band-naming error and the stored grid
+state untouched; RED at the parent as a signature failure — the setter
+returned nothing to assert on). Unit:
+`environment::tests::bus_energized_is_nan_robust` (a NaN utility
+voltage and a NaN island value both de-energize the bus; RED at the
+parent: `NaN != 0.0` read as energized).
+
+**Verification:** RED first (the behavioral NaN failure and the
+setter's signature failure witnessed at the parent); GREEN after;
+every pre-existing `set_grid_voltage` test call site updated to the
+checked form; fmt, clippy `--workspace --all-targets --all-features
+-D warnings` clean; nextest `--workspace --all-features -j 2` 8254/8254
+(8 skipped); `pytest -m ''` after `maturin develop` 1800 passed + 6
+xfailed, 0 failed, 0 errors; pyright 0; the goldens compare-all 10 +
+dst 1 bitwise identical.
+
+**Commit:** `fix: the grid voltage override is validated at the setter`
+
+**Dependencies:** none outside the core, types, fleet and python
+crates.
+
+## Hardening 6: the tariff rejects coverage gaps, and the EV rate reaches the bill
+
+**Kind:** numeric fix (the post-initiative hardening phase's tariff
+entry: the silent $0/kWh fallbacks and the dead EV TOU rate).
+
+**Problem:** the tariff evaluator's price precompute fell back to
+$0/kWh on coverage gaps — a TOU hour matching no period priced the
+step's import at nothing, and a matched period with no energy rate for
+the month did the same — so a hand-built tariff with a season or
+schedule gap silently billed free electricity, corrupting every bill,
+DR vote and RL reward built on it. `ElectricTariff::validate` checked
+that rates reference known periods but never the converse (period
+coverage) nor full-hour coverage. And the dwelling's only
+`evaluator.step` call hardcoded the EV flow to `0.0`: the EV-rate
+machinery (the `ev_tou_period_name` validation, the per-step EV price,
+the blended import price) was dead code at the integration, and a
+configured EV-TOU rider silently billed the EV's kWh at the house rate.
+
+**Change:** `ElectricTariff::validate` gains
+`validate_energy_coverage`, run for tariffs that price energy through
+TOU periods (no `rtp_schedule`, a non-empty `tou_schedule` — RTP
+tariffs price energy from their schedule and a periodless tariff bills
+no energy through periods, so neither is this contract's subject). Two
+gaps are rejected, both resolved exactly as the evaluator resolves
+them (`season_contains_month` with the tariff's split; first matching
+window; first matching rate): every month is claimed by some period
+and the claiming periods' windows cover every weekday-minute of the
+week in every claimed month; and every (period, month) pair the
+schedule claims carries an energy rate. The EV sub-tariff's period
+must carry a rate in every month (its per-step price resolves by name
+and month alone, so a period whose own season claim is narrower than
+the year passed the period check while its rate missed months the EV
+sub-meter prices). The dwelling sums the per-end-use signed EV flow it
+already computed for the electrical summary and passes it into
+`evaluator.step`, so a configured `ev_tou_period_name` bills the EV's
+import share at its own rate through the evaluator's blended price;
+without an EV sub-tariff the flow changes nothing (the evaluator's
+`ev_power_w > 0.0` guard and the blended-price identity keep every
+unconfigured run's arithmetic untouched).
+
+**Acceptance tests:** `crates/hares-tariff/src/types.rs` unit tests:
+`tou_hour_with_no_matching_period_fails_validate`,
+`month_no_period_claims_fails_validate`,
+`period_without_rate_for_claimed_month_fails_validate`,
+`ev_tou_period_without_month_rate_fails_validate`,
+`fully_covered_tariff_validates` (the first four RED at the parent:
+`validate` accepted the gap tariffs). Dwelling level,
+`tests/ev_tariff_rate_wiring.rs`:
+`ev_tou_period_name_changes_the_dwelling_bill` (the same run twice on
+bits — same total import kWh, identical EV charging — with and without
+the EV sub-tariff: the billed energy charge strictly undercuts and the
+saving equals the EV energy times the rate difference; RED at the
+parent: the bills were identical with the EV flow hardcoded to zero).
+The tests that pinned the old fallback were re-pinned to the corrected
+contract: `evaluator_no_match_returns_zero` became
+`evaluator_no_match_rejected_at_construction` (the gap tariff is a
+construction error, not free electricity), the URDB
+`detect_summer_no_seasonal_variation_defaults_northern` fixture's
+schedule now references the period its rate structure defines (the old
+fixture referenced a period with no rate — the parse would silently
+price every hour at $0/kWh, which the new validation catches at
+parse), and the Python builder suite's gap tariffs were re-pinned to
+full coverage: the shared simple-TOU builder's off-peak window covered
+minutes 0-960 of 1440 (the defect class itself — evenings, nights and
+winter weekends priced free), and the two chaining tests' peak-only
+tariffs gained coverage base periods.
+
+**Verification:** RED first (the four validate tests, the construction
+test and the dwelling bill test witnessed failing at the parent);
+GREEN after; fmt, clippy `--workspace --all-targets --all-features
+-D warnings` clean; nextest `--workspace --all-features -j 2` 8254/8254
+(8 skipped); `pytest -m ''` after `maturin develop` 1800 passed + 6
+xfailed, 0 failed, 0 errors (the suite's 15 pre-fix failures were all
+the builder suite's gap tariffs, re-pinned with the fix); pyright 0;
+the goldens compare-all 10 + dst 1 bitwise identical (the shipped
+`flat_tariff.json` covers 24x7 with its period rated, so no fixture
+moves).
+
+**Commit:** `fix: the tariff rejects coverage gaps and the ev rate reaches the bill`
+
+**Dependencies:** none outside the tariff and core crates.
