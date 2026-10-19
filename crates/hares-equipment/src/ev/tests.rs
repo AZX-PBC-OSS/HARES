@@ -7347,16 +7347,25 @@ fn grid_outage_stops_home_charging_and_islanded_bus_allows_it() {
         "SOC must not change while the EVSE is dead"
     );
 
-    // Islanded: bus energized by a backup source → charging resumes.
+    // Islanded: bus energized by a backup source → charging resumes,
+    // clamped to the visible surplus (the on-site source's generation
+    // beyond the loads already on the bus): the EVSE rating exceeds it,
+    // so the draw is the surplus, not the rating.
     let mut env_islanded = sample_env();
     env_islanded.grid.voltage_pu = 0.0;
     env_islanded.grid.island_bus_voltage_pu = Some(1.0);
     ports.zero();
+    ports.electrical.generation_power_w = -5000.0;
     ev.step(&env_islanded, Duration::minutes(15), &mut ports)
         .unwrap();
     assert!(
         ports.electrical.load_power_w > 0.0,
         "islanded bus allows charging from the on-site source"
+    );
+    assert!(
+        (ports.electrical.load_power_w - 5000.0).abs() <= 1e-6,
+        "islanded charging clamps to the visible surplus, drew {} W",
+        ports.electrical.load_power_w
     );
 }
 
@@ -9180,8 +9189,9 @@ fn floor_held_discharge_checkpoint_restores_the_published_v2l_state() {
         "precondition: at the floor the export is exactly zero"
     );
     assert!(
-        ev.island_source_available(),
-        "precondition: the step reports island-source availability"
+        !ev.island_source_available(),
+        "precondition: the floor-held corner publishes the dispatch-active state \
+         with zero delivered watts, and the island source is therefore unavailable"
     );
 
     let state = ev.save_state().unwrap();
@@ -9314,4 +9324,158 @@ fn dbg_publish_value() {
         ports.electrical.load_power_w
     );
     eprintln!("DBG p only");
+}
+
+// -- island source availability and the islanded charge clamp --
+
+/// The outage environment with an island-formed bus: a utility outage
+/// (voltage 0.0) with the dwelling's island resolution holding the bus at
+/// nominal, the state `island_source_available` feeds and the clamp
+/// keys on.
+fn outage_island_env() -> EnvironmentState {
+    let mut env = sample_env();
+    env.grid = GridState {
+        voltage_pu: 0.0,
+        frequency_hz: 60.0,
+        island_bus_voltage_pu: Some(1.0),
+    };
+    env
+}
+
+fn v2l_ev_at_reserve() -> Ev {
+    let mut raw = base_raw();
+    raw.insert(KEY_V2L_ENABLED.to_string(), true.into());
+    raw.insert(KEY_V2L_SOC_RESERVE.to_string(), 0.2.into());
+    raw.insert(KEY_V2L_MAX_DISCHARGE_W.to_string(), 3000.0.into());
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.2.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
+        active_power_w: -3000.0,
+        reactive_power_var: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    ev
+}
+
+/// Availability keys on delivered watts, not the commanded flag: at the
+/// reserve the floor curtails the latched export to zero and the EV is no
+/// island source; above the floor the same command delivers and is.
+#[test]
+fn island_availability_requires_delivered_export() {
+    let mut ev = v2l_ev_at_reserve();
+    let env = sample_env();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    assert!(ev.v2l_active, "the discharge is commanded");
+    assert_eq!(
+        ev.v2l_power_w, 0.0,
+        "the floor curtails the export to zero watts"
+    );
+    assert!(
+        !ev.island_source_available(),
+        "a commanded discharge that delivered nothing must not island the home"
+    );
+
+    ev.soc = 0.5;
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    assert!(
+        ev.v2l_power_w > 0.0,
+        "the same command above the floor delivers export"
+    );
+    assert!(ev.island_source_available());
+}
+
+/// A DR full shed zeroes the delivered export the same way: the command
+/// stands, the watts do not, and the EV is no island source.
+#[test]
+fn island_availability_ends_at_dr_full_shed() {
+    let mut ev = v2l_ev_at_reserve();
+    ev.soc = 0.5;
+    let env = sample_env();
+
+    ev.apply_control_unchecked(&ControlSignal::DemandResponse {
+        level: DRLevel::GridEmergency,
+        duration_s: Some(3600.0),
+    })
+    .unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    assert!(ev.v2l_active, "the discharge is still commanded");
+    assert_eq!(
+        ev.v2l_power_w, 0.0,
+        "a GridEmergency shed zeroes the delivered export"
+    );
+    assert!(
+        !ev.island_source_available(),
+        "a DR-shed EV must not island the home"
+    );
+}
+
+/// Islanded charging pays the surplus clamp: an 11.5 kW EVSE on an
+/// island whose visible surplus is 2.5 kW charges at the surplus, and the
+/// SOC credit never exceeds the energy the island's sources delivered.
+#[test]
+fn islanded_charging_clamps_to_visible_surplus() {
+    let mut raw = base_raw();
+    raw.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 11500.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = outage_island_env();
+    ev.init(&config, &env).unwrap();
+    ev.soc = 0.3;
+
+    let mut ports = PortSlots::default();
+    // The bus so far this step: 1.5 kW of load and 4 kW of PV, a 2.5 kW
+    // surplus the grid would have covered but the island cannot.
+    ports.electrical.load_power_w = 1500.0;
+    ports.electrical.generation_power_w = -4000.0;
+    let soc_before = ev.soc;
+    ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+
+    let charge_w = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        charge_w <= 2500.0 + 1e-6,
+        "islanded charging must clamp to the visible surplus, drew {charge_w} W"
+    );
+    assert!(
+        charge_w > 0.0,
+        "a real surplus must still charge the vehicle"
+    );
+    let soc_after = ev.telemetry().get("soc").unwrap();
+    let gain_j = (soc_after - soc_before) * ev.battery_capacity_j;
+    assert!(
+        gain_j <= 2500.0 * 0.94 * 60.0 + 1.0,
+        "the SOC credit must not exceed the clamped charge energy, gained {gain_j} J"
+    );
+}
+
+/// The clamp is outage-only: the same bus state on a live grid charges at
+/// the full EVSE rate.
+#[test]
+fn grid_connected_charging_is_not_clamped() {
+    let mut raw = base_raw();
+    raw.insert(KEY_MAX_CHARGING_POWER_W.to_string(), 11500.0.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    ev.soc = 0.3;
+
+    let mut ports = PortSlots::default();
+    ports.electrical.load_power_w = 1500.0;
+    ports.electrical.generation_power_w = -4000.0;
+    ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+
+    let charge_w = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        (charge_w - 11500.0).abs() < 1e-6,
+        "grid-connected charging draws the full EVSE rate, got {charge_w} W"
+    );
 }

@@ -964,6 +964,27 @@ impl Ev {
         0.0
     }
 
+    /// The discharge leg a latched negative setpoint resolves to: V2G when
+    /// enabled, else V2L, the same precedence the charge physics applies.
+    /// `None` when no discharge is commanded (not home, no negative
+    /// setpoint, or neither leg enabled).
+    fn commanded_discharge_leg(&self) -> Option<DischargeLeg> {
+        match self.connection_state {
+            EvConnectionState::HomePluggedIn
+                if self.power_setpoint_w.is_some_and(|sp| sp < 0.0) =>
+            {
+                if self.v2g_enabled {
+                    Some(DischargeLeg::V2G)
+                } else if self.v2l_enabled {
+                    Some(DischargeLeg::V2L)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Effective discharge floor: `max(reserve, commanded min_soc,
     /// ready_by_soc)` — the SOC the pack never lands below while
     /// discharging. Shared by both discharge legs (they differ only in
@@ -1351,20 +1372,7 @@ impl Ev {
         let charge_derate = self.charge_derate_factor();
 
         // Discharge leg: a negative setpoint at home with V2G/V2L enabled.
-        let discharge_leg = match self.connection_state {
-            EvConnectionState::HomePluggedIn
-                if self.power_setpoint_w.is_some_and(|sp| sp < 0.0) =>
-            {
-                if self.v2g_enabled {
-                    Some(DischargeLeg::V2G)
-                } else if self.v2l_enabled {
-                    Some(DischargeLeg::V2L)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
+        let discharge_leg = self.commanded_discharge_leg();
 
         // Heater gate (see the method doc).
         let heater_eligible = self.heater_power_w > 0.0
@@ -1657,15 +1665,29 @@ impl Equipment for Ev {
     }
 
     fn island_source_available(&self) -> bool {
-        // An EV plugged in at home and actively discharging (V2L/V2G) is a
-        // source that can hold the home bus energized during a utility
+        // An EV plugged in at home and actually delivering V2L/V2G export is
+        // a source that can hold the home bus energized during a utility
         // outage. A merely plugged-in EV is NOT counted — most EVSEs cannot
         // island a home, and HARES only dispatches EV discharge on explicit
-        // (negative) setpoints. Uses the previous step's discharge state, so
-        // EV-driven islanding takes effect one step after discharge begins.
+        // (negative) setpoints. Nor is a commanded-but-delivering-nothing
+        // discharge counted: a setpoint the SOC floor or a DR shed curtailed
+        // to zero watts produces no energy, and an island held by it runs
+        // every load on phantom power. The check mirrors the stationary
+        // Battery's: the last step's delivered export is positive (the
+        // dispatch is producing, not merely latched), the pack sits above
+        // the commanded leg's effective discharge floor (a pack at its
+        // reserve cannot give another watt), and DR is not commanding a
+        // full shed. Uses the previous step's delivery, so EV-driven
+        // islanding takes effect one step after export begins and collapses
+        // the first step delivery stops.
+        let soc_above_floor = self
+            .commanded_discharge_leg()
+            .is_some_and(|leg| self.soc > self.effective_discharge_floor(leg));
         matches!(self.connection_state, EvConnectionState::HomePluggedIn)
             && self.v2l_active
-            && self.soc > 0.0
+            && self.v2l_power_w > 0.0
+            && soc_above_floor
+            && self.dr_power_fraction() > 0.0
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
@@ -1710,6 +1732,28 @@ impl Equipment for Ev {
         {
             power.charge_leg_ac_w = 0.0;
             power.heater_draw_w = 0.0;
+        }
+
+        // Islanded charge clamp: no phantom island import during an outage.
+        // While the utility is out and the bus is energized (an island a
+        // battery, a generator or this EV's own discharge holds), there is
+        // no grid to import from: every watt of charge must come from
+        // on-site generation surplus already on the bus. The clamp reads
+        // the Stage-1 accumulated net exactly as the stationary Battery's
+        // clamp does (negative = surplus) and caps the charge leg at it, so
+        // the SOC credit below never exceeds the energy the island's
+        // sources delivered. An 11.5 kW EVSE on a 5 kW island charges at
+        // the surplus, not at the rating with the deficit booked as
+        // unserved. Away charging is off-site and unaffected; a dead bus is
+        // handled by the gate above; the discharge leg carries no charge
+        // leg, so it passes through untouched.
+        if self.connection_state == EvConnectionState::HomePluggedIn
+            && power.charge_leg_ac_w > 0.0
+            && env.grid.grid_outage()
+            && env.grid.bus_energized()
+        {
+            let visible_surplus_w = (-ports.electrical.net_active_w()).max(0.0);
+            power.charge_leg_ac_w = power.charge_leg_ac_w.min(visible_surplus_w);
         }
 
         match self.connection_state {
@@ -2002,10 +2046,12 @@ impl Equipment for Ev {
         // DR while the export computes to exactly zero, and the mode is
         // `Off` in those corners (zero pack net rate). Deriving either
         // column from checkpointed state — `last_mode`, the port sign —
-        // therefore diverges from the saved state exactly where
-        // `island_source_available` (the dwelling's islanding reads it)
-        // needs the dispatch-active answer; this corner is what proved
-        // the earlier `last_mode` derivation unfaithful.
+        // therefore diverges from the saved state exactly where the
+        // dwelling's islanding reads them: `island_source_available`
+        // gates on both the dispatch-presence flag and the delivered
+        // export, so a faithful restore needs both columns verbatim;
+        // this corner is what proved the earlier `last_mode` derivation
+        // unfaithful.
         self.v2l_active = cp.v2l_active;
         self.v2l_power_w = cp.v2l_power_w;
         // The away session's actual intake is checkpointed and restored
