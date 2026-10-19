@@ -27,15 +27,20 @@ fn project_root() -> PathBuf {
 
 /// The default generated schedule for `base.xml` over the Denver TMY3
 /// weather with the repo defaults: a 24 h run starting 2023-01-15 00:00
-/// UTC-7 at 900 s steps. The digest moved twice. Once when the constant
-/// 1.0 `occupants` column in front of the `Occupancy` profile column was
-/// deleted and the last column survived the resample; once when the two
-/// constant setpoint columns, which overrode the HVAC's own hourly
-/// setpoints, were dropped. On every column the index names the schedule
-/// is bitwise the earlier one's. The generation path must stay
-/// bitwise-equal to it.
+/// UTC-7 at 900 s steps. The digest moved three times. Twice before the
+/// calendar-anchor contract: once when the constant 1.0 `occupants`
+/// column in front of the `Occupancy` profile column was deleted and the
+/// last column survived the resample; once when the two constant setpoint
+/// columns, which overrode the HVAC's own hourly setpoints, were dropped.
+/// The third move is the anchor itself: the rows are addressed by
+/// calendar date (row 0 = Jan 1, the CSV path's convention), so the
+/// table spans Jan 1 of the start's year to the run's end instead of
+/// starting at the run's start date; a Jan 15 start's 24 h table now
+/// carries the Jan 1 to Jan 15 rows the addressing reads. On every
+/// column the index names the schedule is bitwise the earlier one's. The
+/// generation path must stay bitwise-equal to it.
 const GENERATED_SCHEDULE_DIGEST: &str =
-    "a30b9593fcc0fa406e2ce833b43db6b24cd7f5b7a4489a12cf5d4015f10d84ca";
+    "93d5024bda628a4d9235ee56e8306bee6dc961e3ced993375f5686072f8e0fae";
 
 fn generated_schedule_config(schedule_path: Option<PathBuf>) -> DwellingConfig {
     let start_time = denver_offset::denver_offset()

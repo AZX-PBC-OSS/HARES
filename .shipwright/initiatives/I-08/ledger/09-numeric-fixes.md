@@ -4985,3 +4985,78 @@ moves).
 **Commit:** `fix: the tariff rejects coverage gaps and the ev rate reaches the bill`
 
 **Dependencies:** none outside the tariff and core crates.
+## Hardening 7: generated schedules are addressed by calendar date like the CSV path
+
+**Kind:** numeric fix (the hardening phase's schedule-anchoring
+entry).
+
+**Problem:** the generated schedule's rows started at the run's start
+date (`generate_default_schedule` anchored its timestamps at
+`generation.start`), but the environment addresses schedule rows by
+calendar ordinal (`compute_schedule_idx`: the 365-day ordinal
+`hares_types::schedule_day_ordinal` times the day length plus the time
+of day, modulo the table's length - row 0 is Jan 1), the convention the
+CSV path's timestamps and `schedule_day_ordinal`'s leap mapping share.
+A run starting Jul 1 therefore read, at its first step, the row the
+addressing landed on - for a seven-day table, the Jul 7 23:45 row; for
+longer tables, rows generated for the previous December - every
+generated column (occupancy, plug loads, lighting, appliances, water)
+on the wrong month multiplier and weekday type, silently, for any start
+past Jan 1. Jan 1 starts in a non-leap year were the one accidentally
+correct case (the anchor and the addressing agree), and a leap start
+year's Feb 29 let a February multiplier read at Mar 1.
+
+**Change:** `generate_default_schedule` anchors the table at Jan 1 of
+the start's year on the 365-day calendar - the start year's own weekday
+pattern, any Feb 29 in the span skipped - and generates the start's
+ordinal plus the duration in rows, so the table spans from the
+calendar's Jan 1 to the run's end and the environment's calendar
+addressing reads every start's own calendar dates. A mid-year start
+reads the profile generated for its own dates; the leap-year mapping
+(`schedule_day_ordinal`'s after-Feb-29 shift, Feb 29 itself on the Mar 1
+slot) lands on the row generated for that date; the Dec 31 to Jan 1 wrap
+reads the Jan 1 row. The callers (`DwellingBlueprintBuilder::from_config`,
+the fleet's build, the Python constructor's generation span) pass the
+run's span unchanged: the anchor is the generator's contract.
+
+**Acceptance test:** `generated_schedule_midyear_start_reads_its_own_calendar_date`
+(`crates/hares-core/src/environment.rs`): the generated schedule over
+the shipped profiles, a Jul 1 2023 start fed to the environment manager:
+the payload's lighting value at the first step is the weekend hour-0
+fraction times July's multiplier (0.00574). `generated_schedule_leap_year_start_reads_march_after_feb29`:
+a Jan 1 2024 start's Mar 1 step reads the weekday hour-0 fraction times
+March's multiplier (0.01224), never the Feb 29 slot's February value
+(0.01332). `generated_schedule_dec31_wraps_to_the_jan1_profile`: the
+step at Jan 1 reads January's multiplier (0.00833), never the run's own
+first row's December (0.00840). Generator-level pins in
+`crates/hares-io/src/hpxml_schedule.rs`: the table starts at Jan 1 of
+the start's year and spans the start's ordinal plus the duration
+(181 + 7 days of 900 s rows for the Jul 1 test), a leap start year's
+Feb 29 is skipped (row 59 is Mar 1, row 60 Mar 2), and the Dec 31 run's
+table covers into Jan 1. RED first: all three environment tests read a
+rotated value (0.00984 / 0.01332 / 0.00840), the generator tests
+counted the run start as the anchor.
+
+**Verification:** the numbers above; `frame_golden compare-all` twice,
+10/10 identical on the default feature set and the dst fixture identical
+- no manifest moves, because every fixture carries an explicit schedule
+CSV and a Jan 1 non-leap start's generated table is bitwise the earlier
+one; the generated path's own pin
+(`schedule_path_contract::GENERATED_SCHEDULE_DIGEST`) re-captured
+deliberately (the 24 h Jan 15 start's table now spans the Jan 1 to
+Jan 15 rows the calendar addressing reads; the digest's comment names
+the move). fmt, clippy `--workspace --all-targets --all-features -D
+warnings` clean; nextest `--workspace --all-features -j 2` 8243/8243
+(8 skipped); `pytest -m ''` 1800 passed + 6 xfailed, 0 failed, 0
+errors; pyright 0.
+
+**Commit:** `fix: generated schedules are addressed by calendar date like the csv path`
+
+**Dependencies:** none outside the io and core crates.
+
+**State:** landed on `row/hw2-anchor` (worktree `hw2-anchor`, cut from
+`a0350e07`), commit `37c9095a`. The addressing convention's one known
+property, shared with the CSV path: rows past the anchor year carry the
+anchor year's weekday pattern (the 365-day calendar is cyclic annual
+data), so a run crossing into a second calendar year reads the anchor
+year's weekday type for the same ordinal.

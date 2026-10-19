@@ -3110,6 +3110,146 @@ mod tests {
         assert!((payload[0] - 1.23).abs() < 1.0e-6);
     }
 
+    /// The shipped default schedule profiles, the generated schedule's
+    /// source. Their month multipliers and hourly fractions are far enough
+    /// apart that a wrong calendar date reads a different value.
+    fn shipped_default_profiles() -> hares_io::DefaultProfiles {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
+        hares_io::load_default_profiles(&dir).expect("the shipped defaults CSV loads")
+    }
+
+    /// The schedule payload's value for one named column at the addressed
+    /// row, stepping the manager's clock to `sim_time` first.
+    fn generated_payload_value_at(
+        schedule: hares_io::ScheduleTimeSeries,
+        step_secs: i64,
+        sim_time: DateTime<FixedOffset>,
+        column: &str,
+    ) -> f64 {
+        let col_idx = *schedule
+            .column_index
+            .get(column)
+            .unwrap_or_else(|| panic!("column '{column}' is in the generated schedule"));
+        let mut manager = EnvironmentManager::new(
+            weather_series(),
+            schedule,
+            &building(Some(21.0)),
+            StdDuration::from_secs(u64::try_from(step_secs).expect("positive step")),
+            sim_time,
+            None,
+        )
+        .expect("manager");
+        let clock = SimClock::new(sim_time, Duration::seconds(step_secs), Duration::hours(24));
+        let env = manager.update(&clock, &[]).expect("update");
+        env.domains
+            .schedule
+            .get()
+            .and_then(|d| d.custom_payload.clone())
+            .expect("schedule payload")[col_idx]
+    }
+
+    /// A generated schedule is addressed by calendar date like the CSV
+    /// path: a run starting mid-year reads, at its first step, the profile
+    /// generated for the start's own calendar date. July 1 2023 is a
+    /// Saturday: the value is the weekend fraction at hour 0 times July's
+    /// month multiplier, not some other hour's or month's.
+    #[test]
+    fn generated_schedule_midyear_start_reads_its_own_calendar_date() {
+        let step_secs = 900;
+        let start = utc_offset()
+            .with_ymd_and_hms(2023, 7, 1, 0, 0, 0)
+            .single()
+            .expect("start");
+        let profiles = shipped_default_profiles();
+        let lighting = profiles.get("Indoor Lighting").expect("profile");
+        let expected = lighting.weekend_fractions[0] * lighting.month_multipliers[6];
+
+        let schedule = hares_io::hpxml_schedule::generate_default_schedule(
+            start,
+            Duration::hours(24 * 7),
+            Duration::seconds(step_secs),
+            &profiles,
+        )
+        .expect("the profiles generate the schedule");
+        let got = generated_payload_value_at(schedule, step_secs, start, "lighting_interior");
+        assert!(
+            (got - expected).abs() < 1.0e-12,
+            "a Jul 1 start must read the Jul 1 profile at step 0: expected \
+             {expected} (weekend hour 0 x July multiplier), got {got}"
+        );
+    }
+
+    /// A leap-year run's dates after Feb 29 map onto the 365-day calendar
+    /// the generated rows live on: March 1 2024 reads the profile
+    /// evaluated at March 1 (March's multiplier), never the Feb 29 slot's
+    /// February value. The month multiplier is the discriminator: the old
+    /// run-start-anchored table put a Feb 29 row where the environment's
+    /// addressing lands at Mar 1.
+    #[test]
+    fn generated_schedule_leap_year_start_reads_march_after_feb29() {
+        let step_secs = 3600;
+        let start = utc_offset()
+            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .single()
+            .expect("start");
+        let profiles = shipped_default_profiles();
+        let lighting = profiles.get("Indoor Lighting").expect("profile");
+        let expected = lighting.weekday_fractions[0] * lighting.month_multipliers[2];
+
+        let schedule = hares_io::hpxml_schedule::generate_default_schedule(
+            start,
+            Duration::hours(24 * 70),
+            Duration::seconds(step_secs),
+            &profiles,
+        )
+        .expect("the profiles generate the schedule");
+        let march_1 = utc_offset()
+            .with_ymd_and_hms(2024, 3, 1, 0, 0, 0)
+            .single()
+            .expect("March 1");
+        let got = generated_payload_value_at(schedule, step_secs, march_1, "lighting_interior");
+        assert!(
+            (got - expected).abs() < 1.0e-12,
+            "a leap-year run's Mar 1 must read the Mar 1 profile: expected \
+             {expected} (weekday hour 0 x March multiplier), got {got}"
+        );
+    }
+
+    /// A run spanning Dec 31 into Jan 1 wraps onto the schedule's Jan 1
+    /// row: the step at Jan 1 00:00 reads the profile evaluated at Jan 1
+    /// (January's multiplier), never the schedule's start-of-run row for
+    /// Dec 31 (December's).
+    #[test]
+    fn generated_schedule_dec31_wraps_to_the_jan1_profile() {
+        let step_secs = 900;
+        let start = utc_offset()
+            .with_ymd_and_hms(2023, 12, 31, 0, 0, 0)
+            .single()
+            .expect("start");
+        let profiles = shipped_default_profiles();
+        let lighting = profiles.get("Indoor Lighting").expect("profile");
+        let jan1 = utc_offset()
+            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .single()
+            .expect("Jan 1");
+        let expected = lighting.weekend_fractions[0] * lighting.month_multipliers[0];
+
+        let schedule = hares_io::hpxml_schedule::generate_default_schedule(
+            start,
+            Duration::hours(48),
+            Duration::seconds(step_secs),
+            &profiles,
+        )
+        .expect("the profiles generate the schedule");
+        let got = generated_payload_value_at(schedule, step_secs, jan1, "lighting_interior");
+        assert!(
+            (got - expected).abs() < 1.0e-12,
+            "the step at Jan 1 must read the Jan 1 profile: expected {expected} \
+             (January multiplier), got {got}"
+        );
+    }
+
     #[test]
     fn south_surface_receives_more_direct_solar_than_north_at_noon() {
         let mut manager = EnvironmentManager::new(
