@@ -3570,6 +3570,23 @@ fn build_from_blueprint_inner_with_seed(
         let rng_seed_before = dwelling.rng.get_seed();
         let rng_stream_before = dwelling.rng.get_stream();
         let rng_word_pos_before = dwelling.rng.get_word_pos();
+        // The actors' decision state before warmup is the construction
+        // state: the warm-up's decides would otherwise carry over - the
+        // EV driver's rolled day, the Occupant's step counter, the
+        // driving sources' draw positions - and production would start
+        // from wherever the last warm-up day stopped, a different place
+        // for every warm-up day count. Actors hold decision state only,
+        // so the snapshot is their complete stochastic state; equipment's
+        // thermal state is warm-up's product and is restored by nothing
+        // here.
+        let actor_states: Vec<Vec<u8>> = dwelling
+            .actors
+            .iter()
+            .map(|actor| actor.save_state())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|err| {
+                HaresError::Dwelling(format!("the pre-warm-up actor snapshot failed: {err}"))
+            })?;
 
         match dwelling.run_warmup_converged_inner(warmup_config) {
             Err(err) => {
@@ -3590,6 +3607,22 @@ fn build_from_blueprint_inner_with_seed(
             ),
             #[cfg(not(feature = "observe"))]
             Ok(_) => {}
+        }
+
+        // Restore every actor to its pre-warmup decision state and rewind
+        // every equipment's stochastic schedule sources to their
+        // construction position: production starts where a no-warmup run
+        // would, whatever the warm-up drew.
+        for (actor, state) in dwelling.actors.iter_mut().zip(&actor_states) {
+            actor.load_state(state).map_err(|err| {
+                HaresError::Dwelling(format!(
+                    "the post-warm-up restore of actor '{}' failed: {err}",
+                    actor.name()
+                ))
+            })?;
+        }
+        for eq in &mut dwelling.equipment {
+            eq.reset_stochastic_state();
         }
 
         // Restore RNG state to pre-warmup position.
@@ -16407,9 +16440,9 @@ occupancy = 1.0
             .find(|s| s.name == "EvDriver:EV1")
             .expect("checkpoint must carry the EV driver's state");
         assert_eq!(
-            entry.schema_version, 4,
-            "the EV driver snapshot schema is version 4 (the SI energies; v3 \
-             carried gate latches and the estimate failure)"
+            entry.schema_version, 5,
+            "the EV driver snapshot schema is version 5 (the schedule sources; \
+             v4 held the SI energies alone)"
         );
         // Tamper: pretend the blob was written by an earlier build.
         entry.schema_version = 1;
@@ -16425,7 +16458,7 @@ occupancy = 1.0
             msg.contains("actor schema version mismatch")
                 && msg.contains("EvDriver:EV1")
                 && msg.contains("blob=1")
-                && msg.contains("expected=4"),
+                && msg.contains("expected=5"),
             "error must name the actor and both versions; got: {msg}"
         );
         assert!(

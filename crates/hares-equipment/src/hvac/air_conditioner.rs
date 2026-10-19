@@ -279,6 +279,13 @@ impl RoomAC {
 }
 
 impl Equipment for AirConditioner {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.core.hvac.reset_stochastic_state();
+    }
+
     fn checkpoint_version() -> u32 {
         AC_CHECKPOINT_VERSION
     }
@@ -374,6 +381,13 @@ impl Equipment for AirConditioner {
 }
 
 impl Equipment for RoomAC {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.core.hvac.reset_stochastic_state();
+    }
+
     fn checkpoint_version() -> u32 {
         AC_CHECKPOINT_VERSION
     }

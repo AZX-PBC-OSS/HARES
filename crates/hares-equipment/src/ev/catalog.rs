@@ -552,6 +552,7 @@ impl ArchetypePreset {
         // are the drawn miles times the metre factor.
         const MILE_M: f64 = 1_609.344;
         let miles_to_m_shift = MILE_M.ln();
+
         let scale = |min: f64| -> Option<f64> { (min > 0.0).then_some(min * MILE_M) };
         if let (Some(wd_mu), Some(wd_sigma), Some(we_mu), Some(we_sigma)) = (
             self.weekday_miles_mu,
@@ -611,10 +612,32 @@ impl ArchetypePreset {
         }
     }
 
+    /// The miles source's key: the base seed unmodified.
+    pub fn derive_miles_seed(seed: [u8; 32]) -> [u8; 32] {
+        seed
+    }
+
+    /// The departure source's key: the base seed with byte 0 flipped.
+    pub fn derive_departure_seed(mut seed: [u8; 32]) -> [u8; 32] {
+        seed[0] ^= 0xDE;
+        seed
+    }
+
+    /// The trip-duration source's key: the base seed with byte 1 flipped.
+    pub fn derive_duration_seed(mut seed: [u8; 32]) -> [u8; 32] {
+        seed[1] ^= 0xD0;
+        seed
+    }
+
+    /// The arrival source's key: the base seed with byte 2 flipped.
+    pub fn derive_arrival_seed(mut seed: [u8; 32]) -> [u8; 32] {
+        seed[2] ^= 0xAA;
+        seed
+    }
+
     /// Build a `ScheduleSource` for departure time (minute of day) with Gaussian noise.
     pub fn build_departure_schedule(&self, seed: [u8; 32]) -> ScheduleSource {
-        let mut dep_seed = seed;
-        dep_seed[0] ^= 0xDE;
+        let dep_seed = Self::derive_departure_seed(seed);
         ScheduleSource::Stochastic {
             kind: DistributionKind::Gaussian {
                 mean: self.departure_minute_mean,
@@ -630,8 +653,7 @@ impl ArchetypePreset {
 
     /// Build a `ScheduleSource` for trip duration (minutes) with Gaussian noise.
     pub fn build_duration_schedule(&self, seed: [u8; 32]) -> ScheduleSource {
-        let mut dur_seed = seed;
-        dur_seed[1] ^= 0xD0;
+        let dur_seed = Self::derive_duration_seed(seed);
         ScheduleSource::Stochastic {
             kind: DistributionKind::Gaussian {
                 mean: self.duration_minutes_mean,
@@ -651,8 +673,7 @@ impl ArchetypePreset {
     pub fn build_arrival_schedule(&self, seed: [u8; 32]) -> Option<ScheduleSource> {
         let mean = self.arrival_minute_mean?;
         let stddev = self.arrival_minute_stddev?;
-        let mut arr_seed = seed;
-        arr_seed[2] ^= 0xAA;
+        let arr_seed = Self::derive_arrival_seed(seed);
         Some(ScheduleSource::Stochastic {
             kind: DistributionKind::Gaussian {
                 mean,

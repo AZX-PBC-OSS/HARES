@@ -550,6 +550,13 @@ impl Ventilation {
 }
 
 impl Equipment for Ventilation {
+    fn reset_stochastic_state(&mut self) {
+        // The schedule source at its seed and cursor: the production phase
+        // reads it from the construction position, whatever the warm-up
+        // drew.
+        self.schedule_source.reset();
+    }
+
     fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
         vec![
             hares_types::ResolvedParameter::new(

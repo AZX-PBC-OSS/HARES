@@ -69,7 +69,7 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::{Actor, ActorTarget};
 
-use self::composer::ChargingComposer;
+use self::composer::{ChargingComposer, ComposerCarriedState};
 use self::departure::DepartureDeadline;
 use self::preference::{
     ChargingPreference, DecisionContext, minutes_until, needed_charge_hours_to_target,
@@ -1366,6 +1366,23 @@ struct EvDriverSnapshot {
     gate_latches: Vec<bool>,
     /// The sticky health failure; see `EvDriverActor::estimate_error`.
     estimate_error: Option<String>,
+    /// The composer's carried decision state (the last action, the last
+    /// resolved target, rate and cap, the last needed-charge-hours
+    /// estimate).
+    composer_carried: ComposerCarriedState,
+    /// The four driving schedule sources' positions (the draws a restore
+    /// continues from): the miles, departure, trip-duration and arrival
+    /// sources each carry their own generator.
+    sources: EvDriverSourceStates,
+}
+
+/// The four driving schedule sources' captured positions.
+#[derive(Serialize, Deserialize)]
+struct EvDriverSourceStates {
+    miles: hares_types::ScheduleSourceState,
+    departure: hares_types::ScheduleSourceState,
+    duration: hares_types::ScheduleSourceState,
+    arrival: Option<hares_types::ScheduleSourceState>,
 }
 
 impl Actor for EvDriverActor {
@@ -1393,12 +1410,24 @@ impl Actor for EvDriverActor {
     /// assigned at construction (or taken over from the driver it
     /// replaced), so reseeding keeps it and replaces the dwelling's
     /// generator key, the draws starting over at word position zero. The
-    /// driver draws nothing ahead of its stream at construction, so there
-    /// is nothing to redraw.
+    /// driving schedule sources re-derive beside it: each source's key is
+    /// the construction derivation applied to the new key, each position
+    /// rewound to its start, so a reseeded episode's draws are the seed's,
+    /// never the previous episode's.
     fn reseed(&mut self, seed: [u8; 32]) -> Result<(), HaresError> {
+        use hares_equipment::ev::catalog::ArchetypePreset;
         let stream = self.rng.get_stream();
         self.rng = ChaCha8Rng::from_seed(seed);
         self.rng.set_stream(stream);
+        self.daily_drive_distance_m
+            .rederive(ArchetypePreset::derive_miles_seed(seed));
+        self.departure_time
+            .rederive(ArchetypePreset::derive_departure_seed(seed));
+        self.trip_duration
+            .rederive(ArchetypePreset::derive_duration_seed(seed));
+        if let Some(source) = self.arrival_time.as_mut() {
+            source.rederive(ArchetypePreset::derive_arrival_seed(seed));
+        }
         Ok(())
     }
 
@@ -1769,6 +1798,13 @@ impl Actor for EvDriverActor {
             drive_cancelled: self.drive_cancelled,
             gate_latches: self.composer.gate_latches(),
             estimate_error: self.estimate_error.clone(),
+            composer_carried: self.composer.carried_state(),
+            sources: EvDriverSourceStates {
+                miles: self.daily_drive_distance_m.capture_state(),
+                departure: self.departure_time.capture_state(),
+                duration: self.trip_duration.capture_state(),
+                arrival: self.arrival_time.as_ref().map(|s| s.capture_state()),
+            },
         };
         postcard::to_allocvec(&snap)
             .map_err(|e| HaresError::Io(format!("EvDriverActor save_state: {e}")))
@@ -1792,6 +1828,21 @@ impl Actor for EvDriverActor {
         self.drive_cancelled = snap.drive_cancelled;
         self.composer.restore_gate_latches(&snap.gate_latches)?;
         self.estimate_error = snap.estimate_error;
+        self.composer.restore_carried_state(snap.composer_carried);
+        self.daily_drive_distance_m
+            .restore_state(&snap.sources.miles)?;
+        self.departure_time.restore_state(&snap.sources.departure)?;
+        self.trip_duration.restore_state(&snap.sources.duration)?;
+        match (&mut self.arrival_time, snap.sources.arrival) {
+            (Some(source), Some(saved)) => source.restore_state(&saved)?,
+            (None, None) => {}
+            (live, saved) => {
+                return Err(HaresError::Io(format!(
+                    "EvDriverActor load_state: the arrival source and its snapshot disagree \
+                     (live {live:?}, snapshot {saved:?})"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1809,8 +1860,16 @@ impl Actor for EvDriverActor {
     /// hold J (SI) where v3 held kWh - a v3 blob's energies would read
     /// 3.6e6x small; the version gate rejects it here, at the checkpoint
     /// boundary.
+    ///
+    /// v5: the snapshot carries the four driving schedule sources'
+    /// positions (the miles, departure, trip-duration and arrival
+    /// generators), so a checkpoint restore continues the driver's draws
+    /// where the saved run left them and a reseed re-derives every source
+    /// from the new key. A v4 blob's sources would read at their
+    /// construction position - silently wrong draws - so the version gate
+    /// rejects it here.
     fn checkpoint_version(&self) -> u32 {
-        4
+        5
     }
 
     fn rng_pair(&self) -> Option<([u8; 32], u64)> {
@@ -1900,6 +1959,103 @@ mod tests {
         actor.phase = DriverPhase::HomePluggedIn;
         actor.estimated_soc = soc;
         actor
+    }
+
+    /// An actor whose four driving sources are the archetype's stochastic
+    /// ones (the caller's seed), the way the registry's preset path builds
+    /// them.
+    fn make_preset_actor(seed: [u8; 32]) -> EvDriverActor {
+        use hares_equipment::ev::catalog::{EvArchetypeId, archetype_by_id};
+        let preset = archetype_by_id(EvArchetypeId::DailyCommuterL2.to_string().as_str())
+            .expect("the archetype exists");
+        EvDriverActor::new(
+            "EvDriver:EV1",
+            "EV1",
+            EvDriverParams {
+                strategy: preset.strategy.clone(),
+                plug_in_policy: preset.plug_in_policy.clone(),
+                daily_drive_distance_m: preset.build_distance_schedule(seed),
+                departure_time: preset.build_departure_schedule(seed),
+                trip_duration: preset.build_duration_schedule(seed),
+                arrival_time: preset.build_arrival_schedule(seed),
+                event_day_ratio: preset.event_day_ratio,
+                fuel_economy_j_per_m: 0.3 * 3.6e6 / 1609.344,
+                capacity_j: 60.0 * 3.6e6,
+                max_charge_w: 7200.0,
+                average_speed_m_per_s: defaults::AVERAGE_SPEED_M_PER_S,
+                range_anxiety_distance_m: defaults::RANGE_ANXIETY_DISTANCE_M,
+                away_charge_fraction: 0.0,
+                away_charge_power_w: 0.0,
+            },
+            ChaCha8Rng::seed_from_u64(42),
+        )
+    }
+
+    /// Reseed re-derives every driving source from the new dwelling key:
+    /// each source's key is the construction derivation of the seed, each
+    /// position rewound, and two seeds never share a source keystream - a
+    /// reseeded episode's draws are the seed's, never the previous
+    /// episode's.
+    #[test]
+    fn reseed_rederives_every_driving_source_from_the_new_key() {
+        use hares_equipment::ev::catalog::ArchetypePreset;
+
+        let key_one = {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&1u64.to_le_bytes());
+            b
+        };
+        let key_two = {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&2u64.to_le_bytes());
+            b
+        };
+
+        // Draw from every source, then reseed: the sources land on the new
+        // key's derivations at word position zero.
+        let mut actor = make_preset_actor(key_one);
+        let env = env_at_minute(0);
+        let _ = actor.daily_drive_distance_m.value_at(&env).expect("draw");
+        let _ = actor.departure_time.value_at(&env).expect("draw");
+        let _ = actor.trip_duration.value_at(&env).expect("draw");
+        actor.reseed(key_two).expect("the actor reseeds");
+
+        let source_seed = |source: &ScheduleSource| match source {
+            ScheduleSource::Stochastic {
+                seed,
+                draw_count,
+                rng,
+                ..
+            } => (*seed, *draw_count, rng.get_word_pos()),
+            other => panic!("a stochastic source, got {other:?}"),
+        };
+        let (miles_seed, miles_draws, miles_pos) = source_seed(&actor.daily_drive_distance_m);
+        let (dep_seed, dep_draws, _) = source_seed(&actor.departure_time);
+        let (dur_seed, dur_draws, _) = source_seed(&actor.trip_duration);
+        assert_eq!(miles_seed, ArchetypePreset::derive_miles_seed(key_two));
+        assert_eq!(dep_seed, ArchetypePreset::derive_departure_seed(key_two));
+        assert_eq!(dur_seed, ArchetypePreset::derive_duration_seed(key_two));
+        assert_eq!((miles_draws, dep_draws, dur_draws), (0, 0, 0));
+        assert_eq!(miles_pos, 0);
+        if let Some(source) = &actor.arrival_time {
+            let (arr_seed, arr_draws, _) = source_seed(source);
+            assert_eq!(arr_seed, ArchetypePreset::derive_arrival_seed(key_two));
+            assert_eq!(arr_draws, 0);
+        }
+
+        // Two seeds never share a keystream: the drawn miles after a
+        // reseed with key one differ from a reseed with key two.
+        let drawn_miles = |key: [u8; 32]| {
+            let mut actor = make_preset_actor(key);
+            actor.reseed(key).expect("the actor reseeds");
+            let env = env_at_minute(0);
+            actor.daily_drive_distance_m.value_at(&env).expect("draw")
+        };
+        assert_ne!(
+            drawn_miles(key_one),
+            drawn_miles(key_two),
+            "two seeds must not share a source keystream"
+        );
     }
 
     fn plugged_in_step(actor: &mut EvDriverActor, minute: u16) -> Vec<DispatchRequest> {

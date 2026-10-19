@@ -395,6 +395,178 @@ pub enum ScheduleSource {
     },
 }
 
+/// A captured schedule source's mutable position: the state a checkpoint
+/// or a warm-up boundary carries so the source's next draw lands where the
+/// captured run's would. Stateless sources carry the `Stateless` record,
+/// so a snapshot field reads the same on every source shape.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ScheduleSourceState {
+    Stateless,
+    Stochastic {
+        draw_count: u64,
+    },
+    Shared {
+        cursor: usize,
+    },
+    /// TimeWindows with noisy windows: the RNG word position is saved
+    /// directly because replay is impossible (the distribution sampled
+    /// varies per matching window).
+    NoisyTimeWindows {
+        draw_count: u64,
+        rng_word_pos: u128,
+    },
+}
+
+impl ScheduleSource {
+    /// The source's mutable position, captured for a checkpoint or a
+    /// warm-up boundary.
+    #[must_use]
+    pub fn capture_state(&self) -> ScheduleSourceState {
+        match self {
+            Self::Shared { cursor, .. } => ScheduleSourceState::Shared { cursor: *cursor },
+            Self::Stochastic { draw_count, .. } => ScheduleSourceState::Stochastic {
+                draw_count: *draw_count,
+            },
+            Self::TimeWindows { rng_state, .. } => match rng_state.as_ref() {
+                Some(st) => ScheduleSourceState::NoisyTimeWindows {
+                    draw_count: st.draw_count,
+                    rng_word_pos: st.rng.get_word_pos(),
+                },
+                None => ScheduleSourceState::Stateless,
+            },
+            Self::Constant(_)
+            | Self::DailyProfile { .. }
+            | Self::ColumnRef { .. }
+            | Self::SolarAware { .. } => ScheduleSourceState::Stateless,
+        }
+    }
+
+    /// Restores a captured position: the source's next draw lands where
+    /// the captured run's would. A mismatch between the saved state's
+    /// variant and the source's own is an error naming the shapes, never a
+    /// silent position loss.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError::Equipment`] when the saved state names a kind this
+    /// source is not (`NoisyTimeWindows` state into a source without an
+    /// RNG, a `Shared` cursor into a non-shared source), or a stochastic
+    /// replay draw fails its distribution's validation.
+    pub fn restore_state(&mut self, saved: &ScheduleSourceState) -> Result<(), HaresError> {
+        match (self, saved) {
+            (Self::Shared { cursor, .. }, ScheduleSourceState::Shared { cursor: saved }) => {
+                *cursor = *saved;
+                Ok(())
+            }
+            (
+                Self::Stochastic {
+                    kind,
+                    seed,
+                    draw_count,
+                    rng,
+                    ..
+                },
+                ScheduleSourceState::Stochastic {
+                    draw_count: target_draw_count,
+                },
+            ) => {
+                // Re-seed and replay draws to advance the RNG to the correct
+                // state. This is safe for all distribution kinds regardless of
+                // per-draw RNG word consumption (e.g. Poisson uses rejection
+                // sampling).
+                *rng = ChaCha8Rng::from_seed(*seed);
+                for _ in 0..*target_draw_count {
+                    kind.sample(rng)?;
+                }
+                *draw_count = *target_draw_count;
+                Ok(())
+            }
+            (
+                Self::TimeWindows { rng_state, .. },
+                ScheduleSourceState::NoisyTimeWindows {
+                    draw_count,
+                    rng_word_pos,
+                },
+            ) => {
+                let st = rng_state.as_mut().ok_or_else(|| {
+                    HaresError::Equipment(
+                        "checkpoint contains NoisyTimeWindows state but source has no rng_state"
+                            .into(),
+                    )
+                })?;
+                // Restore RNG to exact position via word-level seek.
+                // Replay isn't possible because the distribution sampled
+                // varies per matching window at each timestep.
+                st.rng = ChaCha8Rng::from_seed(st.seed);
+                st.rng.set_word_pos(*rng_word_pos);
+                st.draw_count = *draw_count;
+                Ok(())
+            }
+            (
+                Self::Constant(_)
+                | Self::DailyProfile { .. }
+                | Self::ColumnRef { .. }
+                | Self::SolarAware { .. },
+                ScheduleSourceState::Stateless,
+            ) => Ok(()),
+            (Self::TimeWindows { .. }, ScheduleSourceState::Stateless) => {
+                // A TimeWindows source without noise is stateless; one with
+                // noise never captures Stateless. Restore nothing.
+                Ok(())
+            }
+            (source, saved) => Err(HaresError::Equipment(format!(
+                "schedule source state mismatch: the saved state is {saved:?} but the live \
+                 source is a {:?} source",
+                source.kind_name()
+            ))),
+        }
+    }
+
+    /// Re-keys this source to `seed` and rewinds it to its start: the
+    /// stochastic generators take the caller's key (the derivation the
+    /// source's builder applied), draw counters at zero. Stateless sources
+    /// are unchanged; a shared source's cursor rewinds.
+    pub fn rederive(&mut self, seed: [u8; 32]) {
+        match self {
+            Self::Stochastic {
+                seed: source_seed,
+                draw_count,
+                rng,
+                ..
+            } => {
+                *source_seed = seed;
+                *draw_count = 0;
+                *rng = ChaCha8Rng::from_seed(seed);
+            }
+            Self::TimeWindows { rng_state, .. } => {
+                if let Some(st) = rng_state.as_mut() {
+                    st.seed = seed;
+                    st.reset();
+                }
+            }
+            Self::Shared { cursor, .. } => *cursor = 0,
+            Self::Constant(_)
+            | Self::DailyProfile { .. }
+            | Self::ColumnRef { .. }
+            | Self::SolarAware { .. } => {}
+        }
+    }
+
+    /// The source kind's name, for error messages.
+    #[must_use]
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Constant(_) => "constant",
+            Self::DailyProfile { .. } => "daily profile",
+            Self::ColumnRef { .. } => "column reference",
+            Self::SolarAware { .. } => "solar aware",
+            Self::Stochastic { .. } => "stochastic",
+            Self::Shared { .. } => "shared",
+            Self::TimeWindows { .. } => "time windows",
+        }
+    }
+}
+
 /// Serde-friendly schedule config representation for typed equipment configs.
 ///
 /// This is the canonical persisted form used in config payloads; runtime code

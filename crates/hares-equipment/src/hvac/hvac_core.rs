@@ -504,6 +504,13 @@ impl HvacConfig {
 }
 
 impl HvacEquipment {
+    /// Rewinds the thermostat's schedule setpoint sources to their seeds
+    /// and cursors: the warm-up boundary's call, so production reads them
+    /// from the construction position, whatever the warm-up drew.
+    pub fn reset_stochastic_state(&mut self) {
+        self.thermostat_fsm.reset_schedule_sources();
+    }
+
     pub fn new(equipment_type: HvacEquipmentType, zone_id: impl Into<Option<ZoneId>>) -> Self {
         let zone_id = zone_id.into();
         let default_cd = match equipment_type {

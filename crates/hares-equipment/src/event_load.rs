@@ -588,6 +588,21 @@ impl Equipment for EventBasedLoad {
         EVENT_LOAD_CHECKPOINT_VERSION
     }
 
+    fn reset_stochastic_state(&mut self) {
+        // The construction position: idle, no delay, the start stream at
+        // its first draw, the schedule sources at their seeds.
+        self.phase = EventPhase::Idle;
+        self.remaining_phase_s = 0.0;
+        self.delay_remaining_s = 0.0;
+        self.replay.current = None;
+        self.event_window_source.reset();
+        self.event_probability_source.reset();
+        if let Some(draws) = self.start_draws.as_mut() {
+            draws.draws = 0;
+            draws.rng = draws.stream.rng_at(0);
+        }
+    }
+
     fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
         vec![
             hares_types::ResolvedParameter::new(
@@ -1170,6 +1185,23 @@ impl WetAppliance {
 impl Equipment for WetAppliance {
     fn checkpoint_version() -> u32 {
         EVENT_LOAD_CHECKPOINT_VERSION
+    }
+
+    fn reset_stochastic_state(&mut self) {
+        // The construction position: idle mid-cycle nowhere, no delay, the
+        // start stream at its first draw, the schedule sources at their
+        // seeds.
+        self.active = false;
+        self.phase_index = 0;
+        self.elapsed_in_phase_s = 0.0;
+        self.delay_remaining_s = 0.0;
+        self.replay.current = None;
+        self.event_window_source.reset();
+        self.event_probability_source.reset();
+        if let Some(draws) = self.start_draws.as_mut() {
+            draws.draws = 0;
+            draws.rng = draws.stream.rng_at(0);
+        }
     }
 
     fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {

@@ -90,7 +90,14 @@ use serde::{Deserialize, Serialize};
 /// hold J, W and VAR, and the checkpoint sections carrying them carry
 /// the SI names. Checkpoints written by v19 builds are rejected by the
 /// version gate.
-pub const CHECKPOINT_VERSION: u32 = 20;
+///
+/// v21: every stochastic schedule source rides in the checkpoint - the
+/// water heaters' draw, mains and appliance sources, and the EV driver's
+/// four driving sources (miles, departure, trip duration, arrival) - so
+/// a restore continues every draw where the saved run left it and a
+/// reseed re-derives every source from the new key. Checkpoints written
+/// by v20 builds are rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 21;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -148,6 +155,19 @@ pub struct DwellingCheckpoint {
     pub format_version: u32,
     pub bldg_id: i64,
     pub timestep_index: u64,
+    /// The environment's actor-facing equipment snapshots, carried
+    /// exactly: the previous step's telemetry and typed core outputs the
+    /// actors read. Rebuilding them from the restored equipment would
+    /// hand the actors the equipment's committed state where the saved
+    /// run's actors read the freshest committed snapshot at save time -
+    /// a different thing whenever an equipment's telemetry and its
+    /// committed state diverge (an init-time default never stepped) - so
+    /// the restore overwrites the maps with these.
+    #[serde(default)]
+    pub env_equipment_telemetry: std::collections::HashMap<String, hares_types::Telemetry>,
+    #[serde(default)]
+    pub env_equipment_core:
+        std::collections::HashMap<hares_types::EquipmentId, hares_types::CoreOutput>,
     /// Per-equipment state, identity-keyed. Each entry carries the
     /// equipment's name and id alongside its opaque state blob; restore
     /// matches by name and validates the id before handing the blob to
@@ -361,6 +381,8 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 7,
             timestep_index: 12,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![EquipmentStateCheckpoint {
                 name: "EV".into(),
                 equipment_id: 3,
@@ -544,9 +566,9 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 20;
+    const PINNED_VERSION: u32 = 21;
     const PINNED_SCHEMA_SHA256: &str =
-        "0dc3a17a1baa28d060169ef00e09ecc4eb16e0fef9b6cf981cf79c01bca23195";
+        "9342153583db2c77d95ea3afed541d637fe35365a06a70f884aca8d095c82ec0";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the
@@ -562,6 +584,18 @@ mod tests {
                 .map(|_| ())?;
             tracer
                 .trace_simple_type::<hares_io::MetricsDeadbandSnapshot>()
+                .map(|_| ())?;
+            // The actor-facing environment maps' nested enums: the
+            // equipment telemetry's and core outputs' power, fuel and
+            // operating-mode records.
+            tracer
+                .trace_simple_type::<hares_types::ElectricPower>()
+                .map(|_| ())?;
+            tracer
+                .trace_simple_type::<hares_types::FuelType>()
+                .map(|_| ())?;
+            tracer
+                .trace_simple_type::<hares_types::OperatingMode>()
                 .map(|_| ())?;
             tracer
                 .trace_simple_type::<DwellingCheckpoint>()
@@ -651,6 +685,8 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 42,
             timestep_index: 100,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),
@@ -684,6 +720,8 @@ mod tests {
             format_version: 1, // intentionally wrong — older than CHECKPOINT_VERSION
             bldg_id: 1,
             timestep_index: 0,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),
@@ -880,6 +918,8 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 1,
             timestep_index: 0,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),
@@ -932,6 +972,8 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 7,
             timestep_index: 12,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),
@@ -1024,6 +1066,8 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 1,
             timestep_index: 30,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),
@@ -1063,6 +1107,8 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 1,
             timestep_index: 0,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),

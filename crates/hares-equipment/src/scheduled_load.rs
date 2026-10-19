@@ -275,6 +275,16 @@ impl ScheduledLoad {
 }
 
 impl Equipment for ScheduledLoad {
+    fn reset_stochastic_state(&mut self) {
+        // The schedule sources at their seeds and cursors: the production
+        // phase reads them from the construction position, whatever the
+        // warm-up drew.
+        self.power_source.reset();
+        if let Some(gas) = self.gas_source.as_mut() {
+            gas.reset();
+        }
+    }
+
     fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
         vec![hares_types::ResolvedParameter::new(
             "usage_multiplier",

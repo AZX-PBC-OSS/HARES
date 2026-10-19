@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "51152c523f3d06d263e67052a9fbf21c24a6d4a7",
+  "git_head": "37c9095aaf5a8903b25575502f5068572325f04f",
   "git_dirty": true,
   "metrics": [
     {
@@ -1015,9 +1015,9 @@
         },
         {
           "name": "actor:BatteryManagementActor:Battery:bms_toggled",
-          "digest": "e91004e2a46f572b5421f2d4464a76c55dc207efabc3eff0e94c6b5eaaed2f8a",
+          "digest": "04481ead8312cc473a4fbdea8cfffaee81c3a032ae730c1db087f636eb093cf8",
           "blocks": [
-            "6cdaad23637c8d9a01c1bf9c919e374e4f90d2554e1f210ef7c1a94a96afe93a",
+            "da08ad5f4b3d5077e8835bd7773aad45805696f31af18c1ab5d88c355d224341",
             "02982e612a395fa81523a6bbafd98eba7706c9e851b261ddd4816f0172fae967",
             "6c35b57fb07edcd04183ddeb11de861361a4d40cfca296c82bbff29d708ba18f",
             "93924ed3b60518e2b5db8322fcc3cf86d59d16457435cdbc51c20a6883ecb7b0",

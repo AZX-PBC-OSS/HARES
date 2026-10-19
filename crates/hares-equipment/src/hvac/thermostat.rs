@@ -341,6 +341,18 @@ pub struct ThermostatFsm {
 }
 
 impl ThermostatFsm {
+    /// Rewinds the thermostat's schedule setpoint sources to their seeds
+    /// and cursors: the warm-up boundary's call, so production reads them
+    /// from the construction position, whatever the warm-up drew.
+    pub fn reset_schedule_sources(&mut self) {
+        if let Some(source) = self.heating_setpoint_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.cooling_setpoint_source.as_mut() {
+            source.reset();
+        }
+    }
+
     /// The thermostat's turn-on/turn-off threshold temperatures per axis,
     /// the thresholds `update_mode_at` switches on (thermostat.rs:432-435).
     /// Returns `((heat_turn_on, heat_turn_off), (cool_turn_on, cool_turn_off))`.

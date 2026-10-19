@@ -372,6 +372,13 @@ impl IdealHvac {
 }
 
 impl Equipment for IdealHvac {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.thermostat_fsm.reset_schedule_sources();
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }

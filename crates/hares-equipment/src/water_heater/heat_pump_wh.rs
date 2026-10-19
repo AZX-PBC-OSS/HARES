@@ -11,10 +11,12 @@ use hares_types::{
     CoreState, DRLevel, DutyCycleComponent, ElectricPower, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidNodeId, FluidType, FuelType, HaresError,
     HeatTransferDirection, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots,
-    ScheduleSource, Telemetry, TelemetryField, ThermalCategory, telemetry_keys as tk,
+    ScheduleSource, ScheduleSourceState, Telemetry, TelemetryField, ThermalCategory,
+    telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::schedule_helpers::{capture_schedule_source_state, restore_optional_source};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 pub use super::hpwh_compressor::ElementHpControlMode;
@@ -45,7 +47,7 @@ use super::{
 
 /// v3: the state no longer carries a ramp target setpoint (this type has
 /// no setpoint ramp).
-const HPWH_CHECKPOINT_VERSION: u32 = 3;
+const HPWH_CHECKPOINT_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HpwhState {
@@ -82,6 +84,9 @@ struct HpwhState {
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
     dr_duration_remaining_s: Option<f64>,
+    // --- Schedule-source position (the draws and cursors a restore
+    // continues from) ---
+    appliance_draw_source_state: Option<ScheduleSourceState>,
 }
 
 pub struct HeatPumpWH {
@@ -732,6 +737,15 @@ impl HeatPumpWH {
 }
 
 impl Equipment for HeatPumpWH {
+    fn reset_stochastic_state(&mut self) {
+        // The appliance draw source at its seed and cursor: the production
+        // phase reads it from the construction position, whatever the
+        // warm-up drew.
+        if let Some(source) = self.appliance_draw_source.as_mut() {
+            source.reset();
+        }
+    }
+
     fn checkpoint_version() -> u32 {
         HPWH_CHECKPOINT_VERSION
     }
@@ -1298,6 +1312,10 @@ impl Equipment for HeatPumpWH {
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
                 dr_load_fraction: self.dr_load_fraction,
                 dr_duration_remaining_s: self.dr_duration_remaining_s,
+                appliance_draw_source_state: self
+                    .appliance_draw_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
             },
             Self::checkpoint_version(),
             "HeatPumpWH",
@@ -1328,6 +1346,10 @@ impl Equipment for HeatPumpWH {
         self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
         self.dr_load_fraction = decoded.dr_load_fraction;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
+        restore_optional_source(
+            &mut self.appliance_draw_source,
+            decoded.appliance_draw_source_state,
+        )?;
         self.tank.load_state(&decoded.tank_state)?;
 
         self.telemetry

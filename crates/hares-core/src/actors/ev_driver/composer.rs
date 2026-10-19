@@ -2,10 +2,23 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{ControlSignal, HaresError};
 
 use super::preference::{ChargingPreference, Constraint, DecisionContext, PreferenceVote};
+
+/// The composer's carried decision state, checkpointed beside the gate
+/// latches: the fields the next decision reads before any new vote lands.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComposerCarriedState {
+    pub last_action: String,
+    pub last_resolved_target_soc: Option<f64>,
+    pub last_resolved_power_w: Option<f64>,
+    pub last_resolved_max_soc: Option<f64>,
+    pub last_needed_charge_hours: f64,
+}
 
 /// Evaluates a set of ChargingPreference instances and resolves
 /// conflicting votes into a single DispatchRequest per timestep.
@@ -133,6 +146,29 @@ impl ChargingComposer {
             preference.restore_charging_allowed(allowed);
         }
         Ok(())
+    }
+
+    /// The composer's carried decision state: the last action, the last
+    /// resolved target, rate and cap, and the last needed-charge-hours
+    /// estimate. The checkpoint carries them so a restore's next decision
+    /// reads the saved run's carried state, never the restore's own.
+    pub fn carried_state(&self) -> ComposerCarriedState {
+        ComposerCarriedState {
+            last_action: self.last_action.clone(),
+            last_resolved_target_soc: self.last_resolved_target_soc,
+            last_resolved_power_w: self.last_resolved_power_w,
+            last_resolved_max_soc: self.last_resolved_max_soc,
+            last_needed_charge_hours: self.last_needed_charge_hours,
+        }
+    }
+
+    /// Restores the state [`Self::carried_state`] saved.
+    pub fn restore_carried_state(&mut self, state: ComposerCarriedState) {
+        self.last_action = state.last_action;
+        self.last_resolved_target_soc = state.last_resolved_target_soc;
+        self.last_resolved_power_w = state.last_resolved_power_w;
+        self.last_resolved_max_soc = state.last_resolved_max_soc;
+        self.last_needed_charge_hours = state.last_needed_charge_hours;
     }
 
     /// The most recent needed-charge-hours estimate from preferences

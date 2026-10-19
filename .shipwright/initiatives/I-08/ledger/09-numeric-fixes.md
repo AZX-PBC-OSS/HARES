@@ -5060,3 +5060,112 @@ property, shared with the CSV path: rows past the anchor year carry the
 anchor year's weekday pattern (the 365-day calendar is cyclic annual
 data), so a run crossing into a second calendar year reads the anchor
 year's weekday type for the same ordinal.
+
+## Hardening 4: warm-up restores every stochastic stream, not only the dwelling rng
+
+**Kind:** numeric fix (the hardening phase's warm-up neutrality and
+checkpoint-completeness entry).
+
+**Problem:** the warm-up ran the full timestep pipeline (actors decide,
+event loads draw) and afterwards restored only the dwelling rng
+(`build_from_blueprint_inner_with_seed`'s snapshot block), so
+production inherited every warm-up draw position: the event loads'
+`StartDraws` sat `days_run * steps_per_day` draws into their streams,
+every stochastic or shared schedule source sat mid-cursor, the EV
+driver's day-roll rng and its four driving sources (miles, departure,
+trip duration, arrival - each with its own ChaCha8 generator) sat at the
+last warm-up day's positions, and the Occupant's presence read a
+rotated step counter. Production telemetry therefore depended on the
+warm-up day count - a warm-up converging at day 2 and one at day 4 ran
+different production episodes - and the Occupant's rotated counter fell
+silently back to `Presence::Home` past the schedule's end (release; the
+debug assert fired). Beside that, the checkpoint contract had the same
+holes in its own shape: `ScheduleSource::reset()` had no production
+caller, the EV driver's snapshot carried only its day-roll rng (episode
+two's draws continued episode one's sources, so `reset(seed)` twice
+diverged), and the water heaters' draw, mains and appliance schedule
+sources rode in no snapshot at all.
+
+**Change:** three moves. The warm-up boundary: the dwelling snapshots
+every actor's decision state before warm-up and restores it after (the
+actors hold decision state only, so the snapshot is their complete
+stochastic state), and rewinds every equipment's stochastic schedule
+sources to their construction position through the new
+`Equipment::reset_stochastic_state` (default no-op): the event loads'
+`StartDraws` to draw zero with the phase back at idle, the schedule
+sources of the scheduled loads, ventilation, the thermostats' setpoint
+sources and all five water heaters at their seeds and cursors. The
+Occupant's presence reads the environment's calendar schedule row
+(`env.schedule_row`, the same row addressing the occupancy column's
+values) with the private counter kept only as the fallback for states
+built without an environment manager - presence follows the clock
+whatever decided before production. The checkpoint's shape: the EV
+driver's snapshot carries the composer's carried decision state and all
+four driving sources' positions (the actor schema at version 5), every
+water heater's state carries its sources' positions (gas, tankless,
+resistance and the heat pump at their next versions, the indirect tank
+gaining its first explicit version), and the checkpoint carries the
+environment's actor-facing equipment maps (the telemetry and typed core
+outputs the actors read) restored as saved rather than rebuilt from the
+restored equipment. `Actor::reseed` re-derives every driving source
+from the new dwelling key (the construction derivation applied to the
+seed, each position rewound), so a reseeded episode's draws are the
+seed's, never the previous episode's; the per-source key derivations
+moved next to the archetype builders that own them
+(`ArchetypePreset::derive_miles_seed` and siblings). The schedule-source
+state type moved to `hares-types` beside `ScheduleSource`
+(`ScheduleSourceState` with `capture_state`/`restore_state`/`rederive`):
+one home for the capture, the mismatched-restore error and the
+re-derivation, with the equipment crate's helpers delegating.
+
+**Acceptance test:** `production_telemetry_is_invariant_to_the_warmup_day_count`
+(`crates/hares-core/tests/warmup_stochastic_neutrality.rs`): a synthetic
+dwelling whose only thermal state sits at a fixed forcing (constant
+weather, solar off, no HVAC, a zero-gain event load), warm-up forced to
+two and to four days (`warmup = { min_days = k, max_days = k }`, both
+counts pinned through the run health): two simulated days of production
+telemetry - net electric, HVAC delivery, gas, every equipment and actor
+channel - bit-identical across the two warm-up day counts. (The zone
+temperatures are not compared: they carry warm-up's thermal initial
+condition, the convergence criteria's to bound, and feed back into
+nothing the stochastic state reads here.)
+`gym_style_reset_seed_twice_is_bit_identical_on_an_ev_archetype_dwelling`:
+the step-0 checkpoint restored, the streams reseeded, an episode run,
+then the same restore and reseed again: two episodes bit-identical for
+a dwelling with an EV carrying the archetype's stochastic driving
+sources beside a stochastic event load. Unit pins: `reseed_rederives_every_driving_source_from_the_new_key`
+(each source's key is the new key's derivation, positions zero, two
+seeds never share a keystream), `presence_follows_the_environment_schedule_row_not_the_step_counter`
+(a rotated counter cannot rotate presence), `checkpoint_restore_continues_the_stochastic_draw_source`
+(a gas water heater's noisy draw source continues, not rewinds, across a
+restore). RED first: the invariance test's event patterns diverged
+(the first event at step 4 against step 1), the gym test's first
+episode never charged at step 0 while the restored episode charged 3.75
+kW from a rebuilt environment map, the water heaters' draw state rode in
+no snapshot.
+
+**Verification:** the tests above; `frame_golden compare-all` on the
+default and dst feature sets, every fixture identical against its
+manifest after two deliberate re-captures (`der_pv_battery_900s` and
+`der_pv_battery_ev_900s`, each twice byte-identical): both moved one
+cell, the BatteryManagementActor's `bms_toggled` flag at row 0 (0.0 to
+1.0) - the restored pre-warm-up decision state puts the BMS's step-0
+hysteresis toggle event in production, where the warm-up-carried latch
+had swallowed it; no power, energy or temperature column moves
+(`CHECKPOINT_VERSION` 20 to 21, the schema fingerprint re-pinned; the
+EV driver's actor schema 4 to 5; the water heater schemas bumped beside
+their new fields). fmt, clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace --all-features
+-j 2` 8248/8248 (8 skipped); `pytest -m ''` after `maturin develop`
+1800 passed + 6 xfailed, 0 failed, 0 errors; pyright 0.
+
+**Commit:** `fix: warmup restores every stochastic stream, not only the dwelling rng`
+
+**Dependencies:** none outside the core and equipment crates.
+
+**State:** landed on `row/hw2-anchor` (worktree `hw2-anchor`), the
+schedule-anchoring commit ahead of it. The re-derivation scheme's one
+scope note: the dwelling reseeds only the actors it recorded
+(the auto-registered drivers); a caller-seeded driver's generators are
+the caller's, and its checkpoint-carried source positions are what make
+`reset(seed)` exact for it.

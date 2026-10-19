@@ -384,6 +384,16 @@ pub trait Equipment: Send + Sync {
         ))
     }
 
+    /// Rewinds every stochastic schedule source this equipment holds to
+    /// its construction position: the generators at their seeds, the draw
+    /// counters and shared cursors at zero, any event phase back at idle.
+    /// The warm-up path calls it on every equipment once warm-up ends, so
+    /// the production phase starts each source where a no-warm-up run
+    /// would, whatever the warm-up drew; the equipment's thermal state is
+    /// warm-up's product and is never touched. The default does nothing:
+    /// equipment without schedule sources has nothing to rewind.
+    fn reset_stochastic_state(&mut self) {}
+
     /// The equipment's current random-stream state (the generator key,
     /// the stream nonce, the word position), read back for the
     /// reproducibility checks. `None` for equipment the dwelling seeded

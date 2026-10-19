@@ -81,6 +81,8 @@ impl Dwelling {
             format_version: CHECKPOINT_VERSION,
             bldg_id: self.bldg_id,
             timestep_index: self.clock.current_step(),
+            env_equipment_telemetry: self.latest_env.equipment_telemetry.clone(),
+            env_equipment_core: self.latest_env.equipment_core.clone(),
             equipment_states,
             rng_state: self.rng.get_seed(),
             thermal: self.thermal_solver.snapshot_state(),
@@ -227,8 +229,14 @@ impl Dwelling {
 
         // Populate latest_env.equipment_core and equipment_telemetry from the
         // restored equipment state so that actors read correct SOC, power flows,
-        // and connection state on the first post-restore step.
+        // and connection state on the first post-restore step; then overwrite
+        // with the checkpoint's own carried maps: the actor-facing snapshots
+        // the saved run's actors read are the exact state to resume from,
+        // wherever an equipment's rebuilt telemetry differs from its
+        // committed one.
         self.snapshot_equipment_state();
+        self.latest_env.equipment_telemetry = cp.env_equipment_telemetry;
+        self.latest_env.equipment_core = cp.env_equipment_core;
         self.restored_from_checkpoint = true;
         self.step_failed.fill(false);
         // The restore replaces all of a run's state, the finished-run latch

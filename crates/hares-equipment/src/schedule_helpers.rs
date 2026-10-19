@@ -2,121 +2,52 @@
 //!
 //! Used by both `scheduled_load` and `event_load` modules.
 
-use hares_types::{HaresError, ScheduleSource, ZoneId};
-use rand::SeedableRng;
-use rand_chacha::ChaCha8Rng;
+pub(crate) use hares_types::ScheduleSourceState;
 
-use serde::{Deserialize, Serialize};
+use hares_types::{HaresError, ScheduleSource, ZoneId};
 
 use crate::{ConfigPayload, EquipmentConfig};
 
 pub(crate) const KEY_MONTH_MULTIPLIER_PREFIX: &str = "month_multiplier_";
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) enum ScheduleSourceState {
-    Stateless,
-    Stochastic {
-        draw_count: u64,
-    },
-    Shared {
-        cursor: usize,
-    },
-    /// TimeWindows with noisy windows: save RNG word position directly since
-    /// we can't replay (the distribution sampled varies per matching window).
-    NoisyTimeWindows {
-        draw_count: u64,
-        rng_word_pos: u128,
-    },
-}
-
 pub(crate) fn capture_schedule_source_state(source: &ScheduleSource) -> ScheduleSourceState {
-    match source {
-        ScheduleSource::Shared { cursor, .. } => ScheduleSourceState::Shared { cursor: *cursor },
-        ScheduleSource::Stochastic { draw_count, .. } => ScheduleSourceState::Stochastic {
-            draw_count: *draw_count,
-        },
-        ScheduleSource::TimeWindows { rng_state, .. } => match rng_state.as_ref() {
-            Some(st) => ScheduleSourceState::NoisyTimeWindows {
-                draw_count: st.draw_count,
-                rng_word_pos: st.rng.get_word_pos(),
-            },
-            None => ScheduleSourceState::Stateless,
-        },
-        ScheduleSource::Constant(_)
-        | ScheduleSource::DailyProfile { .. }
-        | ScheduleSource::ColumnRef { .. }
-        | ScheduleSource::SolarAware { .. } => ScheduleSourceState::Stateless,
-        // Wildcard required: ScheduleSource is #[non_exhaustive].
-        _ => ScheduleSourceState::Stateless,
-    }
+    source.capture_state()
 }
 
 pub(crate) fn restore_schedule_source_state(
     source: &mut ScheduleSource,
     saved: &ScheduleSourceState,
 ) -> crate::Result<()> {
-    match (source, saved) {
-        (ScheduleSource::Shared { cursor, .. }, ScheduleSourceState::Shared { cursor: saved }) => {
-            *cursor = *saved;
-            Ok(())
-        }
-        (
-            ScheduleSource::Stochastic {
-                kind,
-                seed,
-                draw_count,
-                rng,
-                ..
-            },
-            ScheduleSourceState::Stochastic {
-                draw_count: target_draw_count,
-            },
-        ) => {
-            // Re-seed and replay draws to advance the RNG to the correct state.
-            // This is safe for all distribution kinds regardless of per-draw
-            // RNG word consumption (e.g. Poisson uses rejection sampling).
-            *rng = ChaCha8Rng::from_seed(*seed);
-            for _ in 0..*target_draw_count {
-                kind.sample(rng)?;
+    source.restore_state(saved)
+}
+
+/// Restores an optional schedule source's captured position. The saved
+/// state and the live source must agree on existing: a checkpoint
+/// carrying a state for a source the equipment lacks, or a stateful
+/// source whose position the checkpoint dropped, is an error naming the
+/// mismatch, never a silent position loss. A stateless source (a
+/// constant, a profile, a column reference) restores nothing.
+pub(crate) fn restore_optional_source(
+    source: &mut Option<ScheduleSource>,
+    saved: Option<ScheduleSourceState>,
+) -> crate::Result<()> {
+    match (source.as_mut(), saved) {
+        (Some(source), Some(state)) => source.restore_state(&state),
+        (None, None) => Ok(()),
+        (None, Some(state)) => Err(HaresError::Equipment(format!(
+            "checkpoint carries schedule source state ({state:?}) but the equipment has \
+             no such source"
+        ))),
+        (Some(source), None) => {
+            if matches!(source.capture_state(), ScheduleSourceState::Stateless) {
+                Ok(())
+            } else {
+                Err(HaresError::Equipment(format!(
+                    "checkpoint is missing schedule state for a stateful {} source",
+                    source.kind_name()
+                )))
             }
-            *draw_count = *target_draw_count;
-            Ok(())
         }
-        (
-            ScheduleSource::TimeWindows { rng_state, .. },
-            ScheduleSourceState::NoisyTimeWindows {
-                draw_count,
-                rng_word_pos,
-            },
-        ) => {
-            let st = rng_state.as_mut().ok_or_else(|| {
-                HaresError::Equipment(
-                    "checkpoint contains NoisyTimeWindows state but source has no rng_state".into(),
-                )
-            })?;
-            // Restore RNG to exact position via word-level seek.
-            // Replay isn't possible because the distribution sampled varies
-            // per matching window at each timestep.
-            st.rng = ChaCha8Rng::from_seed(st.seed);
-            st.rng.set_word_pos(*rng_word_pos);
-            st.draw_count = *draw_count;
-            Ok(())
-        }
-        (
-            ScheduleSource::Constant(_)
-            | ScheduleSource::DailyProfile { .. }
-            | ScheduleSource::ColumnRef { .. }
-            | ScheduleSource::SolarAware { .. }
-            | ScheduleSource::TimeWindows {
-                rng_state: None, ..
-            },
-            ScheduleSourceState::Stateless,
-        ) => Ok(()),
-        // Wildcard required: ScheduleSource is #[non_exhaustive].
-        _ => Err(HaresError::Equipment(
-            "checkpoint schedule source state does not match current schedule source variant"
-                .to_string(),
-        )),
     }
 }
 

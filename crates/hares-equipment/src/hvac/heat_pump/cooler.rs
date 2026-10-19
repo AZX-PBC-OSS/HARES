@@ -213,6 +213,13 @@ impl HpCooler {
 }
 
 impl Equipment for HpCooler {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.inner.core.hvac.reset_stochastic_state();
+    }
+
     fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
         &self.descriptor
     }
@@ -500,6 +507,13 @@ impl GshpCooler {
 }
 
 impl Equipment for GshpCooler {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.inner.core.hvac.reset_stochastic_state();
+    }
+
     fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
         &self.descriptor
     }
@@ -934,6 +948,13 @@ impl WshpCooler {
 }
 
 impl Equipment for WshpCooler {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.inner.core.hvac.reset_stochastic_state();
+    }
+
     fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
         &self.descriptor
     }

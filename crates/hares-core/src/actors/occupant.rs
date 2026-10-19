@@ -265,23 +265,46 @@ impl Occupant {
         self
     }
 
-    /// Returns the current presence state.
+    /// Returns the current presence state, read at the actor's own step
+    /// counter.
+    ///
+    /// The clock path is [`Self::presence_at_clock_row`]: `decide` reads
+    /// presence at the environment's schedule row. This counter read is
+    /// the fallback for states built without an environment manager.
     ///
     /// # Panics (debug only)
     ///
     /// Panics if `current_step` exceeds the schedule length -- the schedule
     /// must cover the full simulation duration.
     pub fn current_presence(&self) -> Presence {
+        self.presence_at(self.current_step)
+    }
+
+    /// The presence at one schedule position.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics if `index` exceeds the schedule length -- the schedule must
+    /// cover the full simulation (the calendar's rows).
+    fn presence_at(&self, index: usize) -> Presence {
         debug_assert!(
-            self.current_step < self.presence_schedule.len(),
-            "presence schedule exhausted at step {} (schedule length {})",
-            self.current_step,
+            index < self.presence_schedule.len(),
+            "presence schedule exhausted at step {index} (schedule length {})",
             self.presence_schedule.len(),
         );
         self.presence_schedule
-            .get(self.current_step)
+            .get(index)
             .copied()
             .unwrap_or(Presence::Home)
+    }
+
+    /// The presence position this step reads: the environment's calendar
+    /// schedule row when the state carries one (the same row addressing
+    /// the occupancy column's values, so presence follows the clock
+    /// whatever ran before production - warm-up days, a checkpoint
+    /// restore), else the actor's own step counter.
+    fn presence_index(&self, env: &EnvironmentState) -> usize {
+        env.schedule_row.unwrap_or(self.current_step)
     }
 
     /// Returns true if the occupant is currently present.
@@ -292,8 +315,8 @@ impl Occupant {
     /// Advances the timestep counter.
     ///
     /// Called automatically by `decide()` -- no need to call manually.
-    fn advance_step(&mut self) {
-        self.previous_presence = self.current_presence();
+    fn advance_step(&mut self, presence: Presence) {
+        self.previous_presence = presence;
         self.current_step = self.current_step.saturating_add(1);
         #[cfg(debug_assertions)]
         {
@@ -480,8 +503,9 @@ impl Actor for Occupant {
         &self.targets
     }
 
-    fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
-        let current_presence = self.current_presence();
+    fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        let presence_index = self.presence_index(env);
+        let current_presence = self.presence_at(presence_index);
         let is_transition = current_presence != self.previous_presence;
 
         let before = out.len();
@@ -527,7 +551,7 @@ impl Actor for Occupant {
             );
         }
 
-        self.advance_step();
+        self.advance_step(current_presence);
     }
 
     fn save_state(&self) -> Result<Vec<u8>, HaresError> {
@@ -643,6 +667,58 @@ mod tests {
 
         occupant.decide(&env, &mut requests);
         assert!(requests.is_empty());
+    }
+
+    /// Presence reads the environment's calendar schedule row, not the
+    /// actor's own step count: a counter rotated by whatever decided
+    /// before production (a warm-up day count's worth of decides, a
+    /// checkpoint restore) cannot rotate presence when the environment
+    /// names the row the step's calendar date reads. A state without a
+    /// schedule row falls back to the counter.
+    #[test]
+    fn presence_follows_the_environment_schedule_row_not_the_step_counter() {
+        // The calendar's presence: row 0 Away, row 1 Home, row 2 Away.
+        let schedule = vec![Presence::Away, Presence::Home, Presence::Away];
+        let mut occupant = Occupant::new("Test").with_presence_schedule(schedule);
+        // A warm-up day's worth of decides rotates the private counter
+        // past the schedule's end - the rotation the clock read replaces.
+        for _ in 0..10 {
+            occupant.advance_step(Presence::Home);
+        }
+        assert_eq!(occupant.current_step, 10);
+
+        let mut env = test_env().build();
+        let mut requests = Vec::new();
+        env.schedule_row = Some(1);
+        occupant.decide(&env, &mut requests);
+        assert_eq!(
+            occupant.telemetry.get("away"),
+            Some(0.0),
+            "the step's presence is row 1's Home, not the rotated counter's exhausted read"
+        );
+
+        let mut requests = Vec::new();
+        env.schedule_row = Some(0);
+        occupant.decide(&env, &mut requests);
+        assert_eq!(
+            occupant.telemetry.get("away"),
+            Some(1.0),
+            "the step's presence is row 0's Away"
+        );
+
+        // Without a schedule row the counter (the fallback) reads: a
+        // counter within the schedule's length reads its own row, the
+        // pre-clock behavior kept for states built without an
+        // environment manager.
+        let mut requests = Vec::new();
+        env.schedule_row = None;
+        occupant.current_step = 2;
+        occupant.decide(&env, &mut requests);
+        assert_eq!(
+            occupant.telemetry.get("away"),
+            Some(1.0),
+            "the fallback reads the counter's own row"
+        );
     }
 
     #[test]

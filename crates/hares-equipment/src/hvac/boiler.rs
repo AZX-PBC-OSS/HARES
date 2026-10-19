@@ -266,6 +266,13 @@ impl ElectricBoiler {
 }
 
 impl Equipment for ElectricBoiler {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.hvac.reset_stochastic_state();
+    }
+
     fn checkpoint_version() -> u32 {
         BOILER_CHECKPOINT_VERSION
     }
@@ -797,6 +804,13 @@ impl GasBoiler {
 }
 
 impl Equipment for GasBoiler {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.hvac.reset_stochastic_state();
+    }
+
     fn checkpoint_version() -> u32 {
         BOILER_CHECKPOINT_VERSION
     }

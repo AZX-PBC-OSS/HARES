@@ -18,11 +18,12 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
     FluidNodeId, FluidType, FuelType, HaresError, HeatTransferDirection, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
-    ThermalCategory, telemetry_keys as tk,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, ScheduleSourceState, Telemetry,
+    TelemetryField, ThermalCategory, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::schedule_helpers::{capture_schedule_source_state, restore_optional_source};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::siting::{self, Siting};
@@ -39,6 +40,10 @@ use super::{
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
 };
 
+/// Version of the indirect tank's postcard checkpoint format. v1 was the
+/// implicit trait default (no override); v2 carries the draw, mains and
+/// appliance schedule sources' positions.
+const INDIRECT_TANK_CHECKPOINT_VERSION: u32 = 2;
 /// Default HX UA coefficient [W/K] for a copper-coil heat exchanger
 /// in a 50-gal indirect tank.
 const DEFAULT_HX_UA_W_PER_K: f64 = 150.0;
@@ -69,6 +74,11 @@ struct IndirectTankState {
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
     dr_duration_remaining_s: Option<f64>,
+    // --- Schedule-source positions (the draws and cursors a restore
+    // continues from) ---
+    draw_source_state: Option<ScheduleSourceState>,
+    mains_source_state: Option<ScheduleSourceState>,
+    appliance_draw_source_state: Option<ScheduleSourceState>,
 }
 
 pub struct IndirectTank {
@@ -343,6 +353,27 @@ impl IndirectTank {
 }
 
 impl Equipment for IndirectTank {
+    /// v2: the state carries the draw, mains and appliance schedule
+    /// sources' positions; a v1 blob decoded against the new shape would
+    /// read a field that is not there, so the version gate rejects it.
+    fn checkpoint_version() -> u32 {
+        INDIRECT_TANK_CHECKPOINT_VERSION
+    }
+
+    fn reset_stochastic_state(&mut self) {
+        // The draw, mains and appliance sources at their seeds and
+        // cursors: the production phase reads them from the construction
+        // position, whatever the warm-up drew.
+        if let Some(source) = self.draw_l_per_min_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.mains_temp_c_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.appliance_draw_source.as_mut() {
+            source.reset();
+        }
+    }
     fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
         vec![
             hares_types::ResolvedParameter::new(
@@ -652,6 +683,18 @@ impl Equipment for IndirectTank {
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
                 dr_load_fraction: self.dr_load_fraction,
                 dr_duration_remaining_s: self.dr_duration_remaining_s,
+                draw_source_state: self
+                    .draw_l_per_min_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
+                mains_source_state: self
+                    .mains_temp_c_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
+                appliance_draw_source_state: self
+                    .appliance_draw_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
             },
             Self::checkpoint_version(),
             "IndirectTank",
@@ -683,6 +726,12 @@ impl Equipment for IndirectTank {
         self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
         self.dr_load_fraction = decoded.dr_load_fraction;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
+        restore_optional_source(&mut self.draw_l_per_min_source, decoded.draw_source_state)?;
+        restore_optional_source(&mut self.mains_temp_c_source, decoded.mains_source_state)?;
+        restore_optional_source(
+            &mut self.appliance_draw_source,
+            decoded.appliance_draw_source_state,
+        )?;
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal: the thermal flow from
         // the checkpointed `hx_power_w`, the mode re-derived by the step's

@@ -92,10 +92,10 @@ fn checkpoint_version_9_is_rejected() {
         "the error names the file's version 9: {msg}"
     );
     // ACTUAL CHECKPOINT_VERSION: the entry wrote 9→10 when the parent was
-    // at version 9; the version this commit actually bumps is 19→20.
+    // at version 9; the version this commit actually bumps is 20→21.
     assert!(
-        msg.contains("20"),
-        "the error names the expected version 20: {msg}"
+        msg.contains("21"),
+        "the error names the expected version 21: {msg}"
     );
 }
 
