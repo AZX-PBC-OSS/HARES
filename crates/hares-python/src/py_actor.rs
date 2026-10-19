@@ -45,7 +45,7 @@ use hares_types::{
 use crate::py_enums::{
     PyDutyCycleComponent, PyEvConnectionState, PyIdealCapacityMode, PyInverterPriority,
 };
-use crate::utils::validate_thermal_setpoint_band;
+use crate::utils::{validate_finite, validate_thermal_setpoint_band};
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -610,11 +610,12 @@ pub enum PySignal {
         fraction: f64,
     },
     PowerLimit {
-        max_kw: f64,
+        max_power_w: f64,
+        ramp_rate_w_per_s: Option<f64>,
     },
     PowerSetpoint {
-        active_power_kw: f64,
-        reactive_power_kvar: Option<f64>,
+        active_power_w: f64,
+        reactive_power_var: Option<f64>,
         min_soc: Option<f64>,
         max_soc: Option<f64>,
     },
@@ -640,14 +641,14 @@ pub enum PySignal {
         state: PyEvConnectionState,
     },
     EvDrive {
-        kwh: f64,
+        energy_j: f64,
     },
     EvSetReadyBy {
         departure_hour: f64,
         target_soc: f64,
     },
     EvAwayCharge {
-        power_kw: f64,
+        power_w: f64,
     },
     EventDelay {
         delay_s: f64,
@@ -672,7 +673,7 @@ pub enum PySignal {
         percent: f64,
     },
     ReactiveSetpoint {
-        kvar: f64,
+        var: f64,
     },
     PowerFactorSetpoint {
         power_factor: f64,
@@ -771,18 +772,21 @@ impl PySignal {
             },
             PySignal::ModeOverrideRelease() => ControlSignal::ModeOverrideRelease,
             PySignal::LoadFraction { fraction } => ControlSignal::LoadFraction { fraction },
-            PySignal::PowerLimit { max_kw } => ControlSignal::PowerLimit {
-                max_power_kw: max_kw,
-                ramp_rate_kw_per_s: None,
+            PySignal::PowerLimit {
+                max_power_w,
+                ramp_rate_w_per_s,
+            } => ControlSignal::PowerLimit {
+                max_power_w,
+                ramp_rate_w_per_s,
             },
             PySignal::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc,
                 max_soc,
             } => ControlSignal::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc,
                 max_soc,
             },
@@ -818,7 +822,7 @@ impl PySignal {
             PySignal::EvPlugIn { state } => ControlSignal::EvPlugIn {
                 state: EvConnectionState::from(state),
             },
-            PySignal::EvDrive { kwh } => ControlSignal::EvDrive { kwh },
+            PySignal::EvDrive { energy_j } => ControlSignal::EvDrive { energy_j },
             PySignal::EvSetReadyBy {
                 departure_hour,
                 target_soc,
@@ -826,7 +830,7 @@ impl PySignal {
                 departure_hour,
                 target_soc,
             },
-            PySignal::EvAwayCharge { power_kw } => ControlSignal::EvAwayCharge { power_kw },
+            PySignal::EvAwayCharge { power_w } => ControlSignal::EvAwayCharge { power_w },
             PySignal::EventDelay { delay_s } => ControlSignal::EventDelay { delay_s },
             PySignal::HumiditySetpoint {
                 target_rh,
@@ -855,7 +859,7 @@ impl PySignal {
             PySignal::CurtailmentPercent { percent } => {
                 ControlSignal::CurtailmentPercent { percent }
             }
-            PySignal::ReactiveSetpoint { kvar } => ControlSignal::ReactiveSetpoint { kvar },
+            PySignal::ReactiveSetpoint { var } => ControlSignal::ReactiveSetpoint { var },
             PySignal::PowerFactorSetpoint { power_factor } => {
                 ControlSignal::PowerFactorSetpoint { power_factor }
             }
@@ -982,30 +986,46 @@ impl PyDispatchRequest {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, max_kw, priority=None))]
-    fn power_limit(target: String, max_kw: f64, priority: Option<PyPriority>) -> PyResult<Self> {
+    #[pyo3(signature = (target, *, max_power_w, ramp_rate_w_per_s=None, priority=None, **kwargs))]
+    fn power_limit(
+        target: String,
+        max_power_w: f64,
+        ramp_rate_w_per_s: Option<f64>,
+        priority: Option<PyPriority>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("DispatchRequest.power_limit", kwargs)?;
         Ok(Self {
             target,
-            signal: PySignal::PowerLimit { max_kw },
+            signal: PySignal::PowerLimit {
+                max_power_w,
+                ramp_rate_w_per_s,
+            },
             priority: priority.unwrap_or(PyPriority::Schedule),
         })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, active_power_kw, reactive_power_kvar=None, min_soc=None, max_soc=None, priority=None))]
+    #[pyo3(signature = (target, *, active_power_w, reactive_power_var=None, min_soc=None, max_soc=None, priority=None, **kwargs))]
     fn power_setpoint(
         target: String,
-        active_power_kw: f64,
-        reactive_power_kvar: Option<f64>,
+        active_power_w: f64,
+        reactive_power_var: Option<f64>,
         min_soc: Option<f64>,
         max_soc: Option<f64>,
         priority: Option<PyPriority>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("DispatchRequest.power_setpoint", kwargs)?;
+        validate_finite(active_power_w, "active_power_w")?;
+        if let Some(q) = reactive_power_var {
+            validate_finite(q, "reactive_power_var")?;
+        }
         Ok(Self {
             target,
             signal: PySignal::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc,
                 max_soc,
             },
@@ -1100,25 +1120,33 @@ impl PyDispatchRequest {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, kwh, priority=None))]
-    fn ev_drive(target: String, kwh: f64, priority: Option<PyPriority>) -> PyResult<Self> {
+    #[pyo3(signature = (target, *, energy_j, priority=None, **kwargs))]
+    fn ev_drive(
+        target: String,
+        energy_j: f64,
+        priority: Option<PyPriority>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("DispatchRequest.ev_drive", kwargs)?;
         Ok(Self {
             target,
-            signal: PySignal::EvDrive { kwh },
+            signal: PySignal::EvDrive { energy_j },
             priority: priority.unwrap_or(PyPriority::Schedule),
         })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, power_kw, priority=None))]
+    #[pyo3(signature = (target, *, power_w, priority=None, **kwargs))]
     fn ev_away_charge(
         target: String,
-        power_kw: f64,
+        power_w: f64,
         priority: Option<PyPriority>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("DispatchRequest.ev_away_charge", kwargs)?;
         Ok(Self {
             target,
-            signal: PySignal::EvAwayCharge { power_kw },
+            signal: PySignal::EvAwayCharge { power_w },
             priority: priority.unwrap_or(PyPriority::Schedule),
         })
     }
@@ -1236,15 +1264,17 @@ impl PyDispatchRequest {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, kvar, priority=None))]
+    #[pyo3(signature = (target, *, var, priority=None, **kwargs))]
     fn reactive_setpoint(
         target: String,
-        kvar: f64,
+        var: f64,
         priority: Option<PyPriority>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("DispatchRequest.reactive_setpoint", kwargs)?;
         Ok(Self {
             target,
-            signal: PySignal::ReactiveSetpoint { kvar },
+            signal: PySignal::ReactiveSetpoint { var },
             priority: priority.unwrap_or(PyPriority::Schedule),
         })
     }
@@ -1369,24 +1399,39 @@ impl PySignal {
     }
 
     #[staticmethod]
-    fn power_limit(max_kw: f64) -> Self {
-        PySignal::PowerLimit { max_kw }
+    #[pyo3(signature = (*, max_power_w, ramp_rate_w_per_s=None, **kwargs))]
+    fn power_limit(
+        max_power_w: f64,
+        ramp_rate_w_per_s: Option<f64>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("Signal.power_limit", kwargs)?;
+        Ok(PySignal::PowerLimit {
+            max_power_w,
+            ramp_rate_w_per_s,
+        })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (active_power_kw, reactive_power_kvar=None, min_soc=None, max_soc=None))]
+    #[pyo3(signature = (*, active_power_w, reactive_power_var=None, min_soc=None, max_soc=None, **kwargs))]
     fn power_setpoint(
-        active_power_kw: f64,
-        reactive_power_kvar: Option<f64>,
+        active_power_w: f64,
+        reactive_power_var: Option<f64>,
         min_soc: Option<f64>,
         max_soc: Option<f64>,
-    ) -> Self {
-        PySignal::PowerSetpoint {
-            active_power_kw,
-            reactive_power_kvar,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("Signal.power_setpoint", kwargs)?;
+        validate_finite(active_power_w, "active_power_w")?;
+        if let Some(q) = reactive_power_var {
+            validate_finite(q, "reactive_power_var")?;
+        }
+        Ok(PySignal::PowerSetpoint {
+            active_power_w,
+            reactive_power_var,
             min_soc,
             max_soc,
-        }
+        })
     }
 
     #[staticmethod]
@@ -1433,8 +1478,10 @@ impl PySignal {
     }
 
     #[staticmethod]
-    fn ev_drive(kwh: f64) -> Self {
-        PySignal::EvDrive { kwh }
+    #[pyo3(signature = (*, energy_j, **kwargs))]
+    fn ev_drive(energy_j: f64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("Signal.ev_drive", kwargs)?;
+        Ok(PySignal::EvDrive { energy_j })
     }
 
     #[staticmethod]
@@ -1446,8 +1493,10 @@ impl PySignal {
     }
 
     #[staticmethod]
-    fn ev_away_charge(power_kw: f64) -> Self {
-        PySignal::EvAwayCharge { power_kw }
+    #[pyo3(signature = (*, power_w, **kwargs))]
+    fn ev_away_charge(power_w: f64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("Signal.ev_away_charge", kwargs)?;
+        Ok(PySignal::EvAwayCharge { power_w })
     }
 
     #[staticmethod]
@@ -1492,8 +1541,10 @@ impl PySignal {
     }
 
     #[staticmethod]
-    fn reactive_setpoint(kvar: f64) -> Self {
-        PySignal::ReactiveSetpoint { kvar }
+    #[pyo3(signature = (*, var, **kwargs))]
+    fn reactive_setpoint(var: f64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("Signal.reactive_setpoint", kwargs)?;
+        Ok(PySignal::ReactiveSetpoint { var })
     }
 
     #[staticmethod]
@@ -1800,12 +1851,15 @@ mod tests {
             },
             PySignal::LoadFraction { fraction: 0.7 },
             PySignal::PowerSetpoint {
-                active_power_kw: 2.0,
-                reactive_power_kvar: None,
+                active_power_w: 2.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
-            PySignal::PowerLimit { max_kw: 3.0 },
+            PySignal::PowerLimit {
+                max_power_w: 3000.0,
+                ramp_rate_w_per_s: None,
+            },
             PySignal::ModeOverride {
                 mode: PyMode::Cooling,
             },

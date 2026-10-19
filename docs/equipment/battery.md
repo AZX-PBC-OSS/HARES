@@ -143,7 +143,7 @@ graph TD
 
 | Signal | Effect |
 |--------|--------|
-| `PowerSetpoint` | Direct AC power target (kW). Clears SOCTarget and SelfConsumption |
+| `PowerSetpoint` | Direct AC power target (W). Clears SOCTarget and SelfConsumption |
 | `SOCTarget` | Proportional controller: the commanded power `= error * capacity / dt`. Clears PowerSetpoint |
 | `SelfConsumption` | Charge from PV surplus, discharge to offset load. `solar_only_charging` flag prevents grid charging |
 | `GridConnect` | Enable/disable grid power flow |

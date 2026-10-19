@@ -23,7 +23,7 @@ pub struct ChargingComposer {
     /// target already covers the anxiety band"), not a dispatch record —
     /// the dispatched signals are whatever `evaluate` wrote to `out`.
     last_resolved_target_soc: Option<f64>,
-    /// The `power_kw` the most recent `evaluate` resolved (the folded
+    /// The `power_w` the most recent `evaluate` resolved (the folded
     /// most-conservative rate across scored votes, or the override vote's
     /// rate). `None` when the resolution carried no rate — a target-only
     /// plan, whose equipment charges toward the target at its own rate.
@@ -33,7 +33,7 @@ pub struct ChargingComposer {
     /// holding at zero — a rate-bearing strategy (TouAware at peak price,
     /// V2G exporting) can pair a high ceiling with a negative rate, and
     /// the pack is then being driven *away* from the band, not toward it.
-    last_resolved_power_kw: Option<f64>,
+    last_resolved_power_w: Option<f64>,
     /// The `max_soc` the most recent `evaluate` resolved (the folded
     /// most-restrictive upper bound across scored votes, or the override
     /// vote's cap). `None` when the resolution carried no cap — the plan's
@@ -55,7 +55,7 @@ impl ChargingComposer {
             dispatch_target: DispatchTarget::ByName(Arc::from(target_name)),
             last_action: String::new(),
             last_resolved_target_soc: None,
-            last_resolved_power_kw: None,
+            last_resolved_power_w: None,
             last_resolved_max_soc: None,
             last_needed_charge_hours: f64::INFINITY,
         }
@@ -73,11 +73,11 @@ impl ChargingComposer {
         self.last_resolved_target_soc
     }
 
-    /// The `power_kw` the most recent [`Self::evaluate`] resolved, if any
+    /// The `power_w` the most recent [`Self::evaluate`] resolved, if any
     /// (see the field's doc). `None` means the plan carried no rate — the
     /// equipment charges toward the resolved target at its own rate.
-    pub fn last_resolved_power_kw(&self) -> Option<f64> {
-        self.last_resolved_power_kw
+    pub fn last_resolved_power_w(&self) -> Option<f64> {
+        self.last_resolved_power_w
     }
 
     /// The `max_soc` cap the most recent [`Self::evaluate`] resolved, if any
@@ -207,7 +207,7 @@ impl ChargingComposer {
     ///
     /// 1. Check constraints -- first Override wins.
     /// 2. Collect scored votes.
-    /// 3. Resolve: highest-scored target_soc, most conservative power_kw,
+    /// 3. Resolve: highest-scored target_soc, most conservative power_w,
     ///    max min_soc, earliest departure.
     /// 4. Translate to ControlSignal.
     ///
@@ -224,7 +224,7 @@ impl ChargingComposer {
                 self.last_action.push(':');
                 self.last_action.push_str(vote.label);
                 self.last_resolved_target_soc = vote.target_soc;
-                self.last_resolved_power_kw = vote.power_kw;
+                self.last_resolved_power_w = vote.power_w;
                 self.last_resolved_max_soc = vote.max_soc;
                 self.emit_vote(ctx, &vote, out);
                 return;
@@ -248,7 +248,7 @@ impl ChargingComposer {
             self.last_action.clear();
             self.last_action.push_str("idle:no_preferences");
             self.last_resolved_target_soc = None;
-            self.last_resolved_power_kw = None;
+            self.last_resolved_power_w = None;
             self.last_resolved_max_soc = None;
             return;
         }
@@ -258,14 +258,14 @@ impl ChargingComposer {
         self.last_action.push_str("resolved:");
         self.last_action.push_str(resolved.label);
         self.last_resolved_target_soc = resolved.target_soc;
-        self.last_resolved_power_kw = resolved.power_kw;
+        self.last_resolved_power_w = resolved.power_w;
         self.last_resolved_max_soc = resolved.max_soc;
         self.emit_vote(ctx, &resolved, out);
     }
 
     /// Resolve multiple votes into a single action.
     ///
-    /// Fold rules: `power_kw`, `min_soc`/`max_soc`, and `departure_hour`
+    /// Fold rules: `power_w`, `min_soc`/`max_soc`, and `departure_hour`
     /// fold unconditionally across all votes (most conservative / most
     /// restrictive / earliest). `target_soc` comes from the highest-scored
     /// vote that carries one — NOT from the overall score winner — so a
@@ -280,7 +280,7 @@ impl ChargingComposer {
         let mut best_target_soc: Option<f64> = None;
         let mut best_target_score = f64::NEG_INFINITY;
         let mut best_label: &str = "idle";
-        let mut min_power_kw: Option<f64> = None;
+        let mut min_power_w: Option<f64> = None;
         let mut max_min_soc: Option<f64> = None;
         let mut max_max_soc: Option<f64> = None;
         let mut earliest_departure: Option<f64> = None;
@@ -304,9 +304,9 @@ impl ChargingComposer {
                 best_target_score = vote.score;
             }
 
-            // power_kw: most conservative (smallest absolute value, preserving sign)
-            if let Some(p) = vote.power_kw {
-                min_power_kw = Some(match min_power_kw {
+            // power_w: most conservative (smallest absolute value, preserving sign)
+            if let Some(p) = vote.power_w {
+                min_power_w = Some(match min_power_w {
                     Some(existing) => {
                         if p.abs() < existing.abs() {
                             p
@@ -345,7 +345,7 @@ impl ChargingComposer {
 
         PreferenceVote {
             target_soc: best_target_soc,
-            power_kw: min_power_kw,
+            power_w: min_power_w,
             departure_hour: earliest_departure,
             min_soc: max_min_soc,
             max_soc: max_max_soc,
@@ -362,7 +362,7 @@ impl ChargingComposer {
     ///
     /// Three ordered steps:
     ///
-    /// 1. An idle-shaped vote (no `target_soc` and no `power_kw`, regardless
+    /// 1. An idle-shaped vote (no `target_soc` and no `power_w`, regardless
     ///    of `departure_hour` — a departure alone cannot be expressed by any
     ///    of the three signal variants below) dispatches an explicit
     ///    zero-power hold. Dispatching nothing is not neutral: a plugged-in
@@ -379,7 +379,7 @@ impl ChargingComposer {
     ///    equipment applies same-tier signals FIFO, and the `SOCTarget`/
     ///    `EvSetReadyBy` arms clear a prior hold before the rate lands.
     ///
-    /// 3. The rate-of-record is dispatched for any `Some(power_kw)` —
+    /// 3. The rate-of-record is dispatched for any `Some(power_w)` -
     ///    including exactly `0.0`, which clamps to `0.0` and is identical in
     ///    effect to the idle hold. There is deliberately no zero-power
     ///    special case: the old early return silently dropped both the rate
@@ -391,12 +391,12 @@ impl ChargingComposer {
         out: &mut Vec<DispatchRequest>,
     ) {
         // 1. Nothing dispatchable — say so explicitly with a hold.
-        if vote.target_soc.is_none() && vote.power_kw.is_none() {
+        if vote.target_soc.is_none() && vote.power_w.is_none() {
             out.push(DispatchRequest {
                 target: self.dispatch_target.clone(),
                 signal: ControlSignal::PowerSetpoint {
-                    active_power_kw: 0.0,
-                    reactive_power_kvar: None,
+                    active_power_w: 0.0,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 },
@@ -428,25 +428,25 @@ impl ChargingComposer {
         }
 
         // 3. Rate-of-record, dispatched second (see doc comment).
-        if let Some(unclamped) = vote.power_kw {
+        if let Some(unclamped) = vote.power_w {
             // Defense-in-depth: clamp power against equipment context limits.
             // Individual strategies self-clamp, but this output-boundary clamp
             // catches unclamped custom preferences and strategy bugs.
             // OCHRE reference: EV.py:296-300 centralizes power clamping at the
             // equipment level.
             let power = if unclamped > 0.0 {
-                unclamped.min(ctx.max_charge_kw)
+                unclamped.min(ctx.max_charge_w)
             } else {
-                unclamped.max(-ctx.max_discharge_kw)
+                unclamped.max(-ctx.max_discharge_w)
             };
 
             if (power - unclamped).abs() > 1e-9 {
                 tracing::warn!(
-                    original_kw = unclamped,
-                    clamped_kw = power,
+                    original_w = unclamped,
+                    clamped_w = power,
                     preference = vote.label,
-                    max_charge_kw = ctx.max_charge_kw,
-                    max_discharge_kw = ctx.max_discharge_kw,
+                    max_charge_w = ctx.max_charge_w,
+                    max_discharge_w = ctx.max_discharge_w,
                     "PowerSetpoint clamped to context limit",
                 );
             }
@@ -486,7 +486,7 @@ impl ChargingComposer {
             {
                 if vote.min_soc.is_some() || vote.max_soc.is_some() {
                     tracing::debug!(
-                        power_kw = power,
+                        power_w = power,
                         min_soc = vote.min_soc,
                         max_soc = vote.max_soc,
                         "PowerSetpoint carries SOC constraint",
@@ -497,7 +497,7 @@ impl ChargingComposer {
             {
                 tracing::debug!(
                     ev_override_power_propagated = vote.departure_hour.is_some(),
-                    power_kw = power,
+                    power_w = power,
                     preference = vote.label,
                     "PowerSetpoint dispatch with Ready-By coexistence",
                 );
@@ -505,8 +505,8 @@ impl ChargingComposer {
             out.push(DispatchRequest {
                 target: self.dispatch_target.clone(),
                 signal: ControlSignal::PowerSetpoint {
-                    active_power_kw: power,
-                    reactive_power_kvar: None,
+                    active_power_w: power,
+                    reactive_power_var: None,
                     min_soc: vote.min_soc,
                     max_soc: vote.max_soc,
                 },
@@ -525,9 +525,9 @@ mod tests {
     fn make_ctx(env: &hares_types::EnvironmentState) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: 0.5,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 216_000_000.0,
+            max_charge_w: 7200.0,
+            max_discharge_w: 5000.0,
             env,
             current_minute: 720,
             next_departure_minute: None,
@@ -574,7 +574,7 @@ mod tests {
 
         let override_vote = PreferenceVote {
             target_soc: Some(0.8),
-            power_kw: None,
+            power_w: None,
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -584,7 +584,7 @@ mod tests {
 
         let scored_vote = PreferenceVote {
             target_soc: Some(1.0),
-            power_kw: None,
+            power_w: None,
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -620,7 +620,7 @@ mod tests {
 
         let low_vote = PreferenceVote {
             target_soc: Some(0.5),
-            power_kw: None,
+            power_w: None,
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -629,7 +629,7 @@ mod tests {
         };
         let high_vote = PreferenceVote {
             target_soc: Some(0.9),
-            power_kw: None,
+            power_w: None,
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -662,7 +662,7 @@ mod tests {
 
         let big = PreferenceVote {
             target_soc: None,
-            power_kw: Some(7.2),
+            power_w: Some(7.2),
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -671,7 +671,7 @@ mod tests {
         };
         let small = PreferenceVote {
             target_soc: None,
-            power_kw: Some(3.0),
+            power_w: Some(3.0),
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -690,10 +690,8 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                assert!((active_power_kw - 3.0).abs() < 1e-9);
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                assert!((active_power_w - 3.0).abs() < 1e-9);
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
@@ -721,12 +719,10 @@ mod tests {
             "an idle override must dispatch exactly one explicit hold, got {out:?}"
         );
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 assert!(
-                    active_power_kw.abs() < 1e-9,
-                    "the hold must command exactly zero power, got {active_power_kw}"
+                    active_power_w.abs() < 1e-9,
+                    "the hold must command exactly zero power, got {active_power_w}"
                 );
             }
             other => panic!("expected zero-power PowerSetpoint hold, got {other:?}"),
@@ -755,8 +751,8 @@ mod tests {
         assert!(
             out.iter().any(|r| matches!(
                 &r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. }
-                    if active_power_kw.abs() < 1e-9
+                ControlSignal::PowerSetpoint { active_power_w, .. }
+                    if active_power_w.abs() < 1e-9
             )),
             "an all-idle resolution must dispatch an explicit zero-power hold, got {out:?}"
         );
@@ -773,7 +769,7 @@ mod tests {
 
         let zero_rate_vote = PreferenceVote {
             target_soc: None,
-            power_kw: Some(0.0),
+            power_w: Some(0.0),
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -794,10 +790,8 @@ mod tests {
             "a zero-power vote must not be silently dropped"
         );
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                assert!(active_power_kw.abs() < 1e-9);
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                assert!(active_power_w.abs() < 1e-9);
             }
             other => panic!("expected zero-power PowerSetpoint, got {other:?}"),
         }
@@ -818,7 +812,7 @@ mod tests {
         let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(ScoredPref {
             vote: PreferenceVote {
                 target_soc: Some(0.9),
-                power_kw: Some(0.0),
+                power_w: Some(0.0),
                 departure_hour: None,
                 min_soc: None,
                 max_soc: None,
@@ -840,7 +834,7 @@ mod tests {
             "the ceiling must be dispatched first, got {out:?}"
         );
         assert!(
-            matches!(&out[1].signal, ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() < 1e-9),
+            matches!(&out[1].signal, ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w.abs() < 1e-9),
             "the zero rate must be dispatched second as an explicit zero-power setpoint, got {out:?}"
         );
     }
@@ -857,7 +851,7 @@ mod tests {
         let prefs: Vec<Box<dyn ChargingPreference>> = vec![Box::new(ScoredPref {
             vote: PreferenceVote {
                 target_soc: Some(0.9),
-                power_kw: Some(3.5),
+                power_w: Some(3.5),
                 departure_hour: None,
                 min_soc: None,
                 max_soc: None,
@@ -879,7 +873,7 @@ mod tests {
             "the target must be dispatched first, got {out:?}"
         );
         assert!(
-            matches!(&out[1].signal, ControlSignal::PowerSetpoint { active_power_kw, .. } if (active_power_kw - 3.5).abs() < 1e-9),
+            matches!(&out[1].signal, ControlSignal::PowerSetpoint { active_power_w, .. } if (active_power_w - 3.5).abs() < 1e-9),
             "the rate must be dispatched second, got {out:?}"
         );
     }
@@ -898,7 +892,7 @@ mod tests {
         // is FIRST and out-scores the target vote.
         let rate_vote = PreferenceVote {
             target_soc: None,
-            power_kw: Some(7.2),
+            power_w: Some(7.2),
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -907,7 +901,7 @@ mod tests {
         };
         let ceiling_vote = PreferenceVote {
             target_soc: Some(0.9),
-            power_kw: None,
+            power_w: None,
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -933,7 +927,7 @@ mod tests {
             "the ceiling must reach the equipment, got {out:?}"
         );
         assert!(
-            matches!(&out[1].signal, ControlSignal::PowerSetpoint { active_power_kw, .. } if (active_power_kw - 7.2).abs() < 1e-9),
+            matches!(&out[1].signal, ControlSignal::PowerSetpoint { active_power_w, .. } if (active_power_w - 7.2).abs() < 1e-9),
             "the winning rate must reach the equipment, got {out:?}"
         );
     }
@@ -948,7 +942,7 @@ mod tests {
 
         let idle_vote = PreferenceVote {
             target_soc: None,
-            power_kw: None,
+            power_w: None,
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -957,7 +951,7 @@ mod tests {
         };
         let tied_target_vote = PreferenceVote {
             target_soc: Some(0.9),
-            power_kw: None,
+            power_w: None,
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -1008,7 +1002,7 @@ mod tests {
             fn score(&mut self, _ctx: &DecisionContext) -> PreferenceVote {
                 PreferenceVote {
                     target_soc: Some(0.8),
-                    power_kw: None,
+                    power_w: None,
                     departure_hour: None,
                     min_soc: None,
                     max_soc: None,
@@ -1065,7 +1059,7 @@ mod tests {
 
         let discharge_vote = PreferenceVote {
             target_soc: None,
-            power_kw: Some(-5.0),
+            power_w: Some(-5.0),
             departure_hour: None,
             min_soc: Some(0.2),
             max_soc: None,
@@ -1083,12 +1077,12 @@ mod tests {
         assert_eq!(out.len(), 1);
         match &out[0].signal {
             ControlSignal::PowerSetpoint {
-                active_power_kw,
+                active_power_w,
                 min_soc,
                 max_soc,
                 ..
             } => {
-                assert!((active_power_kw - (-5.0)).abs() < 1e-9);
+                assert!((active_power_w - (-5.0)).abs() < 1e-9);
                 assert_eq!(*min_soc, Some(0.2));
                 assert_eq!(*max_soc, None);
             }
@@ -1105,7 +1099,7 @@ mod tests {
         // (charge) without any SOC constraints.
         let charge_vote = PreferenceVote {
             target_soc: None,
-            power_kw: Some(3.5),
+            power_w: Some(3.5),
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -1122,12 +1116,12 @@ mod tests {
         assert_eq!(out.len(), 1);
         match &out[0].signal {
             ControlSignal::PowerSetpoint {
-                active_power_kw,
+                active_power_w,
                 min_soc,
                 max_soc,
                 ..
             } => {
-                assert!((active_power_kw - 3.5).abs() < 1e-9);
+                assert!((active_power_w - 3.5).abs() < 1e-9);
                 assert_eq!(*min_soc, None);
                 assert_eq!(*max_soc, None);
             }
@@ -1136,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn charge_power_clamped_to_max_charge_kw() {
+    fn charge_power_clamped_to_max_charge_w() {
         let env = TestEnvBuilder::new().build();
         let ctx = make_ctx(&env);
 
@@ -1144,7 +1138,7 @@ mod tests {
         // 7.2 kW equipment limit.
         let unclamped_vote = PreferenceVote {
             target_soc: None,
-            power_kw: Some(999.0),
+            power_w: Some(999_000.0),
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -1161,13 +1155,11 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 assert!(
-                    (active_power_kw - ctx.max_charge_kw).abs() < 1e-9,
-                    "expected clamped power {expected}, got {active_power_kw}",
-                    expected = ctx.max_charge_kw,
+                    (active_power_w - ctx.max_charge_w).abs() < 1e-9,
+                    "expected clamped power {expected}, got {active_power_w}",
+                    expected = ctx.max_charge_w,
                 );
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
@@ -1175,15 +1167,15 @@ mod tests {
     }
 
     #[test]
-    fn discharge_power_clamped_to_max_discharge_kw() {
+    fn discharge_power_clamped_to_max_discharge_w() {
         let env = TestEnvBuilder::new().build();
         let ctx = make_ctx(&env);
 
         // Unclamped preference: emits -999 kW discharge power, well below the
-        // -5.0 kW equipment limit.
+        // -5.0 kW equipment limit (5000 W).
         let unclamped_vote = PreferenceVote {
             target_soc: None,
-            power_kw: Some(-999.0),
+            power_w: Some(-999_000.0),
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -1200,13 +1192,11 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 assert!(
-                    (active_power_kw - (-ctx.max_discharge_kw)).abs() < 1e-9,
-                    "expected clamped power {expected}, got {active_power_kw}",
-                    expected = -ctx.max_discharge_kw,
+                    (active_power_w - (-ctx.max_discharge_w)).abs() < 1e-9,
+                    "expected clamped power {expected}, got {active_power_w}",
+                    expected = -ctx.max_discharge_w,
                 );
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
@@ -1221,7 +1211,7 @@ mod tests {
         // Charge power within equipment limit (3.0 kW < 7.2 kW max_charge).
         let charge_vote = PreferenceVote {
             target_soc: None,
-            power_kw: Some(3.0),
+            power_w: Some(3.0),
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -1237,10 +1227,8 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                assert!((active_power_kw - 3.0).abs() < 1e-9);
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                assert!((active_power_w - 3.0).abs() < 1e-9);
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
@@ -1248,7 +1236,7 @@ mod tests {
         // Discharge power within equipment limit (-3.0 kW, magnitude < 5.0 kW max_discharge).
         let discharge_vote = PreferenceVote {
             target_soc: None,
-            power_kw: Some(-3.0),
+            power_w: Some(-3.0),
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -1265,10 +1253,8 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                assert!((active_power_kw - (-3.0)).abs() < 1e-9);
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                assert!((active_power_w - (-3.0)).abs() < 1e-9);
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
@@ -1281,7 +1267,7 @@ mod tests {
 
         let vote = PreferenceVote {
             target_soc: Some(0.9),
-            power_kw: Some(7.2),
+            power_w: Some(7.2),
             departure_hour: Some(7.0),
             min_soc: None,
             max_soc: None,
@@ -1334,12 +1320,12 @@ mod tests {
             .unwrap();
         match &power_req.signal {
             ControlSignal::PowerSetpoint {
-                active_power_kw,
+                active_power_w,
                 min_soc,
                 max_soc,
                 ..
             } => {
-                assert!((active_power_kw - 7.2).abs() < 1e-9);
+                assert!((active_power_w - 7.2).abs() < 1e-9);
                 assert_eq!(*min_soc, None);
                 assert_eq!(*max_soc, None);
             }
@@ -1358,7 +1344,7 @@ mod tests {
 
         let vote = PreferenceVote {
             target_soc: Some(0.9),
-            power_kw: None,
+            power_w: None,
             departure_hour: Some(7.0),
             min_soc: None,
             max_soc: None,
@@ -1393,11 +1379,11 @@ mod tests {
         let env = TestEnvBuilder::new().build();
         let ctx = make_ctx(&env);
 
-        // One preference provides departure_hour, another provides power_kw.
+        // One preference provides departure_hour, another provides power_w.
         // resolve() merges them: departure from the first, power from the second.
         let departure_vote = PreferenceVote {
             target_soc: Some(0.85),
-            power_kw: None,
+            power_w: None,
             departure_hour: Some(6.5),
             min_soc: None,
             max_soc: None,
@@ -1406,7 +1392,7 @@ mod tests {
         };
         let power_vote = PreferenceVote {
             target_soc: None,
-            power_kw: Some(3.5),
+            power_w: Some(3.5),
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -1419,7 +1405,7 @@ mod tests {
         // departure_vote (earliest), power from power_vote (most conservative).
         let high_score_vote = PreferenceVote {
             target_soc: Some(0.95),
-            power_kw: None,
+            power_w: None,
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -1487,10 +1473,8 @@ mod tests {
             .find(|r| matches!(r.signal, ControlSignal::PowerSetpoint { .. }))
             .unwrap();
         match &power_req.signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                assert!((active_power_kw - 3.5).abs() < 1e-9);
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                assert!((active_power_w - 3.5).abs() < 1e-9);
             }
             _ => unreachable!(),
         }
@@ -1503,12 +1487,12 @@ mod tests {
         // 10°C default → effective_efficiency ≈ 0.81
         // SOC 0.2 → 0.9 target, needed ≈ 7.2h, 7h available
         // 7h < 7.2 * 1.2 = 8.6h → urgency fires
-        // Context with max_charge_kw = 7.2
+        // Context with max_charge_w = 7.2
         let ctx = DecisionContext {
             current_soc: 0.2,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 216_000_000.0,
+            max_charge_w: 7200.0,
+            max_discharge_w: 5000.0,
             env: &env,
             current_minute: 0,
             next_departure_minute: Some(420),
@@ -1532,7 +1516,7 @@ mod tests {
         let mut out = Vec::new();
         composer.evaluate(&ctx, &mut out);
 
-        // The urgency Override sets both departure_hour and power_kw.
+        // The urgency Override sets both departure_hour and power_w.
         // The composer must propagate both — not return early after EvSetReadyBy.
         assert_eq!(
             out.len(),
@@ -1551,21 +1535,19 @@ mod tests {
         assert!(has_ready_by, "urgency Override must emit EvSetReadyBy");
         assert!(
             has_power,
-            "urgency Override must emit PowerSetpoint with max_charge_kw"
+            "urgency Override must emit PowerSetpoint with max_charge_w"
         );
 
-        // The PowerSetpoint must carry max_charge_kw (the scheduler's urgency power)
+        // The PowerSetpoint must carry max_charge_w (the scheduler's urgency power)
         let power_req = out
             .iter()
             .find(|r| matches!(r.signal, ControlSignal::PowerSetpoint { .. }))
             .unwrap();
         match &power_req.signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 assert!(
-                    (active_power_kw - 7.2).abs() < 1e-9,
-                    "urgency PowerSetpoint must be max_charge_kw (7.2), got {active_power_kw}"
+                    (active_power_w - 7200.0).abs() < 1e-9,
+                    "urgency PowerSetpoint must be max_charge_w (7200 W), got {active_power_w}"
                 );
             }
             _ => unreachable!(),

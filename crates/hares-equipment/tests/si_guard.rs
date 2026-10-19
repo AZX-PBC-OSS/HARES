@@ -617,12 +617,11 @@ static UNIT_SUFFIX_ALLOWED: &[&str] = &[
     "crates/hares-io/src/output/columns.rs",
     "crates/hares-types/src/output.rs",
     "crates/hares-types/src/telemetry_keys.rs",
-    // Every entry below names the boundary that holds the names or the commit that removes them: a boundary file keeps its entries after commit 4 (a reporting name, a datasheet unit, an external unit column); a commit-3 file's names are the run state (the kW and kWh working values and totals the run-state commit moves); a commit-4 file's are the control layer (actor parameters, signals and telemetry).
-    // (removed by commit 3, the run state)
-    // (still violating: the files whose remaining unit-suffix names are the
-    // control layer the commit-4 row moves: the telemetry key constants'
-    // usage sites, the kW working values the actor reads convert from, and
-    // the datasheet-named pack constants; commit 4 removes these entries.)
+    // Every entry below names the boundary that holds the names: the run-state and control-layer names are gone (the SI moves), so what remains is a reporting name (a declared variable, a telemetry-key constant's use), an output record's own field, a datasheet unit, an external unit column or a test of one of those.
+    // (the files whose remaining unit-suffix names are the reporting names
+    // and output records the boundaries keep: the telemetry key constants'
+    // usage sites, the declared-variable declarations, and the
+    // reporting-unit record fields)
     "crates/hares-equipment/src/battery/config.rs",
     "crates/hares-equipment/src/battery/mod.rs",
     "crates/hares-equipment/src/ev/config.rs",
@@ -709,31 +708,14 @@ static UNIT_SUFFIX_ALLOWED: &[&str] = &[
     "crates/hares-types/src/ports.rs",
     "crates/hares-types/src/zip.rs",
     //
-    // (removed by commit 4, the control layer)
-    "crates/hares-control/src/dispatch.rs",
-    "crates/hares-control/src/signal.rs",
-    "crates/hares-core/src/actor.rs",
-    "crates/hares-core/src/actor_registry.rs",
+    // (reporting names: the actors' declared variables and the reporting
+    // keys they read - the boundary "Reporting names"; the identifier is
+    // the declaration helper's or the constant's name, the string under it
+    // is the declared reporting key. The files whose names the control
+    // layer's SI move renamed are gone from this list.)
     "crates/hares-core/src/actors/bms.rs",
     "crates/hares-core/src/actors/dr_compliance.rs",
-    "crates/hares-core/src/actors/ev_driver/composer.rs",
-    "crates/hares-core/src/actors/ev_driver/departure.rs",
     "crates/hares-core/src/actors/ev_driver/mod.rs",
-    "crates/hares-core/src/actors/ev_driver/preference.rs",
-    "crates/hares-core/src/actors/ev_driver/price.rs",
-    "crates/hares-core/src/actors/ev_driver/soc_gate.rs",
-    "crates/hares-core/src/actors/ev_driver/soc_target.rs",
-    "crates/hares-core/src/actors/ev_driver/solar.rs",
-    "crates/hares-core/src/actors/ev_driver/time_window.rs",
-    "crates/hares-core/src/actors/ev_driver/v2g.rs",
-    "crates/hares-core/src/actors/ev_driver/v2h.rs",
-    "crates/hares-core/src/actors/occupant.rs",
-    "crates/hares-equipment/src/lib.rs",
-    "crates/hares-equipment/src/protocol_bridge/mod.rs",
-    "crates/hares-python/src/py_actor.rs",
-    "crates/hares-python/src/py_control.rs",
-    "crates/hares-python/src/py_gym.rs",
-    "crates/hares-types/src/control_signal.rs",
 ];
 
 // ---------------------------------------------------------------------------

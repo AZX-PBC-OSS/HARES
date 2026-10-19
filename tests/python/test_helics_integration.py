@@ -643,7 +643,7 @@ def test_control_signal_via_helics() -> None:
                     json.dumps(
                         {
                             "equipment": "Battery",
-                            "signal": {"type": "PowerSetpoint", "active_power_kw": -3.0},
+                            "signal": {"type": "PowerSetpoint", "active_power_w": -3000.0},
                         }
                     )
                 )
@@ -715,7 +715,7 @@ def test_malformed_control_payload_does_not_crash_federate(
             _enter_exec(aggregator)
             payloads = [
                 "not json",
-                json.dumps({"unknown_equipment": {"type": "PowerSetpoint", "active_power_kw": 3.0}}),
+                json.dumps({"unknown_equipment": {"type": "PowerSetpoint", "active_power_w": 3000.0}}),
                 json.dumps({"equipment": "Battery", "signal": {"type": "InvalidType"}}),
             ]
             for step_idx in range(_TOTAL_STEPS):

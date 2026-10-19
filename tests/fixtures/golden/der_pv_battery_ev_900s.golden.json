@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "6a5d97695e7dfbb5efb705c35ac6fefc636c8d05",
+  "git_head": "51152c523f3d06d263e67052a9fbf21c24a6d4a7",
   "git_dirty": true,
   "metrics": [
     {
@@ -167,8 +167,8 @@
         "value": 155.0391049152827
       },
       "total_energy_kwh.net_energy_kwh": {
-        "bits": "0x4053d3577655a83f",
-        "value": 79.30221327176058
+        "bits": "0x4053d3577655a840",
+        "value": 79.30221327176059
       },
       "total_energy_kwh.per_end_use": {
         "battery": {
@@ -508,9 +508,9 @@
         },
         {
           "name": "Total Electric Power (kW)",
-          "digest": "c02611fcfa7d11854fbc530d37546cc7fa84e4ea1e05ae4010ea5b3ce0a96307",
+          "digest": "15f1a60c6f5dbea55a7cc8ca563366aa6917e3835c97d925342202b3869dc7e8",
           "blocks": [
-            "1625e7ce43cd94d8add78735e4ccf48137050b8db9f5ce30230de1b7728dcc58",
+            "afcea3a21c57e4b57d205035a616b6ff9280e431349089c9c7fe185e17ac9ad5",
             "c110e94a5c3f269d3a14e2b6674d3d0f6a9f3b4330dd10f7e9eb48855761af83",
             "eb945b6e33b1ba2fd8e872f51c60fd0fecf1b3419d244723c8ef195bda11fb08",
             "092f3a3b3152b635e11640d0da883578dec4e8e5ab75753b06b50657d75a8c68",
@@ -755,9 +755,9 @@
         },
         {
           "name": "Electric Vehicle Electric Power (kW)",
-          "digest": "1972ea243e00fbd170c6861c2b28813f618845c766505acad5ff9b80ec51a4de",
+          "digest": "9fb79082a41c75f1623c1698f230e015138ad481ec9bddf1b0c69778277be90d",
           "blocks": [
-            "432f8b90e899591bb932e1e04389b3d1e03f08a8f31fb973d1fd02d88e7b22f1",
+            "026356bed5d55e81271c324b520f2a47fce574eb803c8c05fd385020be96b753",
             "9c85db7fb2fb08952e480a62856bd2e2dbbacd86a51e369f68ac71d77d32b58e",
             "2d5abe5e0721eeb3390da393f8ac74c09670ad160338b63c8c29a416e4a9e7a3",
             "079cbd99132c4fc884a9511e044282df41c59335b9247b9bde23c430f91f2144",
@@ -898,9 +898,9 @@
         },
         {
           "name": "EV End Use Electric Power (kW)",
-          "digest": "1972ea243e00fbd170c6861c2b28813f618845c766505acad5ff9b80ec51a4de",
+          "digest": "9fb79082a41c75f1623c1698f230e015138ad481ec9bddf1b0c69778277be90d",
           "blocks": [
-            "432f8b90e899591bb932e1e04389b3d1e03f08a8f31fb973d1fd02d88e7b22f1",
+            "026356bed5d55e81271c324b520f2a47fce574eb803c8c05fd385020be96b753",
             "9c85db7fb2fb08952e480a62856bd2e2dbbacd86a51e369f68ac71d77d32b58e",
             "2d5abe5e0721eeb3390da393f8ac74c09670ad160338b63c8c29a416e4a9e7a3",
             "079cbd99132c4fc884a9511e044282df41c59335b9247b9bde23c430f91f2144",
@@ -1067,9 +1067,9 @@
         },
         {
           "name": "actor:EvDriver:Electric Vehicle:charge_kw",
-          "digest": "fa1396fca8c2dafd590e1e1476476ee4a9981c21e18674a219cebc9a628d3b02",
+          "digest": "3574c96138452d42cf2dcfbc02bc7ff7b63cb79a981a252a6b38918210ea8457",
           "blocks": [
-            "cad88dc456747eecf971cfc405d2da0b49d2ef4c28cb8af35fa4a5f74b1a9282",
+            "accecf46ce0e80c23e62f6e442679116cd32d92f376d8c3a70748ba68d797273",
             "d8d0496a3ef62b9a0ab8cebffcdc9bca6d37c02dd42df486d090ba7aef58536f",
             "1a92a05d503a856fac5d2c71f198064ed8cec0f86a7289cefd6a5812b6144e0a",
             "575557193fd269dacb582c0bbe6a91520451dc7e6cc2709f0b8802223282d773",
@@ -1158,9 +1158,9 @@
         },
         {
           "name": "actor:EvDriver:Electric Vehicle:soc",
-          "digest": "4bd2d5c61e53d56ccc14e6459d455cd0af20fb8bbefca9651c982856f8821bfb",
+          "digest": "34b54737fcf0c1214ff065ba4a78cbad2b2a30bf2afafef7b39a2d27d87c90be",
           "blocks": [
-            "c566be88d61ee88308b158d9ca7f5adefaca3907e1b7d240b599d203cc5cf4e4",
+            "8b21260a510a61facfdfa5535ef37f8ebd58c03772fe13e5e27067c6f153a0fd",
             "2d917ccb9710375ba46e9da01cb5191370f9ae7f70fcf0846d65e7ee342ca934",
             "5b9715d6bd6b0c6b0ce0752274e6c73b3a1ed80ff72fa2ca3fab95542be102d1",
             "61dd9c8bb13969b28f31b3e008c3b245d99b8ba019efc2ee8c2a6b4feda222e1",

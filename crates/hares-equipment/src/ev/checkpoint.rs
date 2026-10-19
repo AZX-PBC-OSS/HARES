@@ -29,18 +29,18 @@ pub(super) struct EvCheckpoint {
     pub(super) degradation: crate::battery::degradation::DegradationState,
     pub(super) rainflow: crate::battery::degradation::RainflowCounter,
     pub(super) last_daily_update_day: i32,
-    /// Reactive-power override [kVAR]. `None` = no override (baseline
+    /// Reactive-power override [VAR]. `None` = no override (baseline
     /// power-factor path); `Some(0.0)` is a commanded zero.
     pub(super) q_setpoint_var: Option<f64>,
     pub(super) power_factor: f64,
-    /// Cumulative drive energy [kWh] dispatched but not deliverable by the
+    /// Cumulative drive energy [J] dispatched but not deliverable by the
     /// pack; see `Ev::drive_shortfall_j`.
     pub(super) drive_shortfall_j: f64,
-    /// Drive energy [kWh] dispatched since the last step, awaiting its
+    /// Drive energy [J] dispatched since the last step, awaiting its
     /// thermal application (I²R at the equivalent discharge current) — see
     /// `Ev::pending_drive_j`.
     pub(super) pending_drive_j: f64,
-    /// Reactive power emitted on the last step [kVAR] — same signed value
+    /// Reactive power emitted on the last step [VAR] - same signed value
     /// on port, CoreOutput, and telemetry, keyed on the inverter leg (the
     /// charge/export conversion only; the DC-fed pack heater produces no
     /// vars). Checkpointed verbatim so the restore publishes the

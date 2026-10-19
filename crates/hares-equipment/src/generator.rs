@@ -1954,19 +1954,13 @@ impl Equipment for Generator {
 
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                // The signal carries kW until the control-layer commit; the
-                // stored setpoint is W (SI), converted once here.
-                if !active_power_kw.is_finite() {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                if !active_power_w.is_finite() {
                     return Err(HaresError::Control(
-                        "generator PowerSetpoint active_power_kw must be finite".to_string(),
+                        "generator PowerSetpoint active_power_w must be finite".to_string(),
                     ));
                 }
-                let setpoint_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*active_power_kw)
-                        .get::<uom::si::power::watt>();
+                let setpoint_w = *active_power_w;
                 // Setpoint persists until explicitly cleared (via ModeOverride::Standby
                 // or a new PowerSetpoint). This matches OCHRE's behaviour where the
                 // controller retains the last commanded value across timesteps, avoiding
@@ -2647,8 +2641,8 @@ mod tests {
     fn ramp_to_steady_state(generator: &mut Generator, setpoint_w: f64, env: &EnvironmentState) {
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: setpoint_w,
-                reactive_power_kvar: None,
+                active_power_w: setpoint_w,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -2844,8 +2838,8 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0010,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -2910,7 +2904,7 @@ mod tests {
         let config = gen_config(&[(KEY_NO_LOAD_FUEL_FRACTION, 0.40.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
-        ramp_to_steady_state(&mut generator, 10.0, &base_env());
+        ramp_to_steady_state(&mut generator, 10_000.0, &base_env());
 
         let mut slots = ports_for(&generator);
         generator
@@ -2947,8 +2941,8 @@ mod tests {
             generator.init(&config, &base_env()).unwrap();
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 0.0010,
-                    reactive_power_kvar: None,
+                    active_power_w: 1000.0,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 })
@@ -2992,8 +2986,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0010,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3036,7 +3030,7 @@ mod tests {
         let config = gen_config(&[]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
-        ramp_to_steady_state(&mut generator, 10.0, &base_env());
+        ramp_to_steady_state(&mut generator, 10_000.0, &base_env());
 
         let mut slots = ports_for(&generator);
         generator
@@ -3091,8 +3085,8 @@ mod tests {
         // At rated (10 kW, cr=1.0): eta = 0.95*1.0 = 0.95
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3110,8 +3104,8 @@ mod tests {
         // At 25% load (2.5 kW, cr=0.25): eta = 0.95*0.5 = 0.475
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 2.5000,
-                reactive_power_kvar: None,
+                active_power_w: 2500.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3147,8 +3141,8 @@ mod tests {
         // cr=1.0: eff = 0.40 * 1.0 = 0.40
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3165,8 +3159,8 @@ mod tests {
         // cr=0.5: eff = 0.40 * 0.625 = 0.25
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3192,8 +3186,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3220,8 +3214,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3256,7 +3250,7 @@ mod tests {
         let config = gen_config(&[(KEY_DELTA_W_PER_S, 1000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
-        ramp_to_steady_state(&mut generator, 10.0, &base_env());
+        ramp_to_steady_state(&mut generator, 10_000.0, &base_env());
 
         assert!(
             (generator.current_power_w - 10_000.0).abs() < 1e-6,
@@ -3265,8 +3259,8 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0000,
-                reactive_power_kvar: None,
+                active_power_w: 0.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3390,8 +3384,8 @@ mod tests {
         // Setpoint of 1 kW is below capacity_min of 3 kW → clamp up to 3 kW.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0000,
-                reactive_power_kvar: None,
+                active_power_w: 1.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3409,8 +3403,8 @@ mod tests {
         // Setpoint of 5 kW is above capacity_min → generator runs at 5 kW.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3438,14 +3432,14 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
 
         // First bring generator online.
-        ramp_to_steady_state(&mut generator, 5.0, &base_env());
+        ramp_to_steady_state(&mut generator, 5_000.0, &base_env());
         assert!(generator.current_power_w > 0.0, "precondition: running");
 
         // Set power to 0 -- should shut off, not clamp to 3 kW.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0000,
-                reactive_power_kvar: None,
+                active_power_w: 0.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3479,8 +3473,8 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3519,8 +3513,8 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3561,8 +3555,8 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3600,8 +3594,8 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3693,8 +3687,8 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3749,8 +3743,8 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0010,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3795,8 +3789,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0000,
-                reactive_power_kvar: None,
+                active_power_w: 6.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3834,8 +3828,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3873,8 +3867,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0000,
-                reactive_power_kvar: None,
+                active_power_w: 6.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3913,8 +3907,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 8.0000,
-                reactive_power_kvar: None,
+                active_power_w: 8000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3970,8 +3964,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0000,
-                reactive_power_kvar: None,
+                active_power_w: 6.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4046,8 +4040,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0000,
-                reactive_power_kvar: None,
+                active_power_w: 6.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4099,8 +4093,8 @@ mod tests {
         // Half load (5 kW): verify each stream scales independently.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4131,8 +4125,8 @@ mod tests {
         // Full load (10 kW): total is higher but fractions remain the same.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4186,8 +4180,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0000,
-                reactive_power_kvar: None,
+                active_power_w: 6.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4247,8 +4241,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 7.5000,
-                reactive_power_kvar: None,
+                active_power_w: 7.5000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4311,8 +4305,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0000,
-                reactive_power_kvar: None,
+                active_power_w: 6.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4361,8 +4355,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4419,7 +4413,7 @@ mod tests {
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
-        ramp_to_steady_state(&mut generator, 8.0, &base_env());
+        ramp_to_steady_state(&mut generator, 8_000.0, &base_env());
 
         let mut slots = ports_for(&generator);
         generator
@@ -4474,8 +4468,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4506,7 +4500,7 @@ mod tests {
         let config = gen_config(&[]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
-        ramp_to_steady_state(&mut generator, 10.0, &base_env());
+        ramp_to_steady_state(&mut generator, 10_000.0, &base_env());
 
         let saved = generator.current_power_w;
         let bytes = generator.save_state().unwrap();
@@ -4668,8 +4662,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4699,8 +4693,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4718,8 +4712,8 @@ mod tests {
         // command: return to self-consumption control.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -5025,7 +5019,7 @@ mod tests {
         let config = gen_config(&[]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
-        ramp_to_steady_state(&mut generator, 10.0, &base_env());
+        ramp_to_steady_state(&mut generator, 10_000.0, &base_env());
 
         let mut slots = ports_for(&generator);
         generator
@@ -5050,7 +5044,7 @@ mod tests {
         let config = gen_config(&[]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
-        ramp_to_steady_state(&mut generator, 10.0, &base_env());
+        ramp_to_steady_state(&mut generator, 10_000.0, &base_env());
 
         // Run one step to populate all telemetry fields.
         let mut slots = ports_for(&generator);
@@ -5148,8 +5142,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -5206,8 +5200,8 @@ mod tests {
         //   eta = 0.95 * 0.7125 ≈ 0.677.
         // Constant at any cr: eta = 0.95
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.5000,
-            reactive_power_kvar: None,
+            active_power_w: 2500.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -5485,7 +5479,7 @@ mod tests {
             "idle generator must report Off"
         );
 
-        ramp_to_steady_state(&mut generator, 5.0, &base_env());
+        ramp_to_steady_state(&mut generator, 5_000.0, &base_env());
         let mut slots = ports_for(&generator);
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
@@ -5530,8 +5524,8 @@ mod tests {
         fc.init(&config, &base_env()).unwrap();
 
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -5581,8 +5575,8 @@ mod tests {
         fc.init(&config, &base_env()).unwrap();
 
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -5619,8 +5613,8 @@ mod tests {
         fc.init(&config, &base_env()).unwrap();
 
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -5659,8 +5653,8 @@ mod tests {
         fc.init(&config, &base_env()).unwrap();
 
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -5734,8 +5728,8 @@ mod tests {
 
         // Run GasGenerator at 5 kW AC with eta=0.50.
         gg.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -5745,8 +5739,8 @@ mod tests {
 
         // Run FuelCell at 5 kW AC with eta=0.50, inverter=0.90.
         fc.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -5783,8 +5777,8 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -5825,7 +5819,7 @@ mod tests {
         ]);
         let mut fc = Generator::new(config.clone(), GeneratorKind::FuelCell);
         fc.init(&config, &base_env()).unwrap();
-        ramp_to_steady_state(&mut fc, 5.0, &base_env());
+        ramp_to_steady_state(&mut fc, 5_000.0, &base_env());
 
         let mut slots = ports_for(&fc);
         fc.step(&base_env(), Duration::from_secs(1), &mut slots)
@@ -5865,8 +5859,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -5937,8 +5931,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -5980,8 +5974,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -6012,8 +6006,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0000,
-                reactive_power_kvar: None,
+                active_power_w: 6.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -6095,8 +6089,8 @@ mod tests {
             generator.init(&config, &base_env()).unwrap();
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 10.0000,
-                    reactive_power_kvar: None,
+                    active_power_w: 10000.0,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 })
@@ -6145,8 +6139,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -6207,8 +6201,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 8.0000,
-                reactive_power_kvar: None,
+                active_power_w: 8000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -6266,8 +6260,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 8.0000,
-                reactive_power_kvar: None,
+                active_power_w: 8000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -6302,8 +6296,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0000,
-                reactive_power_kvar: None,
+                active_power_w: 6.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -6334,8 +6328,8 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0000,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -6386,8 +6380,8 @@ mod tests {
 
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 6.0000,
-                reactive_power_kvar: None,
+                active_power_w: 6.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -6425,7 +6419,7 @@ mod tests {
         ]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
-        ramp_to_steady_state(&mut generator, 6.0, &base_env());
+        ramp_to_steady_state(&mut generator, 6_000.0, &base_env());
 
         let mut slots = ports_for(&generator);
         generator
@@ -6474,8 +6468,8 @@ mod tests {
             generator.init(&config, &base_env()).unwrap();
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: setpoint_w,
-                    reactive_power_kvar: None,
+                    active_power_w: setpoint_w,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 })
@@ -6530,8 +6524,8 @@ mod tests {
             generator.init(&config, &base_env()).unwrap();
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 5.0000,
-                    reactive_power_kvar: None,
+                    active_power_w: 5000.0,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 })
@@ -6548,8 +6542,8 @@ mod tests {
             generator.init(&config, &base_env()).unwrap();
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 10.0000,
-                    reactive_power_kvar: None,
+                    active_power_w: 10000.0,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 })
@@ -6599,8 +6593,8 @@ mod tests {
         {
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 10.0000,
-                    reactive_power_kvar: None,
+                    active_power_w: 10000.0,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 })
@@ -6619,8 +6613,8 @@ mod tests {
         {
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: 5.0000,
-                    reactive_power_kvar: None,
+                    active_power_w: 5000.0,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 })
@@ -6672,7 +6666,7 @@ mod tests {
 
         // Run at 30 % load: cr=0.3, curve interpolates between
         // (0.167,0.62) and (0.333,0.78) → er≈0.71, eta≈0.213.
-        ramp_to_steady_state(&mut generator, 3.0, &base_env());
+        ramp_to_steady_state(&mut generator, 3_000.0, &base_env());
         let mut slots = ports_for(&generator);
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
@@ -6834,7 +6828,7 @@ mod tests {
         let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
-        ramp_to_steady_state(&mut generator, 5.0, &base_env());
+        ramp_to_steady_state(&mut generator, 5_000.0, &base_env());
         let mut slots = ports_for(&generator);
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
@@ -6910,7 +6904,7 @@ mod tests {
         let config = gen_config(&[(KEY_DELTA_W_PER_S, 100000.0.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
-        ramp_to_steady_state(&mut generator, 5.0, &base_env());
+        ramp_to_steady_state(&mut generator, 5_000.0, &base_env());
         let mut slots = ports_for(&generator);
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
@@ -6921,8 +6915,8 @@ mod tests {
         // ramp-down step runs.
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0000,
-                reactive_power_kvar: None,
+                active_power_w: 0.0000,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })

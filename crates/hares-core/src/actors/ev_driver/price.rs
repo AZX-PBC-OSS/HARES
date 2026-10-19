@@ -84,7 +84,7 @@ impl ChargingPreference for PriceOptimizer {
             };
             PreferenceVote {
                 target_soc: None,
-                power_kw: Some(ctx.max_charge_kw),
+                power_w: Some(ctx.max_charge_w),
                 departure_hour: None,
                 min_soc: None,
                 max_soc: None,
@@ -100,7 +100,7 @@ impl ChargingPreference for PriceOptimizer {
             };
             PreferenceVote {
                 target_soc: None,
-                power_kw: Some(-ctx.max_discharge_kw),
+                power_w: Some(-ctx.max_discharge_w),
                 departure_hour: None,
                 min_soc: None,
                 max_soc: None,
@@ -126,9 +126,9 @@ mod tests {
     fn make_ctx_with_price(env: &hares_types::EnvironmentState) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: 0.5,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 60.0,
+            max_charge_w: 7.2,
+            max_discharge_w: 5.0,
             env,
             current_minute: 720,
             next_departure_minute: None,
@@ -154,7 +154,7 @@ mod tests {
 
         assert!(vote.score > 0.0);
         assert_eq!(vote.label, "price:charge");
-        assert!(vote.power_kw.unwrap() > 0.0);
+        assert!(vote.power_w.unwrap() > 0.0);
     }
 
     #[test]
@@ -173,7 +173,7 @@ mod tests {
 
         assert!(vote.score > 0.0);
         assert_eq!(vote.label, "price:discharge");
-        assert!(vote.power_kw.unwrap() < 0.0);
+        assert!(vote.power_w.unwrap() < 0.0);
     }
 
     #[test]
@@ -191,7 +191,7 @@ mod tests {
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "price:neutral");
-        assert!(vote.power_kw.is_none());
+        assert!(vote.power_w.is_none());
     }
 
     #[test]

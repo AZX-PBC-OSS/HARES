@@ -242,8 +242,8 @@ pub enum DrAction {
     /// equipment-side [`ControlSignal::mode_release`]), so the unit returns
     /// to its own control.
     TurnOff,
-    /// Limit power draw to a maximum.
-    PowerLimit { max_kw: f64 },
+    /// Limit power draw to a maximum, in watts (SI).
+    PowerLimit { max_w: f64 },
     /// Dispatch a demand-response signal with built-in auto-reversion.
     /// Equipment applies DR setpoint/curtailment behaviour for `duration_s`
     /// seconds, then automatically reverts to `DRLevel::Normal`.
@@ -362,13 +362,13 @@ impl DrAction {
     ///
     /// # Panics (debug only)
     ///
-    /// Panics if `max_kw` is negative.
-    pub fn limit_power(max_kw: f64) -> Self {
+    /// Panics if `max_w` is negative.
+    pub fn limit_power(max_w: f64) -> Self {
         debug_assert!(
-            max_kw >= 0.0,
-            "power limit must be non-negative, got {max_kw}"
+            max_w >= 0.0,
+            "power limit must be non-negative, got {max_w}"
         );
-        Self::PowerLimit { max_kw }
+        Self::PowerLimit { max_w }
     }
 }
 
@@ -743,9 +743,9 @@ impl DrCompliance {
             DrAction::TurnOff => ControlSignal::ModeOverride {
                 mode: OperatingMode::Off,
             },
-            DrAction::PowerLimit { max_kw } => ControlSignal::PowerLimit {
-                max_power_kw: *max_kw,
-                ramp_rate_kw_per_s: None,
+            DrAction::PowerLimit { max_w } => ControlSignal::PowerLimit {
+                max_power_w: *max_w,
+                ramp_rate_w_per_s: None,
             },
             DrAction::DemandResponse { level, duration_s } => ControlSignal::DemandResponse {
                 level: *level,
@@ -797,8 +797,8 @@ impl DrCompliance {
                     out.push(DispatchRequest {
                         target: target.clone(),
                         signal: ControlSignal::PowerLimit {
-                            max_power_kw: f64::INFINITY,
-                            ramp_rate_kw_per_s: None,
+                            max_power_w: f64::INFINITY,
+                            ramp_rate_w_per_s: None,
                         },
                         priority: PriorityTier::Grid,
                     });
@@ -1152,12 +1152,13 @@ impl Actor for DrCompliance {
         }
     }
 
-    /// v3: the snapshot also carries the targets whose thermostat the
-    /// freeze guard forced, so the event's end releases them after a
-    /// checkpoint. v2 carried the axis each target's pre-conditioning has
-    /// displaced.
+    /// v4: the dispatched `PowerLimit` payloads hold W (SI) where v3 held
+    /// kW - a v3 blob's limits would read 1000x small; the version gate
+    /// rejects it here, at the checkpoint boundary. v3 carried the targets
+    /// whose thermostat the freeze guard forced, and v2 the axis each
+    /// target's pre-conditioning has displaced.
     fn checkpoint_version(&self) -> u32 {
-        3
+        4
     }
 
     fn save_state(&self) -> Result<Vec<u8>, HaresError> {
@@ -1356,8 +1357,8 @@ mod tests {
 
     #[test]
     fn dr_action_limit_power_creates_correct_variant() {
-        let action = DrAction::limit_power(5.0);
-        assert_eq!(action, DrAction::PowerLimit { max_kw: 5.0 });
+        let action = DrAction::limit_power(5000.0);
+        assert_eq!(action, DrAction::PowerLimit { max_w: 5000.0 });
     }
 
     #[test]
@@ -1452,7 +1453,7 @@ mod tests {
             .with_compliance_model(AlwaysComply)
             .with_load_target(
                 DispatchTarget::ByName("EV".into()),
-                DrAction::limit_power(3.3),
+                DrAction::limit_power(3300.0),
             );
 
         actor.set_dr_level(DRLevel::High);
@@ -1465,7 +1466,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(matches!(
             requests[0].signal,
-            ControlSignal::PowerLimit { max_power_kw, .. } if (max_power_kw - 3.3).abs() < 0.01
+            ControlSignal::PowerLimit { max_power_w, .. } if (max_power_w - 3300.0).abs() < 0.01
         ));
     }
 
@@ -1956,7 +1957,11 @@ mod tests {
         let mut actor = DrCompliance::new("Test");
         assert!(actor.load_state(&first_layout).is_err());
         assert!(actor.load_state(&second_layout).is_err());
-        assert_eq!(actor.checkpoint_version(), 3);
+        // v4 changed no layout - the dispatched PowerLimit payloads hold W
+        // (SI) where v3 held kW, the same 4-tuple on the wire - so the
+        // refusal of a v3 blob sits at the checkpoint's per-actor
+        // schema_version gate, not at the decode.
+        assert_eq!(actor.checkpoint_version(), 4);
     }
 
     /// Relaxation widens the gap on both axes, which is valid for any unit.
@@ -2417,7 +2422,7 @@ mod tests {
             .with_compliance_model(AlwaysComply)
             .with_load_target(
                 DispatchTarget::ByName("HPWH".into()),
-                DrAction::limit_power(3.0),
+                DrAction::limit_power(3000.0),
             );
 
         // Step 1: DR High — dispatch power limit
@@ -2428,7 +2433,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(matches!(
             &requests[0].signal,
-            ControlSignal::PowerLimit { max_power_kw, .. } if (*max_power_kw - 3.0).abs() < 0.01
+            ControlSignal::PowerLimit { max_power_w, .. } if (*max_power_w - 3000.0).abs() < 0.01
         ));
 
         // Step 2: DR Normal — clear signal dispatched
@@ -2445,14 +2450,14 @@ mod tests {
         assert_eq!(requests2[0].target, DispatchTarget::ByName("HPWH".into()));
         match &requests2[0].signal {
             ControlSignal::PowerLimit {
-                max_power_kw,
-                ramp_rate_kw_per_s,
+                max_power_w,
+                ramp_rate_w_per_s,
             } => {
                 assert!(
-                    max_power_kw.is_infinite() && *max_power_kw > 0.0,
-                    "clear signal must use INFINITY power limit, got {max_power_kw}"
+                    max_power_w.is_infinite() && *max_power_w > 0.0,
+                    "clear signal must use INFINITY power limit, got {max_power_w}"
                 );
-                assert_eq!(*ramp_rate_kw_per_s, None);
+                assert_eq!(*ramp_rate_w_per_s, None);
             }
             other => panic!("expected PowerLimit clear signal, got {other:?}"),
         }
@@ -2464,11 +2469,11 @@ mod tests {
             .with_compliance_model(AlwaysComply)
             .with_load_target(
                 DispatchTarget::ByName("HPWH".into()),
-                DrAction::limit_power(3.0),
+                DrAction::limit_power(3000.0),
             )
             .with_load_target(
                 DispatchTarget::ByName("EV".into()),
-                DrAction::limit_power(5.0),
+                DrAction::limit_power(5000.0),
             );
 
         // Dispatch both power limits during DR High
@@ -2495,7 +2500,7 @@ mod tests {
         for req in &requests2 {
             assert!(matches!(
                 &req.signal,
-                ControlSignal::PowerLimit { max_power_kw, .. } if max_power_kw.is_infinite() && *max_power_kw > 0.0
+                ControlSignal::PowerLimit { max_power_w, .. } if max_power_w.is_infinite() && *max_power_w > 0.0
             ));
         }
     }
@@ -2590,7 +2595,7 @@ mod tests {
             .with_hvac_action(DrAction::off())
             .with_load_target(
                 DispatchTarget::ByName("EVSE".into()),
-                DrAction::limit_power(4.0),
+                DrAction::limit_power(4000.0),
             )
             .with_load_target(DispatchTarget::ByName("HRV".into()), DrAction::off());
 
@@ -2898,7 +2903,7 @@ mod tests {
             .with_compliance_model(AlwaysComply)
             .with_load_target(
                 DispatchTarget::ByName("EV".into()),
-                DrAction::limit_power(4.0),
+                DrAction::limit_power(4000.0),
             );
 
         // Dispatch during DR High
@@ -2930,7 +2935,7 @@ mod tests {
             .with_compliance_model(AlwaysComply)
             .with_load_target(
                 DispatchTarget::ByName("HPWH".into()),
-                DrAction::limit_power(3.0),
+                DrAction::limit_power(3000.0),
             );
 
         // Active DR — signals count reflects dispatched signals
@@ -2985,10 +2990,10 @@ mod tests {
         let mut actor = DrCompliance::new("Test")
             .with_compliance_model(AlwaysComply)
             .with_hvac_target(DispatchTarget::ByName("HPWH".into()))
-            .with_hvac_action(DrAction::limit_power(2.0))
+            .with_hvac_action(DrAction::limit_power(2000.0))
             .with_load_target(
                 DispatchTarget::ByName("HPWH".into()),
-                DrAction::limit_power(3.0),
+                DrAction::limit_power(3000.0),
             );
 
         // Step 1: DR High — dispatches two PowerLimit signals (hvac + load)
@@ -3010,8 +3015,8 @@ mod tests {
         assert!(
             matches!(
                 &requests2[0].signal,
-                ControlSignal::PowerLimit { max_power_kw, .. }
-                if max_power_kw.is_infinite() && *max_power_kw > 0.0
+                ControlSignal::PowerLimit { max_power_w, .. }
+                if max_power_w.is_infinite() && *max_power_w > 0.0
             ),
             "clear signal must be PowerLimit with INFINITY"
         );
@@ -3027,7 +3032,7 @@ mod tests {
             .with_hvac_action(DrAction::off())
             .with_load_target(
                 DispatchTarget::ByName("HPWH".into()),
-                DrAction::limit_power(3.0),
+                DrAction::limit_power(3000.0),
             );
 
         // Active DR
@@ -3056,7 +3061,7 @@ mod tests {
         assert!(
             requests2.iter().any(|r| matches!(
                 &r.signal,
-                ControlSignal::PowerLimit { max_power_kw, .. } if max_power_kw.is_infinite() && *max_power_kw > 0.0
+                ControlSignal::PowerLimit { max_power_w, .. } if max_power_w.is_infinite() && *max_power_w > 0.0
             )),
             "must dispatch PowerLimit INFINITY clear, not original DR signal"
         );
@@ -3075,7 +3080,7 @@ mod tests {
             .with_compliance_model(AlwaysComply)
             .with_load_target(
                 DispatchTarget::ByName("HPWH".into()),
-                DrAction::limit_power(3.0),
+                DrAction::limit_power(3000.0),
             );
 
         actor.set_dr_level(DRLevel::High);
@@ -3128,7 +3133,7 @@ mod tests {
             .with_compliance_model(AlwaysComply)
             .with_load_target(
                 DispatchTarget::ByName("HPWH".into()),
-                DrAction::limit_power(3.0),
+                DrAction::limit_power(3000.0),
             );
 
         actor.set_dr_level(DRLevel::High);
@@ -3145,7 +3150,7 @@ mod tests {
         );
         assert!(matches!(
             &requests[0].signal,
-            ControlSignal::PowerLimit { max_power_kw, .. } if (*max_power_kw - 3.0).abs() < 0.01
+            ControlSignal::PowerLimit { max_power_w, .. } if (*max_power_w - 3000.0).abs() < 0.01
         ));
         assert_eq!(actor.telemetry.get("signals_count"), Some(1.0));
         assert_eq!(actor.telemetry.get("signals_rejected"), Some(0.0));
@@ -3221,7 +3226,7 @@ mod tests {
             .with_compliance_model(AlwaysComply)
             .with_load_target(
                 DispatchTarget::ByEndUse(EndUse::WATER_HEATING),
-                DrAction::limit_power(2.0),
+                DrAction::limit_power(2000.0),
             );
 
         actor.set_dr_level(DRLevel::High);
@@ -3259,7 +3264,7 @@ mod tests {
             .with_compliance_model(AlwaysComply)
             .with_load_target(
                 DispatchTarget::ByName("HVAC".into()),
-                DrAction::limit_power(3.0),
+                DrAction::limit_power(3000.0),
             );
 
         actor.set_dr_level(DRLevel::High);
@@ -3299,11 +3304,11 @@ mod tests {
             .with_compliance_model(AlwaysComply)
             .with_load_target(
                 DispatchTarget::ByName("HPWH".into()),
-                DrAction::limit_power(3.0),
+                DrAction::limit_power(3000.0),
             )
             .with_load_target(
                 DispatchTarget::ByName("EV".into()),
-                DrAction::limit_power(5.0),
+                DrAction::limit_power(5000.0),
             );
 
         actor.set_dr_level(DRLevel::High);
@@ -3320,7 +3325,7 @@ mod tests {
         assert_eq!(requests[0].target, DispatchTarget::ByName("EV".into()));
         assert!(matches!(
             &requests[0].signal,
-            ControlSignal::PowerLimit { max_power_kw, .. } if (*max_power_kw - 5.0).abs() < 0.01
+            ControlSignal::PowerLimit { max_power_w, .. } if (*max_power_w - 5000.0).abs() < 0.01
         ));
         assert_eq!(actor.telemetry.get("signals_count"), Some(1.0));
         assert_eq!(actor.telemetry.get("signals_rejected"), Some(1.0));
@@ -3547,7 +3552,7 @@ mod tests {
         actor.set_dr_level(DRLevel::High);
         actor.last_dispatched.push((
             DispatchTarget::ByName("HVAC".into()),
-            DrAction::PowerLimit { max_kw: 3.0 },
+            DrAction::PowerLimit { max_w: 3000.0 },
         ));
         actor
             .freeze_guard_setpoints
@@ -3568,7 +3573,7 @@ mod tests {
         assert_eq!(restored.last_dispatched.len(), 1);
         assert_eq!(
             restored.last_dispatched[0].1,
-            DrAction::PowerLimit { max_kw: 3.0 }
+            DrAction::PowerLimit { max_w: 3000.0 }
         );
         assert_eq!(
             restored.freeze_guard_setpoints,

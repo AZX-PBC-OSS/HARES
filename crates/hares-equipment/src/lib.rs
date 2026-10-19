@@ -50,7 +50,7 @@ pub enum ActorSeed {
         plug_in_policy: PlugInPolicy,
         capacity_j: f64,
         max_charge_w: f64,
-        fuel_economy_kwh_per_mi: f64,
+        fuel_economy_j_per_m: f64,
     },
 }
 
@@ -752,15 +752,8 @@ mod tests {
         }
 
         fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-            if let ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } = signal
-            {
-                // The signal carries kW until the control-layer commit; the
-                // recorded value is W (SI), converted once here.
-                self.state_value =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*active_power_kw)
-                        .get::<uom::si::power::watt>();
+            if let ControlSignal::PowerSetpoint { active_power_w, .. } = signal {
+                self.state_value = *active_power_w;
                 self.telemetry.insert("x", self.state_value);
             }
             Ok(())
@@ -886,8 +879,8 @@ mod tests {
     fn apply_control_rejects_unsupported_signals() {
         let mut eq = MockEquipment::new(ControlCapabilities::MODE_OVERRIDE);
         let signal = ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0,
-            reactive_power_kvar: None,
+            active_power_w: 3000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         };
@@ -1176,8 +1169,8 @@ mod tests {
             ),
             (
                 ControlSignal::PowerSetpoint {
-                    active_power_kw: 1.0,
-                    reactive_power_kvar: None,
+                    active_power_w: 1000.0,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 },
@@ -1185,8 +1178,8 @@ mod tests {
             ),
             (
                 ControlSignal::PowerLimit {
-                    max_power_kw: 5.0,
-                    ramp_rate_kw_per_s: None,
+                    max_power_w: 5000.0,
+                    ramp_rate_w_per_s: None,
                 },
                 ControlCapabilities::POWER_LIMIT,
             ),
@@ -1246,7 +1239,7 @@ mod tests {
                 ControlCapabilities::CURTAILMENT_PERCENT,
             ),
             (
-                ControlSignal::ReactiveSetpoint { kvar: 1.0 },
+                ControlSignal::ReactiveSetpoint { var: 1.0 },
                 ControlCapabilities::REACTIVE_SETPOINT,
             ),
             (
@@ -1286,11 +1279,11 @@ mod tests {
                 ControlCapabilities::EV_PLUG_IN,
             ),
             (
-                ControlSignal::EvDrive { kwh: 1.0 },
+                ControlSignal::EvDrive { energy_j: 1.0 },
                 ControlCapabilities::EV_DRIVE,
             ),
             (
-                ControlSignal::EvAwayCharge { power_kw: 1.0 },
+                ControlSignal::EvAwayCharge { power_w: 1.0 },
                 ControlCapabilities::EV_AWAY_CHARGE,
             ),
             (
@@ -1456,8 +1449,8 @@ mod tests {
     fn apply_control_rejects_infinite_power_setpoint() {
         let mut eq = mock_with_all_caps();
         let signal = ControlSignal::PowerSetpoint {
-            active_power_kw: f64::INFINITY,
-            reactive_power_kvar: None,
+            active_power_w: f64::INFINITY,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         };
@@ -1486,8 +1479,8 @@ mod tests {
     fn apply_control_rejects_negative_power_limit() {
         let mut eq = mock_with_all_caps();
         let signal = ControlSignal::PowerLimit {
-            max_power_kw: -5.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: -5.0,
+            ramp_rate_w_per_s: None,
         };
         let err = eq.apply_control(&signal).unwrap_err();
         assert!(

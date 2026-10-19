@@ -556,7 +556,7 @@ class TestBatteryConfigParams:
         bat = Battery("Bat", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000,
                       initial_soc=0.3, min_soc=0.2)
         dw.add_battery(bat)
-        dw.apply_control("Bat", ControlSignal.power_setpoint(-5.0))
+        dw.apply_control("Bat", ControlSignal.power_setpoint(active_power_w=-5000.0))
         for _ in range(20):
             dw.step()
         tel = dw.telemetry().equipment()

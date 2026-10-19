@@ -39,6 +39,7 @@
 //! over-charge rather than strand the driver.
 
 mod composer;
+pub mod defaults;
 mod departure;
 mod efficiency;
 mod preference;
@@ -86,7 +87,7 @@ use self::v2h::V2HDischarge;
 struct DayEvent {
     departure_minute: u16,
     arrival_minute: u16,
-    drive_kwh: f64,
+    drive_j: f64,
 }
 
 /// State machine phase for the driver's day.
@@ -101,7 +102,7 @@ enum DriverPhase {
     /// home-arrival minute travel with the phase, not with `todays_event`
     /// (which the new day's roll may have replaced or cleared).
     Driving {
-        remaining_kwh: f64,
+        remaining_j: f64,
         total_steps: u32,
         steps_done: u32,
         plan: DayEvent,
@@ -128,7 +129,7 @@ const CHARGING_EFFICIENCY: f64 = 0.9;
 /// Build the preference stack for a given charging strategy.
 fn build_preferences(
     strategy: &ChargingStrategy,
-    max_charge_kw: f64,
+    max_charge_w: f64,
     efficiency: f64,
     price_schedule: Option<Arc<[f64]>>,
     steps_per_day: usize,
@@ -224,13 +225,7 @@ fn build_preferences(
         } => {
             vec![
                 Box::new(SolarTracking {
-                    // One conversion at the read: the payload enters in W
-                    // (SI); the actor still works in kW until the control
-                    // commit.
-                    min_charge_rate_kw: uom::si::f64::Power::new::<uom::si::power::watt>(
-                        *min_charge_rate_w,
-                    )
-                    .get::<uom::si::power::kilowatt>(),
+                    min_charge_rate_w: *min_charge_rate_w,
                 }),
                 Box::new(DepartureDeadline {
                     schedule: departure_schedule.clone(),
@@ -252,7 +247,7 @@ fn build_preferences(
                 Box::new(V2HDischarge {
                     threshold_soc: *discharge_threshold_soc,
                     min_soc: *min_soc,
-                    max_discharge_kw: max_charge_kw,
+                    max_discharge_w: max_charge_w,
                 }),
             ]
         }
@@ -268,14 +263,132 @@ fn build_preferences(
                 }),
                 Box::new(V2GExport {
                     min_soc: *min_soc,
-                    // One conversion at the read: the payload enters in W
-                    // (SI); the actor still works in kW.
-                    max_export_kw: uom::si::f64::Power::new::<uom::si::power::watt>(*max_export_w)
-                        .get::<uom::si::power::kilowatt>(),
+                    max_export_w: *max_export_w,
                     price_threshold: *price_threshold,
                 }),
             ]
         }
+    }
+}
+
+impl EvDriverParams {
+    /// The params the registry's `EvDriver` factory builds from one
+    /// `ActorConfig`: the preset resolution, the schedules and the SI
+    /// parameters with their `defaults::` fallbacks, exposed so the
+    /// construction the factory performs is readable by introspection and
+    /// the acceptance tests.
+    ///
+    /// # Errors
+    /// A preset id that names no archetype, or a preset value that is not
+    /// a string.
+    pub fn from_registry_config(
+        config: &crate::actor_registry::ActorConfig,
+    ) -> Result<Self, HaresError> {
+        use hares_equipment::config::ConfigValue;
+        use hares_equipment::ev::catalog::{EvArchetypeId, archetype_by_id};
+
+        // If a preset is specified, load defaults from the archetype
+        // catalog. A present-but-unresolvable id is a config error:
+        // silently falling through to the default strategy would
+        // change simulated charging behavior without any signal. A
+        // present-but-non-string value is an error for the same
+        // reason - the user clearly intended a preset.
+        let preset = match config.parameters.get("preset") {
+            None => None,
+            Some(ConfigValue::Text(id)) => Some(archetype_by_id(id).ok_or_else(|| {
+                let valid = EvArchetypeId::ALL
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                // NB: no apostrophes around {id} - the core
+                // source-scan test's sanitizer pairs apostrophes
+                // naively, and an inserted pair shifts the pairing
+                // file-wide (see no_string_telemetry_reads_in_core).
+                HaresError::Control(format!(
+                    "unknown EvDriver preset {id}: valid presets are {valid}"
+                ))
+            })?),
+            Some(other) => {
+                let actual = match other {
+                    ConfigValue::Float(_) => "float",
+                    ConfigValue::Text(_) => "string",
+                    ConfigValue::Bool(_) => "bool",
+                    ConfigValue::FloatArray(_) => "float array",
+                };
+                // NB: no apostrophes around {other} - see the
+                // source-scan sanitizer note on the preset error above.
+                return Err(HaresError::Control(format!(
+                    "EvDriver preset must be a string id, got {actual}: {other}"
+                )));
+            }
+        };
+
+        let seed = config.get_f64("seed").unwrap_or(0.0) as u64;
+        let seed_bytes = {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&seed.to_le_bytes());
+            b
+        };
+
+        let strategy = preset
+            .map(|p| p.strategy.clone())
+            .unwrap_or(ChargingStrategy::Immediate { target_soc: 0.9 });
+        let policy = preset
+            .map(|p| p.plug_in_policy.clone())
+            .unwrap_or(PlugInPolicy::Always);
+        let event_day_ratio = config
+            .get_f64("event_day_ratio")
+            .or_else(|| preset.map(|p| p.event_day_ratio))
+            .unwrap_or(0.8);
+        let distance_schedule = preset
+            .map(|p| p.build_distance_schedule(seed_bytes))
+            .unwrap_or_else(|| {
+                let mean = config
+                    .get_f64("daily_drive_distance_mean_m")
+                    .unwrap_or(defaults::DAILY_DRIVE_DISTANCE_M);
+                ScheduleSource::Constant(mean)
+            });
+        let departure_schedule = preset
+            .map(|p| p.build_departure_schedule(seed_bytes))
+            .unwrap_or(ScheduleSource::Constant(480.0));
+        let duration_schedule = preset
+            .map(|p| p.build_duration_schedule(seed_bytes))
+            .unwrap_or(ScheduleSource::Constant(600.0));
+        let arrival_schedule = preset.and_then(|p| p.build_arrival_schedule(seed_bytes));
+        Ok(Self {
+            strategy,
+            plug_in_policy: policy,
+            daily_drive_distance_m: distance_schedule,
+            departure_time: departure_schedule,
+            trip_duration: duration_schedule,
+            arrival_time: arrival_schedule,
+            event_day_ratio,
+            fuel_economy_j_per_m: config.get_f64("fuel_economy_j_per_m").unwrap_or(
+                uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(0.3)
+                    .get::<uom::si::energy::joule>()
+                    / uom::si::f64::Length::new::<uom::si::length::mile>(1.0)
+                        .get::<uom::si::length::meter>(),
+            ),
+            capacity_j: config.get_f64("capacity_j").unwrap_or(
+                uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(60.0)
+                    .get::<uom::si::energy::joule>(),
+            ),
+            max_charge_w: config.get_f64("max_charge_w").unwrap_or(
+                uom::si::f64::Power::new::<uom::si::power::kilowatt>(7.2)
+                    .get::<uom::si::power::watt>(),
+            ),
+            average_speed_m_per_s: config
+                .get_f64("average_speed_m_per_s")
+                .unwrap_or(defaults::AVERAGE_SPEED_M_PER_S),
+            range_anxiety_distance_m: config
+                .get_f64("range_anxiety_distance_m")
+                .unwrap_or(defaults::RANGE_ANXIETY_DISTANCE_M),
+            away_charge_fraction: config.get_f64("away_charge_fraction").unwrap_or(0.0),
+            away_charge_power_w: config
+                .get_f64("away_charge_power_w")
+                .unwrap_or(defaults::AWAY_CHARGE_POWER_W),
+        })
     }
 }
 
@@ -284,8 +397,8 @@ fn build_preferences(
 pub struct EvDriverParams {
     pub strategy: ChargingStrategy,
     pub plug_in_policy: PlugInPolicy,
-    /// Distribution of miles driven per day.
-    pub daily_drive_miles: ScheduleSource,
+    /// Distribution of distance driven per day, in metres (SI).
+    pub daily_drive_distance_m: ScheduleSource,
     /// Distribution of daily departure time.
     pub departure_time: ScheduleSource,
     /// Distribution of trip duration.
@@ -294,13 +407,13 @@ pub struct EvDriverParams {
     pub arrival_time: Option<ScheduleSource>,
     /// Fraction of days with a driving event.
     pub event_day_ratio: f64,
-    pub fuel_economy_kwh_per_mi: f64,
-    pub capacity_kwh: f64,
-    pub max_charge_kw: f64,
-    pub average_speed_mph: f64,
-    pub range_anxiety_miles: f64,
+    pub fuel_economy_j_per_m: f64,
+    pub capacity_j: f64,
+    pub max_charge_w: f64,
+    pub average_speed_m_per_s: f64,
+    pub range_anxiety_distance_m: f64,
     pub away_charge_fraction: f64,
-    pub away_charge_power_kw: f64,
+    pub away_charge_power_w: f64,
 }
 
 /// Actor that models a human EV driver's daily behavior.
@@ -316,19 +429,19 @@ pub struct EvDriverActor {
     // Behavioral config
     strategy: ChargingStrategy,
     plug_in_policy: PlugInPolicy,
-    daily_drive_miles: ScheduleSource,
+    daily_drive_distance_m: ScheduleSource,
     departure_time: ScheduleSource,
     trip_duration: ScheduleSource,
     /// Direct arrival-time sampling. `None` means fall back to `departure + trip_duration`.
     arrival_time: Option<ScheduleSource>,
     event_day_ratio: f64,
-    fuel_economy_kwh_per_mi: f64,
-    capacity_kwh: f64,
-    max_charge_kw: f64,
-    average_speed_mph: f64,
-    range_anxiety_miles: f64,
+    fuel_economy_j_per_m: f64,
+    capacity_j: f64,
+    max_charge_w: f64,
+    average_speed_m_per_s: f64,
+    range_anxiety_distance_m: f64,
     away_charge_fraction: f64,
-    away_charge_power_kw: f64,
+    away_charge_power_w: f64,
 
     // Composer for per-step charging decisions
     composer: ChargingComposer,
@@ -345,7 +458,7 @@ pub struct EvDriverActor {
     phase: DriverPhase,
     estimated_soc: f64,
     time_res_minutes: f64,
-    expected_daily_miles: f64,
+    expected_daily_distance_m: f64,
     /// Deferred away-charge signals to emit on the next step after driving ends.
     needs_away_charge: bool,
     /// Cumulative count of trips cancelled because the pack could not cover
@@ -422,28 +535,28 @@ impl EvDriverActor {
         let EvDriverParams {
             strategy,
             plug_in_policy,
-            daily_drive_miles,
+            daily_drive_distance_m,
             departure_time,
             trip_duration,
             arrival_time,
             event_day_ratio,
-            fuel_economy_kwh_per_mi,
-            capacity_kwh,
-            max_charge_kw,
-            average_speed_mph,
-            range_anxiety_miles,
+            fuel_economy_j_per_m,
+            capacity_j,
+            max_charge_w,
+            average_speed_m_per_s,
+            range_anxiety_distance_m,
             away_charge_fraction,
-            away_charge_power_kw,
+            away_charge_power_w,
         } = params;
-        let prefs = build_preferences(&strategy, max_charge_kw, CHARGING_EFFICIENCY, None, 24);
+        let prefs = build_preferences(&strategy, max_charge_w, CHARGING_EFFICIENCY, None, 24);
         let composer = ChargingComposer::new(prefs, target);
-        let expected_daily_miles = daily_drive_miles.mean();
+        let expected_daily_distance_m = daily_drive_distance_m.mean();
 
         #[cfg(feature = "observe")]
         tracing::debug!(
             actor = name,
-            distribution = ?daily_drive_miles,
-            analytical_mean_mi = expected_daily_miles,
+            distribution = ?daily_drive_distance_m,
+            analytical_mean_m = expected_daily_distance_m,
             "EV driver daily-miles distribution"
         );
 
@@ -469,18 +582,18 @@ impl EvDriverActor {
             equipment_id: None,
             strategy,
             plug_in_policy,
-            daily_drive_miles,
+            daily_drive_distance_m,
             departure_time,
             trip_duration,
             arrival_time,
             event_day_ratio,
-            fuel_economy_kwh_per_mi,
-            capacity_kwh,
-            max_charge_kw,
-            average_speed_mph,
-            range_anxiety_miles,
+            fuel_economy_j_per_m,
+            capacity_j,
+            max_charge_w,
+            average_speed_m_per_s,
+            range_anxiety_distance_m,
             away_charge_fraction,
-            away_charge_power_kw,
+            away_charge_power_w,
             composer,
             rng,
             current_day_ordinal: -1,
@@ -488,7 +601,7 @@ impl EvDriverActor {
             phase: DriverPhase::HomePluggedIn,
             estimated_soc: 1.0,
             time_res_minutes: 1.0,
-            expected_daily_miles,
+            expected_daily_distance_m,
             needs_away_charge: false,
             drive_cancelled: 0,
             telemetry,
@@ -501,7 +614,7 @@ impl EvDriverActor {
         let target = self.target_name().to_owned();
         let prefs = build_preferences(
             &self.strategy,
-            self.max_charge_kw,
+            self.max_charge_w,
             CHARGING_EFFICIENCY,
             Some(schedule),
             steps_per_day,
@@ -527,19 +640,17 @@ impl EvDriverActor {
     /// column). Away charging is deliberately excluded from that flow
     /// (off-site, no residential port contribution — see the EV equipment's
     /// `AwayPluggedIn` step), so the away phase reads the equipment's
-    /// `away_charge_power_kw` telemetry instead.
-    fn observed_charge_kw(&self, env: &EnvironmentState) -> Option<f64> {
+    /// `away_charge_power_w` telemetry instead.
+    fn observed_charge_w(&self, env: &EnvironmentState) -> Option<f64> {
         match self.phase {
             DriverPhase::HomePluggedIn => self
                 .equipment_id
                 .and_then(|id| env.equipment_core.get(&id))
                 .and_then(|co| co.flows.electric_w)
-                // The kW working value converts once at the read until
-                // the control-layer commit.
-                .map(|p| hares_core_units::w_to_kw(p.signed_w())),
+                .map(|p| p.signed_w()),
             // allowed: away charge power is telemetry-only by design — while
             // AwayPluggedIn the equipment zeroes its residential
-            // active_power_kw (the away charger is off-site from the
+            // active_power_w (the away charger is off-site from the
             // dwelling's electrical balance), so core_output's
             // electric_kw cannot carry it; equipment_telemetry is the only
             // channel that does, and it is name-keyed.
@@ -587,32 +698,34 @@ impl EvDriverActor {
         // Scan newly-emitted dispatch requests for charge/discharge power.
         // A rate dispatched this step is the driver's own command and takes
         // precedence. Goal-based strategies dispatch no rate; the equipment
-        // BMS applies its own power, observed via `observed_charge_kw`.
-        let mut charge_kw: Option<f64> = None;
+        // BMS applies its own power, observed via `observed_charge_w`.
+        let mut charge_w: Option<f64> = None;
         let mut discharge_min_soc = 0.0;
         for req in &out[before_out..] {
             match &req.signal {
                 ControlSignal::PowerSetpoint {
-                    active_power_kw,
+                    active_power_w,
                     min_soc,
                     ..
                 } => {
-                    charge_kw = Some(*active_power_kw);
+                    charge_w = Some(*active_power_w);
                     // Why: None min_soc on a PowerSetpoint means "no discharge
                     // floor constraint" — only V2G/V2H strategies set min_soc.
                     // 0.0 = "allow full discharge" is the default operational
                     // behaviour, so the sentinel is semantically correct.
                     discharge_min_soc = min_soc.unwrap_or(0.0);
                 }
-                ControlSignal::EvAwayCharge { power_kw } => charge_kw = Some(*power_kw),
+                ControlSignal::EvAwayCharge { power_w } => charge_w = Some(*power_w),
                 ControlSignal::EvDrive { .. } => {} // driving, not charging
                 _ => {}
             }
         }
-        let charge_kw = charge_kw
-            .or_else(|| self.observed_charge_kw(env))
+        let charge_w = charge_w
+            .or_else(|| self.observed_charge_w(env))
             .unwrap_or(0.0);
-        self.telemetry.set("charge_kw", charge_kw);
+        // The `charge_kw` channel keeps its reporting name; the value it
+        // holds is W (SI), the row plan converts.
+        self.telemetry.set("charge_kw", charge_w);
         self.telemetry.set("discharge_min_soc", discharge_min_soc);
         self.telemetry.set(
             "soc_gate_charging_allowed",
@@ -631,7 +744,7 @@ impl EvDriverActor {
         // predictive state (see the channel's init comment for the rationale).
         self.telemetry.set(
             "range_anxiety_active",
-            if self.range_anxiety_miles > 0.0 && self.below_anxiety_band(env) {
+            if self.range_anxiety_distance_m > 0.0 && self.below_anxiety_band(env) {
                 1.0
             } else {
                 0.0
@@ -716,28 +829,29 @@ impl EvDriverActor {
             (departure_min as u32 + dur as u32).min(1439) as u16
         };
 
-        // Sample daily miles from the ScheduleSource
-        let miles = self
-            .daily_drive_miles
+        // Sample the day's distance from the ScheduleSource (metres, SI).
+        let distance_m = self
+            .daily_drive_distance_m
             .value_at(env)
-            .unwrap_or(30.0)
+            .unwrap_or(defaults::DAILY_DRIVE_DISTANCE_M)
             .max(0.0);
 
         #[cfg(feature = "observe")]
         {
-            // Log raw sampled miles per vehicle-day for distributional validation.
+            // Log the raw sampled distance per vehicle-day for
+            // distributional validation.
             tracing::debug!(
                 actor = %self.name,
-                raw_miles = miles,
+                raw_distance_m = distance_m,
                 day_ordinal = self.current_day_ordinal,
-                "EV daily miles sample"
+                "EV daily distance sample"
             );
-            if miles < 1.0 {
+            if distance_m < 1609.344 {
                 tracing::debug!(
                     actor = %self.name,
-                    miles = miles,
+                    distance_m = distance_m,
                     day_ordinal = self.current_day_ordinal,
-                    "EV daily miles below 1-mi diagnostic threshold"
+                    "EV daily distance below 1-mi diagnostic threshold"
                 );
             }
             // Emit departure, arrival, and derived duration as diagnostic
@@ -759,12 +873,12 @@ impl EvDriverActor {
             );
         }
         let temp_multiplier = temp_efficiency_multiplier(env.weather.outdoor_temp_c);
-        let drive_kwh = miles * self.fuel_economy_kwh_per_mi * temp_multiplier;
+        let drive_j = distance_m * self.fuel_economy_j_per_m * temp_multiplier;
 
         self.todays_event = Some(DayEvent {
             departure_minute: departure_min,
             arrival_minute: arrival,
-            drive_kwh,
+            drive_j,
         });
     }
 
@@ -774,7 +888,7 @@ impl EvDriverActor {
         current_minute >= target_minute && current_minute < target_minute.saturating_add(res)
     }
 
-    /// The pack's available drive energy [kWh], from the best observable
+    /// The pack's available drive energy [J], from the best observable
     /// source. This is an energy-transfer bound, not a behavioral decision
     /// (which the module doc keeps on the driver's belief): the physical
     /// pack cannot leave the driveway with more energy than it holds.
@@ -787,20 +901,21 @@ impl EvDriverActor {
     /// residual is handled by the equipment's truncation accounting); the
     /// driver's belief when nothing is observable (no equipment is
     /// registered, so nothing can reject a dispatch).
-    fn observed_pack_kwh(&self, env: &EnvironmentState) -> f64 {
-        // allowed: capacity_kwh is the equipment's degradation-adjusted
+    fn observed_pack_j(&self, env: &EnvironmentState) -> f64 {
+        // allowed: CAPACITY_KWH is the equipment's degradation-adjusted
         // pack capacity, telemetry-only (CoreOutput has no capacity
-        // field); the same contract the dwelling's EV-capacity invariant
-        // checker reads it under. equipment_telemetry is name-keyed, so
-        // the lookup is by the dispatch target's name.
+        // field) and holding its J (SI) value since the run state moved;
+        // the same contract the dwelling's EV-capacity invariant checker
+        // reads it under. equipment_telemetry is name-keyed, so the
+        // lookup is by the dispatch target's name.
         let capacity = env
             .equipment_telemetry
             .get(self.target_name())
             .and_then(|t| t.get(tk::CAPACITY_KWH))
-            .unwrap_or(self.capacity_kwh);
+            .unwrap_or(self.capacity_j);
         self.actual_soc(env)
             .map(|soc| soc * capacity)
-            .unwrap_or_else(|| self.perceived_soc() * self.capacity_kwh.max(0.01))
+            .unwrap_or_else(|| self.perceived_soc() * self.capacity_j.max(1.0))
     }
 
     /// The SOC the driver's strategy usually keeps the pack at — the
@@ -880,50 +995,53 @@ impl EvDriverActor {
     }
 
     /// The SOC below which the day's expected driving plus the
-    /// range-anxiety buffer would strand the driver, and the mile figure the
-    /// threshold was computed from. Single home for the anxiety-band
+    /// range-anxiety buffer would strand the driver, and the distance
+    /// figure the threshold was computed from. Single home for the anxiety-band
     /// arithmetic: the trigger check, its observe diagnostics, and the
     /// override's urgency gate must all read the same band.
     ///
-    /// Computes from the day's actual drive_kwh when available, blended via
-    /// `max(day_specific, expected_daily_miles)` so the threshold is never
-    /// lower than the static mean — minimum protection even on below-average
-    /// days. Falls back to `expected_daily_miles` on non-driving days.
+    /// Computes from the day's actual drive_j when available, blended via
+    /// `max(day_specific, expected_daily_distance_m)` so the threshold is
+    /// never lower than the static mean - minimum protection even on
+    /// below-average days. Falls back to `expected_daily_distance_m` on
+    /// non-driving days.
     fn anxiety_band(&self, env: &EnvironmentState) -> (f64, f64) {
         let ambient_c = env.weather.outdoor_temp_c;
         let temp_mult = temp_efficiency_multiplier(ambient_c);
 
-        let day_specific_miles = match self.todays_event {
-            Some(event) => event.drive_kwh / self.fuel_economy_kwh_per_mi.max(0.01),
-            None => self.expected_daily_miles,
+        let day_specific_distance_m = match self.todays_event {
+            Some(event) => event.drive_j / self.fuel_economy_j_per_m.max(0.01),
+            None => self.expected_daily_distance_m,
         };
 
-        let miles_for_anxiety = day_specific_miles.max(self.expected_daily_miles);
+        let distance_for_anxiety = day_specific_distance_m.max(self.expected_daily_distance_m);
 
         #[cfg(debug_assertions)]
         {
             if let Some(event) = self.todays_event {
-                let trip_miles = event.drive_kwh / self.fuel_economy_kwh_per_mi.max(0.01);
+                let trip_distance_m = event.drive_j / self.fuel_economy_j_per_m.max(0.01);
                 debug_assert!(
-                    (miles_for_anxiety - trip_miles.max(self.expected_daily_miles)).abs() < 1e-9,
-                    "anxiety miles must be computed from day-specific drive_kwh \
-                     (blended with expected_daily_miles via max)"
+                    (distance_for_anxiety - trip_distance_m.max(self.expected_daily_distance_m))
+                        .abs()
+                        < 1e-9,
+                    "anxiety distance must be computed from day-specific drive_j \
+                     (blended with expected_daily_distance_m via max)"
                 );
             }
         }
 
-        let anxiety_kwh = (miles_for_anxiety + self.range_anxiety_miles)
-            * self.fuel_economy_kwh_per_mi
+        let anxiety_j = (distance_for_anxiety + self.range_anxiety_distance_m)
+            * self.fuel_economy_j_per_m
             * temp_mult;
-        let anxiety_soc = anxiety_kwh / self.capacity_kwh.max(0.01);
-        (anxiety_soc, miles_for_anxiety)
+        let anxiety_soc = anxiety_j / self.capacity_j.max(1.0);
+        (anxiety_soc, distance_for_anxiety)
     }
 
     /// Check if tomorrow's expected trip would leave perceived SOC dangerously low.
     /// If so, the driver overrides their strategy and charges (minimally, to
     /// the band — see `maybe_push_range_anxiety_override`).
     fn needs_range_anxiety_override(&self, env: &EnvironmentState) -> bool {
-        if self.range_anxiety_miles <= 0.0 {
+        if self.range_anxiety_distance_m <= 0.0 {
             return false;
         }
         self.below_anxiety_band(env)
@@ -939,11 +1057,11 @@ impl EvDriverActor {
         // The mile figure feeds only the observe diagnostics below;
         // underscore binding per the module's convention for observe-only
         // values (see `reconcile_soc`'s `_event_label`).
-        let (anxiety_soc, _miles_for_anxiety) = self.anxiety_band(env);
+        let (anxiety_soc, _distance_for_anxiety) = self.anxiety_band(env);
 
         #[cfg(feature = "observe")]
         {
-            let day_drive_kwh = self.todays_event.map(|e| e.drive_kwh).unwrap_or(0.0);
+            let day_drive_j = self.todays_event.map(|e| e.drive_j).unwrap_or(0.0);
             let triggered = soc < anxiety_soc;
             // `plugged_in` is derived from the plug-in policy at the current SOC,
             // not from `DriverPhase`: the phase conflates "at home" with
@@ -954,10 +1072,10 @@ impl EvDriverActor {
             tracing::debug!(
                 actor = %self.name,
                 anxiety_soc,
-                day_drive_kwh,
-                miles_term = _miles_for_anxiety,
-                expected_daily_miles = self.expected_daily_miles,
-                range_anxiety_miles = self.range_anxiety_miles,
+                day_drive_j,
+                distance_term_m = _distance_for_anxiety,
+                expected_daily_distance_m = self.expected_daily_distance_m,
+                range_anxiety_distance_m = self.range_anxiety_distance_m,
                 perceived_soc = soc,
                 non_driving_day = self.todays_event.is_none(),
                 plugged_in = self.should_plug_in(),
@@ -1051,7 +1169,7 @@ impl EvDriverActor {
             && strategy_target >= anxiety_soc
             && self
                 .composer
-                .last_resolved_power_kw()
+                .last_resolved_power_w()
                 .is_none_or(|power| power > 0.0)
             && self
                 .composer
@@ -1099,9 +1217,9 @@ impl EvDriverActor {
     ) -> DecisionContext<'a> {
         DecisionContext {
             current_soc: self.perceived_soc(),
-            capacity_kwh: self.capacity_kwh,
-            max_charge_kw: self.max_charge_kw,
-            max_discharge_kw: self.max_charge_kw,
+            capacity_j: self.capacity_j,
+            max_charge_w: self.max_charge_w,
+            max_discharge_w: self.max_charge_w,
             env,
             current_minute,
             next_departure_minute: self.todays_event.map(|e| e.departure_minute),
@@ -1119,7 +1237,7 @@ impl EvDriverActor {
     fn observed_charge_derate(&self, env: &EnvironmentState) -> Option<f64> {
         // allowed: CHARGE_DERATE is the equipment's published temperature
         // capability, telemetry-only (CoreOutput has no derate field); the
-        // same name-keyed telemetry contract `observed_pack_kwh` reads
+        // same name-keyed telemetry contract `observed_pack_j` reads
         // under.
         env.equipment_telemetry
             .get(self.target_name())
@@ -1380,8 +1498,8 @@ impl Actor for EvDriverActor {
                     // if the strategy cannot cover it), so the day self-heals;
                     // the cancellation is counted in `drive_cancelled` so a
                     // shortfall is reported, never silently dropped mobility.
-                    let pack_kwh = self.observed_pack_kwh(env);
-                    if event.drive_kwh > pack_kwh {
+                    let pack_j = self.observed_pack_j(env);
+                    if event.drive_j > pack_j {
                         self.drive_cancelled += 1;
                         // Consume the day's event: the trip is cancelled, not
                         // deferred — a second step landing inside the
@@ -1395,8 +1513,8 @@ impl Actor for EvDriverActor {
                         tracing::warn!(
                             actor = %self.name,
                             target = self.target_name(),
-                            requested_drive_kwh = event.drive_kwh,
-                            available_pack_kwh = pack_kwh,
+                            requested_drive_j = event.drive_j,
+                            available_pack_j = pack_j,
                             "EV trip cancelled — the pack cannot cover the day's trip; the \
                              driver stays home and charges"
                         );
@@ -1414,9 +1532,11 @@ impl Actor for EvDriverActor {
                     });
 
                     // Start multi-step driving
-                    let trip_hours = if self.average_speed_mph > 0.0 {
-                        let miles = event.drive_kwh / self.fuel_economy_kwh_per_mi.max(0.01);
-                        miles / self.average_speed_mph
+                    let trip_hours = if self.average_speed_m_per_s > 0.0 {
+                        let distance_m = event.drive_j / self.fuel_economy_j_per_m.max(0.01);
+                        // metres over metres-per-second is seconds, once
+                        // to the hour the departure arithmetic works in.
+                        distance_m / self.average_speed_m_per_s / 3600.0
                     } else {
                         0.0
                     };
@@ -1424,7 +1544,7 @@ impl Actor for EvDriverActor {
                     let total_steps = (trip_minutes / self.time_res_minutes).ceil().max(1.0) as u32;
 
                     self.phase = DriverPhase::Driving {
-                        remaining_kwh: event.drive_kwh,
+                        remaining_j: event.drive_j,
                         total_steps,
                         steps_done: 0,
                         plan: event,
@@ -1434,7 +1554,7 @@ impl Actor for EvDriverActor {
                         actor = %self.name,
                         target = self.target_name(),
                         departure_minute = event.departure_minute,
-                        drive_kwh = event.drive_kwh,
+                        drive_j = event.drive_j,
                         total_steps,
                         "EV driver departing",
                     );
@@ -1443,7 +1563,7 @@ impl Actor for EvDriverActor {
                 }
             }
             DriverPhase::Driving {
-                remaining_kwh,
+                remaining_j,
                 total_steps,
                 steps_done,
                 plan,
@@ -1456,19 +1576,21 @@ impl Actor for EvDriverActor {
                 }
 
                 // Spread energy evenly across remaining steps
-                let kwh_this_step = remaining_kwh / steps_left as f64;
+                let j_this_step = remaining_j / steps_left as f64;
 
                 out.push(DispatchRequest {
                     target: self.vehicle.target.clone(),
-                    signal: ControlSignal::EvDrive { kwh: kwh_this_step },
+                    signal: ControlSignal::EvDrive {
+                        energy_j: j_this_step,
+                    },
                     priority: PriorityTier::Schedule,
                 });
 
                 self.estimated_soc =
-                    (self.estimated_soc - kwh_this_step / self.capacity_kwh.max(0.01)).max(0.0);
+                    (self.estimated_soc - j_this_step / self.capacity_j.max(1.0)).max(0.0);
 
                 let new_steps_done = steps_done + 1;
-                let new_remaining = remaining_kwh - kwh_this_step;
+                let new_remaining = remaining_j - j_this_step;
 
                 if new_steps_done >= total_steps {
                     // Trip complete -- defer away-charge signals to the next
@@ -1481,20 +1603,19 @@ impl Actor for EvDriverActor {
                         // the home charge cycle (arriving at the usual
                         // target, the evening's home session transfers
                         // nothing). Take whichever recoup is larger.
-                        let habitual_kwh = plan.drive_kwh * self.away_charge_fraction;
-                        let usual_kwh = self.usual_target_soc() * self.capacity_kwh.max(0.01);
-                        let short_of_usual_kwh = (usual_kwh
-                            - self.perceived_soc() * self.capacity_kwh.max(0.01))
-                        .max(0.0);
-                        let recoup_kwh = habitual_kwh.max(short_of_usual_kwh);
-                        let recoup_soc = recoup_kwh / self.capacity_kwh.max(0.01);
+                        let habitual_j = plan.drive_j * self.away_charge_fraction;
+                        let usual_j = self.usual_target_soc() * self.capacity_j.max(1.0);
+                        let short_of_usual_j =
+                            (usual_j - self.perceived_soc() * self.capacity_j.max(1.0)).max(0.0);
+                        let recoup_j = habitual_j.max(short_of_usual_j);
+                        let recoup_soc = recoup_j / self.capacity_j.max(1.0);
                         self.estimated_soc = (self.estimated_soc + recoup_soc).min(1.0);
                         self.needs_away_charge = true;
                     }
                     self.phase = DriverPhase::Away { plan };
                 } else {
                     self.phase = DriverPhase::Driving {
-                        remaining_kwh: new_remaining,
+                        remaining_j: new_remaining,
                         total_steps,
                         steps_done: new_steps_done,
                         plan,
@@ -1530,7 +1651,7 @@ impl Actor for EvDriverActor {
                     out.push(DispatchRequest {
                         target: self.vehicle.target.clone(),
                         signal: ControlSignal::EvAwayCharge {
-                            power_kw: self.away_charge_power_kw,
+                            power_w: self.away_charge_power_w,
                         },
                         priority: PriorityTier::Schedule,
                     });
@@ -1683,8 +1804,13 @@ impl Actor for EvDriverActor {
     ///
     /// v3: the snapshot carries the charging strategy's gate hysteresis
     /// latches and the sticky estimate failure.
+    ///
+    /// v4: the carried energies (`DayEvent.drive_j`, `Driving.remaining_j`)
+    /// hold J (SI) where v3 held kWh - a v3 blob's energies would read
+    /// 3.6e6x small; the version gate rejects it here, at the checkpoint
+    /// boundary.
     fn checkpoint_version(&self) -> u32 {
-        3
+        4
     }
 
     fn rng_pair(&self) -> Option<([u8; 32], u64)> {
@@ -1722,18 +1848,18 @@ mod tests {
             EvDriverParams {
                 strategy,
                 plug_in_policy: policy,
-                daily_drive_miles: ScheduleSource::Constant(30.0), // 30 miles/day
-                departure_time: ScheduleSource::Constant(480.0),   // depart 08:00
-                trip_duration: ScheduleSource::Constant(600.0),    // 10h away → arrive 18:00
-                arrival_time: None,                                // no direct arrival sampling
-                event_day_ratio: 1.0,                              // event every day
-                fuel_economy_kwh_per_mi: 0.3,                      // 0.3 kWh/mi
-                capacity_kwh: 60.0,                                // 60 kWh battery
-                max_charge_kw: 7.2,                                // L2 charge rate
-                average_speed_mph: 30.0,                           // 30 mph average
-                range_anxiety_miles: 20.0,                         // 20 miles range anxiety buffer
-                away_charge_fraction: 0.0,                         // no away charging
-                away_charge_power_kw: 6.6,                         // workplace L2 default
+                daily_drive_distance_m: ScheduleSource::Constant(48_280.32), // 30 mi/day
+                departure_time: ScheduleSource::Constant(480.0),             // depart 08:00
+                trip_duration: ScheduleSource::Constant(600.0), // 10h away → arrive 18:00
+                arrival_time: None,                             // no direct arrival sampling
+                event_day_ratio: 1.0,                           // event every day
+                fuel_economy_j_per_m: 671.0808876163206,        // 0.3 kWh/mi
+                capacity_j: 216_000_000.0,                      // 60 kWh battery
+                max_charge_w: 7200.0,                           // L2 charge rate
+                average_speed_m_per_s: 13.4112,                 // 30 mph average
+                range_anxiety_distance_m: 32_186.88,            // 20 mi range anxiety buffer
+                away_charge_fraction: 0.0,                      // no away charging
+                away_charge_power_w: 6600.0,                    // workplace L2 default
             },
             seed_from_u64(seed),
         )
@@ -1792,15 +1918,13 @@ mod tests {
     }
 
     /// A dispatch commands charging iff it asserts a positive target or
-    /// rate. `PowerSetpoint{active_power_kw: 0.0}` is the explicit hold an
+    /// rate. `PowerSetpoint{active_power_w: 0.0}` is the explicit hold an
     /// idling strategy dispatches in place of silence — the opposite of a
     /// charging command, so idle-assertions must not count it as one.
     fn commands_charging(req: &DispatchRequest) -> bool {
         match &req.signal {
             ControlSignal::SOCTarget { .. } | ControlSignal::EvSetReadyBy { .. } => true,
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => *active_power_kw > 1e-9,
+            ControlSignal::PowerSetpoint { active_power_w, .. } => *active_power_w > 1e-9,
             _ => false,
         }
     }
@@ -1810,7 +1934,7 @@ mod tests {
     fn is_explicit_hold(req: &DispatchRequest) -> bool {
         matches!(
             &req.signal,
-            ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() <= 1e-9
+            ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w.abs() <= 1e-9
         )
     }
 
@@ -1848,23 +1972,21 @@ mod tests {
     }
 
     /// Mirror the EV equipment's committed `CoreOutput` while charging: the
-    /// equipment publishes both `state.soc` and `flows.electric_kw` from its
+    /// equipment publishes both `state.soc` and `flows.electric_w` from its
     /// `step()` (hares-equipment/src/ev/mod.rs, CoreOutput construction), so
     /// a test environment modelling "equipment actively charging" supplies
-    /// both observations.
+    /// both observations. The charge power is W (SI).
     fn set_core_charging(
         actor: &mut EvDriverActor,
         env: &mut EnvironmentState,
         equipment_name: &str,
         equipment_id: EquipmentId,
         soc: f64,
-        charge_kw: f64,
+        charge_w: f64,
     ) {
         set_core_soc(actor, env, equipment_name, equipment_id, soc);
         if let Some(co) = env.equipment_core.get_mut(&equipment_id) {
-            // The core flow is W (SI); the test's kW working value
-            // converts once.
-            co.flows.electric_w = Some(ElectricPower::Bidirectional(charge_kw * 1000.0));
+            co.flows.electric_w = Some(ElectricPower::Bidirectional(charge_w));
         }
     }
 
@@ -2028,7 +2150,7 @@ mod tests {
         for (label, strategy) in strategies {
             let mut actor = make_plugged_in_actor(strategy, 0.5);
 
-            let mut charge_kw_ever_positive = false;
+            let mut charge_w_ever_positive = false;
             let mut soc_ever_rose = false;
             let mut needed_charge_hours_ever_positive = false;
             let mut previous_soc = 0.5;
@@ -2046,24 +2168,24 @@ mod tests {
                     "EV1",
                     EquipmentId(7),
                     equipment_soc,
-                    3.6,
+                    3600.0,
                 );
                 plugged_in_step_with_env(&mut actor, &env);
 
                 let telemetry = actor.telemetry().expect("driver telemetry");
-                let charge_kw = telemetry.get("charge_kw").expect("charge_kw key");
+                let charge_w = telemetry.get("charge_kw").expect("charge_kw key");
                 let soc = telemetry.get("soc").expect("soc key");
                 let needed = telemetry
                     .get("needed_charge_hours")
                     .expect("needed_charge_hours key");
 
-                charge_kw_ever_positive |= charge_kw > 0.0;
+                charge_w_ever_positive |= charge_w > 0.0;
                 soc_ever_rose |= soc > previous_soc;
                 needed_charge_hours_ever_positive |= needed > 0.0;
                 previous_soc = soc;
             }
 
-            if !charge_kw_ever_positive {
+            if !charge_w_ever_positive {
                 failures.push(format!(
                     "{label}: charge_kw telemetry stayed 0.0 across 120 steps of active charging"
                 ));
@@ -2095,7 +2217,7 @@ mod tests {
     /// charging session, would instead hold the arrival value until the next
     /// day-start reconciliation: a caller reading the driver's channels would
     /// see "still needs N hours" beside a rising `soc` and positive
-    /// `charge_kw`.
+    /// `charge_kw` (the held W).
     #[test]
     fn needed_charge_hours_decreases_while_equipment_charges_at_home() {
         let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
@@ -2299,13 +2421,13 @@ mod tests {
                     "EV1",
                     EquipmentId(7),
                     equipment_soc,
-                    3.6,
+                    3600.0,
                 );
                 plugged_in_step_with_env(&mut actor, &env);
 
                 let telemetry = actor.telemetry().expect("driver telemetry");
                 let soc = telemetry.get("soc").expect("soc key");
-                let charge_kw = telemetry.get("charge_kw").expect("charge_kw key");
+                let charge_w = telemetry.get("charge_kw").expect("charge_kw key");
                 let needed = telemetry
                     .get("needed_charge_hours")
                     .expect("needed_charge_hours key");
@@ -2315,9 +2437,9 @@ mod tests {
                         "{label} @ SOC {starting_soc}: soc telemetry ({soc}) must report the equipment's ground-truth SOC ({equipment_soc})"
                     ));
                 }
-                if charge_kw <= 0.0 {
+                if charge_w <= 0.0 {
                     failures.push(format!(
-                        "{label} @ SOC {starting_soc}: charge_kw telemetry ({charge_kw}) must be positive while the equipment charges"
+                        "{label} @ SOC {starting_soc}: charge_kw telemetry ({charge_w}) must be positive while the equipment charges"
                     ));
                 }
                 if needed <= 0.0 {
@@ -2448,33 +2570,33 @@ mod tests {
     /// a positive one — and must return to 0.0 when the equipment stops
     /// charging, so the channel can never report phantom charging.
     #[test]
-    fn charge_kw_tracks_observed_equipment_flow_under_goal_control() {
+    fn charge_tracks_observed_equipment_flow_under_goal_control() {
         let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
 
-        // Equipment charging at 3.6 kW (SOC rising 0.001/step on 60 kWh).
+        // Equipment charging at 3600 W (SOC rising 0.001/step on 60 kWh).
         let mut env = env_at_minute(22 * 60);
-        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.501, 3.6);
+        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.501, 3600.0);
         plugged_in_step_with_env(&mut actor, &env);
-        let charge_kw = actor
+        let charge_w = actor
             .telemetry()
             .expect("driver telemetry")
             .get("charge_kw");
         assert_eq!(
-            charge_kw,
-            Some(3.6),
-            "charge_kw must report the observed equipment flow (3.6 kW) when no rate is dispatched"
+            charge_w,
+            Some(3600.0),
+            "charge_kw must report the observed equipment flow (3600 W) when no rate is dispatched"
         );
 
         // Equipment idle (SOC flat, zero published flow) — no phantom charging.
         let mut env = env_at_minute(22 * 60 + 1);
         set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.501, 0.0);
         plugged_in_step_with_env(&mut actor, &env);
-        let charge_kw = actor
+        let charge_w = actor
             .telemetry()
             .expect("driver telemetry")
             .get("charge_kw");
         assert_eq!(
-            charge_kw,
+            charge_w,
             Some(0.0),
             "charge_kw must be 0.0 when the equipment publishes zero flow"
         );
@@ -2483,7 +2605,7 @@ mod tests {
     /// A rate dispatched this step is the driver's own command and wins over
     /// the observed (previous-step) equipment flow.
     #[test]
-    fn charge_kw_prefers_dispatched_rate_over_observed_flow() {
+    fn charge_prefers_dispatched_rate_over_observed_flow() {
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::V2G {
                 min_soc: 0.3,
@@ -2497,18 +2619,18 @@ mod tests {
             electricity_price: Some(0.30),
             ..Default::default()
         };
-        // Previous-step equipment flow says +3.6 (charging); this step the
-        // driver commands a -5.0 kW export.
-        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.71, 3.6);
+        // Previous-step equipment flow says +3600 W (charging); this step
+        // the driver commands a -5000 W export.
+        set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.71, 3600.0);
         plugged_in_step_with_env(&mut actor, &env);
-        let charge_kw = actor
+        let charge_w = actor
             .telemetry()
             .expect("driver telemetry")
             .get("charge_kw");
         assert_eq!(
-            charge_kw,
-            Some(-5.0),
-            "dispatched rate (-5.0) must take precedence over the observed previous-step flow (3.6)"
+            charge_w,
+            Some(-5000.0),
+            "dispatched rate (-5000 W) must take precedence over the observed previous-step flow (3600 W)"
         );
     }
 
@@ -2561,7 +2683,7 @@ mod tests {
     /// `charge_kw` must read the equipment's away-charge telemetry, and must
     /// fall back to 0.0 when that observation is absent.
     #[test]
-    fn charge_kw_reports_away_charging_on_non_dispatch_steps() {
+    fn charge_reports_away_charging_on_non_dispatch_steps() {
         let mut actor = make_away_charge_actor(42);
         let mut out = Vec::new();
 
@@ -2590,7 +2712,7 @@ mod tests {
         // observable. 12:00 is minute 720 — past the drive, before arrival.
         let mut env = env_at_minute(12 * 60);
         let mut away_telemetry = Telemetry::new();
-        away_telemetry.insert(tk::AWAY_CHARGE_POWER_KW, 6.6);
+        away_telemetry.insert(tk::AWAY_CHARGE_POWER_KW, 6600.0);
         env.equipment_telemetry
             .insert("EV1".to_string(), away_telemetry);
         out.clear();
@@ -2599,14 +2721,14 @@ mod tests {
             out.is_empty(),
             "a mid-away step should dispatch nothing, got {out:?}"
         );
-        let charge_kw = actor
+        let charge_w = actor
             .telemetry()
             .expect("driver telemetry")
             .get("charge_kw");
         assert_eq!(
-            charge_kw,
-            Some(6.6),
-            "charge_kw must report the equipment's away-charge power on non-dispatch Away steps"
+            charge_w,
+            Some(6600.0),
+            "charge_kw must report the equipment's away-charge power (6600 W under the reporting key) on non-dispatch Away steps"
         );
 
         // Without the equipment telemetry observation the channel degrades
@@ -2614,12 +2736,12 @@ mod tests {
         let env = env_at_minute(12 * 60 + 1);
         out.clear();
         actor.decide(&env, &mut out);
-        let charge_kw = actor
+        let charge_w = actor
             .telemetry()
             .expect("driver telemetry")
             .get("charge_kw");
         assert_eq!(
-            charge_kw,
+            charge_w,
             Some(0.0),
             "charge_kw must degrade to 0.0 when the away-charge observation is absent"
         );
@@ -2630,7 +2752,7 @@ mod tests {
     /// power), and the Driving phase must never attribute an observable
     /// equipment flow to the charge channel.
     #[test]
-    fn charge_kw_is_zero_while_driving() {
+    fn charge_is_zero_while_driving() {
         let mut actor = make_actor(
             ChargingStrategy::Immediate { target_soc: 0.9 },
             PlugInPolicy::Always,
@@ -2669,7 +2791,7 @@ mod tests {
     /// not clamped to zero — the channel stays truthful about the direction
     /// of power at the charger.
     #[test]
-    fn charge_kw_reports_negative_observed_export_flow() {
+    fn charge_reports_negative_observed_export_flow() {
         let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
         let mut env = env_at_minute(22 * 60);
         set_core_charging(&mut actor, &mut env, "EV1", EquipmentId(7), 0.499, -4.0);
@@ -2813,18 +2935,18 @@ mod tests {
             EvDriverParams {
                 strategy,
                 plug_in_policy: PlugInPolicy::Always,
-                daily_drive_miles: ScheduleSource::Constant(30.0),
+                daily_drive_distance_m: ScheduleSource::Constant(48_280.32),
                 departure_time: ScheduleSource::Constant(480.0),
                 trip_duration: ScheduleSource::Constant(600.0),
                 arrival_time: None,
                 event_day_ratio,
-                fuel_economy_kwh_per_mi: 0.3,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.2,
-                average_speed_mph: 30.0,
-                range_anxiety_miles: 20.0,
+                fuel_economy_j_per_m: 671.0808876163206,
+                capacity_j: 216_000_000.0,
+                max_charge_w: 7200.0,
+                average_speed_m_per_s: 13.4112,
+                range_anxiety_distance_m: 32_186.88,
                 away_charge_fraction: 0.0,
-                away_charge_power_kw: 6.6,
+                away_charge_power_w: 6600.0,
             },
             seed_from_u64(seed),
         )
@@ -3107,9 +3229,9 @@ mod tests {
         // this directly and read maximum urgency).
         let ctx = DecisionContext {
             current_soc: 0.5,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 7.2,
+            capacity_j: 216_000_000.0,
+            max_charge_w: 7200.0,
+            max_discharge_w: 7200.0,
             env: &env,
             current_minute: 22 * 60,
             next_departure_minute: None,
@@ -3391,12 +3513,12 @@ mod tests {
         // Arrival at 18:00 (1080 min), duration 10h (600 min) -> departure at 08:00 (480 min)
         assert_eq!(event.arrival_minute, 1080, "arrival should be 18:00");
         assert_eq!(event.departure_minute, 480, "departure should be 08:00");
-        // 30mi × 0.3kWh/mi × temp_multiplier(10°C) ≈ 9.99 kWh
-        let expected = 30.0 * 0.3 * temp_efficiency_multiplier(10.0);
+        // 30 mi × 0.3 kWh/mi × temp_multiplier(10 °C) ≈ 9.99 kWh, in J.
+        let expected = 48_280.32 * 671.0808876163206 * temp_efficiency_multiplier(10.0);
         assert!(
-            (event.drive_kwh - expected).abs() < 0.1,
-            "drive_kwh should be ~{expected:.1}, got {}",
-            event.drive_kwh,
+            (event.drive_j - expected).abs() < 3.6e5,
+            "drive_j should be ~{expected:.0}, got {}",
+            event.drive_j,
         );
     }
 
@@ -3438,8 +3560,8 @@ mod tests {
 
         // Internal state should match
         assert_eq!(
-            actor_a.todays_event.map(|e| e.drive_kwh),
-            actor_b.todays_event.map(|e| e.drive_kwh),
+            actor_a.todays_event.map(|e| e.drive_j),
+            actor_b.todays_event.map(|e| e.drive_j),
             "daily events should match with same seed"
         );
     }
@@ -3589,13 +3711,13 @@ mod tests {
         out.clear();
 
         // Collect drive signals
-        let mut total_drive_kwh = 0.0;
+        let mut total_drive_j = 0.0;
         let mut drive_count = 0;
         for step in 1..=120 {
             actor.decide(&env_at_minute(8 * 60 + step), &mut out);
             for req in &out {
-                if let ControlSignal::EvDrive { kwh } = &req.signal {
-                    total_drive_kwh += kwh;
+                if let ControlSignal::EvDrive { energy_j } = &req.signal {
+                    total_drive_j += energy_j;
                     drive_count += 1;
                 }
             }
@@ -3606,11 +3728,11 @@ mod tests {
             drive_count > 1,
             "expected multi-step driving, got {drive_count} drive signals"
         );
-        // 30mi × 0.3kWh/mi × temp_multiplier(10°C=1.11) ≈ 9.99 kWh
-        let expected = 30.0 * 0.3 * temp_efficiency_multiplier(10.0);
+        // 30 mi × 0.3 kWh/mi × temp_multiplier(10 °C = 1.11) ≈ 9.99 kWh, in J.
+        let expected = 48_280.32 * 671.0808876163206 * temp_efficiency_multiplier(10.0);
         assert!(
-            (total_drive_kwh - expected).abs() < 0.5,
-            "total drive energy should be ~{expected:.1} kWh, got {total_drive_kwh}"
+            (total_drive_j - expected).abs() < 1.8e6,
+            "total drive energy should be ~{expected:.0} J, got {total_drive_j}"
         );
     }
 
@@ -3684,7 +3806,7 @@ mod tests {
             42,
         );
         actor.away_charge_fraction = 0.3;
-        actor.away_charge_power_kw = 11.5;
+        actor.away_charge_power_w = 11.5;
         let mut out = Vec::new();
 
         // Roll event, depart
@@ -3719,7 +3841,7 @@ mod tests {
         let has_away_charge = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::EvAwayCharge { power_kw } if (power_kw - 11.5).abs() < 0.01
+                ControlSignal::EvAwayCharge { power_w } if (power_w - 11.5).abs() < 0.01
             )
         });
         assert!(
@@ -3860,13 +3982,13 @@ mod tests {
         let plan = DayEvent {
             departure_minute: 480,
             arrival_minute: 1080,
-            drive_kwh: 9.0,
+            drive_j: 9.0 * 3.6e6,
         };
         actor.todays_event = Some(plan);
 
         // Mid-trip step: the phase channel reports Driving (1.0).
         actor.phase = DriverPhase::Driving {
-            remaining_kwh: 9.0,
+            remaining_j: 9.0 * 3.6e6,
             total_steps: 4,
             steps_done: 2,
             plan,
@@ -3883,7 +4005,7 @@ mod tests {
         // `steps_left == 0` exit). The transition to Away must be visible
         // in telemetry on this same step.
         actor.phase = DriverPhase::Driving {
-            remaining_kwh: 0.0,
+            remaining_j: 0.0,
             total_steps: 4,
             steps_done: 4,
             plan,
@@ -3920,13 +4042,13 @@ mod tests {
         // directly, exactly what the roll produces for a late departure.
         actor.event_day_ratio = 0.0;
         actor.away_charge_fraction = 0.5;
-        actor.away_charge_power_kw = 6.6;
+        actor.away_charge_power_w = 6600.0;
         let mut out = Vec::new();
         actor.decide(&env_at_day_minute_temp(1, 0, 10.0), &mut out);
         actor.todays_event = Some(DayEvent {
             departure_minute: 1425, // 23:45
             arrival_minute: 60,     // 01:00 the next day
-            drive_kwh: 9.0,         // 30 mi × 0.3 kWh/mi → 60 one-minute steps
+            drive_j: 9.0 * 3.6e6,   // 9 kWh → the 60 one-minute steps
         });
         out.clear();
 
@@ -3961,20 +4083,25 @@ mod tests {
         );
 
         // Drive to completion: the trip ends in Away with the away-charge
-        // deferred signals pending.
-        for minute in 1..=45 {
+        // deferred signals pending. The trip's ~60 one-minute steps span
+        // 23:46–00:45; the exact count follows the SI duration chain's
+        // rounding, so the loop drives to the phase transition, not a
+        // pinned minute.
+        let mut minute = 1_u16;
+        while !matches!(actor.phase, DriverPhase::Away { .. }) && minute <= 120 {
             out.clear();
             actor.decide(&env_at_day_minute_temp(2, minute, 10.0), &mut out);
+            minute += 1;
         }
         assert!(
-            matches!(actor.phase, DriverPhase::Away { .. }),
+            matches!(actor.phase, DriverPhase::Away { .. }) && minute <= 60,
             "the trip must complete into Away on the non-driving day"
         );
 
         // The deferred away-charge signals fire on the next step — also on
         // a non-driving day.
         out.clear();
-        actor.decide(&env_at_day_minute_temp(2, 46, 10.0), &mut out);
+        actor.decide(&env_at_day_minute_temp(2, minute, 10.0), &mut out);
         assert!(
             out.iter()
                 .any(|r| matches!(r.signal, ControlSignal::EvAwayCharge { .. })),
@@ -4106,7 +4233,7 @@ mod tests {
         let has_charge = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w > 0.0
             ) || matches!(
                 r.signal,
                 ControlSignal::SOCTarget { target_soc, .. } if target_soc > 0.0
@@ -4171,12 +4298,12 @@ mod tests {
         let has_power = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if (active_power_kw - 3.5).abs() < 0.1
+                ControlSignal::PowerSetpoint { active_power_w, .. } if (active_power_w - 3500.0).abs() < 100.0
             )
         });
         assert!(
             has_power,
-            "SolarSurplus should modulate to surplus (3.5kW), got: {out:?}"
+            "SolarSurplus should modulate to surplus (3500 W), got: {out:?}"
         );
     }
 
@@ -4200,7 +4327,7 @@ mod tests {
         let has_power = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() > 0.01
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w.abs() > 0.01
             )
         });
         assert!(
@@ -4261,7 +4388,7 @@ mod tests {
                 ControlSignal::EvSetReadyBy { .. } | ControlSignal::SOCTarget { .. }
             ) || matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w > 0.0
             )
         });
         assert!(
@@ -4288,12 +4415,9 @@ mod tests {
         let out = plugged_in_step_with_env(&mut actor, &env);
 
         let discharge_power = out.iter().find_map(|r| {
-            if let ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } = &r.signal
-            {
-                if *active_power_kw < 0.0 {
-                    Some(*active_power_kw)
+            if let ControlSignal::PowerSetpoint { active_power_w, .. } = &r.signal {
+                if *active_power_w < 0.0 {
+                    Some(*active_power_w)
                 } else {
                     None
                 }
@@ -4307,8 +4431,8 @@ mod tests {
         );
         let power = discharge_power.unwrap();
         assert!(
-            (power + 3.0).abs() < 0.1,
-            "V2H deficit = 4.0-1.0 = 3.0 kW, expected power ~ -3.0, got {power}"
+            (power + 3000.0).abs() < 100.0,
+            "V2H deficit = 4.0-1.0 = 3.0 kW (3000 W), expected power ~ -3000, got {power}"
         );
     }
 
@@ -4331,12 +4455,12 @@ mod tests {
 
         let min_soc_from_signal = out.iter().find_map(|r| {
             if let ControlSignal::PowerSetpoint {
-                active_power_kw,
+                active_power_w,
                 min_soc,
                 ..
             } = &r.signal
             {
-                if *active_power_kw < 0.0 {
+                if *active_power_w < 0.0 {
                     Some(*min_soc)
                 } else {
                     None
@@ -4376,7 +4500,7 @@ mod tests {
         let has_discharge = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < -0.01
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w < -10.0
             )
         });
         assert!(
@@ -4403,12 +4527,9 @@ mod tests {
         let out = plugged_in_step_with_env(&mut actor, &env);
 
         let discharge_power = out.iter().find_map(|r| {
-            if let ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } = &r.signal
-            {
-                if *active_power_kw < 0.0 {
-                    Some(*active_power_kw)
+            if let ControlSignal::PowerSetpoint { active_power_w, .. } = &r.signal {
+                if *active_power_w < 0.0 {
+                    Some(*active_power_w)
                 } else {
                     None
                 }
@@ -4422,8 +4543,8 @@ mod tests {
         );
         let power = discharge_power.unwrap();
         assert!(
-            (power + 5.0).abs() < 0.1,
-            "V2G max_export_kw=5.0, expected power ~ -5.0, got {power}"
+            (power + 5000.0).abs() < 100.0,
+            "V2G max_export_w=5000.0, expected power ~ -5000, got {power}"
         );
     }
 
@@ -4447,7 +4568,7 @@ mod tests {
         let has_discharge = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < -0.01
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w < -10.0
             )
         });
         assert!(
@@ -4463,18 +4584,18 @@ mod tests {
             EvDriverParams {
                 strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
                 plug_in_policy: PlugInPolicy::Always,
-                daily_drive_miles: ScheduleSource::Constant(30.0),
+                daily_drive_distance_m: ScheduleSource::Constant(48_280.32),
                 departure_time: ScheduleSource::Constant(480.0),
                 trip_duration: ScheduleSource::Constant(600.0),
                 arrival_time: None,
                 event_day_ratio: 1.0,
-                fuel_economy_kwh_per_mi: 0.3,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.2,
-                average_speed_mph: 30.0,
-                range_anxiety_miles: 20.0,
+                fuel_economy_j_per_m: 671.0808876163206,
+                capacity_j: 216_000_000.0,
+                max_charge_w: 7200.0,
+                average_speed_m_per_s: 13.4112,
+                range_anxiety_distance_m: 32_186.88,
                 away_charge_fraction: 0.5, // 50% away charge
-                away_charge_power_kw: 6.6,
+                away_charge_power_w: 6600.0,
             },
             seed_from_u64(seed),
         )
@@ -4559,13 +4680,13 @@ mod tests {
     }
 
     #[test]
-    fn expected_daily_miles_from_schedule_mean() {
+    fn expected_daily_distance_from_schedule_mean() {
         let actor = make_actor(
             ChargingStrategy::Immediate { target_soc: 0.9 },
             PlugInPolicy::Always,
             42,
         );
-        assert_eq!(actor.expected_daily_miles, 30.0);
+        assert_eq!(actor.expected_daily_distance_m, 48_280.32);
     }
 
     // H2: Range anxiety fires on a non-driving day when SOC is critically low.
@@ -4579,9 +4700,9 @@ mod tests {
     #[test]
     fn range_anxiety_triggers_on_non_driving_day_with_low_soc() {
         // Actor: 30 mi/day expected, 20 mi buffer, 0.3 kWh/mi, 60 kWh battery.
-        // anxiety_kwh = (30 + 20) * 0.3 * temp_mult(10°C)
-        // anxiety_soc = anxiety_kwh / 60.0
-        // At temp 10°C, temp_mult ≈ 1.11, anxiety_kwh ≈ 16.65, anxiety_soc ≈ 0.278
+        // anxiety_j = (30 + 20) * 0.3 * temp_mult(10°C)
+        // anxiety_soc = anxiety_j / 60.0
+        // At temp 10°C, temp_mult ≈ 1.11, anxiety_j ≈ 16.65, anxiety_soc ≈ 0.278
         // SOC 0.15 < 0.278 → should trigger.
         let mut actor = make_actor(
             ChargingStrategy::Immediate { target_soc: 0.9 },
@@ -4597,11 +4718,11 @@ mod tests {
         assert!(
             actor.needs_range_anxiety_override(&env),
             "needs_range_anxiety_override should be true when SOC=0.15 is below anxiety threshold \
-             (expected_daily_miles={}, range_anxiety_miles={}, fuel_economy={}, capacity={})",
-            actor.expected_daily_miles,
-            actor.range_anxiety_miles,
-            actor.fuel_economy_kwh_per_mi,
-            actor.capacity_kwh,
+             (expected_daily_distance_m={}, range_anxiety_distance_m={}, fuel_economy_j_per_m={}, capacity_j={})",
+            actor.expected_daily_distance_m,
+            actor.range_anxiety_distance_m,
+            actor.fuel_economy_j_per_m,
+            actor.capacity_j,
         );
     }
 
@@ -4740,7 +4861,7 @@ mod tests {
         assert!(
             !out.iter().any(|r| matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < 0.0
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w < 0.0
             )),
             "the same step must not discharge a pack already below the anxiety band, \
              got {out:?}"
@@ -4795,7 +4916,7 @@ mod tests {
         assert!(
             out.iter().any(|r| matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w > 0.0
             )),
             "the composer's positive-rate charge plan must dispatch on the step \
              the override stands down (the strategy governs), got {out:?}"
@@ -4835,7 +4956,7 @@ mod tests {
             vec![
                 Box::new(FixedVotePref(PreferenceVote {
                     target_soc: Some(0.9),
-                    power_kw: None,
+                    power_w: None,
                     departure_hour: None,
                     min_soc: None,
                     max_soc: None,
@@ -4844,7 +4965,7 @@ mod tests {
                 })),
                 Box::new(FixedVotePref(PreferenceVote {
                     target_soc: None,
-                    power_kw: Some(0.0),
+                    power_w: Some(0.0),
                     departure_hour: None,
                     min_soc: None,
                     max_soc: None,
@@ -4892,7 +5013,7 @@ mod tests {
         actor.composer = ChargingComposer::new(
             vec![Box::new(FixedVotePref(PreferenceVote {
                 target_soc: Some(0.9),
-                power_kw: None,
+                power_w: None,
                 departure_hour: None,
                 min_soc: None,
                 max_soc: Some(0.1),
@@ -4941,7 +5062,7 @@ mod tests {
         actor.composer = ChargingComposer::new(
             vec![Box::new(FixedVotePref(PreferenceVote {
                 target_soc: Some(0.9),
-                power_kw: None,
+                power_w: None,
                 departure_hour: None,
                 min_soc: None,
                 max_soc: Some(0.5),
@@ -5143,7 +5264,7 @@ mod tests {
         let has_positive_power = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w > 0.0
             ) || matches!(r.signal, ControlSignal::EvSetReadyBy { .. })
                 || matches!(
                     r.signal,
@@ -5189,7 +5310,7 @@ mod tests {
         let has_active_charging1 = out1.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.01
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w > 0.01
             )
         });
         assert!(
@@ -5204,7 +5325,7 @@ mod tests {
         let has_charging2 = out2.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w > 0.0
             ) || matches!(r.signal, ControlSignal::EvSetReadyBy { .. })
         });
         assert!(
@@ -5235,7 +5356,7 @@ mod tests {
         let has_discharge = out_evening.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < 0.0
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w < 0.0
             )
         });
         assert!(
@@ -5287,7 +5408,7 @@ mod tests {
         let has_discharge = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < -0.01
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w < -10.0
             )
         });
         assert!(
@@ -5323,7 +5444,7 @@ mod tests {
         let has_charge = out_cheap.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w > 0.0
             ) || matches!(
                 r.signal,
                 ControlSignal::SOCTarget { target_soc, .. } if target_soc > 0.0
@@ -5350,7 +5471,7 @@ mod tests {
         let has_positive_charge = out_expensive.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.01
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w > 0.01
             )
         });
         assert!(
@@ -5360,7 +5481,7 @@ mod tests {
         let has_discharge = out_expensive.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw < -0.01
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w < -10.0
             )
         });
         assert!(
@@ -5470,7 +5591,7 @@ mod tests {
         assert!(
             out0.is_empty() || !out0.iter().any(|r| matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() > 0.01
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w.abs() > 0.01
             )),
             "should idle with 0 kW PV, got: {out0:?}"
         );
@@ -5486,7 +5607,7 @@ mod tests {
         assert!(
             out1.is_empty() || !out1.iter().any(|r| matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() > 0.01
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w.abs() > 0.01
             )),
             "should idle with insufficient surplus (1.0-1.5=-0.5), got: {out1:?}"
         );
@@ -5500,18 +5621,15 @@ mod tests {
         };
         let out2 = plugged_in_step_with_env(&mut actor, &env2);
         let power2 = out2.iter().find_map(|r| {
-            if let ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } = &r.signal
-            {
-                Some(*active_power_kw)
+            if let ControlSignal::PowerSetpoint { active_power_w, .. } = &r.signal {
+                Some(*active_power_w)
             } else {
                 None
             }
         });
         assert!(
-            power2.is_some() && (power2.unwrap() - 1.5).abs() < 0.1,
-            "should charge at ~1.5 kW surplus, got: {out2:?}"
+            power2.is_some() && (power2.unwrap() - 1500.0).abs() < 100.0,
+            "should charge at ~1500 W surplus, got: {out2:?}"
         );
 
         // 5.0 kW PV, 1.5 kW load -> surplus 3.5 kW, charge at 3.5 kW
@@ -5523,18 +5641,15 @@ mod tests {
         };
         let out3 = plugged_in_step_with_env(&mut actor, &env3);
         let power3 = out3.iter().find_map(|r| {
-            if let ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } = &r.signal
-            {
-                Some(*active_power_kw)
+            if let ControlSignal::PowerSetpoint { active_power_w, .. } = &r.signal {
+                Some(*active_power_w)
             } else {
                 None
             }
         });
         assert!(
-            power3.is_some() && (power3.unwrap() - 3.5).abs() < 0.1,
-            "should charge at ~3.5 kW surplus, got: {out3:?}"
+            power3.is_some() && (power3.unwrap() - 3500.0).abs() < 100.0,
+            "should charge at ~3500 W surplus, got: {out3:?}"
         );
     }
 
@@ -5594,7 +5709,7 @@ mod tests {
         let has_power = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw.abs() > 0.01
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w.abs() > 0.01
             )
         });
         assert!(
@@ -5859,7 +5974,7 @@ mod tests {
         let has_positive_charge = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+                ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w > 0.0
             ) || matches!(r.signal, ControlSignal::EvSetReadyBy { .. })
                 || matches!(
                     r.signal,
@@ -5937,7 +6052,7 @@ mod tests {
         let mut departure_signals: Vec<ControlSignal> = Vec::new();
         let mut arrival_signals: Vec<ControlSignal> = Vec::new();
         let mut post_arrival_signals: Vec<ControlSignal> = Vec::new();
-        let mut total_drive_kwh = 0.0_f64;
+        let mut total_drive_j = 0.0_f64;
         let mut drive_signal_count = 0_usize;
 
         // SOC samples: (minute, estimated_soc)
@@ -5969,8 +6084,8 @@ mod tests {
             // Collect driving energy and SOC samples between departure and arrival.
             if minute > 480 && minute < 1080 {
                 for req in &out {
-                    if let ControlSignal::EvDrive { kwh } = req.signal {
-                        total_drive_kwh += kwh;
+                    if let ControlSignal::EvDrive { energy_j } = req.signal {
+                        total_drive_j += energy_j;
                         drive_signal_count += 1;
                         soc_samples_driving.push(actor.estimated_soc);
                     }
@@ -6010,12 +6125,12 @@ mod tests {
         );
 
         // ---- 3. Total drive energy matches physics within 5% ----------------
-        // 30 mi × 0.3 kWh/mi × temp_multiplier(10 °C outdoor)
-        let expected_kwh = 30.0 * 0.3 * temp_efficiency_multiplier(10.0);
-        let pct_err = ((total_drive_kwh - expected_kwh) / expected_kwh).abs();
+        // 30 mi × 0.3 kWh/mi × temp_multiplier(10 °C outdoor), in J.
+        let expected_j = 48_280.32 * 671.0808876163206 * temp_efficiency_multiplier(10.0);
+        let pct_err = ((total_drive_j - expected_j) / expected_j).abs();
         assert!(
             pct_err < 0.05,
-            "total EvDrive kWh ({total_drive_kwh:.3}) should be within 5% of expected ({expected_kwh:.3})"
+            "total EvDrive energy ({total_drive_j:.0} J) should be within 5% of expected ({expected_j:.0} J)"
         );
 
         // ---- 4. estimated_soc decreased monotonically across driving steps --
@@ -6084,18 +6199,18 @@ mod tests {
             EvDriverParams {
                 strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
                 plug_in_policy: PlugInPolicy::Always,
-                daily_drive_miles: ScheduleSource::Constant(30.0),
+                daily_drive_distance_m: ScheduleSource::Constant(30.0),
                 departure_time: ScheduleSource::Constant(480.0),
                 trip_duration: ScheduleSource::Constant(600.0),
                 arrival_time: Some(ScheduleSource::Constant(900.0)),
                 event_day_ratio: 1.0,
-                fuel_economy_kwh_per_mi: 0.3,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.2,
-                average_speed_mph: 30.0,
-                range_anxiety_miles: 20.0,
+                fuel_economy_j_per_m: 0.3,
+                capacity_j: 216_000_000.0,
+                max_charge_w: 7.2,
+                average_speed_m_per_s: 30.0,
+                range_anxiety_distance_m: 20.0,
                 away_charge_fraction: 0.0,
-                away_charge_power_kw: 0.0,
+                away_charge_power_w: 0.0,
             },
             seed_from_u64(42),
         );
@@ -6163,18 +6278,18 @@ mod tests {
             EvDriverParams {
                 strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
                 plug_in_policy: PlugInPolicy::Always,
-                daily_drive_miles: ScheduleSource::Constant(30.0),
+                daily_drive_distance_m: ScheduleSource::Constant(30.0),
                 departure_time: ScheduleSource::Constant(480.0),
                 trip_duration: ScheduleSource::Constant(420.0),
                 arrival_time: None,
                 event_day_ratio: 1.0,
-                fuel_economy_kwh_per_mi: 0.3,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.2,
-                average_speed_mph: 30.0,
-                range_anxiety_miles: 20.0,
+                fuel_economy_j_per_m: 0.3,
+                capacity_j: 216_000_000.0,
+                max_charge_w: 7.2,
+                average_speed_m_per_s: 30.0,
+                range_anxiety_distance_m: 20.0,
                 away_charge_fraction: 0.0,
-                away_charge_power_kw: 0.0,
+                away_charge_power_w: 0.0,
             },
             seed_from_u64(42),
         );
@@ -6240,18 +6355,18 @@ mod tests {
             EvDriverParams {
                 strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
                 plug_in_policy: PlugInPolicy::Always,
-                daily_drive_miles: ScheduleSource::Constant(30.0),
+                daily_drive_distance_m: ScheduleSource::Constant(30.0),
                 departure_time: ScheduleSource::Constant(480.0),
                 trip_duration: ScheduleSource::Constant(420.0),
                 arrival_time: Some(ScheduleSource::Constant(1020.0)),
                 event_day_ratio: 1.0,
-                fuel_economy_kwh_per_mi: 0.3,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.2,
-                average_speed_mph: 30.0,
-                range_anxiety_miles: 20.0,
+                fuel_economy_j_per_m: 0.3,
+                capacity_j: 216_000_000.0,
+                max_charge_w: 7.2,
+                average_speed_m_per_s: 30.0,
+                range_anxiety_distance_m: 20.0,
                 away_charge_fraction: 0.0,
-                away_charge_power_kw: 0.0,
+                away_charge_power_w: 0.0,
             },
             seed_from_u64(42),
         );
@@ -6262,18 +6377,18 @@ mod tests {
             EvDriverParams {
                 strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
                 plug_in_policy: PlugInPolicy::Always,
-                daily_drive_miles: ScheduleSource::Constant(30.0),
+                daily_drive_distance_m: ScheduleSource::Constant(30.0),
                 departure_time: ScheduleSource::Constant(480.0),
                 trip_duration: ScheduleSource::Constant(420.0),
                 arrival_time: None,
                 event_day_ratio: 1.0,
-                fuel_economy_kwh_per_mi: 0.3,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.2,
-                average_speed_mph: 30.0,
-                range_anxiety_miles: 20.0,
+                fuel_economy_j_per_m: 0.3,
+                capacity_j: 216_000_000.0,
+                max_charge_w: 7.2,
+                average_speed_m_per_s: 30.0,
+                range_anxiety_distance_m: 20.0,
                 away_charge_fraction: 0.0,
-                away_charge_power_kw: 0.0,
+                away_charge_power_w: 0.0,
             },
             seed_from_u64(43),
         );
@@ -6398,7 +6513,7 @@ mod tests {
             plan: DayEvent {
                 departure_minute: 480,
                 arrival_minute: 1080,
-                drive_kwh: 9.5,
+                drive_j: 9.5,
             },
         };
         actor.needs_away_charge = true;
@@ -6406,7 +6521,7 @@ mod tests {
         actor.todays_event = Some(DayEvent {
             departure_minute: 480,
             arrival_minute: 1080,
-            drive_kwh: 9.5,
+            drive_j: 9.5,
         });
 
         let blob = actor.save_state().expect("save_state should succeed");
@@ -6428,7 +6543,7 @@ mod tests {
                 plan: DayEvent {
                     departure_minute: 480,
                     arrival_minute: 1080,
-                    drive_kwh: 9.5,
+                    drive_j: 9.5,
                 },
             }
         );
@@ -6442,12 +6557,12 @@ mod tests {
             .expect("todays_event must survive the round trip");
         assert_eq!(event.departure_minute, 480);
         assert_eq!(event.arrival_minute, 1080);
-        assert!((event.drive_kwh - 9.5).abs() < 1e-12);
+        assert!((event.drive_j - 9.5).abs() < 1e-12);
     }
 
     /// The snapshot round-trip must also preserve the *mid-trip* phase
     /// variant: `DriverPhase::Driving` now carries the departed day's plan
-    /// (`remaining_kwh`, step counters, and the `DayEvent`), and a field
+    /// (`remaining_j`, step counters, and the `DayEvent`), and a field
     /// dropped or reset in `load_state` would silently zero the trip's
     /// remaining energy across every checkpoint taken mid-route — the
     /// vehicle would arrive home with phantom range or stall the trip.
@@ -6457,7 +6572,7 @@ mod tests {
         let plan = DayEvent {
             departure_minute: 1380, // 23:00 — a midnight-crossing trip
             arrival_minute: 60,
-            drive_kwh: 12.0,
+            drive_j: 12.0,
         };
         let mut actor = make_actor(
             ChargingStrategy::Immediate { target_soc: 0.9 },
@@ -6465,7 +6580,7 @@ mod tests {
             42,
         );
         actor.phase = DriverPhase::Driving {
-            remaining_kwh: 7.5,
+            remaining_j: 7.5,
             total_steps: 80,
             steps_done: 20,
             plan,
@@ -6483,14 +6598,14 @@ mod tests {
 
         match restored.phase {
             DriverPhase::Driving {
-                remaining_kwh,
+                remaining_j,
                 total_steps,
                 steps_done,
                 plan: restored_plan,
             } => {
                 assert!(
-                    (remaining_kwh - 7.5).abs() < 1e-12,
-                    "the trip's remaining energy must survive the round trip, got {remaining_kwh}"
+                    (remaining_j - 7.5).abs() < 1e-12,
+                    "the trip's remaining energy must survive the round trip, got {remaining_j}"
                 );
                 assert_eq!(total_steps, 80, "total steps must survive the round trip");
                 assert_eq!(steps_done, 20, "steps done must survive the round trip");
@@ -6612,7 +6727,7 @@ mod tests {
             PlugInPolicy::Always,
             42,
         );
-        // expected_daily_miles=30, range_anxiety_miles=20, fuel=0.3, cap=60
+        // expected_daily_distance_m=30, range_anxiety_distance_m=20, fuel=0.3, cap=60
         // anxiety_soc ≈ (30+20)*0.3*1.11/60 ≈ 0.278
         // perceived estimated_soc=0.10 < anxiety threshold → should trigger
         actor.estimated_soc = 0.10;
@@ -6646,7 +6761,7 @@ mod tests {
             ) || matches!(r.signal, ControlSignal::EvSetReadyBy { .. })
                 || matches!(
                     r.signal,
-                    ControlSignal::PowerSetpoint { active_power_kw, .. } if active_power_kw > 0.0
+                    ControlSignal::PowerSetpoint { active_power_w, .. } if active_power_w > 0.0
                 )
         });
         assert!(
@@ -6786,15 +6901,15 @@ mod tests {
     // ======= Range anxiety day-specific tests (T-0430) =======
 
     /// Helper: build an actor with specific drive parameters and directly set
-    /// todays_event with the given drive_kwh so the day-specific anxiety
+    /// todays_event with the given drive_j so the day-specific anxiety
     /// calculation is exercised without a full drive cycle.
     fn make_anxiety_actor(
-        expected_daily_miles: f64,
-        fuel_economy_kwh_per_mi: f64,
-        capacity_kwh: f64,
-        range_anxiety_miles: f64,
+        expected_daily_distance_m: f64,
+        fuel_economy_j_per_m: f64,
+        capacity_j: f64,
+        range_anxiety_distance_m: f64,
         estimated_soc: f64,
-        todays_drive_kwh: Option<f64>,
+        todays_drive_j: Option<f64>,
     ) -> EvDriverActor {
         let mut actor = EvDriverActor::new(
             "AnxietyDriver",
@@ -6802,28 +6917,28 @@ mod tests {
             EvDriverParams {
                 strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
                 plug_in_policy: PlugInPolicy::Always,
-                daily_drive_miles: ScheduleSource::Constant(expected_daily_miles),
+                daily_drive_distance_m: ScheduleSource::Constant(expected_daily_distance_m),
                 departure_time: ScheduleSource::Constant(480.0),
                 trip_duration: ScheduleSource::Constant(600.0),
                 arrival_time: None,
-                event_day_ratio: if todays_drive_kwh.is_some() { 1.0 } else { 0.0 },
-                fuel_economy_kwh_per_mi,
-                capacity_kwh,
-                max_charge_kw: 7.2,
-                average_speed_mph: 30.0,
-                range_anxiety_miles,
+                event_day_ratio: if todays_drive_j.is_some() { 1.0 } else { 0.0 },
+                fuel_economy_j_per_m,
+                capacity_j,
+                max_charge_w: 7200.0,
+                average_speed_m_per_s: 13.4112,
+                range_anxiety_distance_m,
                 away_charge_fraction: 0.0,
-                away_charge_power_kw: 0.0,
+                away_charge_power_w: 0.0,
             },
             seed_from_u64(42),
         );
         actor.estimated_soc = estimated_soc;
         actor.phase = DriverPhase::HomePluggedIn;
-        if let Some(drive_kwh) = todays_drive_kwh {
+        if let Some(drive_j) = todays_drive_j {
             actor.todays_event = Some(DayEvent {
                 departure_minute: 480,
                 arrival_minute: 1080,
-                drive_kwh,
+                drive_j,
             });
         }
         actor
@@ -6833,19 +6948,19 @@ mod tests {
     fn range_anxiety_uses_day_specific_drive_on_high_mileage_day() {
         // LongCommuterL2-like parameters: mean=75 mi, fuel=0.251 kWh/mi,
         // capacity=65 kWh, range_anxiety=20 mi.
-        // Day-specific drive_kwh = 115 mi * 0.251 = 28.865 kWh (2-sigma high).
+        // Day-specific drive_j = 115 mi * 0.251 = 28.865 kWh (2-sigma high).
         // Static-mean anxiety: (75+20)*0.251*1.11/65 ≈ 0.407
         // Day-specific anxiety: (115+20)*0.251*1.11/65 ≈ 0.579
         // SOC at 0.45 should NOT trigger with static mean but SHOULD trigger
         // with day-specific value. Since we use max(day, mean), the threshold
         // is 0.579 and 0.45 < 0.579 → true.
         let actor = make_anxiety_actor(
-            75.0,                // expected_daily_miles
-            0.251,               // fuel_economy_kwh_per_mi
+            75.0,                // expected_daily_distance_m
+            0.251,               // fuel_economy_j_per_m
             65.0,                // capacity_kwh
-            20.0,                // range_anxiety_miles
+            20.0,                // range_anxiety_distance_m
             0.45,                // estimated_soc
-            Some(115.0 * 0.251), // todays_drive_kwh: 115 mi at 0.251 kWh/mi
+            Some(115.0 * 0.251), // todays_drive_j: 115 mi at 0.251 kWh/mi
         );
 
         let env = env_at_minute(0);
@@ -6862,16 +6977,16 @@ mod tests {
         // static-mean baseline — the blended `max` approach ensures this.
         // Actor: mean=30 mi, fuel=0.3 kWh/mi, cap=60 kWh, anxiety=20 mi.
         // Static-mean anxiety_soc: (30+20)*0.3*1.11/60 ≈ 0.278
-        // Day with only 5 mi → drive_kwh=1.5. Day-specific-only would give
+        // Day with only 5 mi → drive_j=1.5. Day-specific-only would give
         // (5+20)*0.3*1.11/60 ≈ 0.139 — too low, anxiety wouldn't fire
         // when it should. With max(5, 30) = 30, threshold stays at 0.278.
         let actor = make_anxiety_actor(
-            30.0,      // expected_daily_miles
-            0.3,       // fuel_economy_kwh_per_mi
+            30.0,      // expected_daily_distance_m
+            0.3,       // fuel_economy_j_per_m
             60.0,      // capacity_kwh
-            20.0,      // range_anxiety_miles
+            20.0,      // range_anxiety_distance_m
             0.25,      // estimated_soc (below static-mean threshold 0.278)
-            Some(1.5), // todays_drive_kwh: 5 mi * 0.3 kWh/mi
+            Some(1.5), // todays_drive_j: 5 mi * 0.3 kWh/mi
         );
 
         let env = env_at_minute(0);
@@ -6884,9 +6999,9 @@ mod tests {
 
     #[test]
     fn long_commuter_l2_115_mile_day_soc_0_45_triggers_range_anxiety() {
-        // Regression test: LongCommuterL2 archetype with daily_drive_miles_mean=75.0,
-        // daily_drive_miles_stddev=20.0. A 2-sigma draw of ~115 miles produces
-        // drive_kwh = 115 * 0.251 = 28.865 kWh. The vehicle (Chevy Bolt EV: 65 kWh,
+        // Regression test: LongCommuterL2 archetype with daily_drive_distance_m_mean=75.0,
+        // daily_drive_distance_m_stddev=20.0. A 2-sigma draw of ~115 miles produces
+        // drive_j = 115 * 0.251 = 28.865 kWh. The vehicle (Chevy Bolt EV: 65 kWh,
         // 0.251 kWh/mi) needs ~0.493 SOC for the trip.
         // Static-mean threshold = (75+20)*0.251*1.11/65 ≈ 0.407.
         // Day-specific threshold = (115+20)*0.251*1.11/65 ≈ 0.579.
@@ -6895,12 +7010,12 @@ mod tests {
 
         // Verify with the actual actor that 0.45 triggers with day-specific miles.
         let actor = make_anxiety_actor(
-            75.0,                // expected_daily_miles (from daily_drive_miles_mean)
-            0.251,               // fuel_economy_kwh_per_mi (Chevy Bolt EV)
+            75.0,                // expected_daily_distance_m (from daily_drive_distance_m_mean)
+            0.251,               // fuel_economy_j_per_m (Chevy Bolt EV)
             65.0,                // capacity_kwh (Chevy Bolt EV)
-            20.0,                // range_anxiety_miles (default)
+            20.0,                // range_anxiety_distance_m (default)
             0.45,                // SOC at 0.45
-            Some(115.0 * 0.251), // drive_kwh for 115 mi at 0.251 kWh/mi
+            Some(115.0 * 0.251), // drive_j for 115 mi at 0.251 kWh/mi
         );
 
         let env = env_at_minute(0);
@@ -7417,9 +7532,9 @@ mod tests {
                     .step(&env, std::time::Duration::from_secs(900), &mut ports)
                     .expect("EV step");
                 core = equipment.core_output().clone();
-                let power_kw = core.flows.electric_w.map(|p| p.signed_w()).unwrap_or(0.0) / 1000.0;
-                if power_kw > 0.0 {
-                    day_hours[hour] += power_kw * 0.25;
+                let power_w = core.flows.electric_w.map(|p| p.signed_w()).unwrap_or(0.0) / 1000.0;
+                if power_w > 0.0 {
+                    day_hours[hour] += power_w * 0.25;
                 }
             }
             if drove_today {
@@ -7674,9 +7789,9 @@ mod tests {
         let env = test_env().hour(19).build();
         let ctx = DecisionContext {
             current_soc: 0.25, // below the floor (0.3)
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 216_000_000.0,
+            max_charge_w: 7.2,
+            max_discharge_w: 5.0,
             env: &env,
             current_minute: 19 * 60,
             next_departure_minute: Some(480),
@@ -7711,9 +7826,9 @@ mod tests {
         let env = test_env().hour(19).build();
         let ctx = DecisionContext {
             current_soc: 0.25, // below the floor (0.3)
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 216_000_000.0,
+            max_charge_w: 7.2,
+            max_discharge_w: 5.0,
             env: &env,
             current_minute: 19 * 60,
             next_departure_minute: Some(480),
@@ -8159,7 +8274,7 @@ mod tests {
             42,
         );
         actor.away_charge_fraction = 0.3;
-        actor.away_charge_power_kw = 6.6;
+        actor.away_charge_power_w = 6.6;
         let mut out = Vec::new();
 
         // Roll event, depart, drive to completion. The day's ~9.99 kWh drive
@@ -8200,7 +8315,7 @@ mod tests {
         let has_away_charge = out.iter().any(|r| {
             matches!(
                 r.signal,
-                ControlSignal::EvAwayCharge { power_kw } if (power_kw - 6.6).abs() < 0.01
+                ControlSignal::EvAwayCharge { power_w } if (power_w - 6.6).abs() < 0.01
             )
         });
         assert!(
@@ -8283,12 +8398,5 @@ mod tests {
             "one uncoverable trip must count as exactly one cancellation, even when a \
              second step lands inside the departure-minute window"
         );
-    }
-}
-/// The kW working value of an SI read: the driver's kW-era working
-/// values convert once at the read until the control-layer commit.
-pub(crate) mod hares_core_units {
-    pub(crate) fn w_to_kw(w: f64) -> f64 {
-        uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
     }
 }

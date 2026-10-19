@@ -168,6 +168,19 @@ fn build_control_signal(
 ) -> Result<ControlSignal, String> {
     let lower: HashMap<String, f64> = values.iter().map(|(k, v)| (k.to_lowercase(), *v)).collect();
 
+    // The action keys are signal surface keys: each is checked against the
+    // removed-keys table (`ControlSignal` scope) before the signal builds,
+    // so a pre-rename action key names its replacement instead of reading
+    // as 0.0 under the renamed key.
+    for key in lower.keys() {
+        if let Some(replacement) = hares_types::removed_keys::removed_key(
+            hares_types::removed_keys::KeyScope::ControlSignal,
+            key,
+        ) {
+            return Err(format!("action key '{key}' was removed: {replacement}"));
+        }
+    }
+
     let signal = match signal_type {
         "ThermalSetpoint" => {
             let heat_c = lower
@@ -189,26 +202,21 @@ fn build_control_signal(
             }
         }
         "PowerSetpoint" => {
-            let active_power_kw = lower
-                .get("active_power_kw")
-                .or_else(|| lower.get("p_setpoint_kw"))
-                .or_else(|| lower.get("kw"))
-                .copied()
-                .unwrap_or(0.0);
-            let reactive_power_kvar = lower.get("reactive_power_kvar").copied();
+            let active_power_w = lower.get("active_power_w").copied().unwrap_or(0.0);
+            let reactive_power_var = lower.get("reactive_power_var").copied();
             ControlSignal::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc: None,
                 max_soc: None,
             }
         }
         "PowerLimit" => {
-            let max_power_kw = lower.get("max_power_kw").copied().unwrap_or(0.0);
-            let ramp_rate_kw_per_s = lower.get("ramp_rate_kw_per_s").copied();
+            let max_power_w = lower.get("max_power_w").copied().unwrap_or(0.0);
+            let ramp_rate_w_per_s = lower.get("ramp_rate_w_per_s").copied();
             ControlSignal::PowerLimit {
-                max_power_kw,
-                ramp_rate_kw_per_s,
+                max_power_w,
+                ramp_rate_w_per_s,
             }
         }
         "SOCTarget" => {
@@ -557,19 +565,19 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
             check_opt("max_rh", *max_rh);
         }
         ControlSignal::PowerSetpoint {
-            active_power_kw,
-            reactive_power_kvar,
+            active_power_w,
+            reactive_power_var,
             ..
         } => {
-            check("active_power_kw", *active_power_kw);
-            check_opt("reactive_power_kvar", *reactive_power_kvar);
+            check("active_power_w", *active_power_w);
+            check_opt("reactive_power_var", *reactive_power_var);
         }
         ControlSignal::PowerLimit {
-            max_power_kw,
-            ramp_rate_kw_per_s,
+            max_power_w,
+            ramp_rate_w_per_s,
         } => {
-            check("max_power_kw", *max_power_kw);
-            check_opt("ramp_rate_kw_per_s", *ramp_rate_kw_per_s);
+            check("max_power_w", *max_power_w);
+            check_opt("ramp_rate_w_per_s", *ramp_rate_w_per_s);
         }
         ControlSignal::SOCTarget {
             target_soc,
@@ -1344,13 +1352,13 @@ mod tests {
     #[test]
     fn build_power_setpoint() {
         let mut values = HashMap::new();
-        values.insert("active_power_kw".to_string(), 3.5);
+        values.insert("active_power_w".to_string(), 3500.0);
         let sig = build_control_signal("PowerSetpoint", &values).unwrap();
         assert_eq!(
             sig,
             ControlSignal::PowerSetpoint {
-                active_power_kw: 3.5,
-                reactive_power_kvar: None,
+                active_power_w: 3500.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             }
@@ -1364,8 +1372,8 @@ mod tests {
         assert_eq!(
             sig,
             ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0,
-                reactive_power_kvar: None,
+                active_power_w: 0.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             }
@@ -1375,14 +1383,42 @@ mod tests {
     #[test]
     fn build_power_limit() {
         let mut values = HashMap::new();
-        values.insert("max_power_kw".to_string(), 5.0);
+        values.insert("max_power_w".to_string(), 5000.0);
         let sig = build_control_signal("PowerLimit", &values).unwrap();
         assert_eq!(
             sig,
             ControlSignal::PowerLimit {
-                max_power_kw: 5.0,
-                ramp_rate_kw_per_s: None,
+                max_power_w: 5000.0,
+                ramp_rate_w_per_s: None,
             }
+        );
+    }
+
+    #[test]
+    fn build_rejects_a_removed_action_key_naming_its_replacement() {
+        // The gym's old action-layout keys are `ControlSignal` removed-key
+        // rows: an action dict carrying one fails naming the replacement
+        // instead of reading as 0.0 under the renamed key.
+        let mut values = HashMap::new();
+        values.insert("active_power_kw".to_string(), 3.5);
+        let err = build_control_signal("PowerSetpoint", &values).unwrap_err();
+        assert!(
+            err.contains("PowerSetpoint.active_power_w"),
+            "the old key names its replacement: {err}"
+        );
+        let mut values = HashMap::new();
+        values.insert("p_setpoint_kw".to_string(), 3.5);
+        let err = build_control_signal("PowerSetpoint", &values).unwrap_err();
+        assert!(
+            err.contains("PowerSetpoint.active_power_w"),
+            "the deleted alias names its replacement: {err}"
+        );
+        let mut values = HashMap::new();
+        values.insert("max_power_kw".to_string(), 5.0);
+        let err = build_control_signal("PowerLimit", &values).unwrap_err();
+        assert!(
+            err.contains("PowerLimit.max_power_w"),
+            "the old key names its replacement: {err}"
         );
     }
 
@@ -1541,12 +1577,12 @@ mod tests {
     fn map_multi_equipment_action() {
         let layout = vec![
             ("HVAC".to_string(), "heat_c".to_string()),
-            ("Battery".to_string(), "active_power_kw".to_string()),
+            ("Battery".to_string(), "active_power_w".to_string()),
         ];
         let mut sig_map = HashMap::new();
         sig_map.insert("HVAC".to_string(), "ThermalSetpoint".to_string());
         sig_map.insert("Battery".to_string(), "PowerSetpoint".to_string());
-        let action = vec![22.0, -1.5];
+        let action = vec![22.0, -1500.0];
         let (signals, _clamped_count) =
             map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap();
         assert_eq!(signals.len(), 2);
@@ -1563,8 +1599,8 @@ mod tests {
         assert_eq!(
             batt_sig.1,
             ControlSignal::PowerSetpoint {
-                active_power_kw: -1.5,
-                reactive_power_kvar: None,
+                active_power_w: -1500.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             }
@@ -1747,7 +1783,7 @@ mod tests {
     fn map_action_rejects_nan_in_multi_equipment() {
         let layout = vec![
             ("HVAC".to_string(), "heat_c".to_string()),
-            ("Battery".to_string(), "active_power_kw".to_string()),
+            ("Battery".to_string(), "active_power_w".to_string()),
         ];
         let mut sig_map = HashMap::new();
         sig_map.insert("HVAC".to_string(), "ThermalSetpoint".to_string());

@@ -1885,14 +1885,7 @@ impl Equipment for Ev {
             // into the driver's range-anxiety and needed-hours arithmetic).
             capacity_j: self.battery_capacity_j_rated,
             max_charge_w: self.rated_power_w,
-            // The seed's field is kWh/mi until the control-layer commit;
-            // convert the held J/m once here.
-            fuel_economy_kwh_per_mi: uom::si::f64::Energy::new::<uom::si::energy::joule>(
-                self.fuel_economy_j_per_m
-                    * uom::si::f64::Length::new::<uom::si::length::mile>(1.0)
-                        .get::<uom::si::length::meter>(),
-            )
-            .get::<uom::si::energy::kilowatt_hour>(),
+            fuel_economy_j_per_m: self.fuel_economy_j_per_m,
         })
     }
 
@@ -2130,21 +2123,12 @@ impl Equipment for Ev {
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc,
                 max_soc,
             } => {
-                // The signal carries kW and kVAR until the control-layer
-                // commit; the working values are W and VAR (SI), converted
-                // once here.
-                let active_power_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*active_power_kw)
-                        .get::<uom::si::power::watt>();
-                let reactive_power_var = reactive_power_kvar.map(|q| {
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(q)
-                        .get::<uom::si::power::watt>()
-                });
+                // The signal is W and VAR (SI); read with no conversion.
                 // Validate the ENTIRE signal before mutating any state so a
                 // rejected setpoint leaves no partial effect (e.g. an armed
                 // q_setpoint from a signal whose active power was refused).
@@ -2183,25 +2167,20 @@ impl Equipment for Ev {
                         "EV PowerSetpoint max_soc must be finite, got {m}"
                     )));
                 }
-                if active_power_w < 0.0 && !self.v2l_enabled && !self.v2g_enabled {
+                if *active_power_w < 0.0 && !self.v2l_enabled && !self.v2g_enabled {
                     return Err(HaresError::Control(
                         "negative PowerSetpoint requires v2l_enabled or v2g_enabled".to_string(),
                     ));
                 }
                 if let Some(q) = reactive_power_var {
-                    self.q_setpoint_var = Some(q);
+                    self.q_setpoint_var = Some(*q);
                 }
-                self.power_setpoint_w = Some(active_power_w);
+                self.power_setpoint_w = Some(*active_power_w);
                 self.power_setpoint_min_soc = *min_soc;
                 self.power_setpoint_max_soc = *max_soc;
             }
-            ControlSignal::PowerLimit { max_power_kw, .. } => {
-                // The signal carries kW until the control-layer commit; the
-                // working value is W (SI), converted once here.
-                let max_power_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
-                        .get::<uom::si::power::watt>();
-                self.power_limit_w = Some((max_power_w).max(0.0));
+            ControlSignal::PowerLimit { max_power_w, .. } => {
+                self.power_limit_w = Some((*max_power_w).max(0.0));
             }
             ControlSignal::SOCTarget {
                 target_soc,
@@ -2245,18 +2224,13 @@ impl Equipment for Ev {
                 self.power_setpoint_min_soc = None;
                 self.power_setpoint_max_soc = None;
             }
-            ControlSignal::ReactiveSetpoint { kvar } => {
-                // The signal carries kVAR until the control-layer commit; the
-                // working value is VAR (SI), converted once here.
-                if !kvar.is_finite() {
+            ControlSignal::ReactiveSetpoint { var } => {
+                if !var.is_finite() {
                     return Err(HaresError::Control(
-                        "EV ReactiveSetpoint kvar must be finite".to_string(),
+                        "EV ReactiveSetpoint var must be finite".to_string(),
                     ));
                 }
-                self.q_setpoint_var = Some(
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*kvar)
-                        .get::<uom::si::power::watt>(),
-                );
+                self.q_setpoint_var = Some(*var);
             }
             ControlSignal::PowerFactorSetpoint { power_factor } => {
                 if !power_factor.is_finite() || *power_factor <= 0.0 || *power_factor > 1.0 {
@@ -2306,7 +2280,7 @@ impl Equipment for Ev {
                     self.soc_target_max = None;
                 }
             }
-            ControlSignal::EvDrive { kwh } => {
+            ControlSignal::EvDrive { energy_j } => {
                 if self.connection_state != EvConnectionState::Disconnected {
                     return Err(HaresError::Control(
                         "EvDrive rejected: EV must be Disconnected to drive".to_string(),
@@ -2316,17 +2290,14 @@ impl Equipment for Ev {
                 // central signal validation, and a non-finite or negative
                 // energy would create SOC from nowhere (or poison every
                 // downstream clamp).
-                if !kwh.is_finite() || *kwh < 0.0 {
+                if !energy_j.is_finite() || *energy_j < 0.0 {
                     return Err(HaresError::Control(format!(
-                        "EvDrive kwh must be finite and >= 0, got {kwh}"
+                        "EvDrive energy_j must be finite and >= 0, got {energy_j}"
                     )));
                 }
-                // The signal carries kWh until the control-layer commit;
-                // the energy is J (SI), converted once here.
-                let energy_j = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(*kwh)
-                    .get::<uom::si::energy::joule>();
+                // The signal is J (SI); read with no conversion.
                 let available_j = self.battery_capacity_j * self.soc;
-                if energy_j > available_j {
+                if *energy_j > available_j {
                     // A finite drive exceeding the pack's remaining energy is
                     // a physical situation — a trip longer than the
                     // vehicle's range — not an invalid value: deliver what
@@ -2357,11 +2328,7 @@ impl Equipment for Ev {
                     self.pending_drive_j += energy_j;
                 }
             }
-            ControlSignal::EvAwayCharge { power_kw } => {
-                // The signal carries kW until the control-layer commit; the
-                // working value is W (SI), converted once here.
-                let power_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(*power_kw)
-                    .get::<uom::si::power::watt>();
+            ControlSignal::EvAwayCharge { power_w } => {
                 if self.connection_state != EvConnectionState::AwayPluggedIn {
                     return Err(HaresError::Control(
                         "EvAwayCharge rejected: EV must be AwayPluggedIn".to_string(),
@@ -2370,12 +2337,12 @@ impl Equipment for Ev {
                 // Self-contained guard (see EvDrive): a non-finite or negative
                 // charge power would silently no-op (`> 0.0` compares false)
                 // instead of being reported.
-                if !power_w.is_finite() || power_w < 0.0 {
+                if !power_w.is_finite() || *power_w < 0.0 {
                     return Err(HaresError::Control(format!(
                         "EvAwayCharge power_w must be finite and >= 0, got {power_w}"
                     )));
                 }
-                self.away_charger_power_w = power_w;
+                self.away_charger_power_w = *power_w;
             }
             ControlSignal::EvSetReadyBy {
                 departure_hour,

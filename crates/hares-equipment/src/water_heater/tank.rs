@@ -581,7 +581,7 @@ impl StratifiedTank {
     /// `step_tempered()` so that heating and draw are integrated in the
     /// same Euler step with correct outlet temperature and energy accounting.
     pub fn heat_node(&mut self, node: usize, power_w: f64, dt: Duration) -> Result<()> {
-        validate_finite("power_w", power_w)?;
+        validate_finite("power_kw", power_w)?;
         let seconds = dt.as_secs_f64();
         validate_nonnegative("dt_seconds", seconds)?;
         let volume_m3 = self.node_volume(node)?;

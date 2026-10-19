@@ -4,7 +4,7 @@ use super::preference::{ChargingPreference, DecisionContext, PreferenceVote};
 
 pub struct V2GExport {
     pub min_soc: f64,
-    pub max_export_kw: f64,
+    pub max_export_w: f64,
     pub price_threshold: f64,
 }
 
@@ -31,7 +31,7 @@ impl ChargingPreference for V2GExport {
         if price > self.price_threshold {
             PreferenceVote {
                 target_soc: None,
-                power_kw: Some(-self.max_export_kw),
+                power_w: Some(-self.max_export_w),
                 departure_hour: None,
                 min_soc: Some(self.min_soc),
                 max_soc: None,
@@ -57,9 +57,9 @@ mod tests {
     fn make_ctx(env: &hares_types::EnvironmentState, soc: f64) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: soc,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 60.0,
+            max_charge_w: 7.2,
+            max_discharge_w: 5.0,
             env,
             current_minute: 720,
             next_departure_minute: None,
@@ -84,14 +84,14 @@ mod tests {
             .build();
         let mut pref = V2GExport {
             min_soc: 0.3,
-            max_export_kw: 5.0,
+            max_export_w: 5.0,
             price_threshold: 0.20,
         };
         let ctx = make_ctx(&env, 0.25);
         let vote = pref.score(&ctx);
         assert_eq!(vote.label, "v2g:soc_floor");
         assert!(
-            vote.power_kw.is_none(),
+            vote.power_w.is_none(),
             "no export at/below the soc floor, whatever the price"
         );
         assert!(
@@ -112,14 +112,14 @@ mod tests {
             .build();
         let mut pref = V2GExport {
             min_soc: 0.3,
-            max_export_kw: 5.0,
+            max_export_w: 5.0,
             price_threshold: 0.20,
         };
         let ctx = make_ctx(&env, 0.7);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2g:exporting");
-        assert!((vote.power_kw.unwrap() - (-5.0)).abs() < 1e-9);
+        assert!((vote.power_w.unwrap() - (-5.0)).abs() < 1e-9);
         assert_eq!(vote.min_soc, Some(0.3));
     }
 
@@ -133,14 +133,14 @@ mod tests {
             .build();
         let mut pref = V2GExport {
             min_soc: 0.3,
-            max_export_kw: 5.0,
+            max_export_w: 5.0,
             price_threshold: 0.20,
         };
         let ctx = make_ctx(&env, 0.7);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2g:idle");
-        assert!(vote.power_kw.is_none());
+        assert!(vote.power_w.is_none());
     }
 
     #[test]
@@ -153,7 +153,7 @@ mod tests {
             .build();
         let mut pref = V2GExport {
             min_soc: 0.3,
-            max_export_kw: 5.0,
+            max_export_w: 5.0,
             price_threshold: 0.20,
         };
         let ctx = make_ctx(&env, 0.7);
@@ -161,7 +161,7 @@ mod tests {
 
         // price > threshold is strict, so exactly-at should idle
         assert_eq!(vote.label, "v2g:idle");
-        assert!(vote.power_kw.is_none());
+        assert!(vote.power_w.is_none());
     }
 
     #[test]
@@ -169,7 +169,7 @@ mod tests {
         let env = TestEnvBuilder::new().build();
         let mut pref = V2GExport {
             min_soc: 0.3,
-            max_export_kw: 5.0,
+            max_export_w: 5.0,
             price_threshold: 0.20,
         };
         let ctx = make_ctx(&env, 0.7);

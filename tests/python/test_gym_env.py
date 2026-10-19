@@ -302,7 +302,7 @@ def test_deadband_action_without_a_setpoint_field_is_rejected():
 
 def test_sorted_action_layout_preserves_equipment_sort_order():
     layout, type_by_equip = sorted_action_layout(
-        {"B": ["reactive_power_var", "active_power_kw"], "A": ["active_power_kw"]}
+        {"B": ["reactive_power_var", "active_power_w"], "A": ["active_power_w"]}
     )
 
     equipment_names = [eq for eq, _ in layout]
@@ -311,10 +311,10 @@ def test_sorted_action_layout_preserves_equipment_sort_order():
     assert equipment_names[2] == "B"
 
     a_fields = [f for eq, f in layout if eq == "A"]
-    assert a_fields == ["active_power_kw"]
+    assert a_fields == ["active_power_w"]
 
     b_fields = [f for eq, f in layout if eq == "B"]
-    assert b_fields == sorted(["reactive_power_var", "active_power_kw"])
+    assert b_fields == sorted(["reactive_power_var", "active_power_w"])
 
     assert type_by_equip["A"] == "PowerSetpoint"
     assert type_by_equip["B"] == "PowerSetpoint"
@@ -397,7 +397,7 @@ def test_vec_gym_random_policy_100_steps():
 
     action_config = {
         "Gas Furnace": ["heat_c"],
-        "Batt": ["active_power_kw"],
+        "Batt": ["active_power_w"],
     }
 
     env = VecDwellingGymEnv(
@@ -638,7 +638,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
 
     action_config = {
         "Gas Furnace": ["heat_c"],
-        "Batt": ["active_power_kw"],
+        "Batt": ["active_power_w"],
     }
 
     env = VecDwellingGymEnv(
@@ -1218,16 +1218,16 @@ class _FakeTelemetry:
         return {}
 
 
-def test_telemetry_to_observation_reactive_power_kvar_no_keyerror():
-    """telemetry_to_observation handles reactive_power_kvar without raising KeyError."""
+def test_telemetry_to_observation_reactive_power_var_no_keyerror():
+    """telemetry_to_observation handles reactive_power_var without raising KeyError."""
     obs = telemetry_to_observation(_FakeTelemetry(), ["reactive_power_var"])
     assert obs.shape == (1,)
     assert np.isfinite(obs[0])
     assert obs[0] == 1.5
 
 
-def test_telemetry_to_observation_reactive_power_kvar_in_mixed_fields():
-    """reactive_power_kvar coexists with other fields in a single observation vector."""
+def test_telemetry_to_observation_reactive_power_var_in_mixed_fields():
+    """reactive_power_var coexists with other fields in a single observation vector."""
     obs = telemetry_to_observation(
         _FakeTelemetry(),
         ["total_power_w", "reactive_power_var", "outdoor_temp"],

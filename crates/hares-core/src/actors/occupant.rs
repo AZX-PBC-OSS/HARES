@@ -70,7 +70,7 @@ pub struct EquipmentBehavior {
     /// Turn on equipment when returning home.
     pub on_when_home: bool,
     /// Override power setpoint when equipment is active.
-    pub power_setpoint_kw: Option<f64>,
+    pub power_setpoint_w: Option<f64>,
     /// Apply load fraction when equipment is active.
     pub load_fraction: Option<f64>,
 }
@@ -97,10 +97,10 @@ impl EquipmentBehavior {
     ///
     /// # Panics (debug only)
     ///
-    /// Panics if `kw` is negative.
-    pub fn with_power_setpoint(mut self, kw: f64) -> Self {
-        debug_assert!(kw >= 0.0, "power setpoint must be non-negative, got {kw}");
-        self.power_setpoint_kw = Some(kw);
+    /// Panics if `w` is negative.
+    pub fn with_power_setpoint(mut self, w: f64) -> Self {
+        debug_assert!(w >= 0.0, "power setpoint must be non-negative, got {w}");
+        self.power_setpoint_w = Some(w);
         self
     }
 
@@ -240,7 +240,7 @@ impl Occupant {
                     ControlCapabilities::MODE_OVERRIDE
                 };
             }
-            if behavior.power_setpoint_kw.is_some() {
+            if behavior.power_setpoint_w.is_some() {
                 required |= ControlCapabilities::POWER_SETPOINT;
             }
             if behavior.load_fraction.is_some() && !is_ev {
@@ -314,7 +314,7 @@ impl Occupant {
     ///
     /// Mode signals (`off_when_away`, `on_when_home`) are event-driven -- they fire
     /// on transitions or while the triggering condition holds (away → Off each step).
-    /// Continuous controls (`power_setpoint_kw`, `load_fraction`) are re-sent every
+    /// Continuous controls (`power_setpoint_w`, `load_fraction`) are re-sent every
     /// step while present, keeping the equipment override active for the duration.
     fn dispatch_for_behavior(
         target: &DispatchTarget,
@@ -324,7 +324,7 @@ impl Occupant {
         out: &mut Vec<DispatchRequest>,
     ) {
         let has_continuous_control =
-            behavior.load_fraction.is_some() || behavior.power_setpoint_kw.is_some();
+            behavior.load_fraction.is_some() || behavior.power_setpoint_w.is_some();
         let has_mode_control = behavior.off_when_away || behavior.on_when_home;
         if !is_transition && !has_mode_control && !has_continuous_control {
             return;
@@ -414,12 +414,12 @@ fn push_power_setpoint_if(
     behavior: &EquipmentBehavior,
     out: &mut Vec<DispatchRequest>,
 ) {
-    if let Some(power_kw) = behavior.power_setpoint_kw {
+    if let Some(power_w) = behavior.power_setpoint_w {
         out.push(DispatchRequest {
             target: target.clone(),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: power_kw,
-                reactive_power_kvar: None,
+                active_power_w: power_w,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -582,7 +582,7 @@ mod tests {
         let behavior = EquipmentBehavior::none();
         assert!(!behavior.off_when_away);
         assert!(!behavior.on_when_home);
-        assert_eq!(behavior.power_setpoint_kw, None);
+        assert_eq!(behavior.power_setpoint_w, None);
         assert_eq!(behavior.load_fraction, None);
     }
 
@@ -591,12 +591,12 @@ mod tests {
         let behavior = EquipmentBehavior::none()
             .off_when_away()
             .on_when_home()
-            .with_power_setpoint(5.0)
+            .with_power_setpoint(5000.0)
             .with_load_fraction(0.8);
 
         assert!(behavior.off_when_away);
         assert!(behavior.on_when_home);
-        assert_eq!(behavior.power_setpoint_kw, Some(5.0));
+        assert_eq!(behavior.power_setpoint_w, Some(5000.0));
         assert_eq!(behavior.load_fraction, Some(0.8));
     }
 
@@ -777,7 +777,10 @@ mod tests {
         let schedule = vec![Presence::Home];
         let mut occupant = Occupant::new("Test")
             .with_presence_schedule(schedule)
-            .with_ev("MyEV", EquipmentBehavior::none().with_power_setpoint(7.2));
+            .with_ev(
+                "MyEV",
+                EquipmentBehavior::none().with_power_setpoint(7200.0),
+            );
 
         let env = test_env().build();
         let mut requests = Vec::new();
@@ -785,7 +788,7 @@ mod tests {
         occupant.decide(&env, &mut requests);
 
         let has_power_setpoint = requests.iter().any(|r| {
-            matches!(r.signal, ControlSignal::PowerSetpoint { active_power_kw, .. } if (active_power_kw - 7.2).abs() < 0.01)
+            matches!(r.signal, ControlSignal::PowerSetpoint { active_power_w, .. } if (active_power_w - 7200.0).abs() < 0.01)
         });
         assert!(has_power_setpoint, "expected PowerSetpoint signal for EV");
     }
@@ -956,7 +959,10 @@ mod tests {
         let schedule = vec![Presence::Away];
         let mut occupant = Occupant::new("Test")
             .with_presence_schedule(schedule)
-            .with_lighting("Lights", EquipmentBehavior::none().with_power_setpoint(1.0))
+            .with_lighting(
+                "Lights",
+                EquipmentBehavior::none().with_power_setpoint(1000.0),
+            )
             .with_ev("MyEV", EquipmentBehavior::none());
 
         let env = test_env().build();
@@ -994,7 +1000,10 @@ mod tests {
         let schedule = vec![Presence::Home, Presence::Home];
         let mut occupant = Occupant::new("Test")
             .with_presence_schedule(schedule)
-            .with_lighting("Lights", EquipmentBehavior::none().with_power_setpoint(1.0));
+            .with_lighting(
+                "Lights",
+                EquipmentBehavior::none().with_power_setpoint(1000.0),
+            );
 
         let env = test_env().build();
         let mut requests = Vec::new();

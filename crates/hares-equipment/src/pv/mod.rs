@@ -1156,7 +1156,7 @@ impl Equipment for PV {
         let (final_p_w, final_q_var) = self.apply_inverter_limits(total_ac_power_w, bus_q_var);
         let inverter_clipping_w = (total_ac_power_w - final_p_w).max(0.0);
 
-        // T-0424 invariant: if an explicit ReactiveSetpoint { kvar: 0.0 }
+        // T-0424 invariant: if an explicit ReactiveSetpoint { var: 0.0 }
         // was applied (q_setpoint_active && q_setpoint_source == 1 for
         // ReactiveSetpoint), then reactive_power_var must be 0.0 and no PF
         // override may have occurred. This guards against the original bug
@@ -1389,38 +1389,24 @@ impl Equipment for PV {
 
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
-            ControlSignal::PowerLimit { max_power_kw, .. } => {
-                // The signal carries kW until the control-layer commit; the
-                // working value is W (SI), converted once here.
-                let max_power_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
-                        .get::<uom::si::power::watt>();
+            ControlSignal::PowerLimit { max_power_w, .. } => {
                 if !max_power_w.is_finite() {
                     return Err(HaresError::Control(
                         "PV PowerLimit max_power_w must be finite".to_string(),
                     ));
                 }
-                self.power_limit_w = Some((max_power_w).max(0.0));
+                self.power_limit_w = Some((*max_power_w).max(0.0));
                 Ok(())
             }
             ControlSignal::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 ..
             } => {
-                // The signal carries kW and kVAR until the control-layer
-                // commit; the working values are W and VAR (SI), converted
-                // once here.
-                let active_power_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*active_power_kw)
-                        .get::<uom::si::power::watt>();
-                let reactive_power_var = reactive_power_kvar.map(|q| {
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(q)
-                        .get::<uom::si::power::watt>()
-                });
-                if !active_power_kw.is_finite() {
+                // The signal is W and VAR (SI); read with no conversion.
+                if !active_power_w.is_finite() {
                     return Err(HaresError::Control(
-                        "PV PowerSetpoint active_power_kw must be finite".to_string(),
+                        "PV PowerSetpoint active_power_w must be finite".to_string(),
                     ));
                 }
                 // OCHRE semantics: p_set_point = max(max_generation, p_set) where
@@ -1434,7 +1420,7 @@ impl Equipment for PV {
                             "PV PowerSetpoint reactive_power_var must be finite".to_string(),
                         ));
                     }
-                    self.q_setpoint_var = Some(q);
+                    self.q_setpoint_var = Some(*q);
                     self.q_setpoint_active = true;
                     self.q_setpoint_source = 3; // power_setpoint
                 }
@@ -1449,18 +1435,13 @@ impl Equipment for PV {
                 self.curtailment_fraction = *percent / 100.0;
                 Ok(())
             }
-            ControlSignal::ReactiveSetpoint { kvar } => {
-                // The signal carries kVAR until the control-layer commit; the
-                // working value is VAR (SI), converted once here.
-                if !kvar.is_finite() {
+            ControlSignal::ReactiveSetpoint { var } => {
+                if !var.is_finite() {
                     return Err(HaresError::Control(
-                        "PV ReactiveSetpoint kvar must be finite".to_string(),
+                        "PV ReactiveSetpoint var must be finite".to_string(),
                     ));
                 }
-                self.q_setpoint_var = Some(
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*kvar)
-                        .get::<uom::si::power::watt>(),
-                );
+                self.q_setpoint_var = Some(*var);
                 self.q_setpoint_active = true;
                 self.q_setpoint_source = 1; // reactive_setpoint
                 Ok(())
@@ -1909,7 +1890,7 @@ mod tests {
 
         // Utility outage, no backup: inverter trips despite full sun and a
         // commanded q-setpoint.
-        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.0 })
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { var: 1000.0 })
             .unwrap();
         let mut env_outage = env_with_surfaces(sunny.clone(), 25.0);
         env_outage.grid.voltage_pu = 0.0;
@@ -2107,8 +2088,8 @@ mod tests {
         pv.init(&config_single(), &env).unwrap();
 
         pv.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 1.5,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 1500.0,
+            ramp_rate_w_per_s: None,
         })
         .unwrap();
 
@@ -2131,8 +2112,8 @@ mod tests {
     fn restored_checkpoint_output_satisfies_the_core_contract() {
         let mut pv = PV::new(config_single());
         pv.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 2.3,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 2.3,
+            ramp_rate_w_per_s: None,
         })
         .unwrap();
         let state = pv.save_state().unwrap();
@@ -2152,8 +2133,8 @@ mod tests {
     fn save_and_load_state_round_trip_power_limit() {
         let mut pv = PV::new(config_single());
         pv.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 2.3,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 2.3,
+            ramp_rate_w_per_s: None,
         })
         .unwrap();
 
@@ -2197,8 +2178,8 @@ mod tests {
         source.init(&cfg, &env).unwrap();
         source
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 3.0000,
-                reactive_power_kvar: Some(0.0),
+                active_power_w: 3000.0,
+                reactive_power_var: Some(0.0),
                 min_soc: None,
                 max_soc: None,
             })
@@ -2210,7 +2191,7 @@ mod tests {
         let mut restored = PV::new(cfg.clone());
         restored.init(&cfg, &env).unwrap();
         restored
-            .apply_control(&ControlSignal::ReactiveSetpoint { kvar: 5.0 })
+            .apply_control(&ControlSignal::ReactiveSetpoint { var: 5000.0 })
             .unwrap();
         restored.load_state(&state).unwrap();
 
@@ -2547,7 +2528,7 @@ mod tests {
         );
 
         // Commanded zero must beat the baseline on all three channels.
-        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.0 })
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { var: 0.0 })
             .unwrap();
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
@@ -2557,7 +2538,7 @@ mod tests {
     }
 
     /// T-0424: A PV with power_factor=0.95 must produce Q=0.0 when
-    /// ReactiveSetpoint { kvar: 0.0 } is explicitly commanded. The explicit
+    /// ReactiveSetpoint { var: 0.0 } is explicitly commanded. The explicit
     /// zero must not be overridden by the PF baseline fallback.
     #[test]
     fn reactive_zero_setpoint_not_overridden_by_pf() {
@@ -2578,7 +2559,7 @@ mod tests {
         );
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
-        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.0 })
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { var: 0.0 })
             .unwrap();
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
@@ -2640,7 +2621,7 @@ mod tests {
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
         // Set an explicit Q override via ReactiveSetpoint.
-        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 5.0 })
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { var: 5000.0 })
             .unwrap();
         // Then send PowerFactorSetpoint to clear it and re-engage PF baseline.
         pv.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.95 })
@@ -2680,8 +2661,8 @@ mod tests {
         // PowerSetpoint with active_power_w=3.0 and reactive_power_var=Some(0.0)
         // should force Q to zero.
         pv.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0000,
-            reactive_power_kvar: Some(0.0),
+            active_power_w: 3000.0,
+            reactive_power_var: Some(0.0),
             min_soc: None,
             max_soc: None,
         })
@@ -3317,7 +3298,7 @@ mod tests {
     fn reactive_setpoint_signal_sets_q() {
         let (mut pv, env) = make_inverter_pv(6000.0);
         pv.inverter_min_pf = None;
-        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { var: 1500.0 })
             .unwrap();
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
@@ -3446,7 +3427,7 @@ mod tests {
     fn pv_reactive_setpoint_positive_passthrough() {
         let (mut pv, env) = make_inverter_pv(6000.0);
         pv.inverter_min_pf = None;
-        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { var: 1500.0 })
             .unwrap();
         let mut ports = PortSlots::default();
         let pre = ports.electrical;
@@ -3476,7 +3457,7 @@ mod tests {
     fn pv_reactive_setpoint_negative_passthrough() {
         let (mut pv, env) = make_inverter_pv(6000.0);
         pv.inverter_min_pf = None;
-        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: -1.5 })
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { var: -1500.0 })
             .unwrap();
         let mut ports = PortSlots::default();
         let pre = ports.electrical;
@@ -3507,7 +3488,7 @@ mod tests {
         let (mut pv, env) = make_inverter_pv(6000.0);
         pv.inverter_min_pf = None;
         // First command an absorbing ReactiveSetpoint.
-        pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+        pv.apply_control(&ControlSignal::ReactiveSetpoint { var: 1500.0 })
             .unwrap();
         assert_eq!(pv.q_setpoint_var, Some(1500.0));
         // Then a PowerFactorSetpoint must clear it and re-engage the PF path.
@@ -3536,7 +3517,7 @@ mod tests {
             let (mut pv, env) = make_inverter_pv(4000.0);
             pv.inverter_min_pf = None;
             pv.inverter_priority = InverterPriority::Var;
-            pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: q_cmd })
+            pv.apply_control(&ControlSignal::ReactiveSetpoint { var: q_cmd })
                 .unwrap();
             let mut ports = PortSlots::default();
             pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
@@ -3627,8 +3608,8 @@ mod tests {
     fn power_setpoint_stores_q_value() {
         let mut pv = PV::new(config_single());
         pv.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0000,
-            reactive_power_kvar: Some(0.75),
+            active_power_w: 2000.0,
+            reactive_power_var: Some(750.0),
             min_soc: None,
             max_soc: None,
         })
@@ -3740,8 +3721,8 @@ mod tests {
 
         // Apply a PowerSetpoint limiting to 2.0 kW.
         pv.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0000,
-            reactive_power_kvar: None,
+            active_power_w: 2000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })

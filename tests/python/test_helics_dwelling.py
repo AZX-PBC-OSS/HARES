@@ -394,9 +394,9 @@ def test_helics_dwelling_run_loop_relative_time_and_routing(monkeypatch: pytest.
     orchestrator._sub_control.push_string(
         json.dumps(
             {
-                "Battery": {"type": "PowerSetpoint", "active_power_kw": 3.0},
-                "EV": {"type": "PowerLimit", "max_power_w": 4.2},
-                "Unknown": {"type": "PowerSetpoint", "active_power_kw": 1.0},
+                "Battery": {"type": "PowerSetpoint", "active_power_w": 3000.0},
+                "EV": {"type": "PowerLimit", "max_power_w": 4200.0},
+                "Unknown": {"type": "PowerSetpoint", "active_power_w": 1000.0},
             }
         )
     )
@@ -423,8 +423,8 @@ def test_helics_dwelling_run_loop_relative_time_and_routing(monkeypatch: pytest.
     ]
 
     assert dwelling.applied_controls == [
-        ("Battery", {"parsed": {"type": "PowerSetpoint", "active_power_kw": 3.0}}),
-        ("EV", {"parsed": {"type": "PowerLimit", "max_power_w": 4.2}}),
+        ("Battery", {"parsed": {"type": "PowerSetpoint", "active_power_w": 3000.0}}),
+        ("EV", {"parsed": {"type": "PowerLimit", "max_power_w": 4200.0}}),
     ]
 
     power_pub = fed.publications["total_power_w"]
@@ -1145,13 +1145,13 @@ def test_control_signal_power_setpoint_nan_kw_warns(
     assert orchestrator._sub_control is not None
     # Push a huge-but-finite value through JSON (NaN can't be represented in JSON)
     orchestrator._sub_control.push_string(
-        json.dumps({"Battery": {"type": "PowerSetpoint", "active_power_kw": 1e15}})
+        json.dumps({"Battery": {"type": "PowerSetpoint", "active_power_w": 1e15}})
     )
 
     with caplog.at_level("WARNING"):
         orchestrator.run()
 
-    # 1e15 kW is finite, so no warning from the boundary validator.
+    # 1e15 W is finite, so no warning from the boundary validator.
     # Verify no spurious warning was logged for this valid input.
     assert "PowerSetpoint" not in caplog.text
 
@@ -1164,7 +1164,7 @@ def test_validate_control_signal_rejects_nan_power_setpoint(
 
     with caplog.at_level("WARNING"):
         clamped = module.validate_control_signal(
-            {"type": "PowerSetpoint", "active_power_kw": float("nan")},
+            {"type": "PowerSetpoint", "active_power_w": float("nan")},
             "Battery",
             module.logging.getLogger("test"),
         )
@@ -1385,7 +1385,7 @@ def test_update_mask_shows_all_subscription_receipts(
     orchestrator._sub_voltage.push_double(1.0)
     orchestrator._sub_price.push_double(0.15)
     orchestrator._sub_control.push_string(
-        json.dumps({"Battery": {"type": "PowerSetpoint", "active_power_kw": 3.0}})
+        json.dumps({"Battery": {"type": "PowerSetpoint", "active_power_w": 3000.0}})
     )
     orchestrator._read_subscriptions()
     assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0b111

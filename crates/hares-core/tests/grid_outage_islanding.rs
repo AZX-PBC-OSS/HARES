@@ -109,14 +109,14 @@ fn add_battery(dwelling: &mut Dwelling, initial_soc: f64) {
 fn add_battery_with_discharge_limit(
     dwelling: &mut Dwelling,
     initial_soc: f64,
-    max_discharge_kw: f64,
+    max_discharge_w: f64,
 ) {
     let cfg = BatteryConfig {
         equipment_id: None,
         zone_id: None,
         capacity_j: 10.0 * 3.6e6,
         max_charge_w: 5000.0,
-        max_discharge_w: max_discharge_kw * 1000.0,
+        max_discharge_w: max_discharge_w * 1000.0,
         n_series: None,
         n_parallel: None,
         ah_cell: None,
@@ -293,7 +293,7 @@ fn islanded_load_beyond_discharge_capability_reports_unserved() {
     let telem = dwelling.telemetry().unwrap();
     assert!(
         telem.island_unserved_w > 0.5,
-        "load beyond max_discharge_kw must be reported as unserved, got {} kW",
+        "load beyond max_discharge_w must be reported as unserved, got {} kW",
         telem.island_unserved_w
     );
     assert_eq!(

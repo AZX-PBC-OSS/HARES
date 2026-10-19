@@ -3,26 +3,27 @@
 use super::preference::{ChargingPreference, DecisionContext, PreferenceVote};
 
 pub struct SolarTracking {
-    pub min_charge_rate_kw: f64,
+    pub min_charge_rate_w: f64,
 }
 
 impl ChargingPreference for SolarTracking {
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote {
-        let pv = hares_core_units::w_to_kw(ctx.env.electrical.actual_pv_w_or_fallback());
+        // The electrical summary is W (SI), read with no conversion.
 
         // The observation's own build site checks finiteness, and a negative
         // PV observation fails the step there; no per-decide re-check.
 
-        let load = hares_core_units::w_to_kw(ctx.env.electrical.base_load_w);
+        let pv = ctx.env.electrical.actual_pv_w_or_fallback();
+        let load = ctx.env.electrical.base_load_w;
         let surplus = (pv - load).max(0.0);
 
-        if surplus < self.min_charge_rate_kw {
+        if surplus < self.min_charge_rate_w {
             PreferenceVote::idle("solar:insufficient")
         } else {
-            let clamped = surplus.min(ctx.max_charge_kw);
+            let clamped = surplus.min(ctx.max_charge_w);
             PreferenceVote {
                 target_soc: None,
-                power_kw: Some(clamped),
+                power_w: Some(clamped),
                 departure_hour: None,
                 min_soc: None,
                 max_soc: None,
@@ -46,9 +47,9 @@ mod tests {
     fn make_ctx(env: &hares_types::EnvironmentState) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: 0.5,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 216_000_000.0, // 60 kWh
+            max_charge_w: 7200.0,
+            max_discharge_w: 5000.0,
             env,
             current_minute: 720,
             next_departure_minute: None,
@@ -67,13 +68,13 @@ mod tests {
             })
             .build();
         let mut pref = SolarTracking {
-            min_charge_rate_kw: 1.0,
+            min_charge_rate_w: 1000.0,
         };
         let ctx = make_ctx(&env);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "solar:surplus");
-        assert!((vote.power_kw.unwrap() - 3.5).abs() < 1e-9);
+        assert!((vote.power_w.unwrap() - 3500.0).abs() < 1e-9);
     }
 
     #[test]
@@ -86,13 +87,13 @@ mod tests {
             })
             .build();
         let mut pref = SolarTracking {
-            min_charge_rate_kw: 1.0,
+            min_charge_rate_w: 1000.0,
         };
         let ctx = make_ctx(&env);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "solar:insufficient");
-        assert!(vote.power_kw.is_none());
+        assert!(vote.power_w.is_none());
     }
 
     #[test]
@@ -105,13 +106,13 @@ mod tests {
             })
             .build();
         let mut pref = SolarTracking {
-            min_charge_rate_kw: 1.0,
+            min_charge_rate_w: 1000.0,
         };
         let ctx = make_ctx(&env);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "solar:surplus");
-        assert!((vote.power_kw.unwrap() - 7.2).abs() < 1e-9);
+        assert!((vote.power_w.unwrap() - 7200.0).abs() < 1e-9);
     }
 
     #[test]
@@ -124,13 +125,13 @@ mod tests {
             })
             .build();
         let mut pref = SolarTracking {
-            min_charge_rate_kw: 1.0,
+            min_charge_rate_w: 1000.0,
         };
         let ctx = make_ctx(&env);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "solar:insufficient");
-        assert!(vote.power_kw.is_none());
+        assert!(vote.power_w.is_none());
     }
 
     #[test]
@@ -146,13 +147,13 @@ mod tests {
             })
             .build();
         let mut pref = SolarTracking {
-            min_charge_rate_kw: 1.0,
+            min_charge_rate_w: 1000.0,
         };
         let ctx = make_ctx(&env);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "solar:surplus");
-        assert!((vote.power_kw.unwrap() - 2.0).abs() < 1e-9);
+        assert!((vote.power_w.unwrap() - 2000.0).abs() < 1e-9);
     }
 
     #[test]
@@ -168,20 +169,12 @@ mod tests {
             })
             .build();
         let mut pref = SolarTracking {
-            min_charge_rate_kw: 1.0,
+            min_charge_rate_w: 1000.0,
         };
         let ctx = make_ctx(&env);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "solar:surplus");
-        assert!((vote.power_kw.unwrap() - 3.5).abs() < 1e-9);
-    }
-}
-
-/// The kW working value of an SI summary read: the actors' kW-era working
-/// values convert once at the read until the control-layer commit.
-pub(crate) mod hares_core_units {
-    pub(crate) fn w_to_kw(w: f64) -> f64 {
-        uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
+        assert!((vote.power_w.unwrap() - 3500.0).abs() < 1e-9);
     }
 }

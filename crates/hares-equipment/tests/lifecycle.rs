@@ -407,8 +407,8 @@ fn lifecycle_battery() {
     eq.init(&cfg, &env).expect("init must succeed");
 
     let valid = ControlSignal::PowerSetpoint {
-        active_power_kw: 2.0000,
-        reactive_power_kvar: None,
+        active_power_w: 2.0000,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     };
@@ -462,8 +462,8 @@ fn lifecycle_gas_furnace() {
         deadband_c: Some(1.0),
     };
     let invalid = ControlSignal::PowerSetpoint {
-        active_power_kw: 5.0000,
-        reactive_power_kvar: None,
+        active_power_w: 5.0000,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     };
@@ -1392,8 +1392,8 @@ fn lifecycle_resistance_water_heater() {
             deadband_c: Some(2.0),
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1418,8 +1418,8 @@ fn lifecycle_gas_water_heater() {
             deadband_c: Some(2.0),
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1444,8 +1444,8 @@ fn lifecycle_heat_pump_water_heater() {
             deadband_c: Some(2.0),
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1470,8 +1470,8 @@ fn lifecycle_tankless_water_heater() {
             deadband_c: None,
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1496,8 +1496,8 @@ fn lifecycle_gas_tankless_water_heater() {
             deadband_c: None,
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1522,8 +1522,8 @@ fn lifecycle_indirect_tank() {
             deadband_c: Some(2.0),
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1657,7 +1657,7 @@ fn pv_capacitive_reactive_output_is_negative_in_core_output() {
     let env = env_with_pv_surface();
     eq.init(&cfg, &env).expect("init pv");
 
-    eq.apply_control(&ControlSignal::ReactiveSetpoint { kvar: -1.0 })
+    eq.apply_control(&ControlSignal::ReactiveSetpoint { var: -1.0 })
         .expect("reactive setpoint accepted");
     let mut ports = ports_for(eq.as_ref());
     eq.step(&env, Duration::from_secs(60), &mut ports)

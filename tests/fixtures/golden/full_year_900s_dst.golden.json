@@ -5,7 +5,7 @@
   ],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "6a5d97695e7dfbb5efb705c35ac6fefc636c8d05",
+  "git_head": "51152c523f3d06d263e67052a9fbf21c24a6d4a7",
   "git_dirty": true,
   "metrics": [
     {

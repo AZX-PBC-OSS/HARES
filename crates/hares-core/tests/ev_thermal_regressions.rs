@@ -288,6 +288,8 @@ fn battery_heater_warms_pack_while_cold_derate_blocks_charging() {
     for _ in 0..16 {
         // 4 h of preconditioning at 1.5 kW.
         step_900s(&mut ev, &mut env);
+        // The telemetry key holds W (SI) under the kW reporting name:
+        // W × hours / 1000 = kWh.
         billed_kwh += ev.telemetry().get("active_power_kw").unwrap_or(0.0) * STEP_HOURS / 1000.0;
     }
     let end_c = ev

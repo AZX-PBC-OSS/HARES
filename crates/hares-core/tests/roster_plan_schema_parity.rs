@@ -190,7 +190,7 @@ fn re_added_ev_restores_the_assembled_schema_and_its_driver_columns() {
     );
 }
 
-/// The battery declares an `active_power_kw` telemetry field in kW, so the
+/// The battery declares an `active_power_w` telemetry field in kW, so the
 /// assembled Electric Power column carries the telemetry unit provenance:
 /// the metadata the parity tests above compare is not empty.
 #[test]

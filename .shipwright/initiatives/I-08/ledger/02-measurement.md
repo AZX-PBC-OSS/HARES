@@ -4442,3 +4442,67 @@ the dst build's own).
 `si_census` at this commit: 4616 lines (the parent's 8857), the file at
 `target/si-census.txt`, the four witnesses green. Load average at the
 captures: 1 to 2 (1 min).
+
+### M-6b, 2026-10-19, row 94h, the control-layer SI commit
+
+The record the schedule requires of row 94h: B-14's commit 4 (the control
+layer in SI) against its parent `51152c52` (the landed commit 3), the
+after side the fix's working tree, measured before the goldens were
+re-captured. The before side is commit 3's committed goldens (captured at
+row 94g); the after side is the fresh frames of the ten non-dst goldens
+plus the dst build's `full_year_900s_dst`, `master_seed = 0`, warm-up as
+each manifest states. The comparison is per column, the guard's metric.
+
+Ten of the eleven goldens compare bitwise outright:
+`consumer_shape_900s`, `der_pv_battery_900s`,
+`full_year_900s_dst`, `full_year_hourly`, `leap_year_february_900s`,
+`fleet_mixed_offset`, `fleet_same_offset_300s`,
+`month_boundary_billing_3600s`, `resstock_2025_fleet`,
+`weather_wrap_900s`. One moves, in its last bits:
+
+| Golden | Movement |
+|---|---|
+| `der_pv_battery_ev_900s` | `Total Electric Power (kW)`, `Electric Vehicle Electric Power (kW)`, `EV End Use Electric Power (kW)`, `actor:EvDriver:Electric Vehicle:charge_kw` 1 cell each, max relative 2.3e-14; `actor:EvDriver:Electric Vehicle:soc` 39 cells, max relative 1.3e-16; the metrics' `total_energy_kwh.net_energy_kwh` 1 ulp (79.30221327176058 to ...59); every other column bitwise |
+
+The conversion that explains it: the EV driver's fuel economy now enters
+once as `fuel_economy_j_per_m` (the `uom` conversion of the catalogue's
+0.3 kWh per mile, 671.0808876163206 J/m, not binary-exact) and the
+driver's trip arithmetic runs in metres and joules, where the parent ran
+in miles and kWh with a conversion at each use; the pairs' last bits
+differ and propagate from the first driven step (row 38's SOC last bit)
+to the charge rate (row 76). No scaled difference above 1e-9 and no
+scale ratio near a unit factor anywhere: the movement is the conversion
+pairs, and nothing else. (The same dwelling's identical movement at row
+94c, recorded above, was the config-side J/m conversion; this one is the
+driver's parameter.)
+
+The 45-day EV cold-snap run (the Measurement section's EV dwelling: the
+`bldg0000007` ResStock home with its injected 75 kWh / 11.5 kW EV under
+the Nightly strategy, constant -7.0 C weather, 45 days at 900 s, warm-up
+disabled, seed 0; the manifest in this worktree's `target/ev45/`, the
+before side run at `51152c52`, the after side on the fix's tree), the
+full frame compared cell by cell, per variable:
+
+| Variable | Differing cells | Movement |
+|---|---|---|
+| `EV SOC (-)`, `actor:EvDriver:EV:soc` | 364 each | 1 to 2 ulps, the max absolute 2.2204e-16 |
+| `EV Electric Power (kW)`, `EV End Use Electric Power (kW)`, `EV Energy (kWh)`, `actor:EvDriver:EV:charge_kw`, `Total Electric Power (kW)` | 6 each | max relative 6.4e-15, first at rows 287 to 288 (a charge-taper step) |
+| every other of the 90 columns | 0 | bitwise |
+
+The SOC's differing cells are the drive and charge spans where the fuel
+economy's J/m conversion pair moves the SOC integral's last bit; the
+power cells are the taper steps one ulp of SOC is worth many ulps of
+power at. The regression's own gate is green at the fix (the run charges
+on most of the 45 days, and no trip is cancelled). No scaled difference
+above 1e-9 and no scale ratio near a unit factor anywhere: the movement
+is the conversion pairs, and nothing else.
+
+`si_census` at this commit: 2987 lines (the parent's 4616), the file at
+`target/si-census.txt`. The witnesses: the constants' file
+(`telemetry_keys.rs`'s `ELECTRIC_KW`), `python/hares/**`,
+`notebooks/simulation_explorer.py` (the UI's display-unit knobs and the
+OCHRE-boundary dict keys), and `benches/output_row_plan.rs` (the
+row-plan bench's declared reporting column) - the bench witness moved
+from `rl_episode.rs`, whose observation keys the run-state commit
+renamed, to the reporting column that stays. Load average at the
+captures: 1 to 2 (1 min).

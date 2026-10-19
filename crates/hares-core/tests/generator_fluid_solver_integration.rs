@@ -143,8 +143,8 @@ fn generator_fluid_solver_invariant_passes() {
     // Ramp to steady-state at 8 kW electrical.
     generator
         .apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 8.0000,
-            reactive_power_kvar: None,
+            active_power_w: 8.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })

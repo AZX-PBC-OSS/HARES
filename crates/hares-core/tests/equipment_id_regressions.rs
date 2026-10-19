@@ -1256,17 +1256,17 @@ fn midrun_equipment_add_with_recording_gets_empty_map_not_panic() {
         .iter()
         .position(|c| *c == "MELs Electric Power (kW)")
         .unwrap_or_else(|| panic!("MELs column missing; header: {header:?}"));
-    let mels_day2_kwh: f64 = contents
+    let mels_day2_energy_j: f64 = contents
         .lines()
         .skip(1 + 96)
         .filter_map(|l| l.split(',').nth(mels_col))
         .filter_map(|v| v.trim().parse::<f64>().ok())
-        .map(|kw| kw * 0.25)
+        .map(|kw| kw * 0.25 * 3.6e6)
         .sum();
     assert!(
-        mels_day2_kwh > 1.0,
+        mels_day2_energy_j > 3.6e6,
         "the always-on MELs load must keep reporting its own energy after the \
-         mid-run add; got {mels_day2_kwh} kWh"
+         mid-run add; got {mels_day2_energy_j} J"
     );
     assert!(
         !header.iter().any(|c| c.starts_with("ProbeLate")),
@@ -2362,8 +2362,8 @@ fn user_bms_actor() -> Box<dyn hares_core::actor::Actor> {
                 surplus_deadband_w: 0.0,
             },
             grid_export_rule: GridExportRule::Unrestricted,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            max_charge_w: 5.0,
+            max_discharge_w: 5.0,
             price_schedule: None,
             steps_per_day: 96,
             min_dwell_steps: 0,
@@ -2553,8 +2553,8 @@ fn ev_soc_check_fails_loudly_when_core_output_soc_is_absent() {
     // adjacent gate stays green and the only behavior under test is the
     // `soc_bounds` loud failure on the absent SOC.
     let derate = hares_equipment::battery::CapacityDerateModel::default().evaluate(25.0);
-    probe.telemetry.insert("capacity_kwh", 60.0 * derate);
-    probe.telemetry.insert("capacity_kwh_rated", 60.0);
+    probe.telemetry.insert("capacity_j", 60.0 * derate);
+    probe.telemetry.insert("capacity_j_rated", 60.0);
     probe.telemetry.insert("capacity_fade_pct", 0.0);
     probe.telemetry.insert("battery_temp_c", 25.0);
     dwelling

@@ -327,8 +327,8 @@ fn negative_power_setpoint_rejected_without_v2l_or_v2g() {
 
     let err = ev
         .apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -1.0,
-            reactive_power_kvar: None,
+            active_power_w: -1000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -1051,8 +1051,8 @@ fn commanded_power_setpoint_bounds_total_draw_with_heater_running() {
     env.weather.outdoor_temp_c = 2.0;
     ev.init(&config, &env).unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0000,
-        reactive_power_kvar: None,
+        active_power_w: 3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -1124,8 +1124,8 @@ fn urgent_deadline_with_heater_exceeds_soft_setpoint_within_the_supply_bound() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0000,
-        reactive_power_kvar: None,
+        active_power_w: 1000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -1191,8 +1191,8 @@ fn cold_v2l_export_conserves_pack_energy_and_stops_at_floor() {
     env.weather.outdoor_temp_c = 2.0;
     ev.init(&config, &env).unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -1295,8 +1295,8 @@ fn cold_discharge_ohmic_loss_covers_export_and_heater_terminal_currents() {
     env.weather.outdoor_temp_c = 2.0;
     ev.init(&config, &env).unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -1405,7 +1405,7 @@ fn commanded_vars_at_zero_real_power_report_on_mode() {
         max_soc: None,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::ReactiveSetpoint { kvar: 2.0 })
+    ev.apply_control_unchecked(&ControlSignal::ReactiveSetpoint { var: 2000.0 })
         .unwrap();
 
     let mut ports = PortSlots::default();
@@ -1456,7 +1456,7 @@ fn away_activity_reports_off_mode_consistent_with_zero_dwelling_flows() {
         state: EvConnectionState::AwayPluggedIn,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 11.5 })
+    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_w: 11500.0 })
         .unwrap();
 
     let mut ports = PortSlots::default();
@@ -1502,7 +1502,7 @@ fn away_activity_reports_off_mode_consistent_with_zero_dwelling_flows() {
         })
         .unwrap();
     ev_warm
-        .apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 11.5 })
+        .apply_control_unchecked(&ControlSignal::EvAwayCharge { power_w: 11500.0 })
         .unwrap();
     let mut ports = PortSlots::default();
     ev_warm
@@ -1583,7 +1583,7 @@ fn heater_does_not_run_without_a_supply_disconnected_or_away_idle() {
         state: EvConnectionState::AwayPluggedIn,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 0.0 })
+    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_w: 0.0 })
         .unwrap();
     let soc_before = ev.soc;
     let mut ports = PortSlots::default();
@@ -1667,8 +1667,8 @@ fn grid_outage_suspends_preconditioning_except_while_the_vehicle_discharges() {
     let mut ev = Ev::new(config.clone());
     ev.init(&config, &sample_env()).unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -1868,8 +1868,8 @@ fn grid_emergency_discharge_with_running_heater_publishes_a_guard_valid_output()
     ev.init(&config, &env).unwrap();
     // The V2L dispatch: a negative setpoint with V2L enabled.
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -1930,8 +1930,8 @@ fn grid_emergency_v2g_discharge_with_running_heater_publishes_a_guard_valid_outp
     env.weather.outdoor_temp_c = 2.0;
     ev.init(&config, &env).unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: -5.0,
-        reactive_power_kvar: None,
+        active_power_w: -5000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2004,8 +2004,8 @@ fn pack_fed_preconditioning_reports_and_restores_standby_mode() {
     env.weather.outdoor_temp_c = 2.0;
     ev.init(&config, &env).unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2235,8 +2235,8 @@ fn sub_threshold_export_leg_discharge_mode_still_publishes_a_nonzero_flow() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2288,7 +2288,7 @@ fn dead_bus_suppresses_a_latched_var_setpoint_flows_all_zero() {
     // Warm pack (ambient-resolved at the 10 °C test environment, above the
     // 5 °C heater threshold): charging-idle, no heater, only the latched
     // var command.
-    ev.apply_control_unchecked(&ControlSignal::ReactiveSetpoint { kvar: 1.0 })
+    ev.apply_control_unchecked(&ControlSignal::ReactiveSetpoint { var: 1000.0 })
         .unwrap();
     let mut env_outage = sample_env();
     env_outage.grid.voltage_pu = 0.0;
@@ -2327,7 +2327,7 @@ fn away_arm_zeroes_a_latched_var_setpoint_off_mode_flows_all_zero() {
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
     ev.init(&config, &env).unwrap();
-    ev.apply_control_unchecked(&ControlSignal::ReactiveSetpoint { kvar: 1.0 })
+    ev.apply_control_unchecked(&ControlSignal::ReactiveSetpoint { var: 1000.0 })
         .unwrap();
     // The away transition goes through Disconnected (the same path the
     // away-charging tests take).
@@ -2401,8 +2401,10 @@ fn usable_capacity_stays_physical_through_daily_cycling() {
             state: EvConnectionState::Disconnected,
         })
         .unwrap();
-        ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 15.0 })
-            .unwrap();
+        ev.apply_control_unchecked(&ControlSignal::EvDrive {
+            energy_j: 15.0 * 3.6e6,
+        })
+        .unwrap();
         step(&mut ev, &mut env);
         // Home, charge back to target.
         ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
@@ -2525,8 +2527,10 @@ fn ev_capacity_never_exceeds_its_rating() {
                 state: EvConnectionState::Disconnected,
             })
             .unwrap();
-            ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 15.0 })
-                .unwrap();
+            ev.apply_control_unchecked(&ControlSignal::EvDrive {
+                energy_j: 15.0 * 3.6e6,
+            })
+            .unwrap();
             step(&mut ev, &mut env);
             // Idle daytime hours to complete the 24.
             for _ in 0..11 {
@@ -2602,8 +2606,8 @@ fn v2l_allows_negative_power_when_enabled_and_soc_above_reserve() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -2.0,
-        reactive_power_kvar: None,
+        active_power_w: -2000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2633,8 +2637,8 @@ fn v2l_respects_soc_reserve_floor() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2669,8 +2673,8 @@ fn v2l_discharge_lands_on_soc_reserve_floor() {
     // 1.2 kWh above the floor; a 5 kW request over 1 h far exceeds what
     // that energy sustains (~1.08 kW AC), so the energy cap binds.
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -5.0,
-        reactive_power_kvar: None,
+        active_power_w: -5000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2712,8 +2716,8 @@ fn v2g_discharge_lands_on_soc_reserve_floor() {
     ev.init(&config, &env).expect("init");
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -5.0,
-        reactive_power_kvar: None,
+        active_power_w: -5000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2753,8 +2757,8 @@ fn v2l_respects_max_discharge_limit() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -10.0,
-        reactive_power_kvar: None,
+        active_power_w: -10.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2780,8 +2784,8 @@ fn v2l_rejected_when_disabled() {
 
     let err = ev
         .apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -1.0,
-            reactive_power_kvar: None,
+            active_power_w: -1000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -2805,8 +2809,8 @@ fn v2l_does_not_export_to_grid() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -2.0,
-        reactive_power_kvar: None,
+        active_power_w: -2000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2846,8 +2850,8 @@ fn v2g_allows_negative_power_when_enabled() {
     ev.init(&config, &env).expect("init");
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2867,8 +2871,8 @@ fn v2g_discharge_produces_negative_power() {
     ev.init(&config, &env).expect("init");
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2897,8 +2901,8 @@ fn v2g_respects_soc_reserve() {
     ev.init(&config, &env).expect("init");
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -5.0,
-        reactive_power_kvar: None,
+        active_power_w: -5000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -2934,8 +2938,8 @@ fn v2g_respects_power_setpoint_min_soc_above_reserve() {
     ev.init(&config, &env).expect("init");
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -5.0,
-        reactive_power_kvar: None,
+        active_power_w: -5000.0,
+        reactive_power_var: None,
         min_soc: Some(0.35),
         max_soc: None,
     })
@@ -2964,8 +2968,8 @@ fn v2g_discharges_when_soc_above_power_setpoint_min_soc() {
     ev.init(&config, &env).expect("init");
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -5.0,
-        reactive_power_kvar: None,
+        active_power_w: -5000.0,
+        reactive_power_var: None,
         min_soc: Some(0.35),
         max_soc: None,
     })
@@ -2994,8 +2998,8 @@ fn v2l_respects_power_setpoint_min_soc_above_reserve() {
     ev.init(&config, &env).expect("init");
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: Some(0.30),
         max_soc: None,
     })
@@ -3021,8 +3025,8 @@ fn power_setpoint_max_soc_caps_charging() {
     ev.init(&config, &env).expect("init");
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 7.2000,
-        reactive_power_kvar: None,
+        active_power_w: 7.2000,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: Some(0.90),
     })
@@ -3377,8 +3381,10 @@ fn ev_drive_reduces_soc() {
     .unwrap();
 
     let soc_before = ev.soc;
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 10.0 })
-        .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvDrive {
+        energy_j: 10.0 * 3.6e6,
+    })
+    .unwrap();
 
     // The drive debits against the usable capacity — rated scaled by the
     // reversible temperature derate at the pack's temperature (the
@@ -3416,8 +3422,11 @@ fn drive_energy_heats_the_pack_at_its_equivalent_discharge_current() {
     })
     .unwrap();
     let temp_before = ev.battery_temp_c;
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 15.0 })
-        .unwrap();
+    // 15 kWh in joules.
+    ev.apply_control_unchecked(&ControlSignal::EvDrive {
+        energy_j: 15.0 * 3.6e6,
+    })
+    .unwrap();
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
@@ -3457,7 +3466,9 @@ fn ev_drive_while_home_plugged_in_rejected() {
     ev.init(&config, &env).unwrap();
 
     let err = ev
-        .apply_control_unchecked(&ControlSignal::EvDrive { kwh: 5.0 })
+        .apply_control_unchecked(&ControlSignal::EvDrive {
+            energy_j: 5.0 * 3.6e6,
+        })
         .unwrap_err();
     assert!(err.to_string().contains("Disconnected"));
 }
@@ -3479,7 +3490,9 @@ fn ev_drive_while_away_plugged_in_rejected() {
     .unwrap();
 
     let err = ev
-        .apply_control_unchecked(&ControlSignal::EvDrive { kwh: 5.0 })
+        .apply_control_unchecked(&ControlSignal::EvDrive {
+            energy_j: 5.0 * 3.6e6,
+        })
         .unwrap_err();
     assert!(err.to_string().contains("Disconnected"));
 }
@@ -3503,7 +3516,7 @@ fn ev_drive_negative_kwh_must_not_increase_soc() {
         state: EvConnectionState::Disconnected,
     })
     .unwrap();
-    let _ = ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: -5.0 });
+    let _ = ev.apply_control_unchecked(&ControlSignal::EvDrive { energy_j: -5.0 });
 
     // Observe through a step while Disconnected (thermal drift only; the
     // step never touches SOC) so telemetry reflects post-drive state.
@@ -3542,7 +3555,7 @@ fn ev_drive_nan_kwh_must_not_poison_soc_or_power() {
         state: EvConnectionState::Disconnected,
     })
     .unwrap();
-    let _ = ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: f64::NAN });
+    let _ = ev.apply_control_unchecked(&ControlSignal::EvDrive { energy_j: f64::NAN });
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
@@ -3595,7 +3608,9 @@ fn ev_drive_infinite_kwh_must_not_create_energy() {
     .unwrap();
 
     // Positive infinity: the available-energy guard must reject it outright.
-    let result = ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: f64::INFINITY });
+    let result = ev.apply_control_unchecked(&ControlSignal::EvDrive {
+        energy_j: f64::INFINITY,
+    });
     assert!(
         result.is_err(),
         "+inf drive kWh must be rejected by the available-energy guard"
@@ -3610,7 +3625,7 @@ fn ev_drive_infinite_kwh_must_not_create_energy() {
 
     // Negative infinity: the same guard is blind to it — SOC must not rise.
     let _ = ev.apply_control_unchecked(&ControlSignal::EvDrive {
-        kwh: f64::NEG_INFINITY,
+        energy_j: f64::NEG_INFINITY,
     });
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
@@ -3638,7 +3653,7 @@ fn ev_away_charge_increases_soc_no_residential_power() {
         state: EvConnectionState::AwayPluggedIn,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 7.2 })
+    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_w: 7200.0 })
         .unwrap();
 
     let soc_before = ev.soc;
@@ -3665,7 +3680,7 @@ fn ev_away_charge_while_home_rejected() {
     ev.init(&config, &env).unwrap();
 
     let err = ev
-        .apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 7.2 })
+        .apply_control_unchecked(&ControlSignal::EvAwayCharge { power_w: 7200.0 })
         .unwrap_err();
     assert!(err.to_string().contains("AwayPluggedIn"));
 }
@@ -3683,7 +3698,7 @@ fn ev_away_charge_while_disconnected_rejected() {
     .unwrap();
 
     let err = ev
-        .apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 7.2 })
+        .apply_control_unchecked(&ControlSignal::EvAwayCharge { power_w: 7200.0 })
         .unwrap_err();
     assert!(err.to_string().contains("AwayPluggedIn"));
 }
@@ -3810,8 +3825,8 @@ fn power_setpoint_zero_suppresses_charging() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0000,
-        reactive_power_kvar: None,
+        active_power_w: 0.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -3924,8 +3939,8 @@ fn soc_target_clears_latched_zero_power_hold() {
 
     // An idle window latches the hold …
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0000,
-        reactive_power_kvar: None,
+        active_power_w: 0.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -3962,8 +3977,8 @@ fn ready_by_clears_latched_zero_power_hold() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0000,
-        reactive_power_kvar: None,
+        active_power_w: 0.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -4012,8 +4027,8 @@ fn urgent_ready_by_deadline_charges_through_latched_hold() {
     .unwrap();
     // … then a later idle step latches the hold on top of it.
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0000,
-        reactive_power_kvar: None,
+        active_power_w: 0.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -4053,8 +4068,8 @@ fn latched_hold_and_target_survive_equipment_checkpoint_round_trip() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0000,
-        reactive_power_kvar: None,
+        active_power_w: 0.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -4272,8 +4287,8 @@ fn disconnect_clears_latched_hold_for_away_charging() {
 
     // Home session leaves a hold and a target latched …
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 0.0000,
-        reactive_power_kvar: None,
+        active_power_w: 0.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -4294,7 +4309,7 @@ fn disconnect_clears_latched_hold_for_away_charging() {
         state: EvConnectionState::AwayPluggedIn,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 7.2 })
+    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_w: 7200.0 })
         .unwrap();
 
     let soc_before = ev.soc;
@@ -4425,8 +4440,8 @@ fn power_limit_during_ready_by() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerLimit {
-        max_power_kw: 2.0,
-        ramp_rate_kw_per_s: None,
+        max_power_w: 2000.0,
+        ramp_rate_w_per_s: None,
     })
     .unwrap();
 
@@ -4465,8 +4480,8 @@ fn deadline_guarantee_raises_power_above_setpoint_when_urgent() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0000,
-        reactive_power_kvar: None,
+        active_power_w: 1000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -4511,8 +4526,8 @@ fn external_authority_respects_setpoint_despite_urgent_deadline() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0000,
-        reactive_power_kvar: None,
+        active_power_w: 1000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -4571,8 +4586,8 @@ fn external_authority_deadline_target_must_not_raise_controller_destination() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0000,
-        reactive_power_kvar: None,
+        active_power_w: 1000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -4676,8 +4691,8 @@ fn deadline_guarantee_respects_setpoint_when_not_urgent() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0000,
-        reactive_power_kvar: None,
+        active_power_w: 1000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -4726,15 +4741,15 @@ fn power_limit_caps_after_deadline_guarantee_max() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0000,
-        reactive_power_kvar: None,
+        active_power_w: 1000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerLimit {
-        max_power_kw: 3.0,
-        ramp_rate_kw_per_s: None,
+        max_power_w: 3000.0,
+        ramp_rate_w_per_s: None,
     })
     .unwrap();
 
@@ -4781,8 +4796,8 @@ fn deadline_guarantee_meets_target_soc_despite_low_setpoint() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0000,
-        reactive_power_kvar: None,
+        active_power_w: 1000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -4835,8 +4850,8 @@ fn external_authority_reports_no_cc_cv_derating_when_setpoint_active() {
     })
     .unwrap();
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.5000,
-        reactive_power_kvar: None,
+        active_power_w: 1500.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -4854,7 +4869,7 @@ fn external_authority_reports_no_cc_cv_derating_when_setpoint_active() {
     let power = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
         (power - 1500.0).abs() < 1e-6,
-        "ExternalAuthority should deliver the raw setpoint power, got {power}"
+        "ExternalAuthority should deliver the raw setpoint power (1500 W), got {power}"
     );
 }
 
@@ -5035,7 +5050,7 @@ fn away_charges_to_ready_soc() {
         state: EvConnectionState::AwayPluggedIn,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 7.2 })
+    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_w: 7200.0 })
         .unwrap();
 
     for _ in 0..500 {
@@ -5084,7 +5099,7 @@ fn telemetry_away_plugged_in() {
         state: EvConnectionState::AwayPluggedIn,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 11.5 })
+    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_w: 11500.0 })
         .unwrap();
 
     let mut ports = PortSlots::default();
@@ -5162,7 +5177,7 @@ fn away_charge_zero_power_idles() {
         state: EvConnectionState::AwayPluggedIn,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: 0.0 })
+    ev.apply_control_unchecked(&ControlSignal::EvAwayCharge { power_w: 0.0 })
         .unwrap();
 
     let soc_before = ev.soc;
@@ -5357,8 +5372,8 @@ fn charging_reaches_full_at_correct_time() {
 }
 
 /// OCHRE EV_FUEL_ECONOMY default = 0.325 kWh/mile.
-/// 30-mile trip: drive_j = 30 * 0.325 = 9.75 kWh
-/// SOC drop = 9.75 / 60 = 0.1625
+/// 30-mile trip: 30 × 0.325 = 9.75 kWh = 3.51e7 J.
+/// SOC drop = 3.51e7 / (60 × 3.6e6) = 0.1625
 ///
 /// Validates driving uses fuel economy directly, no charging efficiency applied.
 #[test]
@@ -5366,7 +5381,11 @@ fn driving_soc_decrease_matches_fuel_economy() {
     let mut raw = base_raw();
     raw.insert(KEY_CAPACITY_J.to_string(), 216000000.0.into());
     raw.insert(KEY_INITIAL_SOC.to_string(), 1.0.into());
-    raw.insert(KEY_FUEL_ECONOMY_J_PER_M.to_string(), 0.325.into());
+    // 0.325 kWh/mi as J/m (the SI raw key, converted once here).
+    raw.insert(
+        KEY_FUEL_ECONOMY_J_PER_M.to_string(),
+        (0.325 * 3.6e6 / 1_609.344).into(),
+    );
     let config = ev_config(raw);
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
@@ -5378,13 +5397,14 @@ fn driving_soc_decrease_matches_fuel_economy() {
     .unwrap();
 
     let miles = 30.0;
-    let drive_j = miles * 0.325; // kWh (the 0.325 kWh/mi default)
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_j })
+    // 30 mi × 0.325 kWh/mi, in J.
+    let drive_j = miles * 0.325 * 3.6e6;
+    ev.apply_control_unchecked(&ControlSignal::EvDrive { energy_j: drive_j })
         .unwrap();
 
     // SOC drop = drive energy / usable capacity (rated × the temperature
     // derate at the unpinned 10 °C ambient initialization).
-    let expected_drop = drive_j / (60.0 * capacity_derate_at(10.0));
+    let expected_drop = drive_j / (60.0 * 3.6e6 * capacity_derate_at(10.0));
     let actual_drop = 1.0 - ev.soc;
     assert!(
         (actual_drop - expected_drop).abs() < 0.005,
@@ -5479,8 +5499,10 @@ fn soc_clamps_at_boundaries() {
     .unwrap();
 
     // Available = 0.05 * 60 = 3.0 kWh; try to drive 3.0 kWh exactly
-    ev2.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 3.0 })
-        .unwrap();
+    ev2.apply_control_unchecked(&ControlSignal::EvDrive {
+        energy_j: 3.0 * 3.6e6,
+    })
+    .unwrap();
     assert!(
         ev2.soc >= 0.0,
         "SOC must never go below 0.0, got {}",
@@ -5496,8 +5518,10 @@ fn soc_clamps_at_boundaries() {
     // accounted as observable drive shortfall — not silently dropped, and
     // not an error that would vanish into a warning string while the day's
     // profile kept reporting the dispatched energy.
-    ev2.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 1.0 })
-        .unwrap();
+    ev2.apply_control_unchecked(&ControlSignal::EvDrive {
+        energy_j: 1.0 * 3.6e6,
+    })
+    .unwrap();
     assert!(
         ev2.soc.abs() < 1e-9,
         "overdraw truncates to available: SOC must land exactly at 0, got {}",
@@ -5545,10 +5569,14 @@ fn drive_shortfall_accumulates_and_survives_checkpoint() {
     // at the unpinned 10 °C ambient initialization); first drive overdraws,
     // second (at SOC 0) is entirely undeliverable.
     let available = 0.05 * 60.0 * capacity_derate_at(10.0);
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 4.0 })
-        .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 2.0 })
-        .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvDrive {
+        energy_j: 4.0 * 3.6e6,
+    })
+    .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvDrive {
+        energy_j: 2.0 * 3.6e6,
+    })
+    .unwrap();
     assert!(
         (ev.drive_shortfall_j - (6.0 - available) * 3.6e6).abs() < 1e-3,
         "successive shortfalls must accumulate to 6.0 − available kWh \
@@ -5752,8 +5780,10 @@ fn ev_full_day_lifecycle() {
         state: EvConnectionState::Disconnected,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 9.75 })
-        .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvDrive {
+        energy_j: 9.75 * 3.6e6,
+    })
+    .unwrap();
 
     let mut ports = PortSlots::default();
     ev.step(&env, dt, &mut ports).unwrap();
@@ -5858,7 +5888,7 @@ fn ev_soc_decreases_during_driving() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    let drive_j = 15.0; // kWh
+    let drive_j = 15.0 * 3.6e6; // 15 kWh, in J
     // The drive debits against the signal-time usable capacity; its own
     // I²R heat (a 15 kWh one-minute burst is a ~900 kW discharge) warms
     // the pack within the step, so the post-step capacity differs.
@@ -5867,16 +5897,16 @@ fn ev_soc_decreases_during_driving() {
         state: EvConnectionState::Disconnected,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_j })
+    ev.apply_control_unchecked(&ControlSignal::EvDrive { energy_j: drive_j })
         .unwrap();
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
 
-    let expected_soc = 0.8 - drive_j * 3.6e6 / cap_at_drive;
+    let expected_soc = 0.8 - drive_j / cap_at_drive;
     assert!(
         (ev.soc - expected_soc).abs() < 0.01,
-        "SOC after {drive_j} kWh drive should be ~{expected_soc:.4}, got {}",
+        "SOC after the 15 kWh drive should be ~{expected_soc:.4}, got {}",
         ev.soc
     );
     assert!(
@@ -5972,8 +6002,10 @@ fn ev_drive_after_full_day_charging() {
         state: EvConnectionState::Disconnected,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 10.0 })
-        .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvDrive {
+        energy_j: 10.0 * 3.6e6,
+    })
+    .unwrap();
 
     let mut ports = PortSlots::default();
     ev.step(&env, dt, &mut ports).unwrap();
@@ -6016,7 +6048,7 @@ fn ev_insufficient_charge_before_departure() {
     })
     .unwrap();
     ev.apply_control_unchecked(&ControlSignal::EvDrive {
-        kwh: drive_j / 3.6e6,
+        energy_j: drive_j / 3.6e6,
     })
     .unwrap();
 
@@ -6874,7 +6906,7 @@ fn ev_reactive_setpoint_overrides_baseline_q() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { var: 1500.0 })
         .unwrap();
 
     let mut ports = PortSlots::default();
@@ -6902,8 +6934,8 @@ fn ev_power_factor_setpoint_zeros_q_setpoint_and_follows_baseline() {
 
     // Force charging via PowerSetpoint so P>0.
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0000,
-        reactive_power_kvar: None,
+        active_power_w: 3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -6934,8 +6966,8 @@ fn ev_power_setpoint_stores_reactive_q() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0000,
-        reactive_power_kvar: Some(0.75),
+        active_power_w: 3000.0,
+        reactive_power_var: Some(750.0),
         min_soc: None,
         max_soc: None,
     })
@@ -6969,8 +7001,8 @@ fn ev_rejected_power_setpoint_leaves_reactive_state_unchanged() {
     // Negative setpoint without v2l/v2g must be rejected in full.
     let err = ev
         .apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -3.0,
-            reactive_power_kvar: Some(1.25),
+            active_power_w: -3000.0,
+            reactive_power_var: Some(1.25),
             min_soc: None,
             max_soc: None,
         })
@@ -7003,8 +7035,8 @@ fn ev_reactive_setpoint_zero_forces_q_zero_over_pf_baseline() {
 
     // Charge so the pf = 0.9 baseline produces Q > 0.
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0000,
-        reactive_power_kvar: None,
+        active_power_w: 3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -7018,7 +7050,7 @@ fn ev_reactive_setpoint_zero_forces_q_zero_over_pf_baseline() {
     );
 
     // Commanded zero must beat the baseline.
-    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.0 })
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { var: 0.0 })
         .unwrap();
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
@@ -7041,8 +7073,8 @@ fn ev_kva_clamp_curtails_reactive_not_active_power() {
 
     // Command 5 kW charge + 5 kvar reactive → S = sqrt(P²+25) > 5 kVA.
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.6000,
-        reactive_power_kvar: Some(5.0),
+        active_power_w: 3600.0,
+        reactive_power_var: Some(5.0),
         min_soc: None,
         max_soc: None,
     })
@@ -7081,8 +7113,8 @@ fn ev_kva_clamp_reduces_q_to_charger_limit() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.6000,
-        reactive_power_kvar: Some(4.0),
+        active_power_w: 3600.0,
+        reactive_power_var: Some(4.0),
         min_soc: None,
         max_soc: None,
     })
@@ -7125,8 +7157,8 @@ fn ev_charging_vs_v2g_discharge_signs() {
     ev_charge.init(&config, &env).unwrap();
     ev_charge
         .apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0000,
-            reactive_power_kvar: None,
+            active_power_w: 3000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -7153,8 +7185,8 @@ fn ev_charging_vs_v2g_discharge_signs() {
     ev_discharge.init(&config, &env).unwrap();
     ev_discharge
         .apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -3.0,
-            reactive_power_kvar: None,
+            active_power_w: -3000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -7191,7 +7223,7 @@ fn ev_port_core_output_telemetry_reactive_consistent() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.2 })
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { var: 1.2 })
         .unwrap();
 
     let mut ports = PortSlots::default();
@@ -7220,7 +7252,7 @@ fn ev_validate_core_contract_passes_with_reactive() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.5 })
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { var: 500.0 })
         .unwrap();
 
     let mut ports = PortSlots::default();
@@ -7348,8 +7380,8 @@ fn v2l_discharge_not_gated_by_outage_and_counts_as_island_source() {
     );
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -2.0,
-        reactive_power_kvar: None,
+        active_power_w: -2000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -7394,8 +7426,8 @@ fn v2l_discharge_stops_at_ready_by_soc() {
     .unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -2.0,
-        reactive_power_kvar: None,
+        active_power_w: -2000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -7424,8 +7456,8 @@ fn v2l_discharge_proceeds_without_ready_by_soc() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -2.0,
-        reactive_power_kvar: None,
+        active_power_w: -2000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -7460,8 +7492,8 @@ fn v2g_discharge_stops_at_ready_by_soc() {
     .unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -7490,8 +7522,8 @@ fn v2g_discharge_proceeds_without_ready_by_soc() {
     ev.init(&config, &env).unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -7526,8 +7558,8 @@ fn ev_with_0700_deadline_refuses_discharge_below_90pct_at_2000() {
     .unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -2.0,
-        reactive_power_kvar: None,
+        active_power_w: -2000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -7566,8 +7598,8 @@ fn v2l_discharge_respects_deadline_flag_off_bypasses_interlock() {
     .unwrap();
 
     ev.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -2.0,
-        reactive_power_kvar: None,
+        active_power_w: -2000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -7671,7 +7703,7 @@ fn daily_degradation_rescales_usable_capacity() {
 /// moved SOC by `energy / rated`, independent of the pack's aged state.
 #[test]
 fn fixed_drive_soc_swing_scales_with_degraded_capacity() {
-    let drive_j = 6.0; // kWh, the signal's unit until the control-layer commit
+    let drive_j = 6.0 * 3.6e6; // 6 kWh, in J (the signal's unit)
 
     // Fresh pack: SOH = 1, usable capacity = rated × derate (the packs sit
     // at the aged_ev fixture's pinned 25 °C).
@@ -7682,7 +7714,7 @@ fn fixed_drive_soc_swing_scales_with_degraded_capacity() {
     assert!((cap_fresh - rated * capacity_derate_at(25.0)).abs() < 1.0);
     let soc_before_fresh = fresh.soc;
     fresh
-        .apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_j })
+        .apply_control_unchecked(&ControlSignal::EvDrive { energy_j: drive_j })
         .unwrap();
     let swing_fresh = soc_before_fresh - fresh.soc;
 
@@ -7697,18 +7729,17 @@ fn fixed_drive_soc_swing_scales_with_degraded_capacity() {
     let cap_aged = aged.battery_capacity_j;
     let soh = 1.0 - aged.degradation.capacity_fade_fraction();
     let soc_before_aged = aged.soc;
-    aged.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_j })
+    aged.apply_control_unchecked(&ControlSignal::EvDrive { energy_j: drive_j })
         .unwrap();
     let swing_aged = soc_before_aged - aged.soc;
 
-    // Each swing equals energy / usable_capacity (the signal's kWh to the
-    // pack's joules: × 3.6e6).
+    // Each swing equals energy / usable_capacity (both J now).
     assert!(
-        (swing_fresh - drive_j * 3.6e6 / cap_fresh).abs() < 1e-6,
+        (swing_fresh - drive_j / cap_fresh).abs() < 1e-9,
         "fresh swing {swing_fresh} should equal energy/fresh-usable-capacity"
     );
     assert!(
-        (swing_aged - drive_j * 3.6e6 / cap_aged).abs() < 1e-6,
+        (swing_aged - drive_j / cap_aged).abs() < 1e-9,
         "aged swing {swing_aged} should equal energy/aged-usable-capacity"
     );
 
@@ -7801,7 +7832,7 @@ fn ev_away_charge_rejects_non_finite_and_negative_power() {
 
     for bad in [f64::NAN, -1.5, f64::NEG_INFINITY] {
         let err = ev
-            .apply_control_unchecked(&ControlSignal::EvAwayCharge { power_kw: bad })
+            .apply_control_unchecked(&ControlSignal::EvAwayCharge { power_w: bad })
             .expect_err("invalid away-charge power must be rejected");
         assert!(
             format!("{err:?}").contains("EvAwayCharge"),
@@ -7862,14 +7893,14 @@ fn power_setpoint_rejects_non_finite_active_power_on_unchecked_path() {
     ev.init(&config, &env).unwrap();
     let err = ev
         .apply_control_unchecked(&ControlSignal::PowerSetpoint {
-            active_power_kw: f64::NAN,
-            reactive_power_kvar: None,
+            active_power_w: f64::NAN,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
         .expect_err("non-finite active setpoint must be rejected");
     assert!(
-        format!("{err:?}").contains("active_power_kw"),
+        format!("{err:?}").contains("active_power_w"),
         "error must name the offending field for NaN, got {err:?}"
     );
 
@@ -7884,14 +7915,14 @@ fn power_setpoint_rejects_non_finite_active_power_on_unchecked_path() {
     for bad in [f64::NAN, f64::NEG_INFINITY] {
         let err = ev
             .apply_control_unchecked(&ControlSignal::PowerSetpoint {
-                active_power_kw: bad,
-                reactive_power_kvar: None,
+                active_power_w: bad,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
             .expect_err("non-finite active setpoint must be rejected when v2g is enabled");
         assert!(
-            format!("{err:?}").contains("active_power_kw"),
+            format!("{err:?}").contains("active_power_w"),
             "error must name the offending field for {bad}, got {err:?}"
         );
     }
@@ -7909,14 +7940,14 @@ fn ev_soc_window_fields_reject_non_finite_on_unchecked_path() {
 
     for signal in [
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1000.0,
+            reactive_power_var: None,
             min_soc: Some(f64::NAN),
             max_soc: None,
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: Some(f64::INFINITY),
         },
@@ -7985,14 +8016,14 @@ fn power_setpoint_rejects_non_finite_soc_window_on_checked_path() {
 
     for signal in [
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1000.0,
+            reactive_power_var: None,
             min_soc: Some(f64::NAN),
             max_soc: None,
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: Some(f64::NAN),
         },
@@ -8079,20 +8110,20 @@ fn power_setpoint_rejects_out_of_domain_soc_window_on_unchecked_path() {
 
     for signal in [
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1000.0,
+            reactive_power_var: None,
             min_soc: Some(7.5),
             max_soc: None,
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1000.0,
+            reactive_power_var: None,
             min_soc: Some(0.8),
             max_soc: Some(0.2),
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0000,
-            reactive_power_kvar: None,
+            active_power_w: 1000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: Some(-0.1),
         },
@@ -8643,7 +8674,7 @@ fn var_support_checkpoint_restores_an_output_the_mode_flow_guard_accepts() {
     // SOC at target → zero charge demand; 10 °C pack → heater off. The
     // only live flow is the commanded reactive power: the standby
     // var-support state, mode `On`.
-    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { var: 1500.0 })
         .unwrap();
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
@@ -8940,7 +8971,7 @@ fn away_charging_checkpoint_restores_the_intake_the_step_published() {
         state: EvConnectionState::AwayPluggedIn,
     })
     .unwrap();
-    ev.apply_control(&ControlSignal::EvAwayCharge { power_kw: 7.2 })
+    ev.apply_control(&ControlSignal::EvAwayCharge { power_w: 7200.0 })
         .unwrap();
 
     let mut ports = PortSlots::default();
@@ -9048,8 +9079,8 @@ fn mid_discharge_checkpoint_restores_island_source_availability() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -9129,8 +9160,8 @@ fn floor_held_discharge_checkpoint_restores_the_published_v2l_state() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -9185,7 +9216,7 @@ fn commanded_vars_served_at_a_bound_binding_checkpoint_survive_restore() {
     let mut ev = Ev::new(config.clone());
     let env = sample_env();
     ev.init(&config, &env).unwrap();
-    ev.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 6.5 })
+    ev.apply_control(&ControlSignal::ReactiveSetpoint { var: 6500.0 })
         .unwrap();
 
     let mut ports = PortSlots::default();
@@ -9227,8 +9258,8 @@ fn ev_setpoint_above_rated_warns_once_per_run() {
     let mut drained: Vec<hares_types::Warning> = Vec::new();
     for _ in 0..3 {
         ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-            active_power_kw: 20.0000,
-            reactive_power_kvar: None,
+            active_power_w: 20000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -9252,8 +9283,8 @@ fn ev_setpoint_above_rated_warns_once_per_run() {
     })
     .unwrap();
     ev.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-        active_power_kw: 20.0000,
-        reactive_power_kvar: None,
+        active_power_w: 20000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -9278,7 +9309,7 @@ fn dbg_publish_value() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
     eprintln!(
-        "DBG active_power_kw={} electrical_port={}",
+        "DBG active_power_w={} electrical_port={}",
         ev.telemetry().get("active_power_kw").unwrap(),
         ports.electrical.load_power_w
     );

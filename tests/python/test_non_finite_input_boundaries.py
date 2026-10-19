@@ -226,11 +226,11 @@ def test_finite_ocv_table_attaches() -> None:
             id="typed-thermal-deadband_c",
         ),
         pytest.param(
-            lambda: hares.ControlSignal.power_setpoint(kw=1.0, min_soc=float("nan")),
+            lambda: hares.ControlSignal.power_setpoint(active_power_w=1.0, min_soc=float("nan")),
             id="typed-power-min_soc",
         ),
         pytest.param(
-            lambda: hares.ControlSignal.power_setpoint(kw=1.0, max_soc=float("nan")),
+            lambda: hares.ControlSignal.power_setpoint(active_power_w=1.0, max_soc=float("nan")),
             id="typed-power-max_soc",
         ),
     ],
@@ -252,4 +252,4 @@ def test_validated_control_signal_fields_stay_loud() -> None:
             {"type": "SOCTarget", "target_soc": float("nan")}
         )
     with pytest.raises((TypeError, ValueError), match="finite"):
-        hares.ControlSignal.power_setpoint(kw=float("nan"))
+        hares.ControlSignal.power_setpoint(active_power_w=float("nan"))

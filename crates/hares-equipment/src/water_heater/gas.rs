@@ -972,12 +972,7 @@ impl Equipment for GasWH {
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
-            ControlSignal::PowerLimit { max_power_kw, .. } if self.burner_input_w > 0.0 => {
-                // The signal carries kW until the control-layer commit; the
-                // working value is W (SI), converted once here.
-                let max_power_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
-                        .get::<uom::si::power::watt>();
+            ControlSignal::PowerLimit { max_power_w, .. } if self.burner_input_w > 0.0 => {
                 let max_fraction = (max_power_w / self.burner_input_w).clamp(0.0, 1.0);
                 self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
             }

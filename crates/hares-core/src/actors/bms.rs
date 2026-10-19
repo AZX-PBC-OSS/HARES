@@ -21,8 +21,8 @@ use crate::{Actor, ActorTarget};
 pub struct BmsParams {
     pub bms_mode: BmsMode,
     pub grid_export_rule: GridExportRule,
-    pub max_charge_kw: f64,
-    pub max_discharge_kw: f64,
+    pub max_charge_w: f64,
+    pub max_discharge_w: f64,
     /// Day-ahead price schedule the BMS compares its price thresholds against.
     pub price_schedule: Option<Arc<[f64]>>,
     pub steps_per_day: usize,
@@ -35,7 +35,7 @@ struct SelfConsumptionPolicy {
     min_soc: f64,
     max_soc: f64,
     solar_only_charging: bool,
-    surplus_deadband_kw: f64,
+    surplus_deadband_w: f64,
 }
 
 pub struct BatteryManagementActor {
@@ -48,8 +48,8 @@ pub struct BatteryManagementActor {
     discharge_price_threshold: f64,
     daily_avg_price: f64,
     current_day_ordinal0: u32,
-    max_charge_kw: f64,
-    max_discharge_kw: f64,
+    max_charge_w: f64,
+    max_discharge_w: f64,
     price_schedule: Option<Arc<[f64]>>,
     steps_per_day: usize,
     last_action: String,
@@ -119,8 +119,8 @@ impl BatteryManagementActor {
         let BmsParams {
             bms_mode,
             grid_export_rule,
-            max_charge_kw,
-            max_discharge_kw,
+            max_charge_w,
+            max_discharge_w,
             price_schedule,
             steps_per_day,
             min_dwell_steps,
@@ -150,8 +150,8 @@ impl BatteryManagementActor {
             discharge_price_threshold: f64::INFINITY,
             daily_avg_price: 0.0,
             current_day_ordinal0: u32::MAX,
-            max_charge_kw,
-            max_discharge_kw,
+            max_charge_w,
+            max_discharge_w,
             price_schedule,
             steps_per_day,
             last_action: String::new(),
@@ -202,9 +202,9 @@ impl BatteryManagementActor {
         );
     }
 
-    /// Clamp discharge power (negative `active_power_kw`) based on grid export rule.
+    /// Clamp discharge power (negative `active_power_w`) based on grid export rule.
     ///
-    /// `pv_kw` must be the actual current-step PV generation so that the clamp is
+    /// `pv_w` must be the actual current-step PV generation so that the clamp is
     /// correct for both the primary evaluate-mode path and the re-evaluation path.
     ///
     /// - `Unrestricted`: no clamping.
@@ -212,23 +212,22 @@ impl BatteryManagementActor {
     /// - `SolarOnly`: clamp discharge so net export does not exceed PV generation.
     fn clamp_discharge_for_export(
         &self,
-        discharge_kw: f64,
-        pv_kw: f64,
+        discharge_w: f64,
+        pv_w: f64,
         env: &EnvironmentState,
     ) -> f64 {
-        // discharge_kw is the raw magnitude (positive value) of desired discharge.
+        // discharge_w is the raw magnitude (positive value) of desired discharge.
         match self.grid_export_rule {
-            GridExportRule::Unrestricted => discharge_kw,
+            GridExportRule::Unrestricted => discharge_w,
             GridExportRule::Disabled => {
                 // Battery can only offset home load, never export to grid.
-                discharge_kw.min(hares_core_units::w_to_kw(env.electrical.base_load_w).max(0.0))
+                discharge_w.min(env.electrical.base_load_w.max(0.0))
             }
             GridExportRule::SolarOnly => {
                 // Battery may discharge up to load + PV, so net grid export
                 // (discharge - load) is at most PV generation.
-                let max_allowed =
-                    hares_core_units::w_to_kw(env.electrical.base_load_w).max(0.0) + pv_kw;
-                discharge_kw.min(max_allowed)
+                let max_allowed = env.electrical.base_load_w.max(0.0) + pv_w;
+                discharge_w.min(max_allowed)
             }
         }
     }
@@ -254,8 +253,8 @@ impl BatteryManagementActor {
                     self.last_action = "idle:no_soc".into();
                     return;
                 };
-                let pv = hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback());
-                let load = hares_core_units::w_to_kw(env.electrical.base_load_w);
+                let pv = env.electrical.actual_pv_w_or_fallback();
+                let load = env.electrical.base_load_w;
                 let surplus = pv - load;
                 // One conversion at the read: the payload enters in W
                 // (SI); the actor still works in kW until the control
@@ -264,9 +263,7 @@ impl BatteryManagementActor {
                     uom::si::f64::Power::new::<uom::si::power::watt>(*surplus_deadband_w)
                         .get::<uom::si::power::kilowatt>();
 
-                if *solar_only_charging
-                    && hares_core_units::w_to_kw(env.electrical.actual_pv_w) <= 0.0
-                {
+                if *solar_only_charging && env.electrical.actual_pv_w <= 0.0 {
                     self.emit(ControlSignal::GridConnect { connected: false }, out);
                     self.last_action = "grid_disconnect:solar_only".into();
                     return;
@@ -310,16 +307,16 @@ impl BatteryManagementActor {
                             );
                         }
                         GridExportRule::Disabled | GridExportRule::SolarOnly => {
-                            let raw_discharge = (-surplus).min(self.max_discharge_kw);
+                            let raw_discharge = (-surplus).min(self.max_discharge_w);
                             let clamped = self.clamp_discharge_for_export(
                                 raw_discharge,
-                                hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback()),
+                                env.electrical.actual_pv_w_or_fallback(),
                                 env,
                             );
                             self.emit(
                                 ControlSignal::PowerSetpoint {
-                                    active_power_kw: -clamped,
-                                    reactive_power_kvar: None,
+                                    active_power_w: -clamped,
+                                    reactive_power_var: None,
                                     min_soc: None,
                                     max_soc: None,
                                 },
@@ -394,17 +391,15 @@ impl BatteryManagementActor {
                         "BMS dwell timer suppressed TOU action change"
                     );
                     // Keep charging — re-instate the charge path.
-                    if *solar_only_charging
-                        && hares_core_units::w_to_kw(env.electrical.actual_pv_w) <= 0.0
-                    {
+                    if *solar_only_charging && env.electrical.actual_pv_w <= 0.0 {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
                         self.last_action = "grid_disconnect:tou_solar_only".into();
                         return;
                     }
                     self.emit(
                         ControlSignal::PowerSetpoint {
-                            active_power_kw: self.max_charge_kw,
-                            reactive_power_kvar: None,
+                            active_power_w: self.max_charge_w,
+                            reactive_power_var: None,
                             min_soc: None,
                             max_soc: None,
                         },
@@ -421,14 +416,14 @@ impl BatteryManagementActor {
                         "BMS dwell timer suppressed TOU action change"
                     );
                     let clamped = self.clamp_discharge_for_export(
-                        self.max_discharge_kw,
-                        hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback()),
+                        self.max_discharge_w,
+                        env.electrical.actual_pv_w_or_fallback(),
                         env,
                     );
                     self.emit(
                         ControlSignal::PowerSetpoint {
-                            active_power_kw: -clamped,
-                            reactive_power_kvar: None,
+                            active_power_w: -clamped,
+                            reactive_power_var: None,
                             min_soc: None,
                             max_soc: None,
                         },
@@ -436,17 +431,15 @@ impl BatteryManagementActor {
                     );
                     self.last_action = "tou:discharge".into();
                 } else if should_charge {
-                    if *solar_only_charging
-                        && hares_core_units::w_to_kw(env.electrical.actual_pv_w) <= 0.0
-                    {
+                    if *solar_only_charging && env.electrical.actual_pv_w <= 0.0 {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
                         self.last_action = "grid_disconnect:tou_solar_only".into();
                         return;
                     }
                     self.emit(
                         ControlSignal::PowerSetpoint {
-                            active_power_kw: self.max_charge_kw,
-                            reactive_power_kvar: None,
+                            active_power_w: self.max_charge_w,
+                            reactive_power_var: None,
                             min_soc: None,
                             max_soc: None,
                         },
@@ -455,14 +448,14 @@ impl BatteryManagementActor {
                     self.last_action = "tou:charge".into();
                 } else if should_discharge {
                     let clamped = self.clamp_discharge_for_export(
-                        self.max_discharge_kw,
-                        hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback()),
+                        self.max_discharge_w,
+                        env.electrical.actual_pv_w_or_fallback(),
                         env,
                     );
                     self.emit(
                         ControlSignal::PowerSetpoint {
-                            active_power_kw: -clamped,
-                            reactive_power_kvar: None,
+                            active_power_w: -clamped,
+                            reactive_power_var: None,
                             min_soc: None,
                             max_soc: None,
                         },
@@ -494,9 +487,7 @@ impl BatteryManagementActor {
                 };
 
                 if need_charge {
-                    if !charge_from_grid
-                        && hares_core_units::w_to_kw(env.electrical.actual_pv_w) <= 0.0
-                    {
+                    if !charge_from_grid && env.electrical.actual_pv_w <= 0.0 {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
                         self.last_action = "grid_disconnect:backup_no_pv".into();
                         return;
@@ -512,8 +503,8 @@ impl BatteryManagementActor {
                     if *charge_rate_fraction < 1.0 {
                         self.emit(
                             ControlSignal::PowerLimit {
-                                max_power_kw: charge_rate_fraction * self.max_charge_kw,
-                                ramp_rate_kw_per_s: None,
+                                max_power_w: charge_rate_fraction * self.max_charge_w,
+                                ramp_rate_w_per_s: None,
                             },
                             out,
                         );
@@ -557,16 +548,16 @@ impl BatteryManagementActor {
                         return;
                     };
                     if soc > *min_soc_during_dr {
-                        let raw = dr_discharge_rate * self.max_discharge_kw;
+                        let raw = dr_discharge_rate * self.max_discharge_w;
                         let clamped = self.clamp_discharge_for_export(
                             raw,
-                            hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback()),
+                            env.electrical.actual_pv_w_or_fallback(),
                             env,
                         );
                         self.emit(
                             ControlSignal::PowerSetpoint {
-                                active_power_kw: -clamped,
-                                reactive_power_kvar: None,
+                                active_power_w: -clamped,
+                                reactive_power_var: None,
                                 min_soc: None,
                                 max_soc: None,
                             },
@@ -592,8 +583,8 @@ impl BatteryManagementActor {
                         BmsAction::Charge { rate_fraction } => {
                             self.emit(
                                 ControlSignal::PowerSetpoint {
-                                    active_power_kw: rate_fraction * self.max_charge_kw,
-                                    reactive_power_kvar: None,
+                                    active_power_w: rate_fraction * self.max_charge_w,
+                                    reactive_power_var: None,
                                     min_soc: None,
                                     max_soc: None,
                                 },
@@ -602,16 +593,16 @@ impl BatteryManagementActor {
                             self.last_action = "scheduled:charge".into();
                         }
                         BmsAction::Discharge { rate_fraction } => {
-                            let raw = rate_fraction * self.max_discharge_kw;
+                            let raw = rate_fraction * self.max_discharge_w;
                             let clamped = self.clamp_discharge_for_export(
                                 raw,
-                                hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback()),
+                                env.electrical.actual_pv_w_or_fallback(),
                                 env,
                             );
                             self.emit(
                                 ControlSignal::PowerSetpoint {
-                                    active_power_kw: -clamped,
-                                    reactive_power_kvar: None,
+                                    active_power_w: -clamped,
+                                    reactive_power_var: None,
                                     min_soc: None,
                                     max_soc: None,
                                 },
@@ -780,7 +771,7 @@ impl BatteryManagementActor {
     /// Re-evaluate SelfConsumption decision with actual (not prior-step) PV.
     fn reevaluate_self_consumption(
         &mut self,
-        pv_kw: f64,
+        pv_w: f64,
         env: &EnvironmentState,
         policy: SelfConsumptionPolicy,
         out: &mut Vec<DispatchRequest>,
@@ -789,14 +780,14 @@ impl BatteryManagementActor {
             min_soc,
             max_soc,
             solar_only_charging,
-            surplus_deadband_kw,
+            surplus_deadband_w,
         } = policy;
         let Some(soc) = self.read_soc(env) else {
             return;
         };
-        let load = hares_core_units::w_to_kw(env.electrical.base_load_w);
-        let surplus = pv_kw - load;
-        let deadband = surplus_deadband_kw;
+        let load = env.electrical.base_load_w;
+        let surplus = pv_w - load;
+        let deadband = surplus_deadband_w;
 
         // If solar-only and actual PV is zero, disconnect from grid.
         // This handles the case where stale PV was positive (grid connected)
@@ -804,7 +795,7 @@ impl BatteryManagementActor {
         let force_solar_only = matches!(self.grid_export_rule, GridExportRule::Disabled);
         let effective_solar_only = solar_only_charging || force_solar_only;
 
-        if effective_solar_only && pv_kw <= 0.0 {
+        if effective_solar_only && pv_w <= 0.0 {
             // No real PV: disconnect from grid regardless of last_action.
             self.emit(ControlSignal::GridConnect { connected: false }, out);
             self.last_action = "grid_disconnect:solar_only".into();
@@ -812,7 +803,7 @@ impl BatteryManagementActor {
         }
 
         // Re-connect grid if PV is back and we were previously forced off.
-        if effective_solar_only && pv_kw > 0.0 && self.last_action.contains("grid_disconnect") {
+        if effective_solar_only && pv_w > 0.0 && self.last_action.contains("grid_disconnect") {
             self.emit(ControlSignal::GridConnect { connected: true }, out);
             self.last_action = "self_consumption:grid_reconnected".into();
             return;
@@ -857,12 +848,12 @@ impl BatteryManagementActor {
                         );
                     }
                     GridExportRule::Disabled | GridExportRule::SolarOnly => {
-                        let raw_discharge = (-surplus).min(self.max_discharge_kw);
-                        let clamped = self.clamp_discharge_for_export(raw_discharge, pv_kw, env);
+                        let raw_discharge = (-surplus).min(self.max_discharge_w);
+                        let clamped = self.clamp_discharge_for_export(raw_discharge, pv_w, env);
                         self.emit(
                             ControlSignal::PowerSetpoint {
-                                active_power_kw: -clamped,
-                                reactive_power_kvar: None,
+                                active_power_w: -clamped,
+                                reactive_power_var: None,
                                 min_soc: None,
                                 max_soc: None,
                             },
@@ -887,19 +878,19 @@ impl BatteryManagementActor {
     /// Re-evaluate BackupReserve (no grid charging) with actual PV.
     fn reevaluate_backup_no_grid(
         &mut self,
-        pv_kw: f64,
+        pv_w: f64,
         _env: &EnvironmentState,
         out: &mut Vec<DispatchRequest>,
     ) {
         // Stale PV was zero → grid was disconnected. Actual PV is positive
         // → reconnect so the battery can charge from solar.
-        if pv_kw > 0.0 && self.last_action.contains("grid_disconnect") {
+        if pv_w > 0.0 && self.last_action.contains("grid_disconnect") {
             self.emit(ControlSignal::GridConnect { connected: true }, out);
             self.last_action = "backup:grid_reconnected".into();
         }
         // Stale PV was positive (grid connected) but actual PV is zero
         // and charge_from_grid is false → disconnect.
-        if pv_kw <= 0.0 && !self.last_action.contains("grid_disconnect") {
+        if pv_w <= 0.0 && !self.last_action.contains("grid_disconnect") {
             self.emit(ControlSignal::GridConnect { connected: false }, out);
             self.last_action = "grid_disconnect:backup_no_pv".into();
         }
@@ -908,15 +899,15 @@ impl BatteryManagementActor {
     /// Re-evaluate TimeOfUseOptimization (solar-only) with actual PV.
     fn reevaluate_tou_solar_only(
         &mut self,
-        pv_kw: f64,
+        pv_w: f64,
         _env: &EnvironmentState,
         out: &mut Vec<DispatchRequest>,
     ) {
-        if pv_kw > 0.0 && self.last_action.contains("grid_disconnect") {
+        if pv_w > 0.0 && self.last_action.contains("grid_disconnect") {
             self.emit(ControlSignal::GridConnect { connected: true }, out);
             self.last_action = "tou:grid_reconnected".into();
         }
-        if pv_kw <= 0.0 && !self.last_action.contains("grid_disconnect") {
+        if pv_w <= 0.0 && !self.last_action.contains("grid_disconnect") {
             self.emit(ControlSignal::GridConnect { connected: false }, out);
             self.last_action = "grid_disconnect:tou_solar_only".into();
         }
@@ -933,7 +924,7 @@ impl BatteryManagementActor {
     /// Non-PV-dependent modes are a no-op.
     fn adjust_for_pv_in_mode(
         &mut self,
-        pv_kw: f64,
+        pv_w: f64,
         env: &EnvironmentState,
         mode: &BmsMode,
         out: &mut Vec<DispatchRequest>,
@@ -945,19 +936,15 @@ impl BatteryManagementActor {
                 solar_only_charging,
                 surplus_deadband_w,
             } => {
-                // One conversion at the read (the actor's kW working
-                // value): the payload enters in W (SI).
-                let deadband =
-                    uom::si::f64::Power::new::<uom::si::power::watt>(*surplus_deadband_w)
-                        .get::<uom::si::power::kilowatt>();
+                // The payload is W (SI), passed through with no conversion.
                 self.reevaluate_self_consumption(
-                    pv_kw,
+                    pv_w,
                     env,
                     SelfConsumptionPolicy {
                         min_soc: *min_soc,
                         max_soc: *max_soc,
                         solar_only_charging: *solar_only_charging,
-                        surplus_deadband_kw: deadband,
+                        surplus_deadband_w: *surplus_deadband_w,
                     },
                     out,
                 );
@@ -966,13 +953,13 @@ impl BatteryManagementActor {
                 charge_from_grid: false,
                 ..
             } => {
-                self.reevaluate_backup_no_grid(pv_kw, env, out);
+                self.reevaluate_backup_no_grid(pv_w, env, out);
             }
             BmsMode::TimeOfUseOptimization {
                 solar_only_charging: true,
                 ..
             } => {
-                self.reevaluate_tou_solar_only(pv_kw, env, out);
+                self.reevaluate_tou_solar_only(pv_w, env, out);
             }
             BmsMode::DemandResponse {
                 base_mode,
@@ -982,7 +969,7 @@ impl BatteryManagementActor {
                 let price = env.price_signal.electricity_price.unwrap_or(0.0);
                 let dr_active = self.is_dr_active(env, price, *dr_deactivation_multiplier);
                 if !dr_active {
-                    self.adjust_for_pv_in_mode(pv_kw, env, base_mode, out);
+                    self.adjust_for_pv_in_mode(pv_w, env, base_mode, out);
                 }
             }
             BmsMode::StormWatch {
@@ -1007,7 +994,7 @@ impl BatteryManagementActor {
                     }
                 };
                 if !sw_active {
-                    self.adjust_for_pv_in_mode(pv_kw, env, base_mode, out);
+                    self.adjust_for_pv_in_mode(pv_w, env, base_mode, out);
                 }
             }
             _ => { /* PV-independent mode: no re-evaluation needed */ }
@@ -1112,13 +1099,10 @@ impl Actor for BatteryManagementActor {
         // for this battery — the BMS enters idle:no_soc and never dispatches,
         // so the 0.0 sentinel ("unavailable") cannot drive a wrong action.
         self.telemetry.set("soc", self.read_soc(env).unwrap_or(0.0));
-        let pv_stale = hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback());
+        let pv_stale = env.electrical.actual_pv_w_or_fallback();
         self.telemetry.set("pv_kw", pv_stale);
         self.telemetry.set("bms_pv_stale_kw", pv_stale);
-        self.telemetry.set(
-            "load_kw",
-            hares_core_units::w_to_kw(env.electrical.base_load_w),
-        );
+        self.telemetry.set("load_kw", env.electrical.base_load_w);
         let toggled = self.last_action != action_before;
         if toggled {
             self.current_mode_entered_step = self.step_count;
@@ -1129,18 +1113,13 @@ impl Actor for BatteryManagementActor {
             .set("bms_dwell_blocked", self.dwell_blocked_count);
     }
 
-    fn adjust_for_pv(
-        &mut self,
-        pv_kw: f64,
-        env: &EnvironmentState,
-        out: &mut Vec<DispatchRequest>,
-    ) {
-        self.telemetry.set("bms_pv_actual_kw", pv_kw);
+    fn adjust_for_pv(&mut self, pv_w: f64, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        self.telemetry.set("bms_pv_actual_kw", pv_w);
 
         // Re-evaluate PV-dependent modes with actual-step PV data.
         // Non-PV-dependent and active composite modes are no-ops.
         let mode = std::mem::take(&mut self.bms_mode);
-        self.adjust_for_pv_in_mode(pv_kw, env, &mode, out);
+        self.adjust_for_pv_in_mode(pv_w, env, &mode, out);
         self.bms_mode = mode;
     }
 
@@ -1247,8 +1226,8 @@ mod tests {
             BmsParams {
                 bms_mode,
                 grid_export_rule,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 price_schedule,
                 steps_per_day: 24,
                 min_dwell_steps: 0,
@@ -1270,8 +1249,8 @@ mod tests {
             BmsParams {
                 bms_mode,
                 grid_export_rule,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 price_schedule: None,
                 steps_per_day: 24,
                 min_dwell_steps: 0,
@@ -1450,10 +1429,8 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                assert!(*active_power_kw > 0.0);
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                assert!(*active_power_w > 0.0);
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
@@ -1488,10 +1465,8 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                assert!(*active_power_kw < 0.0);
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                assert!(*active_power_w < 0.0);
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
@@ -1556,11 +1531,11 @@ mod tests {
         }
         match &out[1].signal {
             ControlSignal::PowerLimit {
-                max_power_kw,
-                ramp_rate_kw_per_s,
+                max_power_w,
+                ramp_rate_w_per_s,
             } => {
-                assert!((*max_power_kw - 2.5).abs() < 1e-9);
-                assert_eq!(*ramp_rate_kw_per_s, None);
+                assert!((*max_power_w - 2500.0).abs() < 1e-9);
+                assert_eq!(*ramp_rate_w_per_s, None);
             }
             other => panic!("expected PowerLimit, got {other:?}"),
         }
@@ -1611,10 +1586,8 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                assert!((*active_power_kw - (-0.8 * 5.0)).abs() < 1e-9);
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                assert!((*active_power_w - (-0.8 * 5000.0)).abs() < 1e-9);
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
@@ -1681,10 +1654,8 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                assert!((*active_power_kw - 2.5).abs() < 1e-9);
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                assert!((*active_power_w - 2500.0).abs() < 1e-9);
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
@@ -2057,14 +2028,12 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 // Clamped to home load: -2.0 kW (not -5.0)
                 assert!(
-                    (*active_power_kw + 2.0).abs() < 1e-10,
+                    (*active_power_w + 2000.0).abs() < 1e-10,
                     "discharge should be clamped to home load (2 kW), got {}",
-                    active_power_kw
+                    active_power_w
                 );
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
@@ -2107,14 +2076,12 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 // Full discharge allowed: load exceeds battery capacity.
                 assert!(
-                    (*active_power_kw + 5.0).abs() < 1e-10,
+                    (*active_power_w + 5000.0).abs() < 1e-10,
                     "discharge should be full 5 kW when load exceeds, got {}",
-                    active_power_kw
+                    active_power_w
                 );
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
@@ -2156,13 +2123,11 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 assert!(
-                    (*active_power_kw + 5.0).abs() < 1e-10,
+                    (*active_power_w + 5000.0).abs() < 1e-10,
                     "unrestricted discharge should be full 5 kW, got {}",
-                    active_power_kw
+                    active_power_w
                 );
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
@@ -2206,13 +2171,11 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 assert!(
-                    (*active_power_kw + 3.0).abs() < 1e-10,
+                    (*active_power_w + 3000.0).abs() < 1e-10,
                     "SolarOnly discharge should be clamped to load+PV (3 kW), got {}",
-                    active_power_kw
+                    active_power_w
                 );
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
@@ -2248,14 +2211,13 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                // Deficit is 3 kW. With Disabled export, clamped to min(3, 5) = 3.
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                // Deficit is 3 kW, in W. With Disabled export, clamped to
+                // min(3, 5) kW = 3000 W.
                 assert!(
-                    (*active_power_kw + 3.0).abs() < 1e-10,
-                    "self_consumption+disabled discharge should be 3 kW (deficit), got {}",
-                    active_power_kw
+                    (*active_power_w + 3000.0).abs() < 1e-10,
+                    "self_consumption+disabled discharge should be 3000 W (deficit), got {}",
+                    active_power_w
                 );
             }
             other => panic!("expected PowerSetpoint for Disabled export, got {other:?}"),
@@ -2290,13 +2252,11 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 assert!(
-                    (*active_power_kw + 2.0).abs() < 1e-10,
+                    (*active_power_w + 2000.0).abs() < 1e-10,
                     "discharge should match load (2 kW), got {}",
-                    active_power_kw
+                    active_power_w
                 );
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
@@ -2363,13 +2323,11 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 assert!(
-                    (*active_power_kw + 3.0).abs() < 1e-10,
+                    (*active_power_w + 3000.0).abs() < 1e-10,
                     "SolarOnly self-consumption discharge should be 3 kW (deficit), got {}",
-                    active_power_kw
+                    active_power_w
                 );
             }
             other => panic!("expected PowerSetpoint for SolarOnly, got {other:?}"),
@@ -2393,8 +2351,8 @@ mod tests {
                     surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: GridExportRule::Disabled,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 0.5, // max_discharge_kw is small
+                max_charge_w: 5000.0,
+                max_discharge_w: 500.0, // max_discharge_w is small
                 price_schedule: None,
                 steps_per_day: 24,
                 min_dwell_steps: 0,
@@ -2415,14 +2373,12 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 // deficit=3, but max_discharge=0.5 → hardware cap binds.
                 assert!(
-                    (*active_power_kw + 0.5).abs() < 1e-10,
+                    (*active_power_w + 500.0).abs() < 1e-10,
                     "hardware cap (0.5 kW) should be binding, got {}",
-                    active_power_kw
+                    active_power_w
                 );
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
@@ -2443,8 +2399,8 @@ mod tests {
                     surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: GridExportRule::Disabled, // but export rule says no grid interaction
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 price_schedule: None,
                 steps_per_day: 24,
                 min_dwell_steps: 0,
@@ -2689,11 +2645,9 @@ mod tests {
 
         assert_eq!(out.len(), 1);
         match &out[0].signal {
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
                 // deficit=2.0 → raw discharge = 2.0, SolarOnly clamp load+actual=4+2=6.0 → 2.0
-                assert!((*active_power_kw + 2.0).abs() < 1e-9);
+                assert!((*active_power_w + 2000.0).abs() < 1e-9);
             }
             other => panic!("expected PowerSetpoint, got {other:?}"),
         }
@@ -2733,7 +2687,7 @@ mod tests {
 
         // adjust_for_pv with actual PV=1 → deficit=-1 → discharge
         out.clear();
-        actor.adjust_for_pv(1.0, &env, &mut out);
+        actor.adjust_for_pv(1000.0, &env, &mut out);
         assert_eq!(out.len(), 1);
         assert!(matches!(
             out[0].signal,
@@ -2770,7 +2724,7 @@ mod tests {
 
         // adjust_for_pv with actual PV=6 → surplus=+2 → charge
         out.clear();
-        actor.adjust_for_pv(6.0, &env, &mut out);
+        actor.adjust_for_pv(6000.0, &env, &mut out);
         assert_eq!(out.len(), 1);
         assert!(matches!(
             out[0].signal,
@@ -2804,7 +2758,7 @@ mod tests {
         assert_eq!(actor.last_action(), "self_consumption:charge");
 
         out.clear();
-        actor.adjust_for_pv(4.1, &env, &mut out);
+        actor.adjust_for_pv(4100.0, &env, &mut out);
         assert!(
             out.is_empty(),
             "re-evaluation should not re-emit when surplus direction is unchanged"
@@ -2840,7 +2794,7 @@ mod tests {
         // Actual PV=2.0 kW, load=2 kW → surplus = 0.
         // With deadband=0.0 and was_charging: surplus >= 0.0 stays charging.
         out.clear();
-        actor.adjust_for_pv(2.0, &env, &mut out);
+        actor.adjust_for_pv(2000.0, &env, &mut out);
         assert_eq!(
             actor.last_action(),
             "self_consumption:charge",
@@ -2850,7 +2804,7 @@ mod tests {
         // Actual PV=1.0 kW, load=2 kW → surplus = -1.0.
         // Surplus < -deadband (0.0) → should switch to discharge.
         out.clear();
-        actor.adjust_for_pv(1.0, &env, &mut out);
+        actor.adjust_for_pv(1000.0, &env, &mut out);
         assert!(!out.is_empty(), "should emit when switching to discharge");
         assert_eq!(actor.last_action(), "self_consumption:discharge");
     }
@@ -2859,7 +2813,7 @@ mod tests {
     fn adjust_for_pv_full_rated_pv_no_re_eval_for_charging() {
         // Stale PV=0, load=5 → deficit=-5 → decide() may idle or discharge.
         // Actual PV=10 kW (full-rated), load=5 → surplus=+5 → should charge.
-        // Batter max_charge_kw=5, so PV=10 exceeds it but that's fine.
+        // Batter max_charge_w=5000, so PV=10 kW exceeds it but that's fine.
         let mut actor = bms(BmsMode::SelfConsumption {
             min_soc: 0.1,
             max_soc: 0.95,
@@ -2882,7 +2836,7 @@ mod tests {
 
         // adjust_for_pv with full-rated PV → surplus=+5 → charge
         out.clear();
-        actor.adjust_for_pv(10.0, &env, &mut out);
+        actor.adjust_for_pv(10000.0, &env, &mut out);
         assert_eq!(out.len(), 1);
         assert!(matches!(
             out[0].signal,
@@ -2951,7 +2905,7 @@ mod tests {
 
         // Actual PV=5 → reconnect
         out.clear();
-        actor.adjust_for_pv(5.0, &env, &mut out);
+        actor.adjust_for_pv(5000.0, &env, &mut out);
         assert_eq!(out.len(), 1);
         assert!(matches!(
             out[0].signal,
@@ -2969,7 +2923,7 @@ mod tests {
         assert!(out.is_empty());
 
         out.clear();
-        actor.adjust_for_pv(10.0, &env, &mut out);
+        actor.adjust_for_pv(10000.0, &env, &mut out);
         assert!(out.is_empty(), "Manual mode should not react to PV");
     }
 
@@ -2998,21 +2952,22 @@ mod tests {
             .unwrap()
             .get("bms_pv_stale_kw")
             .unwrap_or(-1.0);
+        // The held value is W (SI) under the kW reporting name.
         assert!(
-            (stale - 4.0).abs() < 1e-9,
-            "bms_pv_stale_kw should be {stale}"
+            (stale - 4000.0).abs() < 1e-9,
+            "bms_pv_stale_kw should be 4000 W, got {stale}"
         );
 
         out.clear();
-        actor.adjust_for_pv(7.0, &env, &mut out);
+        actor.adjust_for_pv(7000.0, &env, &mut out);
         let actual = actor
             .telemetry()
             .unwrap()
             .get("bms_pv_actual_kw")
             .unwrap_or(-1.0);
         assert!(
-            (actual - 7.0).abs() < 1e-9,
-            "bms_pv_actual_kw should be 7.0, got {actual}"
+            (actual - 7000.0).abs() < 1e-9,
+            "bms_pv_actual_kw should be 7000 W, got {actual}"
         );
     }
 
@@ -3043,7 +2998,7 @@ mod tests {
 
         // Actual PV=5, load=2 → surplus=+3 → charge
         out.clear();
-        actor.adjust_for_pv(5.0, &env, &mut out);
+        actor.adjust_for_pv(5000.0, &env, &mut out);
         assert_eq!(out.len(), 1);
         assert!(matches!(
             out[0].signal,
@@ -3202,7 +3157,7 @@ mod tests {
         // adjust_for_pv: surplus=+0.4 (within deadband) → must stay idle
         // (old code: surplus > 0.0 would have triggered charge — the bypass bug)
         out.clear();
-        actor.adjust_for_pv(2.4, &env, &mut out);
+        actor.adjust_for_pv(2400.0, &env, &mut out);
         assert_eq!(
             actor.last_action(),
             "idle:self_consumption",
@@ -3211,7 +3166,7 @@ mod tests {
 
         // adjust_for_pv: surplus=-0.4 (within deadband) → must stay idle
         out.clear();
-        actor.adjust_for_pv(1.6, &env, &mut out);
+        actor.adjust_for_pv(1600.0, &env, &mut out);
         assert_eq!(
             actor.last_action(),
             "idle:self_consumption",
@@ -3220,7 +3175,7 @@ mod tests {
 
         // adjust_for_pv: surplus=+1.0 (above deadband) → should charge
         out.clear();
-        actor.adjust_for_pv(3.0, &env, &mut out);
+        actor.adjust_for_pv(3000.0, &env, &mut out);
         assert_eq!(
             actor.last_action(),
             "self_consumption:charge",
@@ -3230,7 +3185,7 @@ mod tests {
         // adjust_for_pv: surplus drops to +0.2 (within hysteresis band but was_charging)
         // → should stay charging (surplus >= -deadband)
         out.clear();
-        actor.adjust_for_pv(2.2, &env, &mut out);
+        actor.adjust_for_pv(2200.0, &env, &mut out);
         assert_eq!(
             actor.last_action(),
             "self_consumption:charge",
@@ -3239,7 +3194,7 @@ mod tests {
 
         // adjust_for_pv: surplus=-0.6 (below -deadband) → switch to discharge
         out.clear();
-        actor.adjust_for_pv(1.4, &env, &mut out);
+        actor.adjust_for_pv(1400.0, &env, &mut out);
         assert_eq!(
             actor.last_action(),
             "self_consumption:discharge",
@@ -3763,13 +3718,5 @@ mod tests {
             (blocked - 2.0).abs() < 1e-9,
             "bms_dwell_blocked should be 2 (suppressed at steps 2 and 3), got {blocked}"
         );
-    }
-}
-
-/// The kW working value of an SI summary read: the actors' kW-era working
-/// values convert once at the read until the control-layer commit.
-pub(crate) mod hares_core_units {
-    pub(crate) fn w_to_kw(w: f64) -> f64 {
-        uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
     }
 }

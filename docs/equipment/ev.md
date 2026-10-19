@@ -113,9 +113,9 @@ The EV is an inverter-coupled DER (V2G/V2L via DC-link inverter) and IEEE 1547-2
 
 | Signal | Behaviour |
 |--------|-----------|
-| `PowerSetpoint.reactive_power_kvar: Some(q)` | Sets absolute var override (finite values accepted) |
-| `ReactiveSetpoint { kvar }` | Direct var setpoint, positive = absorbing |
-| `PowerFactorSetpoint { power_factor }` | Sets displacement power factor in `(0, 1]`, clears the `q_setpoint_kvar` override (`None`) |
+| `PowerSetpoint.reactive_power_var: Some(q)` | Sets absolute var override (finite values accepted) |
+| `ReactiveSetpoint { var }` | Direct var setpoint, positive = absorbing |
+| `PowerFactorSetpoint { power_factor }` | Sets displacement power factor in `(0, 1]`, clears the `q_setpoint_var` override (`None`) |
 
 **Config fields**:
 | Field | Default | Meaning |

@@ -43,7 +43,7 @@ fn wide_fields() -> Vec<&'static str> {
         "outdoor_temp",
         "outdoor_humidity_ratio",
         "total_power_w",
-        "reactive_power_kvar",
+        "reactive_power_var",
         "zone_temp[Indoor]",
         "setpoint_heat[Indoor]",
         "setpoint_cool[Indoor]",

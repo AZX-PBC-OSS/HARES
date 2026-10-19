@@ -507,7 +507,7 @@ mod tests {
         bridge.init(&minimal_config(), &env).unwrap();
 
         let payload: Vec<u8> = br#"[
-            {"target": "Battery-1", "signal": {"PowerSetpoint": {"active_power_kw": 5.0, "reactive_power_kvar": null}}},
+            {"target": "Battery-1", "signal": {"PowerSetpoint": {"active_power_w": 5000.0, "reactive_power_var": null}}},
             {"target": "HVAC-1", "signal": {"ModeOverride": {"mode": "Off"}}}
         ]"#
         .to_vec();
@@ -525,8 +525,8 @@ mod tests {
         assert_eq!(
             commands[0].signal,
             ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             }
@@ -539,7 +539,7 @@ mod tests {
         let env = empty_env();
         bridge.init(&minimal_config(), &env).unwrap();
 
-        let payload = br#"[{"target": "Battery-1", "signal": {"PowerSetpoint": {"active_power_kw": 1.0, "reactive_power_kvar": null}}}]"#.to_vec();
+        let payload = br#"[{"target": "Battery-1", "signal": {"PowerSetpoint": {"active_power_w": 1000.0, "reactive_power_var": null}}}]"#.to_vec();
         bridge
             .apply_control(&ControlSignal::ProtocolNative {
                 protocol: ProtocolId(17),
@@ -607,8 +607,8 @@ mod tests {
         bridge.init(&minimal_config(), &env).unwrap();
 
         let signal = ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         };

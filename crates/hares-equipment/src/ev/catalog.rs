@@ -473,7 +473,7 @@ impl std::str::FromStr for EvArchetypeId {
 /// microdata (NHTS Trip File Codebook v1.2, Aug 2020); sigma=0.65 yields
 /// CV≈0.725 in log-space.
 /// The log-normal has natural [0,∞) support, eliminating the need to clamp
-/// negative Gaussian draws. Call `build_miles_schedule` to construct the
+/// negative Gaussian draws. Call `build_distance_schedule` to construct the
 /// runtime ScheduleSource from a seed.
 ///
 /// Departure-time and duration parameters remain Gaussian because those
@@ -544,7 +544,15 @@ impl ArchetypePreset {
     /// distribution. CV ≈ 0.7–0.8 derived from TRPMILES microdata (NHTS
     /// Trip File Codebook v1.2, Aug 2020). sigma=0.65 yields CV≈0.725
     /// within this range. Mu values derived from archetype target means.
-    pub fn build_miles_schedule(&self, seed: [u8; 32]) -> ScheduleSource {
+    pub fn build_distance_schedule(&self, seed: [u8; 32]) -> ScheduleSource {
+        // The mile parameters are the catalogue's datasheet figures; the
+        // runtime schedule is metres (SI), converted once here. A
+        // log-normal's samples scale by a factor through its log-space
+        // mean (mu + ln factor, sigma unchanged), so the drawn distances
+        // are the drawn miles times the metre factor.
+        const MILE_M: f64 = 1_609.344;
+        let miles_to_m_shift = MILE_M.ln();
+        let scale = |min: f64| -> Option<f64> { (min > 0.0).then_some(min * MILE_M) };
         if let (Some(wd_mu), Some(wd_sigma), Some(we_mu), Some(we_sigma)) = (
             self.weekday_miles_mu,
             self.weekday_miles_sigma,
@@ -556,11 +564,7 @@ impl ArchetypePreset {
             // (offset + sample = LogNormal(mu,sigma)). This differs from
             // the old Gaussian approach where offset held the mean and
             // DistributionKind held the spread only.
-            let min_val = if self.daily_drive_miles_min > 0.0 {
-                Some(self.daily_drive_miles_min)
-            } else {
-                None
-            };
+            let min_val = scale(self.daily_drive_miles_min);
             ScheduleSource::noisy_time_windows(
                 vec![
                     TimeWindow::with_noise(
@@ -569,7 +573,7 @@ impl ArchetypePreset {
                         1440,
                         0.0,
                         DistributionKind::LogNormal {
-                            mu: wd_mu,
+                            mu: wd_mu + miles_to_m_shift,
                             sigma: wd_sigma,
                         },
                         min_val,
@@ -581,7 +585,7 @@ impl ArchetypePreset {
                         1440,
                         0.0,
                         DistributionKind::LogNormal {
-                            mu: we_mu,
+                            mu: we_mu + miles_to_m_shift,
                             sigma: we_sigma,
                         },
                         min_val,
@@ -592,14 +596,10 @@ impl ArchetypePreset {
                 seed,
             )
         } else {
-            let clamp_min = if self.daily_drive_miles_min > 0.0 {
-                Some(self.daily_drive_miles_min)
-            } else {
-                None
-            };
+            let clamp_min = scale(self.daily_drive_miles_min);
             ScheduleSource::Stochastic {
                 kind: DistributionKind::LogNormal {
-                    mu: self.daily_drive_miles_mu,
+                    mu: self.daily_drive_miles_mu + miles_to_m_shift,
                     sigma: self.daily_drive_miles_sigma,
                 },
                 seed,
@@ -1399,11 +1399,11 @@ mod tests {
     }
 
     #[test]
-    fn archetype_build_miles_schedule_deterministic() {
+    fn archetype_build_distance_schedule_deterministic() {
         let preset = EvArchetypeId::DailyCommuterL2.preset();
         let seed = [42u8; 32];
-        let s1 = preset.build_miles_schedule(seed);
-        let s2 = preset.build_miles_schedule(seed);
+        let s1 = preset.build_distance_schedule(seed);
+        let s2 = preset.build_distance_schedule(seed);
         assert_eq!(s1, s2);
     }
 
@@ -1442,10 +1442,10 @@ mod tests {
     }
 
     #[test]
-    fn build_miles_schedule_emits_log_normal() {
+    fn build_distance_schedule_emits_log_normal() {
         for &id in EvArchetypeId::ALL {
             let preset = id.preset();
-            let schedule = preset.build_miles_schedule([0u8; 32]);
+            let schedule = preset.build_distance_schedule([0u8; 32]);
             match schedule {
                 ScheduleSource::Stochastic { kind, .. } => {
                     assert!(
@@ -1477,21 +1477,25 @@ mod tests {
         // Verify that switching from Gaussian to LogNormal preserves the
         // intended fleet mean within ±5% for all simple (non-TW) archetypes.
         // Original Gaussian means serve as the calibration target.
+        // The calibration targets are the archetype mean MILES; the
+        // schedule now returns metres (SI), so each target enters through
+        // the mile factor.
+        const MILE_M: f64 = 1_609.344;
         let calibration_targets: &[(EvArchetypeId, f64)] = &[
-            (EvArchetypeId::DailyCommuterL2, 38.0),
-            (EvArchetypeId::DailyCommuterL1, 25.0),
-            (EvArchetypeId::LongCommuterL2, 75.0),
-            (EvArchetypeId::WfhL1Minimal, 8.0),
-            (EvArchetypeId::HeavyUseSuv, 55.0),
-            (EvArchetypeId::ShiftWorker, 30.0),
-            (EvArchetypeId::WorkplaceCharger, 30.0),
-            (EvArchetypeId::RetireeL1, 10.0),
-            (EvArchetypeId::PhevCommuter, 35.0),
-            (EvArchetypeId::TouOptimizerCa, 38.0),
+            (EvArchetypeId::DailyCommuterL2, 38.0 * MILE_M),
+            (EvArchetypeId::DailyCommuterL1, 25.0 * MILE_M),
+            (EvArchetypeId::LongCommuterL2, 75.0 * MILE_M),
+            (EvArchetypeId::WfhL1Minimal, 8.0 * MILE_M),
+            (EvArchetypeId::HeavyUseSuv, 55.0 * MILE_M),
+            (EvArchetypeId::ShiftWorker, 30.0 * MILE_M),
+            (EvArchetypeId::WorkplaceCharger, 30.0 * MILE_M),
+            (EvArchetypeId::RetireeL1, 10.0 * MILE_M),
+            (EvArchetypeId::PhevCommuter, 35.0 * MILE_M),
+            (EvArchetypeId::TouOptimizerCa, 38.0 * MILE_M),
         ];
         for &(id, target) in calibration_targets {
             let preset = id.preset();
-            let schedule = preset.build_miles_schedule([1u8; 32]);
+            let schedule = preset.build_distance_schedule([1u8; 32]);
             let mean = schedule.mean();
             let rel_error = (mean - target).abs() / target;
             assert!(
@@ -1508,7 +1512,7 @@ mod tests {
     #[test]
     fn log_normal_never_produces_negative_draws() {
         let preset = EvArchetypeId::DailyCommuterL2.preset();
-        let mut schedule = preset.build_miles_schedule([42u8; 32]);
+        let mut schedule = preset.build_distance_schedule([42u8; 32]);
         let env = sample_env();
         for _ in 0..10_000 {
             let v = schedule.value_at(&env).unwrap();
@@ -1525,7 +1529,7 @@ mod tests {
         // - 95th percentile ≤ 95 mi  (theoretical ≈ 90 mi; 95 allows sampling noise)
         // - 99th percentile ≤ 160 mi (theoretical ≈ 140 mi; 160 allows sampling noise)
         let preset = EvArchetypeId::DailyCommuterL2.preset();
-        let mut schedule = preset.build_miles_schedule([7u8; 32]);
+        let mut schedule = preset.build_distance_schedule([7u8; 32]);
         let env = sample_env();
 
         let n = 100_000;
@@ -1535,9 +1539,11 @@ mod tests {
         }
 
         let mean: f64 = samples.iter().sum::<f64>() / n as f64;
+        // The drawn distances are metres; the 38 mi target converts once.
+        let target_m = 38.0 * 1_609.344;
         assert!(
-            (mean - 38.0).abs() / 38.0 < 0.05,
-            "empirical mean {mean:.2} deviates from 38.0 beyond 5%"
+            (mean - target_m).abs() / target_m < 0.05,
+            "empirical mean {mean:.2} deviates from {target_m} beyond 5%"
         );
 
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1552,14 +1558,14 @@ mod tests {
 
         let p95 = samples[(n as f64 * 0.95) as usize];
         assert!(
-            p95 <= 95.0,
-            "95th percentile {p95:.1} exceeds 95 mi threshold"
+            p95 <= 95.0 * 1_609.344,
+            "95th percentile {p95:.1} exceeds the 95 mi threshold"
         );
 
         let p99 = samples[(n as f64 * 0.99) as usize];
         assert!(
-            p99 <= 160.0,
-            "99th percentile {p99:.1} exceeds 160 mi threshold"
+            p99 <= 160.0 * 1_609.344,
+            "99th percentile {p99:.1} exceeds the 160 mi threshold"
         );
     }
 
@@ -1572,11 +1578,11 @@ mod tests {
         // now return a realistic non-zero daily miles mean.
         for &id in &[EvArchetypeId::WfhOccasional, EvArchetypeId::WeekendWarrior] {
             let preset = id.preset();
-            let schedule = preset.build_miles_schedule([1u8; 32]);
+            let schedule = preset.build_distance_schedule([1u8; 32]);
             let mean = schedule.mean();
             assert!(
-                mean > 5.0,
-                "{}: mean()={mean} should be >5 mi/day (was 0 before noise-aware fix)",
+                mean > 5.0 * 1_609.344,
+                "{}: mean()={mean} should be >5 mi/day in metres (was 0 before noise-aware fix)",
                 preset.label
             );
         }

@@ -570,7 +570,7 @@ pub fn sample_config_for_class(class: &str) -> Option<EquipmentConfig> {
             class,
             &[
                 ("zone_id", 1.0),
-                ("active_power_w", 1000.0),
+                ("active_power_kw", 1000.0),
                 ("power_constant_w", 3600.0),
                 ("sensible_gain_fraction", 0.0),
                 ("latent_gain_fraction", 0.0),
@@ -680,7 +680,7 @@ pub fn sample_config_for_class(class: &str) -> Option<EquipmentConfig> {
                     class,
                     &[
                         ("zone_id", 1.0),
-                        ("active_power_w", 1000.0),
+                        ("active_power_kw", 1000.0),
                         ("power_constant_w", 1000.0),
                         ("sensible_gain_fraction", 0.0),
                         ("latent_gain_fraction", 0.0),

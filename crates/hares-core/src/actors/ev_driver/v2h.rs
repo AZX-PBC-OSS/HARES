@@ -5,17 +5,17 @@ use super::preference::{ChargingPreference, DecisionContext, PreferenceVote};
 pub struct V2HDischarge {
     pub threshold_soc: f64,
     pub min_soc: f64,
-    pub max_discharge_kw: f64,
+    pub max_discharge_w: f64,
 }
 
 impl ChargingPreference for V2HDischarge {
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote {
-        let pv = hares_core_units::w_to_kw(ctx.env.electrical.actual_pv_w_or_fallback());
+        let pv = ctx.env.electrical.actual_pv_w_or_fallback();
 
         // The observation's own build site checks finiteness, and a negative
         // PV observation fails the step there; no per-decide re-check.
 
-        let load = hares_core_units::w_to_kw(ctx.env.electrical.base_load_w);
+        let load = ctx.env.electrical.base_load_w;
         let deficit = load - pv;
 
         // The soc floor is a constraint on *this preference's vote* — do not
@@ -36,10 +36,10 @@ impl ChargingPreference for V2HDischarge {
         }
 
         if ctx.current_soc > self.threshold_soc && deficit > 0.0 {
-            let discharge = deficit.min(self.max_discharge_kw);
+            let discharge = deficit.min(self.max_discharge_w);
             PreferenceVote {
                 target_soc: None,
-                power_kw: Some(-discharge),
+                power_w: Some(-discharge),
                 departure_hour: None,
                 min_soc: Some(self.min_soc),
                 max_soc: None,
@@ -65,9 +65,9 @@ mod tests {
     fn make_ctx(env: &hares_types::EnvironmentState, soc: f64) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: soc,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 60.0,
+            max_charge_w: 7.2,
+            max_discharge_w: 5000.0,
             env,
             current_minute: 720,
             next_departure_minute: None,
@@ -94,13 +94,13 @@ mod tests {
         let mut pref = V2HDischarge {
             threshold_soc: 0.5,
             min_soc: 0.2,
-            max_discharge_kw: 5.0,
+            max_discharge_w: 5000.0,
         };
         let ctx = make_ctx(&env, 0.15);
         let vote = pref.score(&ctx);
         assert_eq!(vote.label, "v2h:soc_floor");
         assert!(
-            vote.power_kw.is_none(),
+            vote.power_w.is_none(),
             "no discharge at/below the soc floor, whatever the deficit"
         );
         assert!(
@@ -123,13 +123,13 @@ mod tests {
         let mut pref = V2HDischarge {
             threshold_soc: 0.5,
             min_soc: 0.2,
-            max_discharge_kw: 5.0,
+            max_discharge_w: 5000.0,
         };
         let ctx = make_ctx(&env, 0.7);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2h:discharging");
-        assert!((vote.power_kw.unwrap() - (-3.0)).abs() < 1e-9);
+        assert!((vote.power_w.unwrap() - (-3000.0)).abs() < 1e-9);
         assert_eq!(vote.min_soc, Some(0.2));
     }
 
@@ -145,13 +145,13 @@ mod tests {
         let mut pref = V2HDischarge {
             threshold_soc: 0.5,
             min_soc: 0.2,
-            max_discharge_kw: 5.0,
+            max_discharge_w: 5000.0,
         };
         let ctx = make_ctx(&env, 0.7);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2h:idle");
-        assert!(vote.power_kw.is_none());
+        assert!(vote.power_w.is_none());
     }
 
     #[test]
@@ -166,13 +166,13 @@ mod tests {
         let mut pref = V2HDischarge {
             threshold_soc: 0.5,
             min_soc: 0.2,
-            max_discharge_kw: 5.0,
+            max_discharge_w: 5000.0,
         };
         let ctx = make_ctx(&env, 0.4);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2h:idle");
-        assert!(vote.power_kw.is_none());
+        assert!(vote.power_w.is_none());
     }
 
     #[test]
@@ -187,14 +187,14 @@ mod tests {
         let mut pref = V2HDischarge {
             threshold_soc: 0.5,
             min_soc: 0.2,
-            max_discharge_kw: 5.0,
+            max_discharge_w: 5000.0,
         };
         // SOC exactly at threshold -- strict > means it should idle
         let ctx = make_ctx(&env, 0.5);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2h:idle");
-        assert!(vote.power_kw.is_none());
+        assert!(vote.power_w.is_none());
     }
 
     #[test]
@@ -209,13 +209,13 @@ mod tests {
         let mut pref = V2HDischarge {
             threshold_soc: 0.5,
             min_soc: 0.2,
-            max_discharge_kw: 5.0,
+            max_discharge_w: 5000.0,
         };
         let ctx = make_ctx(&env, 0.7);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2h:discharging");
-        assert!((vote.power_kw.unwrap() - (-5.0)).abs() < 1e-9);
+        assert!((vote.power_w.unwrap() - (-5000.0)).abs() < 1e-9);
     }
 
     #[test]
@@ -233,14 +233,14 @@ mod tests {
         let mut pref = V2HDischarge {
             threshold_soc: 0.5,
             min_soc: 0.2,
-            max_discharge_kw: 5.0,
+            max_discharge_w: 5000.0,
         };
         let ctx = make_ctx(&env, 0.7);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2h:discharging");
-        // deficit = 4.0 - 2.0 = 2.0, clamped to max_discharge_kw=5.0 → 2.0
-        assert!((vote.power_kw.unwrap() - (-2.0)).abs() < 1e-9);
+        // deficit = 4.0 - 2.0 = 2.0, clamped to max_discharge_w=5000.0 → 2000 W
+        assert!((vote.power_w.unwrap() - (-2000.0)).abs() < 1e-9);
     }
 
     #[test]
@@ -258,20 +258,12 @@ mod tests {
         let mut pref = V2HDischarge {
             threshold_soc: 0.5,
             min_soc: 0.2,
-            max_discharge_kw: 5.0,
+            max_discharge_w: 5000.0,
         };
         let ctx = make_ctx(&env, 0.7);
         let vote = pref.score(&ctx);
 
         assert_eq!(vote.label, "v2h:discharging");
-        assert!((vote.power_kw.unwrap() - (-3.0)).abs() < 1e-9);
-    }
-}
-
-/// The kW working value of an SI summary read: the actors' kW-era working
-/// values convert once at the read until the control-layer commit.
-pub(crate) mod hares_core_units {
-    pub(crate) fn w_to_kw(w: f64) -> f64 {
-        uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
+        assert!((vote.power_w.unwrap() - (-3000.0)).abs() < 1e-9);
     }
 }

@@ -9,6 +9,7 @@ license.workspace = true
 hares-types = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
+uom = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

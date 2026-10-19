@@ -465,6 +465,8 @@ def _run_simulation(
             bat_name: str | None = None
             bat_charge_kw = bat_max_kw
             bat_discharge_kw = bat_max_kw
+            bat_charge_w = bat_charge_kw * 1000.0
+            bat_discharge_w = bat_discharge_kw * 1000.0
             if bat_mode_val == "catalog":
                 bat_obj = Battery.by_product_id(bat_product_val)
                 dw.add_battery(bat_obj)
@@ -500,8 +502,8 @@ def _run_simulation(
                         "target": bat_name,
                         "mode": bat_control_val,
                         "grid_export_rule": bat_export_val,
-                        "max_charge_kw": bat_charge_kw,
-                        "max_discharge_kw": bat_discharge_kw,
+                        "max_charge_w": bat_charge_w,
+                        "max_discharge_w": bat_discharge_w,
                         "steps_per_day": 86400.0 / time_res_s,
                     },
                 )

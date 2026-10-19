@@ -110,7 +110,7 @@ class TestBatteryPowerFactorCharging:
             power_factor=0.9,
         )
         dw.add_battery(bat)
-        dw.apply_control("Bat", ControlSignal.power_setpoint(3.0))
+        dw.apply_control("Bat", ControlSignal.power_setpoint(active_power_w=3000.0))
         dw.step()
 
         tel = _equipment_telemetry(dw, "Bat")
@@ -144,7 +144,7 @@ class TestBatteryPowerFactorCharging:
             power_factor=0.9,
         )
         dw.add_battery(bat)
-        dw.apply_control("Bat", ControlSignal.power_setpoint(3.0))
+        dw.apply_control("Bat", ControlSignal.power_setpoint(active_power_w=3000.0))
         dw.step()
 
         co = _equipment_core_output(dw, "Bat")
@@ -182,9 +182,9 @@ class TestBatteryReactiveSetpoint:
         )
         dw.add_battery(bat)
         # ReactiveSetpoint takes precedence over baseline pf.
-        dw.apply_control("Bat", ControlSignal.reactive_setpoint(1.5))
+        dw.apply_control("Bat", ControlSignal.reactive_setpoint(var=1500.0))
         # Also command charging so P>0.
-        dw.apply_control("Bat", ControlSignal.power_setpoint(2.0))
+        dw.apply_control("Bat", ControlSignal.power_setpoint(active_power_w=2000.0))
         dw.step()
 
         tel = _equipment_telemetry(dw, "Bat")
@@ -213,7 +213,7 @@ class TestBatteryReactiveSetpoint:
         dw.add_battery(bat)
         # PowerFactorSetpoint updates pf; Q follows new pf baseline.
         dw.apply_control("Bat", ControlSignal.power_factor_setpoint(0.8))
-        dw.apply_control("Bat", ControlSignal.power_setpoint(2.0))
+        dw.apply_control("Bat", ControlSignal.power_setpoint(active_power_w=2000.0))
         dw.step()
 
         tel = _equipment_telemetry(dw, "Bat")
@@ -245,14 +245,14 @@ class TestBatteryReactiveSetpoint:
         )
         dw.add_battery(bat)
         dw.apply_control(
-            "Bat", ControlSignal.power_setpoint(2.0, reactive_kvar=0.75)
+            "Bat", ControlSignal.power_setpoint(active_power_w=2000.0, reactive_power_var=750.0)
         )
         dw.step()
 
         tel = _equipment_telemetry(dw, "Bat")
         q = tel["reactive_power_kvar"]
         assert math.isclose(q, 750.0, rel_tol=1e-6), (
-            f"PowerSetpoint(reactive=0.75 kvar) should set Q=750 var, got Q={q}"
+            f"PowerSetpoint(reactive=750 var) should set Q=750 var, got Q={q}"
         )
 
 
@@ -345,8 +345,8 @@ class TestEvReactiveSetpoint:
         dw = self._make_ev_dwelling(
             power_factor=0.9, charger_capacity_va=10000
         )
-        dw.apply_control("TestEV", ControlSignal.reactive_setpoint(1.5))
-        dw.apply_control("TestEV", ControlSignal.power_setpoint(2.0))
+        dw.apply_control("TestEV", ControlSignal.reactive_setpoint(var=1500.0))
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(active_power_w=2000.0))
         dw.step()
 
         tel = _equipment_telemetry(dw, "TestEV")
@@ -360,7 +360,7 @@ class TestEvReactiveSetpoint:
 
         dw = self._make_ev_dwelling()
         dw.apply_control("TestEV", ControlSignal.power_factor_setpoint(0.8))
-        dw.apply_control("TestEV", ControlSignal.power_setpoint(2.0))
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(active_power_w=2000.0))
         dw.step()
 
         tel = _equipment_telemetry(dw, "TestEV")
@@ -377,14 +377,14 @@ class TestEvReactiveSetpoint:
 
         dw = self._make_ev_dwelling(charger_capacity_va=10000)
         dw.apply_control(
-            "TestEV", ControlSignal.power_setpoint(2.0, reactive_kvar=0.75)
+            "TestEV", ControlSignal.power_setpoint(active_power_w=2000.0, reactive_power_var=750.0)
         )
         dw.step()
 
         tel = _equipment_telemetry(dw, "TestEV")
         q = tel["reactive_power_kvar"]
         assert math.isclose(q, 750.0, rel_tol=1e-6), (
-            f"PowerSetpoint(reactive=0.75 kvar) should set Q=750 var, got Q={q}"
+            f"PowerSetpoint(reactive=750 var) should set Q=750 var, got Q={q}"
         )
 
     def test_real_power_unchanged_by_reactive_setpoint(self):
@@ -392,12 +392,12 @@ class TestEvReactiveSetpoint:
         from hares import ControlSignal
 
         dw = self._make_ev_dwelling(power_factor=0.9, charger_capacity_va=10000)
-        dw.apply_control("TestEV", ControlSignal.power_setpoint(3.0))
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(active_power_w=3000.0))
         dw.step()
         tel_before = _equipment_telemetry(dw, "TestEV")
         p_before = tel_before["active_power_kw"]
 
-        dw.apply_control("TestEV", ControlSignal.reactive_setpoint(0.5))
+        dw.apply_control("TestEV", ControlSignal.reactive_setpoint(var=500.0))
         dw.step()
         tel_after = _equipment_telemetry(dw, "TestEV")
         p_after = tel_after["active_power_kw"]
@@ -427,7 +427,7 @@ class TestDefaultEvZeroQ:
             initial_connection_state=EvConnectionState.HomePluggedIn,
         )
         dw.add_ev(ev)
-        dw.apply_control("TestEV", ControlSignal.power_setpoint(3.0))
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(active_power_w=3000.0))
         dw.step()
 
         co = _equipment_core_output(dw, "TestEV")
@@ -633,7 +633,7 @@ class TestDefaultBatteryZeroQ:
             discharge_efficiency=1.0,
         )
         dw.add_battery(bat)
-        dw.apply_control("Bat", ControlSignal.power_setpoint(2.0))
+        dw.apply_control("Bat", ControlSignal.power_setpoint(active_power_w=2000.0))
         dw.step()
 
         co = _equipment_core_output(dw, "Bat")

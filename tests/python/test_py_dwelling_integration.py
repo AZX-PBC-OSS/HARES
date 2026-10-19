@@ -299,8 +299,8 @@ class TestControlInjection:
         )
 
         signals = [
-            ControlSignal.power_setpoint(1.5),
-            ControlSignal.power_setpoint(1.5, 0.5),
+            ControlSignal.power_setpoint(active_power_w=1500.0),
+            ControlSignal.power_setpoint(active_power_w=1500.0, reactive_power_var=0.5),
             ControlSignal.thermal_setpoint(heat_c=20.0, cool_c=24.0),
             ControlSignal.thermal_setpoint_delta(heating_delta_c=1.0),
             ControlSignal.ideal_capacity(5000.0),
@@ -312,7 +312,7 @@ class TestControlInjection:
             ControlSignal.demand_response_str("Normal"),
             ControlSignal.soc_target(target=0.8, min=0.2, max=1.0),
             ControlSignal.humidity_setpoint(target_rh=50.0),
-            ControlSignal.power_limit(max_power_kw=5.0),
+            ControlSignal.power_limit(max_power_w=5000.0),
             ControlSignal.duty_cycle(on_fraction=0.5, period_s=300.0),
             ControlSignal.duty_cycle(
                 on_fraction=0.5, component=DutyCycleComponent.Compressor
@@ -320,7 +320,7 @@ class TestControlInjection:
             ControlSignal.grid_connect(connected=True),
             ControlSignal.self_consumption(enabled=True, solar_only_charging=False),
             ControlSignal.curtailment_percent(50.0),
-            ControlSignal.reactive_setpoint(kvar=1.0),
+            ControlSignal.reactive_setpoint(var=1.0),
             ControlSignal.power_factor_setpoint(0.95),
             ControlSignal.inverter_priority_mode(InverterPriority.Watt),
             ControlSignal.protocol_native(42, b"\x01\x02"),
@@ -761,7 +761,7 @@ class TestEvControlSignals:
         dw.add_ev(ev)
         # Disconnect then drive
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
-        dw.apply_control("EV1", ControlSignal.ev_drive(10.0))
+        dw.apply_control("EV1", ControlSignal.ev_drive(energy_j=3.6e7))
         dw.step()
         tel = dw.telemetry().equipment()
         idx = tel["names"].index("EV1")
@@ -784,7 +784,7 @@ class TestEvControlSignals:
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
         dw.step()
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.AwayPluggedIn))
-        dw.apply_control("EV1", ControlSignal.ev_away_charge(11.5))
+        dw.apply_control("EV1", ControlSignal.ev_away_charge(power_w=11_500.0))
         dw.step()
         tel = dw.telemetry().equipment()
         idx = tel["names"].index("EV1")
@@ -819,7 +819,7 @@ class TestEvControlSignals:
                 initial_connection_state=EvConnectionState.HomePluggedIn)
         dw.add_ev(ev)
         with pytest.raises((ValueError, RuntimeError)):
-            dw.apply_control("EV1", ControlSignal.ev_drive(5.0))
+            dw.apply_control("EV1", ControlSignal.ev_drive(energy_j=1.8e7))
 
     def test_ev_away_charge_while_home_raises(self):
         """EvAwayCharge must be rejected when not AwayPluggedIn."""
@@ -830,7 +830,7 @@ class TestEvControlSignals:
                 initial_connection_state=EvConnectionState.HomePluggedIn)
         dw.add_ev(ev)
         with pytest.raises((ValueError, RuntimeError)):
-            dw.apply_control("EV1", ControlSignal.ev_away_charge(7.2))
+            dw.apply_control("EV1", ControlSignal.ev_away_charge(power_w=7200.0))
 
 
 class TestEquipmentMutationRoundTrip:

@@ -105,7 +105,7 @@ class HELICSDiagnostics(TypedDict):
 #     validate_thermal_setpoint_deadband; the device then holds it to its
 #     own class)
 #   DutyCycle.on_fraction: [0, 1]
-#   PowerSetpoint.active_power_kw: finite only (Rust: finite only)
+#   PowerSetpoint.active_power_w: finite only (Rust: finite only)
 THERMAL_SETPOINT_HEAT_MIN_C = -50.0
 THERMAL_SETPOINT_HEAT_MAX_C = 100.0
 THERMAL_SETPOINT_COOL_MIN_C = 0.0
@@ -241,14 +241,14 @@ def validate_control_signal(
                         DUTY_CYCLE_ON_FRACTION_MAX,
                     )
     elif signal_type == "PowerSetpoint":
-        val = signal_body.get("active_power_kw")
+        val = signal_body.get("active_power_w")
         if val is not None:
             try:
                 v = float(val)
             except (TypeError, ValueError):
                 clamped += 1
                 logger.warning(
-                    "Control signal '%s' active_power_kw for equipment '%s' is not a number: %r",
+                    "Control signal '%s' active_power_w for equipment '%s' is not a number: %r",
                     signal_type,
                     equipment,
                     val,
@@ -257,7 +257,7 @@ def validate_control_signal(
                 if not math.isfinite(v):
                     clamped += 1
                     logger.warning(
-                        "Control signal '%s' active_power_kw for equipment '%s' = %.2f is not finite",
+                        "Control signal '%s' active_power_w for equipment '%s' = %.2f is not finite",
                         signal_type,
                         equipment,
                         v,

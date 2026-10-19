@@ -3774,7 +3774,7 @@ test:
   grep -qE '^crates/hares-types/src/telemetry_keys\.rs:[0-9]+:pub const ELECTRIC_KW: &str = "electric_kw";$' target/si-census.txt
   grep -qE '^python/hares/.+:[0-9]+:' target/si-census.txt
   grep -qE '^notebooks/simulation_explorer\.py:[0-9]+:' target/si-census.txt
-  grep -qE '^benches/rl_episode\.rs:[0-9]+:' target/si-census.txt
+  grep -qE '^benches/output_row_plan\.rs:[0-9]+:' target/si-census.txt
   wc -l < target/si-census.txt
   ```
 
@@ -3944,7 +3944,9 @@ on the EV dwelling of `crates/hares-core/tests/ev_thermal_regressions.rs`'s
 
 **State:** commits 1 and 2 committed on branch `row/r94c-b14` (worktree
 `r94c-b14`, based on `ff39b24b`; commit 1 `a776983b`, commit 2 the
-branch's next commit). Commits 3 and 4 (rows 94g and 94h) are not landed.
+branch's next commit). Commits 3 and 4 (rows 94g and 94h) are landed on
+branch `row/r94gh` (worktree `r94gh`): commit 3 `51152c52`, commit 4 the
+branch's next commit - their records close this entry's State.
 Adaptations to this base, recorded: the entry's evidence cites `21d90588`
 and `afa9a071` and this base is `ff39b24b`, so the cited line numbers
 drifted (PvArray `array_config.rs:100`, PvArraySpec `:155`,
@@ -4069,6 +4071,68 @@ zone-capacitance, plug-load EV and payload cases),
 `ev_fuel_economy_converts_to_joules_per_metre`),
 `numeric_changes_name_existing_goldens` passing with this commit's
 line; `si_census` 8715 lines at this commit with all four witnesses.
+
+Commit 3 (the run-state fix, row 94g): landed as `51152c52` on branch
+`row/r94gh` (worktree `r94gh`), the branch that now carries the entry's
+four commits rebased under rows 94e and 94f (commit 1 `d12a8c38`, commit
+2 `5958ef72`, commit 3 the branch's tip before commit 4).
+`CHECKPOINT_VERSION` rose from 19 to 20 (the actual numbers at this
+base; the entry's 9 to 10 is the plan's stale numbering) with
+`PINNED_SCHEMA_SHA256` re-pinned in the same commit. RED first (the
+pre-fix measurement against the parent `6a5d9769`'s frames): the
+per-golden movement in `02-measurement.md` M-6, every difference last
+bits except the gas columns' one therm-factor relative (1.3969e-7), the
+BMS and EV-driver actor columns' first-caught 1000x double conversion
+fixed in the commit by converting each actor's declared-kW telemetry to
+W once at the row write. GREEN: re-captured twice byte-identical;
+compare-all 10 identical (default features) + 1 (dst).
+
+Commit 4 (the control-layer fix, row 94h): landed as the branch's next
+commit (worktree `r94gh`). Every actor parameter, control-signal field,
+actor state and actor telemetry value is held in SI under its SI name
+(the entry's Commit-4 list); the removed-key surfaces are `REMOVED_KEYS`'
+`ActorParameter` rows (checked by `ActorRegistry::create` before the
+factory runs) and `ControlSignal` rows (checked by the Python
+constructors' `**kwargs` catch-alls, `ControlSignal.from_dict`, the
+gym's Rust action reader and the protocol bridge's handler before serde
+parses); the DR action string takes `PowerLimit:<max>W`; the EV driver's
+documented literals are `ev_driver::defaults`' named SI constants; the
+`Actor` trait's PV argument is `pv_w`; the demand-response compliance
+actor's snapshot version rose to 4 (its dispatched `PowerLimit` payloads
+hold W where v3 held kW; the refusal sits at the per-actor
+`schema_version` gate) and the EV driver's at 4 (v3's kWh energies would
+read 3.6e6x small). `CHECKPOINT_VERSION` stays 20 (the run-state commit
+bumped it; the control layer changes no `DwellingCheckpoint` field).
+Adaptations recorded: (e) the census step's benches witness moved from
+`rl_episode.rs` (whose last kW-named observation key the control-layer
+commit renamed to `reactive_power_var`, emptying the bench tree of
+census lines) to `benches/output_row_plan.rs`'s declared reporting
+column, keeping the dead-pathspec self-check; (f) the gym's observation
+resolver accepts the run-state commit's `reactive_power_var` and deletes
+the `total_electric_kw` alias (the renamed-key error names
+`total_power_w`), the observation bounds table takes the new keys at the
+W/VAR scale, and `py_gym.rs`/`gym_env.py` read the renamed action keys.
+RED first (the fix's frames against commit 3's goldens, M-6b in
+`02-measurement.md`): ten goldens bitwise, `der_pv_battery_ev_900s`'s EV
+columns in the last bits (max relative 2.3e-14; the fuel economy's J/m
+pair), the 45-day cold-snap run's SOC at 1 to 2 ulps and its power cells
+at 6.4e-15, nothing above 1e-9 scaled and no scale ratio near a unit
+factor. GREEN: re-captured twice byte-identical (the ten non-dst
+goldens, and `full_year_900s_dst` on the dst build); compare-all 10
+identical (default features) + 1 (dst). Gates: fmt clean; clippy
+`--workspace --all-targets --all-features -D warnings` clean; nextest
+`--workspace --all-features` 8220 passed, 8 skipped; `pytest -m ''`
+1798 passed + 6 xfailed, 0 failed, 0 errors; pyright 0; the acceptance
+tests of the commit-4 list added and passing
+(`removed_actor_parameter_names_its_replacement` (all 10 rows),
+`removed_control_signal_keyword_names_its_replacement` (Python, all 8
+rows on all three surfaces),
+`protocol_bridge_old_signal_key_names_its_replacement`,
+`ev_driver_defaults_are_the_documented_values`,
+`power_limit_action_requires_a_unit`,
+`actor_columns_keep_their_reporting_unit`,
+`actor_blob_of_an_older_schema_is_rejected`); `si_census` 2987 lines at
+this commit with the four witnesses.
 
 ## B-15: OpenStudio-HPXML unavailable periods are applied
 

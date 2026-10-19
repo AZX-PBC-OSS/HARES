@@ -918,8 +918,11 @@ pub fn observation_field_bounds(key: &str) -> (f64, f64) {
         "outdoor_temp" | "outdoor_temp_c" => (-50.0, 55.0),
         "outdoor_rh" => (0.0, 1.0),
         "outdoor_humidity_ratio" => (0.0, 0.1),
-        "total_power_kw" | "total_electric_kw" => (-100.0, 100.0),
-        "reactive_power_kvar" => (-100.0, 100.0),
+        // The gym's observation names are SI (the run state's renames);
+        // the bounds are the kW-era ±100 and the kVAR-era ±100 held in W
+        // and VAR, ×1000.
+        "total_power_w" => (-100_000.0, 100_000.0),
+        "reactive_power_var" => (-100_000.0, 100_000.0),
         "battery_soc" | "ev_soc" => (0.0, 1.0),
         "time_sin" | "time_cos" => (-1.0, 1.0),
         _ => {

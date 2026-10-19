@@ -739,20 +739,13 @@ impl Equipment for ScheduledLoad {
                 self.mode_override = None;
                 Ok(())
             }
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                // The signal carries kW until the control-layer commit; the
-                // stored setpoint is W (SI), converted once here.
-                if !active_power_kw.is_finite() {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                if !active_power_w.is_finite() {
                     return Err(HaresError::Control(
-                        "ScheduledLoad PowerSetpoint active_power_kw must be finite".to_string(),
+                        "ScheduledLoad PowerSetpoint active_power_w must be finite".to_string(),
                     ));
                 }
-                let setpoint_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*active_power_kw)
-                        .get::<uom::si::power::watt>();
-                self.power_setpoint_override = Some(setpoint_w.max(0.0));
+                self.power_setpoint_override = Some(active_power_w.max(0.0));
                 Ok(())
             }
             _ => Err(HaresError::Control(format!(
@@ -1338,8 +1331,8 @@ mod tests {
         let mut env = base_env();
         eq.init(&config, &env).unwrap();
         eq.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })

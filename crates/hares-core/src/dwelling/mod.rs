@@ -999,21 +999,16 @@ fn build_end_use_aggregate_indices(
 }
 
 /// Resolve each actor's telemetry columns against the output column
-/// index: `(key, index, unit)` entry lists, one per actor, in actor order.
+/// index: `(key, index)` entry lists, one per actor, in actor order.
 /// Actors without telemetry get an empty entry list — the positional
 /// `zip` against the actor vector in `record_step` requires a per-actor
 /// entry regardless. Shared by the fresh-schema and frozen-schema roster
 /// plans so the two derivations cannot drift; pre-resolving also keeps the
 /// per-step `format!("actor:{name}:{key}")` out of the hot path.
-///
-/// The declared unit rides the entry: the actors hold their kW working
-/// values until the control-layer commit, so the row write converts the
-/// declared-kW channels' values to W once (the plan's own `from_si` is
-/// the single conversion back).
 fn build_actor_column_map(
     actors: &[&dyn Actor],
     column_index: &HashMap<String, usize>,
-) -> Vec<Vec<(String, usize, hares_types::Unit)>> {
+) -> Vec<Vec<(String, usize)>> {
     actors
         .iter()
         .map(|actor| {
@@ -1025,13 +1020,7 @@ fn build_actor_column_map(
             for key in tel.0.keys() {
                 let col_name = format!("actor:{actor_name}:{key}");
                 if let Some(&idx) = column_index.get(&col_name) {
-                    let unit = actor
-                        .output_variables()
-                        .iter()
-                        .find(|field| field.name.as_ref() == key)
-                        .map(|field| field.unit)
-                        .unwrap_or(hares_types::Unit::None);
-                    entries.push((key.clone(), idx, unit));
+                    entries.push((key.clone(), idx));
                 }
             }
             entries
@@ -1244,7 +1233,7 @@ struct OutputRowBindings {
     /// equipment-vector order.
     end_use_aggregates: Vec<Option<usize>>,
     /// Telemetry key to output column of each actor, in actor order.
-    actors: Vec<Vec<(String, usize, hares_types::Unit)>>,
+    actors: Vec<Vec<(String, usize)>>,
     /// The slots valid every step whose value is the row's zero: the
     /// summed cells whose contributors exist (the duct losses slot when
     /// the dwelling has HVAC equipment; every bound end-use aggregate
@@ -7391,13 +7380,13 @@ impl Dwelling {
         {
             let time_step_secs = self.latest_env.time_step_secs();
             if time_step_secs >= PV_RE_EVAL_MIN_STEP_SECS {
-                // The actors' pv_kw working value converts once from the
-                // port's W (SI) until the control-layer commit.
-                let pv_kw = -hares_core_units::w_to_kw(self.ports.electrical.generation_power_w);
+                // The actors' pv argument is W (SI), the port's generation
+                // read with no conversion.
+                let pv_w = -self.ports.electrical.generation_power_w;
                 self.actor_dispatch_buf.clear();
                 for actor in &mut self.actors {
                     let emitted_from = self.actor_dispatch_buf.len();
-                    actor.adjust_for_pv(pv_kw, &self.latest_env, &mut self.actor_dispatch_buf);
+                    actor.adjust_for_pv(pv_w, &self.latest_env, &mut self.actor_dispatch_buf);
                     crate::actor::check_declared_signals(
                         actor.as_ref(),
                         &self.actor_dispatch_buf[emitted_from..],
@@ -8228,7 +8217,7 @@ impl Dwelling {
 
         // Capture electrical summary for next step's EnvironmentState. The
         // summary is W (SI); the actors' pv_kw working value converts once
-        // from it until the control-layer commit.
+        // from it until the control layer holds SI.
         let mut battery_w = 0.0;
         let mut ev_w = 0.0;
         let mut pv_w = 0.0;
@@ -8624,16 +8613,11 @@ impl Dwelling {
         // leaves its cell unwritten, null.
         for (actor, pre_resolved) in self.actors.iter().zip(&self.roster.bindings.actors) {
             if let Some(tel) = actor.telemetry() {
-                for (key, column_idx, unit) in pre_resolved {
+                for (key, column_idx) in pre_resolved {
                     if let Some(value) = tel.get(key) {
-                        // The actors hold their kW working values until the
-                        // control-layer commit; the row slot wants the SI
-                        // value (W) its unit declares, converted once here.
-                        let si_value = match unit {
-                            hares_types::Unit::Kilowatt => value * 1000.0,
-                            _ => value,
-                        };
-                        writer.write(*column_idx, si_value);
+                        // The actors hold SI values; the declared unit's
+                        // reporting column converts once in the writer.
+                        writer.write(*column_idx, value);
                     }
                 }
             }
@@ -9382,9 +9366,6 @@ pub(crate) fn build_actors_from_seeds(
             ActorSeed::Battery {
                 mut bms_mode,
                 grid_export_rule,
-                // The seeds hold W (SI) since the run-state commit; the
-                // actors' kW parameters convert once here until the
-                // control-layer commit.
                 max_charge_w,
                 max_discharge_w,
                 min_dwell_steps,
@@ -9419,8 +9400,8 @@ pub(crate) fn build_actors_from_seeds(
                     BmsParams {
                         bms_mode,
                         grid_export_rule,
-                        max_charge_kw: hares_core_units::w_to_kw(max_charge_w),
-                        max_discharge_kw: hares_core_units::w_to_kw(max_discharge_w),
+                        max_charge_w,
+                        max_discharge_w,
                         price_schedule: price_schedule.clone(),
                         steps_per_day,
                         min_dwell_steps,
@@ -9440,7 +9421,7 @@ pub(crate) fn build_actors_from_seeds(
                 plug_in_policy,
                 capacity_j,
                 max_charge_w,
-                fuel_economy_kwh_per_mi,
+                fuel_economy_j_per_m,
             } => {
                 let actor_name = format!("EvDriver:{name}");
                 if existing_names.contains(actor_name.as_str()) {
@@ -9495,18 +9476,23 @@ pub(crate) fn build_actors_from_seeds(
                     EvDriverParams {
                         strategy,
                         plug_in_policy,
-                        daily_drive_miles: ScheduleSource::Constant(30.0),
+                        daily_drive_distance_m: ScheduleSource::Constant(
+                            crate::actors::ev_driver::defaults::DAILY_DRIVE_DISTANCE_M,
+                        ),
                         departure_time: ScheduleSource::Constant(480.0),
                         trip_duration: ScheduleSource::Constant(600.0),
                         arrival_time: None,
                         event_day_ratio: 0.8,
-                        fuel_economy_kwh_per_mi,
-                        capacity_kwh: hares_core_units::j_to_kwh(capacity_j),
-                        max_charge_kw: hares_core_units::w_to_kw(max_charge_w),
-                        average_speed_mph: 30.0,
-                        range_anxiety_miles: 20.0,
+                        fuel_economy_j_per_m,
+                        capacity_j,
+                        max_charge_w,
+                        average_speed_m_per_s:
+                            crate::actors::ev_driver::defaults::AVERAGE_SPEED_M_PER_S,
+                        range_anxiety_distance_m:
+                            crate::actors::ev_driver::defaults::RANGE_ANXIETY_DISTANCE_M,
                         away_charge_fraction: 0.0,
-                        away_charge_power_kw: 6.6,
+                        away_charge_power_w:
+                            crate::actors::ev_driver::defaults::AWAY_CHARGE_POWER_W,
                     },
                     ev_seed,
                 );
@@ -10325,10 +10311,8 @@ fn cfg_gated_helper() {
             signal: &ControlSignal,
         ) -> std::result::Result<(), hares_types::HaresError> {
             match signal {
-                ControlSignal::PowerSetpoint {
-                    active_power_kw, ..
-                } => {
-                    self.last_power_kw = *active_power_kw;
+                ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                    self.last_power_kw = *active_power_w;
                     self.telemetry.insert(tk::LAST_POWER_KW, self.last_power_kw);
                 }
                 ControlSignal::SOCTarget { target_soc, .. } => {
@@ -10382,7 +10366,7 @@ fn cfg_gated_helper() {
                     core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::REACTIVE,
                     telemetry_fields: vec![
                         TelemetryField::power_kw("active_power_kw", "active electrical power"),
-                        TelemetryField::ratio("reactive_power_var", "reactive electrical power"),
+                        TelemetryField::ratio("reactive_power_kvar", "reactive electrical power"),
                     ],
                     zone_type: None,
                 },
@@ -10427,7 +10411,7 @@ fn cfg_gated_helper() {
             self.telemetry
                 .insert("active_power_kw", self.active_power_kw);
             self.telemetry
-                .insert("reactive_power_var", self.reactive_power_var);
+                .insert("reactive_power_kvar", self.reactive_power_var);
             Ok(())
         }
 
@@ -11563,8 +11547,8 @@ fn cfg_gated_helper() {
         dwelling.apply_control(
             "EV1",
             ControlSignal::PowerSetpoint {
-                active_power_kw: -2.0,
-                reactive_power_kvar: None,
+                active_power_w: -2000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12154,8 +12138,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12164,8 +12148,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12181,7 +12165,10 @@ occupancy = 1.0
         );
 
         assert!(warnings.is_empty());
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(5000.0)
+        );
     }
 
     #[test]
@@ -12193,8 +12180,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12203,8 +12190,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 2.0,
-                reactive_power_kvar: None,
+                active_power_w: 2000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12213,8 +12200,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 3.0,
-                reactive_power_kvar: None,
+                active_power_w: 3000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12223,8 +12210,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0000,
-                reactive_power_kvar: None,
+                active_power_w: 0.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12251,8 +12238,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("NonExistent")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12284,8 +12271,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::BATTERY),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12317,8 +12304,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12347,8 +12334,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::custom("heat_pump_water_heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 2.5000,
-                reactive_power_kvar: None,
+                active_power_w: 2500.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12365,7 +12352,10 @@ occupancy = 1.0
 
         // Should find the equipment and apply the signal
         assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(2.5));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(2500.0)
+        );
     }
 
     #[test]
@@ -12378,8 +12368,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::custom("ice_storage")), // Different custom type
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12413,8 +12403,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::custom("novel_equipment_type")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12844,8 +12834,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Eq1")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12854,8 +12844,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Eq2")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 2.0,
-                reactive_power_kvar: None,
+                active_power_w: 2000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12864,8 +12854,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Eq1")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 3.0,
-                reactive_power_kvar: None,
+                active_power_w: 3000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12890,8 +12880,14 @@ occupancy = 1.0
         assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
         assert_eq!(delivered_count, 3, "all 3 signals must be delivered");
         // Eq1 gets Grid (3.0) as last write, Eq2 gets Schedule (2.0)
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(3.0));
-        assert_eq!(equipment[1].telemetry().get(tk::LAST_POWER_KW), Some(2.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(3000.0)
+        );
+        assert_eq!(
+            equipment[1].telemetry().get(tk::LAST_POWER_KW),
+            Some(2000.0)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -12907,8 +12903,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12917,8 +12913,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 9.0000,
-                reactive_power_kvar: None,
+                active_power_w: 9000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12935,7 +12931,10 @@ occupancy = 1.0
 
         assert!(warnings.is_empty());
         // Last queued signal in the same tier wins (FIFO within tier, last write wins)
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(9.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(9000.0)
+        );
     }
 
     #[test]
@@ -12949,8 +12948,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 9.0000,
-                reactive_power_kvar: None,
+                active_power_w: 9000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12959,8 +12958,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -12977,7 +12976,10 @@ occupancy = 1.0
 
         assert!(warnings.is_empty());
         // Now the 1.0 kW signal wins — it was queued last.
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(1.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(1000.0)
+        );
     }
 
     #[test]
@@ -12989,8 +12991,8 @@ occupancy = 1.0
             dispatcher.queue(DispatchRequest {
                 target: DispatchTarget::ByName(Arc::from("Heater")),
                 signal: ControlSignal::PowerSetpoint {
-                    active_power_kw: kw,
-                    reactive_power_kvar: None,
+                    active_power_w: kw * 1000.0,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 },
@@ -13008,7 +13010,10 @@ occupancy = 1.0
 
         assert!(warnings.is_empty());
         // Last queued (4.0 kW) wins.
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(4.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(4000.0)
+        );
     }
 
     #[cfg(feature = "observe")]
@@ -13020,8 +13025,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13030,8 +13035,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13053,7 +13058,10 @@ occupancy = 1.0
         assert!(matches!(&conflict.target, DispatchTarget::ByName(n) if n.as_ref() == "Heater"));
         assert_eq!(conflict.signals.len(), 2);
         // Last signal wins (overwrite-safe apply_control).
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(5000.0)
+        );
         // Signals are recorded in FIFO order; the observer capture preserves both.
         assert_eq!(capture.signals.len(), 2);
     }
@@ -13069,8 +13077,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13079,8 +13087,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Battery")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 2.0,
-                reactive_power_kvar: None,
+                active_power_w: 2000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13115,8 +13123,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13299,8 +13307,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::BATTERY),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13309,8 +13317,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Battery #1")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 8.0000,
-                reactive_power_kvar: None,
+                active_power_w: 8000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13335,7 +13343,10 @@ occupancy = 1.0
         assert_eq!(conflict.tier, PriorityTier::Schedule);
         assert_eq!(conflict.signals.len(), 2);
         // Last-write-wins: the ByName signal (8.0) overwrites the ByEndUse signal (5.0).
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(8.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(8000.0)
+        );
     }
 
     #[cfg(feature = "observe")]
@@ -13352,8 +13363,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::BATTERY),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13362,8 +13373,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 3.0,
-                reactive_power_kvar: None,
+                active_power_w: 3000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13402,8 +13413,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::HVAC_HEATING),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13421,8 +13432,14 @@ occupancy = 1.0
 
         assert!(warnings.is_empty());
         // Both HVAC_HEATING equipment should receive the signal
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
-        assert_eq!(equipment[1].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(5000.0)
+        );
+        assert_eq!(
+            equipment[1].telemetry().get(tk::LAST_POWER_KW),
+            Some(5000.0)
+        );
         // Battery should NOT receive it
         assert_eq!(equipment[2].telemetry().get(tk::LAST_POWER_KW), None);
     }
@@ -13492,8 +13509,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::BATTERY),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13506,7 +13523,10 @@ occupancy = 1.0
             |_, _, _, _| {},
         );
         // Pass 1: Safety setpoint applied.
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(10000.0)
+        );
         assert!(warnings.is_empty());
 
         // Pass 2: Schedule-tier signal targeting the same battery by name.
@@ -13514,8 +13534,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Battery #1")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13539,7 +13559,7 @@ occupancy = 1.0
         // The Safety setpoint must still be in effect.
         assert_eq!(
             equipment[0].telemetry().get(tk::LAST_POWER_KW),
-            Some(10.0),
+            Some(10000.0),
             "Safety setpoint must survive lower-priority overwrite"
         );
     }
@@ -13560,8 +13580,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::BATTERY),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13570,8 +13590,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Battery #1")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 8.0000,
-                reactive_power_kvar: None,
+                active_power_w: 8000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13595,7 +13615,7 @@ occupancy = 1.0
         assert_eq!(delivered_count, 2);
         assert_eq!(
             equipment[0].telemetry().get(tk::LAST_POWER_KW),
-            Some(8.0),
+            Some(8000.0),
             "last-queued ByName signal must overwrite ByEndUse signal at same tier"
         );
     }
@@ -13622,8 +13642,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::BATTERY),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 10.0000,
-                reactive_power_kvar: None,
+                active_power_w: 10000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13637,8 +13657,14 @@ occupancy = 1.0
         );
 
         // Both batteries got the signal.
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
-        assert_eq!(equipment[1].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(10000.0)
+        );
+        assert_eq!(
+            equipment[1].telemetry().get(tk::LAST_POWER_KW),
+            Some(10000.0)
+        );
         // EV was not affected.
         assert_eq!(equipment[2].telemetry().get(tk::LAST_POWER_KW), None);
 
@@ -13647,8 +13673,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Battery #1")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 1.0,
-                reactive_power_kvar: None,
+                active_power_w: 1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13671,16 +13697,22 @@ occupancy = 1.0
         );
 
         // Battery #1 still has Safety value.
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(10000.0)
+        );
         // Battery #2 still has Safety value.
-        assert_eq!(equipment[1].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
+        assert_eq!(
+            equipment[1].telemetry().get(tk::LAST_POWER_KW),
+            Some(10000.0)
+        );
 
         // Pass 3: Schedule signal to Battery #2 by name. Also blocked.
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Battery #2")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 2.0,
-                reactive_power_kvar: None,
+                active_power_w: 2000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13703,8 +13735,14 @@ occupancy = 1.0
         );
 
         // Both batteries still at Safety value.
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
-        assert_eq!(equipment[1].telemetry().get(tk::LAST_POWER_KW), Some(10.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(10000.0)
+        );
+        assert_eq!(
+            equipment[1].telemetry().get(tk::LAST_POWER_KW),
+            Some(10000.0)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -13719,8 +13757,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByName(Arc::from("Heater")),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13736,7 +13774,10 @@ occupancy = 1.0
             &mut warnings,
             &mut RejectionGate::new(0, None),
         );
-        assert_eq!(equipment[0].telemetry().get(tk::LAST_POWER_KW), Some(5.0));
+        assert_eq!(
+            equipment[0].telemetry().get(tk::LAST_POWER_KW),
+            Some(5000.0)
+        );
 
         // Second dispatch with nothing queued -- queues should be empty
         let mut delivered_count = 0u32;
@@ -13884,8 +13925,8 @@ occupancy = 1.0
         dispatcher.queue(DispatchRequest {
             target: DispatchTarget::ByEndUse(EndUse::OTHER),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: 7.0000,
-                reactive_power_kvar: None,
+                active_power_w: 7000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -13905,7 +13946,7 @@ occupancy = 1.0
         assert!(warnings[0].message.contains("control apply failed"));
         assert_eq!(
             equipment[1].telemetry().get(tk::LAST_POWER_KW),
-            Some(7.0),
+            Some(7000.0),
             "second equipment should still receive signal despite first rejecting"
         );
     }
@@ -14190,7 +14231,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_j: 60.0 * 3.6e6,
                 max_charge_w: 7600.0,
-                fuel_economy_kwh_per_mi: 0.28,
+                fuel_economy_j_per_m: 626.6045505724814,
             }),
         ));
 
@@ -14251,7 +14292,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_j: 60.0 * 3.6e6,
                 max_charge_w: 7600.0,
-                fuel_economy_kwh_per_mi: 0.28,
+                fuel_economy_j_per_m: 626.6045505724814,
             }),
         ));
 
@@ -14279,7 +14320,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_j: 60.0 * 3.6e6,
                 max_charge_w: 7600.0,
-                fuel_economy_kwh_per_mi: 0.28,
+                fuel_economy_j_per_m: 626.6045505724814,
             })
         };
         let eq1: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new("EV1", seed()));
@@ -14337,7 +14378,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_j: 60.0 * 3.6e6,
                 max_charge_w: 7600.0,
-                fuel_economy_kwh_per_mi: 0.28,
+                fuel_economy_j_per_m: 626.6045505724814,
             }),
         ));
 
@@ -14461,7 +14502,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_j: 60.0 * 3.6e6,
                 max_charge_w: 7600.0,
-                fuel_economy_kwh_per_mi: 0.28,
+                fuel_economy_j_per_m: 626.6045505724814,
             }),
         ));
         let eq2: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
@@ -14474,7 +14515,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_j: 75.0 * 3.6e6,
                 max_charge_w: 11_500.0,
-                fuel_economy_kwh_per_mi: 0.325,
+                fuel_economy_j_per_m: 727.4055060172144,
             }),
         ));
 
@@ -14497,7 +14538,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_j: 60.0 * 3.6e6,
                 max_charge_w: 7600.0,
-                fuel_economy_kwh_per_mi: 0.28,
+                fuel_economy_j_per_m: 626.6045505724814,
             }),
         ));
 
@@ -14515,7 +14556,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_j: 60.0 * 3.6e6,
                 max_charge_w: 7600.0,
-                fuel_economy_kwh_per_mi: 0.28,
+                fuel_economy_j_per_m: 626.6045505724814,
             }),
         ));
         let eq2: Box<dyn Equipment> = Box::new(SeedableTestEquipment::new(
@@ -14525,7 +14566,7 @@ occupancy = 1.0
                 plug_in_policy: hares_types::PlugInPolicy::Always,
                 capacity_j: 60.0 * 3.6e6,
                 max_charge_w: 7600.0,
-                fuel_economy_kwh_per_mi: 0.28,
+                fuel_economy_j_per_m: 626.6045505724814,
             }),
         ));
 
@@ -16308,18 +16349,18 @@ occupancy = 1.0
                         target_soc: 0.9,
                     },
                     plug_in_policy: hares_types::PlugInPolicy::Always,
-                    daily_drive_miles: ScheduleSource::Constant(30.0),
+                    daily_drive_distance_m: ScheduleSource::Constant(48_280.32),
                     departure_time: ScheduleSource::Constant(480.0),
                     trip_duration: ScheduleSource::Constant(600.0),
                     arrival_time: None,
                     event_day_ratio: 0.8,
-                    fuel_economy_kwh_per_mi: 0.28,
-                    capacity_kwh: 60.0,
-                    max_charge_kw: 7.2,
-                    average_speed_mph: 30.0,
-                    range_anxiety_miles: 20.0,
+                    fuel_economy_j_per_m: 626.6045505724814,
+                    capacity_j: 216_000_000.0,
+                    max_charge_w: 7200.0,
+                    average_speed_m_per_s: 13.4112,
+                    range_anxiety_distance_m: 32_186.88,
                     away_charge_fraction: 0.0,
-                    away_charge_power_kw: 6.6,
+                    away_charge_power_w: 6600.0,
                 },
                 ChaCha8Rng::seed_from_u64(42),
             )) as Box<dyn crate::Actor>
@@ -16336,8 +16377,9 @@ occupancy = 1.0
             .find(|s| s.name == "EvDriver:EV1")
             .expect("checkpoint must carry the EV driver's state");
         assert_eq!(
-            entry.schema_version, 3,
-            "the EV driver snapshot schema is version 3 (gate latches and estimate failure)"
+            entry.schema_version, 4,
+            "the EV driver snapshot schema is version 4 (the SI energies; v3 \
+             carried gate latches and the estimate failure)"
         );
         // Tamper: pretend the blob was written by an earlier build.
         entry.schema_version = 1;
@@ -16353,7 +16395,7 @@ occupancy = 1.0
             msg.contains("actor schema version mismatch")
                 && msg.contains("EvDriver:EV1")
                 && msg.contains("blob=1")
-                && msg.contains("expected=3"),
+                && msg.contains("expected=4"),
             "error must name the actor and both versions; got: {msg}"
         );
         assert!(
@@ -19101,7 +19143,7 @@ destination = "memory"
             plug_in_policy: hares_types::PlugInPolicy::Always,
             capacity_j: 60.0 * 3.6e6,
             max_charge_w: 7600.0,
-            fuel_economy_kwh_per_mi: 0.28,
+            fuel_economy_j_per_m: 626.6045505724814,
         }
     }
 
@@ -19993,7 +20035,8 @@ latent_gain_fraction = 0.08
         for power in &powers[..BOUNDARY_STEP] {
             january_import_j += power.max(0.0) * 3600.0;
         }
-        let january_sum = hares_core_units::j_to_kwh(january_import_j);
+        let january_sum = uom::si::f64::Energy::new::<uom::si::energy::joule>(january_import_j)
+            .get::<uom::si::energy::kilowatt_hour>();
         assert_eq!(
             from_start_january.total_import_kwh.to_bits(),
             january_sum.to_bits(),
@@ -20498,8 +20541,8 @@ latent_gain_fraction = 0.08
     impl Undeclared {
         fn send(&self, out: &mut Vec<hares_control::DispatchRequest>) {
             let signal = ControlSignal::PowerSetpoint {
-                active_power_kw: 0.0000,
-                reactive_power_kvar: None,
+                active_power_w: 0.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             };
@@ -20607,8 +20650,8 @@ latent_gain_fraction = 0.08
                 out: &mut Vec<hares_control::DispatchRequest>,
             ) {
                 let signal = ControlSignal::PowerSetpoint {
-                    active_power_kw: 0.0000,
-                    reactive_power_kvar: None,
+                    active_power_w: 0.0,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 };
@@ -23129,7 +23172,9 @@ occupancy = 0.0
             .expect("float64 column");
         assert_eq!(
             values.value(0).to_bits(),
-            hares_core_units::w_to_kw(step.net_electric_power_w).to_bits(),
+            uom::si::f64::Power::new::<uom::si::power::watt>(step.net_electric_power_w)
+                .get::<uom::si::power::kilowatt>()
+                .to_bits(),
             "the placed value at the named variable's golden index is the \
              step's own value, on bits"
         );
@@ -24132,17 +24177,5 @@ occupancy = 1.0"#,
                 .iter()
                 .any(|f| f.name() == "Total Electric Power (kW)")
         );
-    }
-}
-
-/// The kW working values of SI reads: the actors' kW-era parameters convert
-/// once at the read until the control-layer commit.
-pub(crate) mod hares_core_units {
-    pub(crate) fn w_to_kw(w: f64) -> f64 {
-        uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
-    }
-    pub(crate) fn j_to_kwh(j: f64) -> f64 {
-        uom::si::f64::Energy::new::<uom::si::energy::joule>(j)
-            .get::<uom::si::energy::kilowatt_hour>()
     }
 }

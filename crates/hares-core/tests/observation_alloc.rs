@@ -73,7 +73,6 @@ fn base_observation_fields(dwelling: &Dwelling) -> Vec<String> {
         "outdoor_temp",
         "outdoor_humidity_ratio",
         "total_power_w",
-        "total_electric_kw",
         "reactive_power_var",
         "time_sin",
         "time_cos",

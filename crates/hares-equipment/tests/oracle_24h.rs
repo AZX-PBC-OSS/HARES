@@ -618,7 +618,7 @@ fn oracle_battery_self_discharge_24h() {
 #[test]
 fn oracle_generator_24h_constant_load() {
     let rated_kw = 10.0;
-    let setpoint_kw = 5.0;
+    let setpoint_w = 5000.0;
     let eta_electric = 0.30;
 
     let cfg = EquipmentConfig::from_typed(
@@ -666,8 +666,8 @@ fn oracle_generator_24h_constant_load() {
 
     generator
         .apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: setpoint_kw,
-            reactive_power_kvar: None,
+            active_power_w: setpoint_w,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -689,8 +689,8 @@ fn oracle_generator_24h_constant_load() {
     let total_gen_kwh = total_gen_kw_s / 3_600.0;
 
     // Analytical: gen = power * 24h, fuel = power_W / efficiency * 24h
-    let expected_gen_kwh = setpoint_kw * HOURS_24;
-    let expected_fuel_kwh = (setpoint_kw * 1_000.0) / eta_electric * HOURS_24 / 1_000.0;
+    let expected_gen_kwh = (setpoint_w / 1_000.0) * HOURS_24;
+    let expected_fuel_kwh = setpoint_w / eta_electric * HOURS_24 / 1_000.0;
 
     assert_within_pct(total_gen_kwh, expected_gen_kwh, 1.0, "generator output");
     assert_within_pct(total_fuel_kwh, expected_fuel_kwh, 1.0, "generator fuel");

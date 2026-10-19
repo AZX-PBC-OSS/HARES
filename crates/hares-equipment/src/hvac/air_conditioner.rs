@@ -2092,13 +2092,8 @@ impl CoolingCore {
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = *fraction;
             }
-            ControlSignal::PowerLimit { max_power_kw, .. } => {
-                // The signal carries kW until the control-layer commit; the
-                // working value is W (SI), converted once here.
-                let max_power_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
-                        .get::<uom::si::power::watt>();
-                self.ctrl_power_limit_w = max_power_w;
+            ControlSignal::PowerLimit { max_power_w, .. } => {
+                self.ctrl_power_limit_w = *max_power_w;
             }
             ControlSignal::ModeOverride { mode } => {
                 self.ctrl_mode_override = Some(*mode);
@@ -2477,8 +2472,8 @@ mod tests {
             (ControlSignal::LoadFraction { fraction: 5.0 }, "fraction"),
             (
                 ControlSignal::PowerLimit {
-                    max_power_kw: -5.0,
-                    ramp_rate_kw_per_s: None,
+                    max_power_w: -5.0,
+                    ramp_rate_w_per_s: None,
                 },
                 "power",
             ),
@@ -4943,8 +4938,8 @@ mod tests {
             (
                 "PowerLimit",
                 ControlSignal::PowerLimit {
-                    max_power_kw: 2.0,
-                    ramp_rate_kw_per_s: None,
+                    max_power_w: 2000.0,
+                    ramp_rate_w_per_s: None,
                 },
             ),
             (
@@ -5801,8 +5796,8 @@ mod dr_tests {
         eq_limited.init(&cfg, &environment).unwrap();
         eq_limited
             .apply_control(&ControlSignal::PowerLimit {
-                max_power_kw: limit_w / 1000.0,
-                ramp_rate_kw_per_s: None,
+                max_power_w: limit_w / 1000.0,
+                ramp_rate_w_per_s: None,
             })
             .unwrap();
         let kw_limited = step_once(&mut eq_limited, &environment);

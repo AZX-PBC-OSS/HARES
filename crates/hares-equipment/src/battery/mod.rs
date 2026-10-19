@@ -1799,21 +1799,11 @@ impl Equipment for Battery {
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc,
                 max_soc,
             } => {
-                // The signal carries kW and kVAR until the control-layer
-                // commit; the working values are W and VAR (SI), converted
-                // once here.
-                let active_power_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*active_power_kw)
-                        .get::<uom::si::power::watt>();
-                let reactive_power_var = reactive_power_kvar.map(|q| {
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(q)
-                        .get::<uom::si::power::watt>()
-                });
                 if min_soc.is_some() || max_soc.is_some() {
                     return Err(HaresError::Control(
                         "Battery PowerSetpoint must not carry min_soc/max_soc; SOC window constraints arrive via SOCTarget".to_string(),
@@ -1827,7 +1817,7 @@ impl Equipment for Battery {
                         "Battery PowerSetpoint active_power_w must be finite".to_string(),
                     ));
                 }
-                self.power_setpoint_w = Some(active_power_w);
+                self.power_setpoint_w = Some(*active_power_w);
                 self.soc_target = None;
                 self.self_consumption_enabled = false;
                 if let Some(q) = reactive_power_var {
@@ -1836,7 +1826,7 @@ impl Equipment for Battery {
                             "Battery PowerSetpoint reactive_power_var must be finite".to_string(),
                         ));
                     }
-                    self.q_setpoint_var = Some(q);
+                    self.q_setpoint_var = Some(*q);
                 }
             }
             ControlSignal::SOCTarget {
@@ -1933,26 +1923,16 @@ impl Equipment for Battery {
                 self.power_setpoint_w = None;
                 self.soc_target = None;
             }
-            ControlSignal::PowerLimit { max_power_kw, .. } => {
-                // The signal carries kW until the control-layer commit; the
-                // working value is W (SI), converted once here.
-                let max_power_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
-                        .get::<uom::si::power::watt>();
-                self.external_power_limit_w = Some(max_power_w);
+            ControlSignal::PowerLimit { max_power_w, .. } => {
+                self.external_power_limit_w = Some(*max_power_w);
             }
-            ControlSignal::ReactiveSetpoint { kvar } => {
-                // The signal carries kVAR until the control-layer commit; the
-                // working value is VAR (SI), converted once here.
-                if !kvar.is_finite() {
+            ControlSignal::ReactiveSetpoint { var } => {
+                if !var.is_finite() {
                     return Err(HaresError::Control(
-                        "Battery ReactiveSetpoint kvar must be finite".to_string(),
+                        "Battery ReactiveSetpoint var must be finite".to_string(),
                     ));
                 }
-                let reactive_power_var =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*kvar)
-                        .get::<uom::si::power::watt>();
-                self.q_setpoint_var = Some(reactive_power_var);
+                self.q_setpoint_var = Some(*var);
             }
             ControlSignal::PowerFactorSetpoint { power_factor } => {
                 if !power_factor.is_finite() || *power_factor <= 0.0 || *power_factor > 1.0 {
@@ -2463,14 +2443,14 @@ mod tests {
         bat.init(&config, &base_env()).unwrap();
         let err = bat
             .apply_control_unchecked(&ControlSignal::PowerSetpoint {
-                active_power_kw: f64::NAN,
-                reactive_power_kvar: None,
+                active_power_w: f64::NAN,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
             .expect_err("non-finite active setpoint must be rejected");
         assert!(
-            format!("{err:?}").contains("active_power_kw"),
+            format!("{err:?}").contains("active_power_w"),
             "error must name the offending field, got {err:?}"
         );
     }
@@ -2492,8 +2472,8 @@ mod tests {
         for bad in [f64::NAN, f64::NEG_INFINITY, -5.0] {
             let err = bat
                 .apply_control_unchecked(&ControlSignal::PowerLimit {
-                    max_power_kw: bad,
-                    ramp_rate_kw_per_s: None,
+                    max_power_w: bad,
+                    ramp_rate_w_per_s: None,
                 })
                 .expect_err("invalid PowerLimit must be rejected");
             assert!(
@@ -2522,8 +2502,8 @@ mod tests {
         // longer govern: charging stops at the target instead of riding
         // the latched 5 kW toward max_soc.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -2551,8 +2531,8 @@ mod tests {
         // Mirror: a fresh PowerSetpoint supersedes the latched target — a
         // 2 kW discharge must drive SOC back below the 0.6 target.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -2.0,
-            reactive_power_kvar: None,
+            active_power_w: -2000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -2585,8 +2565,8 @@ mod tests {
 
         // Apply large charge power setpoint
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 100.0000,
-            reactive_power_kvar: None,
+            active_power_w: 100000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -2617,8 +2597,8 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -100.0,
-            reactive_power_kvar: None,
+            active_power_w: -100000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -2649,8 +2629,8 @@ mod tests {
 
         // Charge for 10 steps
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: charge_power,
-            reactive_power_kvar: None,
+            active_power_w: charge_power,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -2667,8 +2647,8 @@ mod tests {
 
         // Discharge for 10 steps at same power magnitude
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -charge_power,
-            reactive_power_kvar: None,
+            active_power_w: -charge_power,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -2709,8 +2689,8 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -2851,8 +2831,8 @@ mod tests {
 
         // Command a charge — during a dead-bus outage it must not happen.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0000,
-            reactive_power_kvar: Some(1.0),
+            active_power_w: 3000.0,
+            reactive_power_var: Some(1.0),
             min_soc: None,
             max_soc: None,
         })
@@ -2912,8 +2892,8 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0000,
-            reactive_power_kvar: None,
+            active_power_w: 3000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -2954,8 +2934,8 @@ mod tests {
 
         // Command 3 kW of charging — more than the visible surplus.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0000,
-            reactive_power_kvar: None,
+            active_power_w: 3000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -2996,8 +2976,8 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -2.0,
-            reactive_power_kvar: None,
+            active_power_w: -2000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3049,16 +3029,16 @@ mod tests {
         // Both charge at 3 kW
         bat_a
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 3.0000,
-                reactive_power_kvar: None,
+                active_power_w: 3000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
             .unwrap();
         bat_b
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: 3.0000,
-                reactive_power_kvar: None,
+                active_power_w: 3000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3090,8 +3070,8 @@ mod tests {
 
         // Step a few times to build up some state
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0000,
-            reactive_power_kvar: None,
+            active_power_w: 2000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3226,8 +3206,8 @@ mod tests {
         bat.apply_control(&ControlSignal::GridConnect { connected: false })
             .unwrap();
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3342,8 +3322,8 @@ mod tests {
 
         // Request discharge
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3405,8 +3385,8 @@ mod tests {
         // Step at warm temp to get baseline discharge
         bat.cell_temp_c = 25.0;
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3420,8 +3400,8 @@ mod tests {
         bat.init(&config, &env).unwrap();
         bat.cell_temp_c = -5.0; // Midpoint of [-20, 10] -> derate = 0.5
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3450,8 +3430,8 @@ mod tests {
         bat.cell_temp_c = -25.0; // Below default min_discharge_temp_c (-20)
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3482,8 +3462,8 @@ mod tests {
         bat.cell_temp_c = -2.0; // Below min charge temp
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3636,8 +3616,8 @@ mod tests {
 
             let soc_before_charge = bat.telemetry().get(tk::SOC).unwrap_or(0.5);
             bat.apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: charge_power_w,
-                reactive_power_kvar: None,
+                active_power_w: charge_power_w,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3649,8 +3629,8 @@ mod tests {
             let delta_soc_charge = soc_after_charge - soc_before_charge;
 
             bat.apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: -charge_power_w,
-                reactive_power_kvar: None,
+                active_power_w: -charge_power_w,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3698,8 +3678,8 @@ mod tests {
         let discharge_eta = 0.80_f64;
         let capacity_j = 10.0_f64 * 3.6e6;
         let dt = Duration::from_secs(3600); // 1 hour for clean arithmetic
-        let power_kw = 1.0_f64; // 1 kW AC for 1 hour = 1 kWh AC
-        let power_j = power_kw * 1000.0 * dt.as_secs_f64(); // 1 kW for 1 h = 3.6e6 J
+        let power_w = 1000.0_f64; // 1 kW AC for 1 hour = 1 kWh AC
+        let power_j = power_w * dt.as_secs_f64(); // 1 kW for 1 h = 3.6e6 J
 
         let make_bat = |charge_e: f64, discharge_e: f64| {
             EquipmentConfig::from_typed(
@@ -3734,8 +3714,8 @@ mod tests {
             let soc_before = bat.soc;
 
             bat.apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: power_kw,
-                reactive_power_kvar: None,
+                active_power_w: power_w,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3763,8 +3743,8 @@ mod tests {
             let soc_before = bat.soc;
 
             bat.apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: -power_kw,
-                reactive_power_kvar: None,
+                active_power_w: -power_w,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3793,8 +3773,8 @@ mod tests {
             let soc_before = bat.soc;
 
             bat.apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: power_kw,
-                reactive_power_kvar: None,
+                active_power_w: power_w,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -3835,8 +3815,8 @@ mod tests {
         // Discharge at 95% of max (negative = discharge).
         let high_power_w = -0.95 * DEFAULT_MAX_DISCHARGE_W;
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: high_power_w,
-            reactive_power_kvar: None,
+            active_power_w: high_power_w,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -4027,8 +4007,8 @@ mod tests {
 
         // Request discharge power 10× P_max (guaranteed to drive discriminant negative)
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -(p_max_w * 10.0 / 1000.0),
-            reactive_power_kvar: None,
+            active_power_w: -(p_max_w * 10.0 / 1000.0),
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -4110,8 +4090,8 @@ mod tests {
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &env).unwrap();
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.5000,
-            reactive_power_kvar: None,
+            active_power_w: 2500.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -4158,8 +4138,8 @@ mod tests {
         let mut bat1 = Battery::new(config.clone());
         bat1.init(&config, &env).unwrap();
         bat1.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.5000,
-            reactive_power_kvar: None,
+            active_power_w: 2500.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -4530,8 +4510,8 @@ mod tests {
 
         // Run 10 steps to accumulate some sub-daily degradation state.
         bat1.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0000,
-            reactive_power_kvar: None,
+            active_power_w: 3000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -4584,8 +4564,8 @@ mod tests {
             env.current_time += ChronoDuration::seconds(300);
             let power = if step < steps_per_day / 2 { 5.0 } else { -5.0 };
             bat1.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-                active_power_kw: power,
-                reactive_power_kvar: None,
+                active_power_w: power,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -4800,8 +4780,8 @@ mod tests {
         bat.init(&config, &base_env()).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -4838,8 +4818,8 @@ mod tests {
         bat.init(&config, &base_env()).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -4878,8 +4858,8 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -4933,14 +4913,14 @@ mod tests {
         bat.init(&config, &env).expect("init");
 
         bat.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 2.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 2000.0,
+            ramp_rate_w_per_s: None,
         })
         .expect("PowerLimit accepted");
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -4970,8 +4950,8 @@ mod tests {
         .expect("DR accepted");
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -5002,8 +4982,8 @@ mod tests {
         .expect("DR accepted");
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -5044,8 +5024,8 @@ mod tests {
 
         // DR should have reverted to Normal -- full power available
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -5761,16 +5741,16 @@ mod tests {
 
                 if step < steps_per_day / 2 {
                     bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-                        active_power_kw: 5.0000,
-                        reactive_power_kvar: None,
+                        active_power_w: 5000.0,
+                        reactive_power_var: None,
                         min_soc: None,
                         max_soc: None,
                     })
                     .unwrap();
                 } else {
                     bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-                        active_power_kw: -5.0,
-                        reactive_power_kvar: None,
+                        active_power_w: -5000.0,
+                        reactive_power_var: None,
                         min_soc: None,
                         max_soc: None,
                     })
@@ -6080,8 +6060,8 @@ mod tests {
         bat.capacity_j = 0.0;
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -6143,16 +6123,16 @@ mod tests {
                 env.current_time += ChronoDuration::seconds(300);
                 if step < steps_per_day / 2 {
                     bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-                        active_power_kw: 5.0000,
-                        reactive_power_kvar: None,
+                        active_power_w: 5000.0,
+                        reactive_power_var: None,
                         min_soc: None,
                         max_soc: None,
                     })
                     .unwrap();
                 } else {
                     bat.apply_control_unchecked(&ControlSignal::PowerSetpoint {
-                        active_power_kw: -5.0,
-                        reactive_power_kvar: None,
+                        active_power_w: -5000.0,
+                        reactive_power_var: None,
                         min_soc: None,
                         max_soc: None,
                     })
@@ -6189,10 +6169,10 @@ mod tests {
         bat.capacity_j = 0.0;
 
         // Exercise both charge and discharge directions.
-        for &power_kw in &[5000.0, -5000.0] {
+        for &power_w in &[5000.0, -5000.0] {
             bat.apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: power_kw,
-                reactive_power_kvar: None,
+                active_power_w: power_w,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             })
@@ -6205,9 +6185,9 @@ mod tests {
             let soc = bat.telemetry().get(tk::SOC).unwrap();
             assert!(
                 soc.is_finite(),
-                "SOC must be finite at power_w={power_kw}, got {soc}"
+                "SOC must be finite at power_w={power_w}, got {soc}"
             );
-            assert!(!soc.is_nan(), "SOC must not be NaN at power_w={power_kw}");
+            assert!(!soc.is_nan(), "SOC must not be NaN at power_w={power_w}");
 
             // Also verify key telemetry fields are finite.
             for key in &[
@@ -6219,7 +6199,7 @@ mod tests {
                 if let Some(v) = bat.telemetry().get(key) {
                     assert!(
                         v.is_finite(),
-                        "telemetry key {key:?} must be finite at power_w={power_kw}, got {v}"
+                        "telemetry key {key:?} must be finite at power_w={power_w}, got {v}"
                     );
                 }
             }
@@ -6571,8 +6551,8 @@ mod tests {
 
         // Force charging via PowerSetpoint.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0000,
-            reactive_power_kvar: None,
+            active_power_w: 2000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -6644,8 +6624,8 @@ mod tests {
 
         // Force discharging via PowerSetpoint.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -2.0,
-            reactive_power_kvar: None,
+            active_power_w: -2000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -6715,7 +6695,7 @@ mod tests {
         let env = base_env();
         bat.init(&config, &env).unwrap();
 
-        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { var: 1500.0 })
             .unwrap();
 
         let mut ports = PortSlots::default();
@@ -6782,8 +6762,8 @@ mod tests {
 
         // Charge at 2 kW so the pf = 0.9 baseline would produce Q > 0.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0000,
-            reactive_power_kvar: None,
+            active_power_w: 2000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -6798,7 +6778,7 @@ mod tests {
         );
 
         // Commanded zero must beat the baseline.
-        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.0 })
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { var: 0.0 })
             .unwrap();
         let mut ports = PortSlots::default();
         bat.step(&env, Duration::from_secs(300), &mut ports)
@@ -6827,8 +6807,8 @@ mod tests {
 
         // Force charging via PowerSetpoint so P>0.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0000,
-            reactive_power_kvar: None,
+            active_power_w: 2000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -6894,8 +6874,8 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 2.0000,
-            reactive_power_kvar: Some(0.75),
+            active_power_w: 2000.0,
+            reactive_power_var: Some(750.0),
             min_soc: None,
             max_soc: None,
         })
@@ -6962,8 +6942,8 @@ mod tests {
 
         // Command 5 kW charge + 5 kvar reactive → S = sqrt(P²+25) > 5 kVA.
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: Some(5.0),
+            active_power_w: 5000.0,
+            reactive_power_var: Some(5.0),
             min_soc: None,
             max_soc: None,
         })
@@ -7043,8 +7023,8 @@ mod tests {
         bat.init(&config, &env).unwrap();
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 4.0000,
-            reactive_power_kvar: Some(4.0),
+            active_power_w: 4.0000,
+            reactive_power_var: Some(4.0),
             min_soc: None,
             max_soc: None,
         })
@@ -7079,7 +7059,7 @@ mod tests {
         let env = base_env();
         bat.init(&config, &env).unwrap();
 
-        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.2 })
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { var: 1.2 })
             .unwrap();
 
         let mut ports = PortSlots::default();
@@ -7108,7 +7088,7 @@ mod tests {
         let env = base_env();
         bat.init(&config, &env).unwrap();
 
-        bat.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 0.5 })
+        bat.apply_control(&ControlSignal::ReactiveSetpoint { var: 500.0 })
             .unwrap();
 
         let mut ports = PortSlots::default();

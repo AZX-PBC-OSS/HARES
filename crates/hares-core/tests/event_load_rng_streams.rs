@@ -68,7 +68,7 @@ fn dwelling_config(hpxml: &Path) -> DwellingConfig {
 
 fn probe_spec(class: &str) -> hares_io::EquipmentSpec {
     let parameters = json!({
-        "active_power_w": 1000.0,
+        "active_power_kw": 1000.0,
         "active_duration_s": 1800.0,
         "cooldown_duration_s": 900.0,
         "event_window_source": "constant",

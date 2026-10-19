@@ -932,19 +932,13 @@ impl Equipment for EventBasedLoad {
             ControlSignal::ModeOverrideRelease => {
                 self.forced_mode = None;
             }
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                // The signal carries kW until the control-layer commit; the
-                // stored setpoint is W (SI), converted once here.
-                if !active_power_kw.is_finite() {
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                if !active_power_w.is_finite() {
                     return Err(HaresError::Control(
-                        "EventBasedLoad PowerSetpoint active_power_kw must be finite".to_string(),
+                        "EventBasedLoad PowerSetpoint active_power_w must be finite".to_string(),
                     ));
                 }
-                let setpoint_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*active_power_kw)
-                        .get::<uom::si::power::watt>();
+                let setpoint_w = *active_power_w;
                 self.power_setpoint_override = Some(setpoint_w.max(0.0));
             }
             ControlSignal::EventDelay { delay_s } => {
@@ -2570,8 +2564,8 @@ mod tests {
 
         // Apply a PowerSetpoint override for the next step only.
         eq.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 0.5000,
-            reactive_power_kvar: None,
+            active_power_w: 500.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3420,8 +3414,8 @@ mod tests {
         eq.init(&config, &env).unwrap();
 
         eq.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3470,8 +3464,8 @@ mod tests {
         );
 
         eq.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 0.7500,
-            reactive_power_kvar: None,
+            active_power_w: 750.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3494,7 +3488,7 @@ mod tests {
     // =======================================================================
 
     #[test]
-    fn deterministic_event_does_not_mutate_active_power_kw_field() {
+    fn deterministic_event_does_not_mutate_active_power_w_field() {
         use super::super::config::ConfigValue;
 
         // The series enters in W (SI).

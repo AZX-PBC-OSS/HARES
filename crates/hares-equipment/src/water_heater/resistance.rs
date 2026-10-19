@@ -963,12 +963,7 @@ impl Equipment for ResistanceWH {
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
-            ControlSignal::PowerLimit { max_power_kw, .. } => {
-                // The signal carries kW until the control-layer commit; the
-                // working value is W (SI), converted once here.
-                let max_power_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
-                        .get::<uom::si::power::watt>();
+            ControlSignal::PowerLimit { max_power_w, .. } => {
                 // Clamp element power to respect the limit by reducing ctrl_load_fraction.
                 let total_w = self.upper_element_power_w + self.lower_element_power_w;
                 if total_w > 0.0 {

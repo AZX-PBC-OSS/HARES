@@ -8,9 +8,9 @@ use super::efficiency::temp_efficiency_multiplier;
 #[derive(Clone, Debug)]
 pub struct DecisionContext<'a> {
     pub current_soc: f64,
-    pub capacity_kwh: f64,
-    pub max_charge_kw: f64,
-    pub max_discharge_kw: f64,
+    pub capacity_j: f64,
+    pub max_charge_w: f64,
+    pub max_discharge_w: f64,
     pub env: &'a EnvironmentState,
     pub current_minute: u16,
     pub next_departure_minute: Option<u16>,
@@ -34,7 +34,7 @@ pub struct DecisionContext<'a> {
 pub struct PreferenceVote {
     pub target_soc: Option<f64>,
     /// Positive = charge, negative = discharge.
-    pub power_kw: Option<f64>,
+    pub power_w: Option<f64>,
     pub departure_hour: Option<f64>,
     pub min_soc: Option<f64>,
     pub max_soc: Option<f64>,
@@ -47,7 +47,7 @@ impl PreferenceVote {
     pub fn idle(label: &'static str) -> Self {
         Self {
             target_soc: None,
-            power_kw: None,
+            power_w: None,
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -145,11 +145,11 @@ pub(super) fn needed_charge_hours_to_target(
     ctx: &DecisionContext,
 ) -> Result<f64, hares_types::HaresError> {
     let soc_gap = (target_soc - ctx.current_soc).max(0.0);
-    let energy_kwh = soc_gap * ctx.capacity_kwh;
-    if energy_kwh <= 0.0 {
+    let energy_j = soc_gap * ctx.capacity_j;
+    if energy_j <= 0.0 {
         return Ok(0.0);
     }
-    if ctx.max_charge_kw <= 0.0 || charging_efficiency <= 0.0 {
+    if ctx.max_charge_w <= 0.0 || charging_efficiency <= 0.0 {
         return Ok(f64::INFINITY);
     }
     // Cold-charge capability: the equipment's own published derate when
@@ -172,7 +172,9 @@ pub(super) fn needed_charge_hours_to_target(
         // charging because the same physical mechanisms degrade both.
         _ => charging_efficiency / temp_efficiency_multiplier(ctx.env.weather.outdoor_temp_c),
     };
-    let raw_hours = energy_kwh / (ctx.max_charge_kw * effective_efficiency);
+    // Joules over watts is seconds; once to the hours the estimate
+    // reports.
+    let raw_hours = energy_j / (ctx.max_charge_w * effective_efficiency) / 3600.0;
     let hours = if ctx.time_res_minutes > 0.0 {
         let step_hours = ctx.time_res_minutes / 60.0;
         (raw_hours / step_hours).ceil() * step_hours
@@ -186,9 +188,9 @@ pub(super) fn needed_charge_hours_to_target(
     if hours.is_nan() || hours < 0.0 || hours == f64::NEG_INFINITY {
         return Err(hares_types::HaresError::InvalidState(format!(
             "needed_charge_hours: result must be a non-negative finite number or +inf; \
-             got hours={hours}, soc_gap={soc_gap}, energy_kwh={energy_kwh}, \
-             max_charge_kw={}, effective_efficiency={effective_efficiency}",
-            ctx.max_charge_kw
+             got hours={hours}, soc_gap={soc_gap}, energy_j={energy_j}, \
+             max_charge_w={}, effective_efficiency={effective_efficiency}",
+            ctx.max_charge_w
         )));
     }
 

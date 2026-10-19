@@ -129,8 +129,8 @@ fn battery_config_fields_are_unit_invariant() {
     // The parent's stored value: the fixture's 20.0 kWh nominal capacity,
     // converted to J at the read-back (x3.6e6). The fixed path converts
     // the same kWh once at the read with uom; the two agree on bits.
-    let parent_capacity_kwh = 20.0;
-    let parent_j = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(parent_capacity_kwh)
+    let parent_capacity_j = 20.0;
+    let parent_j = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(parent_capacity_j)
         .get::<uom::si::energy::joule>();
     assert!(
         within_2_ulp(capacity_j, parent_j),

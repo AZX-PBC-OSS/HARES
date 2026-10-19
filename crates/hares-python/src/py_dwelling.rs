@@ -2350,23 +2350,34 @@ fn ev_driver_params(
     spec: &hares_equipment::ev::catalog::VehicleSpec,
     preset: &hares_equipment::ev::catalog::ArchetypePreset,
     seed_bytes: [u8; 32],
-    max_power: f64,
+    max_power_w: f64,
 ) -> hares_core::actors::EvDriverParams {
     hares_core::actors::EvDriverParams {
         strategy: preset.strategy.clone(),
         plug_in_policy: preset.plug_in_policy.clone(),
-        daily_drive_miles: preset.build_miles_schedule(seed_bytes),
+        daily_drive_distance_m: preset.build_distance_schedule(seed_bytes),
         departure_time: preset.build_departure_schedule(seed_bytes),
         trip_duration: preset.build_duration_schedule(seed_bytes),
         arrival_time: preset.build_arrival_schedule(seed_bytes),
         event_day_ratio: preset.event_day_ratio,
-        fuel_economy_kwh_per_mi: spec.fuel_economy_kwh_per_mi,
-        capacity_kwh: spec.capacity_kwh,
-        max_charge_kw: max_power,
-        average_speed_mph: 30.0,
-        range_anxiety_miles: 20.0,
+        // The catalogue's datasheet figures are kWh/mi and kWh; the
+        // driver's parameters are SI, converted once here with uom.
+        fuel_economy_j_per_m: uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
+            spec.fuel_economy_kwh_per_mi,
+        )
+        .get::<uom::si::energy::joule>()
+            / uom::si::f64::Length::new::<uom::si::length::mile>(1.0)
+                .get::<uom::si::length::meter>(),
+        capacity_j: uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(spec.capacity_kwh)
+            .get::<uom::si::energy::joule>(),
+        max_charge_w: max_power_w,
+        average_speed_m_per_s: hares_core::actors::ev_driver::defaults::AVERAGE_SPEED_M_PER_S,
+        range_anxiety_distance_m: hares_core::actors::ev_driver::defaults::RANGE_ANXIETY_DISTANCE_M,
         away_charge_fraction: 0.0,
-        away_charge_power_kw: preset.away_charge_power_kw,
+        away_charge_power_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(
+            preset.away_charge_power_kw,
+        )
+        .get::<uom::si::power::watt>(),
     }
 }
 
@@ -3923,9 +3934,9 @@ mod tests {
     }
 
     /// The seed path's away-charge default: `actor_registry` builds an
-    /// EvDriver whose `away_charge_power_kw` falls back to this when the
+    /// EvDriver whose `away_charge_power_w` falls back to this when the
     /// config carries no override.
-    const SEED_PATH_AWAY_CHARGE_POWER_KW: f64 = 6.6;
+    const SEED_PATH_AWAY_CHARGE_POWER_W: f64 = 6600.0;
 
     #[test]
     fn add_ev_with_driver_away_charge_power_matches_the_seed_path() {
@@ -3938,9 +3949,9 @@ mod tests {
 
         let spec = VehicleId::ChevyBoltEv.spec();
         for aid in EvArchetypeId::ALL {
-            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7.2);
+            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7200.0);
             assert_eq!(
-                params.away_charge_power_kw, SEED_PATH_AWAY_CHARGE_POWER_KW,
+                params.away_charge_power_w, SEED_PATH_AWAY_CHARGE_POWER_W,
                 "{aid}: the Python-built driver's away-charge power must be the seed path's default"
             );
         }
@@ -3955,11 +3966,11 @@ mod tests {
             spec,
             EvArchetypeId::DailyCommuterL2.preset(),
             [7u8; 32],
-            7.2,
+            7200.0,
         );
         params.away_charge_fraction = 0.3;
         params.event_day_ratio = 1.0;
-        params.daily_drive_miles = ScheduleSource::Constant(30.0);
+        params.daily_drive_distance_m = ScheduleSource::Constant(48_280.32);
         params.departure_time = ScheduleSource::Constant(0.0);
         params.trip_duration = ScheduleSource::Constant(600.0);
         params.arrival_time = None;
@@ -3982,8 +3993,8 @@ mod tests {
             let mut out: Vec<DispatchRequest> = Vec::new();
             actor.decide(&env, &mut out);
             for req in out {
-                if let ControlSignal::EvAwayCharge { power_kw } = req.signal {
-                    away_powers.push(power_kw);
+                if let ControlSignal::EvAwayCharge { power_w } = req.signal {
+                    away_powers.push(power_w);
                 }
             }
         }
@@ -3994,8 +4005,8 @@ mod tests {
         assert!(
             away_powers
                 .iter()
-                .all(|p| (*p - SEED_PATH_AWAY_CHARGE_POWER_KW).abs() < 1e-9),
-            "every away-charge dispatch must carry the seed path's 6.6 kW, got {away_powers:?}"
+                .all(|p| (*p - SEED_PATH_AWAY_CHARGE_POWER_W).abs() < 1e-9),
+            "every away-charge dispatch must carry the seed path's 6600 W, got {away_powers:?}"
         );
     }
 
@@ -4005,14 +4016,22 @@ mod tests {
 
         let spec = VehicleId::ChevyBoltEv.spec();
         let quotient = spec.capacity_kwh / spec.range_miles;
+        // The catalogue's kWh/mi and the driver's J/m: the same figure
+        // through the one uom conversion the builder performs.
+        let catalogue_j_per_m = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
+            spec.fuel_economy_kwh_per_mi,
+        )
+        .get::<uom::si::energy::joule>()
+            / uom::si::f64::Length::new::<uom::si::length::mile>(1.0)
+                .get::<uom::si::length::meter>();
         for aid in EvArchetypeId::ALL {
-            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7.2);
+            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7200.0);
             assert_eq!(
-                params.fuel_economy_kwh_per_mi, spec.fuel_economy_kwh_per_mi,
+                params.fuel_economy_j_per_m, catalogue_j_per_m,
                 "{aid}: the Python-built driver's fuel economy must be the catalogue's"
             );
             assert_ne!(
-                params.fuel_economy_kwh_per_mi, quotient,
+                params.fuel_economy_j_per_m, quotient,
                 "{aid}: the catalogue figure must not be the capacity/range quotient"
             );
         }

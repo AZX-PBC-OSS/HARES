@@ -226,8 +226,8 @@ fn battery_core_output_matches_dwelling_aggregation() {
         .apply_control_validated(
             &battery_name,
             ControlSignal::PowerSetpoint {
-                active_power_kw: 3.0,
-                reactive_power_kvar: None,
+                active_power_w: 3.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -296,8 +296,8 @@ fn actors_observe_previous_equipment_core_snapshot() {
                 surplus_deadband_w: 0.0,
             },
             grid_export_rule: GridExportRule::Unrestricted,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            max_charge_w: 5.0,
+            max_discharge_w: 5.0,
             price_schedule: None,
             steps_per_day: 24,
             min_dwell_steps: 0,

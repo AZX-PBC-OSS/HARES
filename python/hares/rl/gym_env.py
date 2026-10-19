@@ -167,9 +167,9 @@ def _infer_signal_type(fields: Sequence[str]) -> str:
     normalized = {field.lower() for field in fields}
     if normalized & (_SETPOINT_FIELDS | {"deadband_c"}):
         return "ThermalSetpoint"
-    if normalized & {"active_power_kw", "reactive_power_kvar", "p_setpoint_kw", "kw"}:
+    if normalized & {"active_power_w", "reactive_power_var"}:
         return "PowerSetpoint"
-    if normalized & {"max_power_kw", "ramp_rate_kw_per_s"}:
+    if normalized & {"max_power_w", "ramp_rate_w_per_s"}:
         return "PowerLimit"
     if normalized & {"target_soc", "soc", "min_soc", "max_soc"}:
         return "SOCTarget"
@@ -389,13 +389,13 @@ def build_control_signal(signal_type: str, values: Mapping[str, float]) -> Any:
         )
     if signal_type == "PowerSetpoint":
         return PyControlSignal.power_setpoint(
-            kw=lower.get("active_power_kw", lower.get("p_setpoint_kw", lower.get("kw", 0.0))),
-            reactive_kvar=lower.get("reactive_power_kvar"),
+            active_power_w=lower.get("active_power_w", 0.0),
+            reactive_power_var=lower.get("reactive_power_var"),
         )
     if signal_type == "PowerLimit":
         return PyControlSignal.power_limit(
-            max_power_kw=lower.get("max_power_kw", 0.0),
-            ramp_rate_kw_per_s=lower.get("ramp_rate_kw_per_s"),
+            max_power_w=lower.get("max_power_w", 0.0),
+            ramp_rate_w_per_s=lower.get("ramp_rate_w_per_s"),
         )
     if signal_type == "SOCTarget":
         return PyControlSignal.soc_target(

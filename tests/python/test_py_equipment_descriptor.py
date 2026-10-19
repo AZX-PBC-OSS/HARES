@@ -188,12 +188,12 @@ class TestValidateControl:
         names = dwelling.equipment_names()
         assert len(names) > 0, "should have at least one equipment"
 
-        valid_signal = ControlSignal.power_setpoint(1.0)
+        valid_signal = ControlSignal.power_setpoint(active_power_w=1000.0)
         result = dwelling.validate_control(names[0], valid_signal)
         assert isinstance(result, bool), "should return a boolean"
 
     def test_validate_control_returns_false_for_nonexistent_equipment(self, dwelling):
-        signal = ControlSignal.power_setpoint(1.0)
+        signal = ControlSignal.power_setpoint(active_power_w=1000.0)
         result = dwelling.validate_control("nonexistent_equipment_name", signal)
 
         assert result is False, "should return False for nonexistent equipment"

@@ -465,18 +465,18 @@ fn midrun_readd_of_a_removed_name_reuses_its_frozen_columns() {
         .iter()
         .position(|c| *c == "Clothes Washer Electric Power (kW)")
         .unwrap_or_else(|| panic!("washer column missing; header: {header:?}"));
-    let day2_kwh: f64 = contents
+    let day2_energy_j: f64 = contents
         .lines()
         .skip(1 + 96)
         .filter_map(|l| l.split(',').nth(washer_col))
         .filter_map(|v| v.trim().parse::<f64>().ok())
-        .map(|kw| kw * 0.25)
+        .map(|kw| kw * 0.25 * 3.6e6)
         .sum();
     assert!(
-        day2_kwh > 1.0,
+        day2_energy_j > 3.6e6,
         "the re-added name's frozen columns must carry its output (0.5 kW → \
          ≈12 kWh/day) — a quiet column means the re-add was misclassified as \
-         schema-unknown and its values silently dropped; got {day2_kwh} kWh"
+         schema-unknown and its values silently dropped; got {day2_energy_j} J"
     );
 }
 

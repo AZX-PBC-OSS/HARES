@@ -213,13 +213,13 @@ pub trait Actor: Send + Sync + 'static {
     ///
     /// # Arguments
     ///
-    /// * `pv_kw` - Actual PV generation from current-step Independent equipment
-    ///   ports (kW), positive = producing.
+    /// * `pv_w` - Actual PV generation from current-step Independent equipment
+    ///   ports (W, SI), positive = producing.
     /// * `env` - Current environment state.
     /// * `out` - Pre-allocated output buffer to append revised dispatch requests to.
     fn adjust_for_pv(
         &mut self,
-        _pv_kw: f64,
+        _pv_w: f64,
         _env: &EnvironmentState,
         _out: &mut Vec<DispatchRequest>,
     ) {

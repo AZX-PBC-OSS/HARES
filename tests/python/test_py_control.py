@@ -1,7 +1,7 @@
 """Tests for ControlSignal Python bindings."""
 
 import pytest
-from typing import cast
+from typing import Callable, cast
 from hares import (
     ControlSignal,
     DispatchRequest,
@@ -21,21 +21,21 @@ class TestControlSignalConstructors:
     """Test all 18 ControlSignal constructors."""
 
     def test_power_setpoint(self):
-        sig = ControlSignal.power_setpoint(1.5)
+        sig = ControlSignal.power_setpoint(active_power_w=1.5)
         assert sig.to_dict()["type"] == "PowerSetpoint"
-        assert sig.to_dict()["active_power_kw"] == 1.5
+        assert sig.to_dict()["active_power_w"] == 1.5
         assert "PowerSetpoint" in repr(sig)
 
     def test_power_setpoint_accepts_negative_discharge(self):
         # Signed per the core contract: negative = discharge (V2G/V2H).
-        sig = ControlSignal.power_setpoint(-1.0)
-        assert sig.to_dict()["active_power_kw"] == -1.0
+        sig = ControlSignal.power_setpoint(active_power_w=-1.0)
+        assert sig.to_dict()["active_power_w"] == -1.0
 
     def test_power_setpoint_accepts_zero_and_positive(self):
-        sig = ControlSignal.power_setpoint(0.0)
-        assert sig.to_dict()["active_power_kw"] == 0.0
-        sig = ControlSignal.power_setpoint(1.5)
-        assert sig.to_dict()["active_power_kw"] == 1.5
+        sig = ControlSignal.power_setpoint(active_power_w=0.0)
+        assert sig.to_dict()["active_power_w"] == 0.0
+        sig = ControlSignal.power_setpoint(active_power_w=1.5)
+        assert sig.to_dict()["active_power_w"] == 1.5
 
     def test_ideal_capacity_rejects_negative(self):
         with pytest.raises(ValueError):
@@ -81,13 +81,13 @@ class TestControlSignalConstructors:
 
     def test_power_limit_rejects_negative(self):
         with pytest.raises(ValueError):
-            ControlSignal.power_limit(max_power_kw=-1.0)
+            ControlSignal.power_limit(max_power_w=-1.0)
 
     def test_power_limit_accepts_zero_and_positive(self):
-        sig = ControlSignal.power_limit(max_power_kw=0.0)
-        assert sig.to_dict()["max_power_kw"] == 0.0
-        sig = ControlSignal.power_limit(max_power_kw=5.0)
-        assert sig.to_dict()["max_power_kw"] == 5.0
+        sig = ControlSignal.power_limit(max_power_w=0.0)
+        assert sig.to_dict()["max_power_w"] == 0.0
+        sig = ControlSignal.power_limit(max_power_w=5000.0)
+        assert sig.to_dict()["max_power_w"] == 5000.0
 
     def test_curtailment_percent_rejects_out_of_range(self):
         with pytest.raises(ValueError):
@@ -103,25 +103,25 @@ class TestControlSignalConstructors:
         sig = ControlSignal.curtailment_percent(50.0)
         assert sig.to_dict()["percent"] == 50.0
 
-    def test_ev_drive_rejects_negative_kwh(self):
+    def test_ev_drive_rejects_negative_energy(self):
         with pytest.raises(ValueError):
-            ControlSignal.ev_drive(-1.0)
+            ControlSignal.ev_drive(energy_j=-1.0)
 
     def test_ev_drive_accepts_zero_and_positive(self):
-        sig = ControlSignal.ev_drive(0.0)
-        assert sig.to_dict()["kwh"] == 0.0
-        sig = ControlSignal.ev_drive(5.0)
-        assert sig.to_dict()["kwh"] == 5.0
+        sig = ControlSignal.ev_drive(energy_j=0.0)
+        assert sig.to_dict()["energy_j"] == 0.0
+        sig = ControlSignal.ev_drive(energy_j=1.8e7)
+        assert sig.to_dict()["energy_j"] == 1.8e7
 
     def test_ev_away_charge_rejects_negative_power(self):
         with pytest.raises(ValueError):
-            ControlSignal.ev_away_charge(-1.0)
+            ControlSignal.ev_away_charge(power_w=-1.0)
 
     def test_ev_away_charge_accepts_zero_and_positive(self):
-        sig = ControlSignal.ev_away_charge(0.0)
-        assert sig.to_dict()["power_kw"] == 0.0
-        sig = ControlSignal.ev_away_charge(11.5)
-        assert sig.to_dict()["power_kw"] == 11.5
+        sig = ControlSignal.ev_away_charge(power_w=0.0)
+        assert sig.to_dict()["power_w"] == 0.0
+        sig = ControlSignal.ev_away_charge(power_w=11_500.0)
+        assert sig.to_dict()["power_w"] == 11_500.0
 
     def test_ev_set_ready_by_rejects_out_of_range_soc(self):
         with pytest.raises(ValueError):
@@ -153,7 +153,7 @@ class TestControlSignalConstructors:
 
     def test_power_setpoint_rejects_nan(self):
         with pytest.raises(ValueError):
-            ControlSignal.power_setpoint(float("nan"))
+            ControlSignal.power_setpoint(active_power_w=float("nan"))
 
     def test_ideal_capacity_rejects_nan(self):
         with pytest.raises(ValueError):
@@ -173,7 +173,7 @@ class TestControlSignalConstructors:
 
     def test_power_limit_rejects_nan(self):
         with pytest.raises(ValueError):
-            ControlSignal.power_limit(max_power_kw=float("nan"))
+            ControlSignal.power_limit(max_power_w=float("nan"))
 
     def test_curtailment_percent_rejects_nan(self):
         with pytest.raises(ValueError):
@@ -181,11 +181,11 @@ class TestControlSignalConstructors:
 
     def test_ev_drive_rejects_nan(self):
         with pytest.raises(ValueError):
-            ControlSignal.ev_drive(float("nan"))
+            ControlSignal.ev_drive(energy_j=float("nan"))
 
     def test_ev_away_charge_rejects_nan(self):
         with pytest.raises(ValueError):
-            ControlSignal.ev_away_charge(float("nan"))
+            ControlSignal.ev_away_charge(power_w=float("nan"))
 
     def test_ev_set_ready_by_rejects_nan(self):
         with pytest.raises(ValueError):
@@ -328,17 +328,17 @@ class TestControlSignalConstructors:
         assert "HumiditySetpoint" in repr(sig)
 
     def test_power_limit(self):
-        sig = ControlSignal.power_limit(max_power_kw=5.0, ramp_rate_kw_per_s=0.1)
+        sig = ControlSignal.power_limit(max_power_w=5000.0, ramp_rate_w_per_s=0.1)
         d = sig.to_dict()
         assert d["type"] == "PowerLimit"
-        assert d["max_power_kw"] == 5.0
-        assert d["ramp_rate_kw_per_s"] == 0.1
+        assert d["max_power_w"] == 5000.0
+        assert d["ramp_rate_w_per_s"] == 0.1
         assert "PowerLimit" in repr(sig)
 
     def test_power_limit_optional_params(self):
-        sig = ControlSignal.power_limit(max_power_kw=5.0)
+        sig = ControlSignal.power_limit(max_power_w=5000.0)
         d = sig.to_dict()
-        assert "ramp_rate_kw_per_s" not in d
+        assert "ramp_rate_w_per_s" not in d
 
     def test_duty_cycle(self):
         sig = ControlSignal.duty_cycle(on_fraction=0.5, period_s=300.0)
@@ -403,10 +403,10 @@ class TestControlSignalConstructors:
         assert "CurtailmentPercent" in repr(sig)
 
     def test_reactive_setpoint(self):
-        sig = ControlSignal.reactive_setpoint(kvar=1.0)
+        sig = ControlSignal.reactive_setpoint(var=1.0)
         d = sig.to_dict()
         assert d["type"] == "ReactiveSetpoint"
-        assert d["kvar"] == 1.0
+        assert d["var"] == 1.0
         assert "ReactiveSetpoint" in repr(sig)
 
     def test_power_factor_setpoint(self):
@@ -473,7 +473,7 @@ class TestControlSignalFromDict:
     """Test from_dict parsing."""
 
     def test_from_dict_power_setpoint(self):
-        d = {"type": "PowerSetpoint", "active_power_kw": 1.5}
+        d = {"type": "PowerSetpoint", "active_power_w": 1.5}
         sig = ControlSignal.from_dict(d)
         assert sig.to_dict()["type"] == "PowerSetpoint"
 
@@ -484,16 +484,16 @@ class TestControlSignalFromDict:
 
     def test_from_dict_all_26_variants(self):
         variants = [
-            {"type": "PowerSetpoint", "active_power_kw": 1.0},
+            {"type": "PowerSetpoint", "active_power_w": 1.0},
             {"type": "ThermalSetpoint", "heating_setpoint_c": 20.0},
             {"type": "ThermalSetpointDelta", "heating_delta_c": 1.0},
             {"type": "HumiditySetpoint", "target_rh": 50.0},
-            {"type": "PowerLimit", "max_power_kw": 5.0},
+            {"type": "PowerLimit", "max_power_w": 5000.0},
             {"type": "DutyCycle", "on_fraction": 0.5},
             {"type": "GridConnect", "connected": True},
             {"type": "SelfConsumption", "enabled": True, "solar_only_charging": True},
             {"type": "CurtailmentPercent", "percent": 50.0},
-            {"type": "ReactiveSetpoint", "kvar": 1.0},
+            {"type": "ReactiveSetpoint", "var": 1.0},
             {"type": "PowerFactorSetpoint", "power_factor": 0.95},
             {"type": "InverterPriorityMode", "priority": "Watt"},
             {"type": "SOCTarget", "target_soc": 0.8},
@@ -505,8 +505,8 @@ class TestControlSignalFromDict:
             {"type": "IdealCapacity", "capacity_w": 5000.0},
             {"type": "IdealCapacityModeOverride", "mode": "Auto"},
             {"type": "EvPlugIn", "state": "HomePluggedIn"},
-            {"type": "EvDrive", "kwh": 5.0},
-            {"type": "EvAwayCharge", "power_kw": 11.5},
+            {"type": "EvDrive", "energy_j": 1.8e7},
+            {"type": "EvAwayCharge", "power_w": 11_500.0},
             {"type": "EvSetReadyBy", "departure_hour": 7.0, "target_soc": 0.85},
             {"type": "EventDelay", "delay_s": 300.0},
             {"type": "MaxCapacityFraction", "fraction": 0.5},
@@ -580,7 +580,7 @@ class TestControlSignalFromDict:
         invalid_cases = [
             # PowerSetpoint is signed (negative = discharge) and therefore
             # not an invalid case.
-            {"type": "PowerLimit", "max_power_kw": -1.0},
+            {"type": "PowerLimit", "max_power_w": -1.0},
             {"type": "SOCTarget", "target_soc": 1.5},
             {"type": "SOCTarget", "target_soc": -0.1},
             {"type": "DutyCycle", "on_fraction": 1.5},
@@ -588,8 +588,8 @@ class TestControlSignalFromDict:
             {"type": "LoadFraction", "fraction": -0.5},
             {"type": "CurtailmentPercent", "percent": 150.0},
             {"type": "IdealCapacity", "capacity_w": -1.0},
-            {"type": "EvDrive", "kwh": -1.0},
-            {"type": "EvAwayCharge", "power_kw": -1.0},
+            {"type": "EvDrive", "energy_j": -1.0},
+            {"type": "EvAwayCharge", "power_w": -1.0},
             {"type": "EvSetReadyBy", "departure_hour": 7.0, "target_soc": 1.5},
             {"type": "MaxCapacityFraction", "fraction": -0.5},
         ]
@@ -600,15 +600,15 @@ class TestControlSignalFromDict:
     def test_from_dict_rejects_nan_values(self):
         """from_dict raises ValueError for NaN in numeric fields."""
         nan_cases = [
-            {"type": "PowerSetpoint", "active_power_kw": float("nan")},
-            {"type": "PowerLimit", "max_power_kw": float("nan")},
+            {"type": "PowerSetpoint", "active_power_w": float("nan")},
+            {"type": "PowerLimit", "max_power_w": float("nan")},
             {"type": "SOCTarget", "target_soc": float("nan")},
             {"type": "DutyCycle", "on_fraction": float("nan")},
             {"type": "LoadFraction", "fraction": float("nan")},
             {"type": "CurtailmentPercent", "percent": float("nan")},
             {"type": "IdealCapacity", "capacity_w": float("nan")},
-            {"type": "EvDrive", "kwh": float("nan")},
-            {"type": "EvAwayCharge", "power_kw": float("nan")},
+            {"type": "EvDrive", "energy_j": float("nan")},
+            {"type": "EvAwayCharge", "power_w": float("nan")},
             {"type": "EvSetReadyBy", "departure_hour": 7.0, "target_soc": float("nan")},
             {"type": "MaxCapacityFraction", "fraction": float("nan")},
         ]
@@ -619,8 +619,8 @@ class TestControlSignalFromDict:
     def test_from_dict_accepts_valid_boundary_values(self):
         """from_dict accepts valid boundary values (0.0, 1.0, 100.0)."""
         valid_cases = [
-            {"type": "PowerSetpoint", "active_power_kw": 0.0},
-            {"type": "PowerLimit", "max_power_kw": 0.0},
+            {"type": "PowerSetpoint", "active_power_w": 0.0},
+            {"type": "PowerLimit", "max_power_w": 0.0},
             {"type": "SOCTarget", "target_soc": 0.0},
             {"type": "SOCTarget", "target_soc": 1.0},
             {"type": "DutyCycle", "on_fraction": 0.0},
@@ -630,8 +630,8 @@ class TestControlSignalFromDict:
             {"type": "CurtailmentPercent", "percent": 0.0},
             {"type": "CurtailmentPercent", "percent": 100.0},
             {"type": "IdealCapacity", "capacity_w": 0.0},
-            {"type": "EvDrive", "kwh": 0.0},
-            {"type": "EvAwayCharge", "power_kw": 0.0},
+            {"type": "EvDrive", "energy_j": 0.0},
+            {"type": "EvAwayCharge", "power_w": 0.0},
             {"type": "MaxCapacityFraction", "fraction": 0.0},
             {"type": "MaxCapacityFraction", "fraction": 1.0},
             {"type": "EvSetReadyBy", "departure_hour": 7.0, "target_soc": 0.0},
@@ -656,9 +656,11 @@ class TestControlSignalRoundTrip:
     """Test to_dict -> from_dict round-trip for all variants."""
 
     def test_power_setpoint_round_trip(self):
-        original = ControlSignal.power_setpoint(1.5, 0.3, min_soc=0.2, max_soc=0.9)
+        original = ControlSignal.power_setpoint(
+            active_power_w=1.5, reactive_power_var=0.3, min_soc=0.2, max_soc=0.9
+        )
         d = original.to_dict()
-        assert d["reactive_power_kvar"] == 0.3
+        assert d["reactive_power_var"] == 0.3
         assert d["min_soc"] == 0.2
         assert d["max_soc"] == 0.9
         round_trip = ControlSignal.from_dict(d)
@@ -731,7 +733,7 @@ class TestControlSignalRoundTrip:
         assert round_trip.to_dict() == d
 
     def test_power_limit_round_trip(self):
-        original = ControlSignal.power_limit(max_power_kw=5.0, ramp_rate_kw_per_s=0.1)
+        original = ControlSignal.power_limit(max_power_w=5000.0, ramp_rate_w_per_s=0.1)
         d = original.to_dict()
         round_trip = ControlSignal.from_dict(d)
         assert round_trip.to_dict() == d
@@ -771,7 +773,7 @@ class TestControlSignalRoundTrip:
         assert round_trip.to_dict() == d
 
     def test_reactive_setpoint_round_trip(self):
-        original = ControlSignal.reactive_setpoint(kvar=1.0)
+        original = ControlSignal.reactive_setpoint(var=1.0)
         d = original.to_dict()
         round_trip = ControlSignal.from_dict(d)
         assert round_trip.to_dict() == d
@@ -801,7 +803,7 @@ class TestControlSignalRepr:
     @pytest.mark.parametrize(
         "constructor,name",
         [
-            (lambda: ControlSignal.power_setpoint(1.0), "PowerSetpoint"),
+            (lambda: ControlSignal.power_setpoint(active_power_w=1.0), "PowerSetpoint"),
             (lambda: ControlSignal.thermal_setpoint(heat_c=20.0), "ThermalSetpoint"),
             (lambda: ControlSignal.thermal_setpoint_delta(), "ThermalSetpointDelta"),
             (lambda: ControlSignal.ideal_capacity(5000.0), "IdealCapacity"),
@@ -811,12 +813,12 @@ class TestControlSignalRepr:
             (lambda: ControlSignal.demand_response(DRLevel.Normal), "DemandResponse"),
             (lambda: ControlSignal.soc_target(0.8), "SOCTarget"),
             (lambda: ControlSignal.humidity_setpoint(50.0), "HumiditySetpoint"),
-            (lambda: ControlSignal.power_limit(5.0), "PowerLimit"),
+            (lambda: ControlSignal.power_limit(max_power_w=5.0), "PowerLimit"),
             (lambda: ControlSignal.duty_cycle(0.5), "DutyCycle"),
             (lambda: ControlSignal.grid_connect(True), "GridConnect"),
             (lambda: ControlSignal.self_consumption(True, True), "SelfConsumption"),
             (lambda: ControlSignal.curtailment_percent(50.0), "CurtailmentPercent"),
-            (lambda: ControlSignal.reactive_setpoint(1.0), "ReactiveSetpoint"),
+            (lambda: ControlSignal.reactive_setpoint(var=1.0), "ReactiveSetpoint"),
             (lambda: ControlSignal.power_factor_setpoint(0.95), "PowerFactorSetpoint"),
             (
                 lambda: ControlSignal.inverter_priority_mode(InverterPriority.Watt),
@@ -878,7 +880,7 @@ class TestNewSignalConstructors:
         assert "CurtailmentPercent" in repr(sig)
 
     def test_reactive_setpoint(self):
-        sig = Signal.reactive_setpoint(1.0)
+        sig = Signal.reactive_setpoint(var=1.0)
         assert "ReactiveSetpoint" in repr(sig)
 
     def test_power_factor_setpoint(self):
@@ -927,7 +929,7 @@ class TestNewDispatchRequestConstructors:
         assert "CurtailmentPercent" in repr(req.signal)
 
     def test_reactive_setpoint(self):
-        req = DispatchRequest.reactive_setpoint("inverter", 2.0)
+        req = DispatchRequest.reactive_setpoint(target="inverter", var=2.0)
         assert req.target == "inverter"
         assert "ReactiveSetpoint" in repr(req.signal)
 
@@ -1024,23 +1026,23 @@ class TestAllPySignalVariantsRoundtrip:
             DispatchRequest.thermal_setpoint_delta("hvac", heating_delta_c=1.0),
             DispatchRequest.mode_override("hvac", Mode.Off),
             DispatchRequest.load_fraction("hvac", 0.5),
-            DispatchRequest.power_limit("hvac", 5.0),
-            DispatchRequest.power_setpoint("hvac", 3.0),
+            DispatchRequest.power_limit(target="hvac", max_power_w=5000.0),
+            DispatchRequest.power_setpoint("hvac", active_power_w=3000.0),
             DispatchRequest.soc_target("battery", target_soc=0.8),
             DispatchRequest.duty_cycle("hvac", 0.5),
             DispatchRequest.demand_response("hvac", DRLevel.High),
             DispatchRequest.ideal_capacity("hvac", 5000.0),
             DispatchRequest.ev_plug_in("ev", EvConnectionState.HomePluggedIn),
-            DispatchRequest.ev_drive("ev", 5.0),
+            DispatchRequest.ev_drive(target="ev", energy_j=1.8e7),
             DispatchRequest.ev_set_ready_by("ev", departure_hour=7.0, target_soc=0.85),
-            DispatchRequest.ev_away_charge("ev", 11.5),
+            DispatchRequest.ev_away_charge(target="ev", power_w=11_500.0),
             DispatchRequest.event_delay("ev", 300.0),
             DispatchRequest.humidity_setpoint("dehumidifier", target_rh=0.5),
             DispatchRequest.grid_connect("inverter", True),
             DispatchRequest.self_consumption("pv", True, False),
             DispatchRequest.protocol_native("controller", 1, b"test"),
             DispatchRequest.curtailment_percent("pv", 50.0),
-            DispatchRequest.reactive_setpoint("inverter", 1.0),
+            DispatchRequest.reactive_setpoint(target="inverter", var=1.0),
             DispatchRequest.power_factor_setpoint("inverter", 0.95),
             DispatchRequest.inverter_priority_mode("inverter", InverterPriority.Watt),
             DispatchRequest.ideal_capacity_mode_override("hvac", IdealCapacityMode.on()),
@@ -1051,3 +1053,113 @@ class TestAllPySignalVariantsRoundtrip:
             assert req.target, f"missing target for {repr(req.signal)}"
             assert req.signal is not None
             assert req.priority is not None
+
+
+# ---------------------------------------------------------------------------
+# The SI control layer's acceptance: removed control-signal keywords name
+# their replacements. Parametrized over every `ControlSignal` row of the
+# removed-keys table (scope `ControlSignal`): each of the three Python
+# surfaces (`ControlSignal`, `DispatchRequest`, `Signal`) called with the
+# old keyword, and `ControlSignal.from_dict` given the old key, fails
+# naming the replacement; each surface's parent positional form raises
+# `TypeError`; and the HELICS signal body with the old key names it too.
+# ---------------------------------------------------------------------------
+
+# (old keyword, method, the required new keyword the call supplies beside
+# the removed one, replacement text)
+_OLD_KEYWORD_ROWS = [
+    ("active_power_kw", "power_setpoint", "active_power_w", "PowerSetpoint.active_power_w"),
+    ("reactive_kvar", "power_setpoint", "active_power_w", "PowerSetpoint.reactive_power_var"),
+    ("max_kw", "power_limit", "max_power_w", "PowerLimit.max_power_w"),
+    ("max_power_kw", "power_limit", "max_power_w", "PowerLimit.max_power_w"),
+    ("ramp_rate_kw_per_s", "power_limit", "max_power_w", "PowerLimit.ramp_rate_w_per_s"),
+    ("kvar", "reactive_setpoint", "var", "ReactiveSetpoint.var"),
+    ("kwh", "ev_drive", "energy_j", "EvDrive.energy_j"),
+    ("power_kw", "ev_away_charge", "power_w", "EvAwayCharge.power_w"),
+]
+
+# The removed keyword's value, keyed by the keyword.
+_OLD_KEYWORD_VALUES = {
+    "active_power_kw": 1.0,
+    "reactive_kvar": 0.5,
+    "max_kw": 5.0,
+    "max_power_kw": 5.0,
+    "ramp_rate_kw_per_s": 0.2,
+    "kvar": 1.0,
+    "kwh": 5.0e6,
+    "power_kw": 6600.0,
+}
+
+
+class TestRemovedControlSignalKeywords:
+    def test_removed_keyword_names_its_replacement(self):
+        for old_kw, method, required, replacement in _OLD_KEYWORD_ROWS:
+            # The required new keyword is supplied (like the equipment
+            # surfaces' removed-keyword test), so the refusal comes from
+            # the removed-keyword check, not Python's missing-argument
+            # refusal.
+            call = cast(
+                "Callable[..., object]",
+                getattr(ControlSignal, method),
+            )
+            with pytest.raises(TypeError, match=replacement):  # pyright: ignore[reportCallIssue]
+                call(**{required: 1.0, old_kw: _OLD_KEYWORD_VALUES[old_kw]})
+
+    def test_dispatch_request_removed_keyword_names_its_replacement(self):
+        for old_kw, method, required, replacement in _OLD_KEYWORD_ROWS:
+            call = cast(
+                "Callable[..., object]",
+                getattr(DispatchRequest, method),
+            )
+            with pytest.raises(TypeError, match=replacement):  # pyright: ignore[reportCallIssue]
+                call("ev", **{required: 1.0, old_kw: _OLD_KEYWORD_VALUES[old_kw]})
+
+    def test_signal_removed_keyword_names_its_replacement(self):
+        for old_kw, method, required, replacement in _OLD_KEYWORD_ROWS:
+            call = cast(
+                "Callable[..., object]",
+                getattr(Signal, method),
+            )
+            with pytest.raises(TypeError, match=replacement):  # pyright: ignore[reportCallIssue]
+                call(**{required: 1.0, old_kw: _OLD_KEYWORD_VALUES[old_kw]})
+
+    def test_from_dict_old_key_names_its_replacement(self):
+        rows = [
+            ({"type": "PowerSetpoint", "active_power_kw": 1.0}, "PowerSetpoint.active_power_w"),
+            ({"type": "PowerSetpoint", "reactive_power_kvar": 0.5},
+             "PowerSetpoint.reactive_power_var"),
+            ({"type": "PowerLimit", "max_power_kw": 5.0}, "PowerLimit.max_power_w"),
+            ({"type": "PowerLimit", "ramp_rate_kw_per_s": 0.2},
+             "PowerLimit.ramp_rate_w_per_s"),
+            ({"type": "ReactiveSetpoint", "kvar": 1.0}, "ReactiveSetpoint.var"),
+            ({"type": "EvDrive", "kwh": 5.0}, "EvDrive.energy_j"),
+            ({"type": "EvAwayCharge", "power_kw": 6.6}, "EvAwayCharge.power_w"),
+        ]
+        for body, replacement in rows:
+            with pytest.raises((TypeError, ValueError), match=replacement):  # pyright: ignore[reportCallIssue]
+                ControlSignal.from_dict(body)  # pyright: ignore[reportCallIssue]
+
+    def test_parent_positional_forms_raise_typeerror(self):
+        with pytest.raises(TypeError):  # pyright: ignore[reportCallIssue]
+            ControlSignal.power_setpoint(5.0)  # pyright: ignore[reportCallIssue]
+        with pytest.raises(TypeError):  # pyright: ignore[reportCallIssue]
+            ControlSignal.power_limit(5.0)  # pyright: ignore[reportCallIssue]
+        with pytest.raises(TypeError):  # pyright: ignore[reportCallIssue]
+            ControlSignal.reactive_setpoint(1.0)  # pyright: ignore[reportCallIssue]
+        with pytest.raises(TypeError):  # pyright: ignore[reportCallIssue]
+            ControlSignal.ev_drive(1.0)  # pyright: ignore[reportCallIssue]
+        with pytest.raises(TypeError):  # pyright: ignore[reportCallIssue]
+            ControlSignal.ev_away_charge(1.0)  # pyright: ignore[reportCallIssue]
+        with pytest.raises(TypeError):  # pyright: ignore[reportCallIssue]
+            DispatchRequest.power_limit("ev", 5.0)  # pyright: ignore[reportCallIssue]
+        with pytest.raises(TypeError):  # pyright: ignore[reportCallIssue]
+            Signal.power_limit(5.0)  # pyright: ignore[reportCallIssue]
+
+    def test_helics_signal_body_old_key_names_its_replacement(self):
+        # The HELICS intake routes every signal body through
+        # `ControlSignal.from_dict` (helics/dwelling.py:782) and logs its
+        # error; the body's keys are the from_dict keys, so the old body
+        # key fails at the same table.
+        body = {"type": "PowerSetpoint", "active_power_kw": 1.0}
+        with pytest.raises((TypeError, ValueError), match="active_power_w"):  # pyright: ignore[reportCallIssue]
+            ControlSignal.from_dict(body)  # pyright: ignore[reportCallIssue]

@@ -973,3 +973,27 @@ constants already carried (so the move is bitwise neutral):
 The scheduled load's gas schedule enters in W (`gas_constant_w`,
 `gas_profile_max_w`); the parent's therms-per-hour raw keys are removed
 and name their replacement.
+
+## The control layer is held in SI units
+
+The control layer - actor parameters, actor state and telemetry, and the
+control signals and power setpoints - is held and computed in SI, under
+the same rule as the run state: every quantity is stored under a name
+that ends in its SI unit (`capacity_j`, `max_charge_w`,
+`fuel_economy_j_per_m`, `average_speed_m_per_s`,
+`daily_drive_distance_mean_m`, `range_anxiety_distance_m`,
+`away_charge_power_w`, `surplus_deadband_w`; the signal fields
+`active_power_w`, `reactive_power_var`, `max_power_w`,
+`ramp_rate_w_per_s`, `var`, `energy_j`, `power_w`), and every value that
+enters in another unit is converted once, with `uom`, at the boundary
+where it is read: the actor registry's parameter checks and fills, the
+Python builders (the catalogue's datasheet figures convert once), the
+OCHRE `P Setpoint` mapping, and the HELICS/gym/protocol-bridge signal
+bodies. The demand-response action string carries an explicit unit
+(`PowerLimit:<max>W`); a bare number is rejected. The published actor
+variables keep their kW reporting spellings (`pv_kw`, `load_kw`,
+`charge_kw`, `bms_pv_actual_kw`): a declared variable name is a
+reporting name, the value under it is SI, and the row plan converts
+once. The EV driver's behavioural defaults are named SI constants
+(`ev_driver::defaults`) written from the documented values (30 mi,
+30 mph, 20 mi, 6.6 kW); no value moved.

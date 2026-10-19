@@ -61,8 +61,8 @@ pub enum ControlSignal {
         max_rh: Option<f64>,
     },
     PowerSetpoint {
-        active_power_kw: f64,
-        reactive_power_kvar: Option<f64>,
+        active_power_w: f64,
+        reactive_power_var: Option<f64>,
         /// Minimum SOC floor constraint (e.g. from V2G/V2H discharge strategies).
         /// When set, equipment BMS should clamp discharge to respect this floor.
         #[serde(default)]
@@ -72,8 +72,8 @@ pub enum ControlSignal {
         max_soc: Option<f64>,
     },
     PowerLimit {
-        max_power_kw: f64,
-        ramp_rate_kw_per_s: Option<f64>,
+        max_power_w: f64,
+        ramp_rate_w_per_s: Option<f64>,
     },
     SOCTarget {
         target_soc: f64,
@@ -120,7 +120,7 @@ pub enum ControlSignal {
         percent: f64,
     },
     ReactiveSetpoint {
-        kvar: f64,
+        var: f64,
     },
     PowerFactorSetpoint {
         power_factor: f64,
@@ -153,11 +153,11 @@ pub enum ControlSignal {
     },
     /// Deduct driving energy from EV SOC. Only valid when Disconnected.
     EvDrive {
-        kwh: f64,
+        energy_j: f64,
     },
     /// Set external charger power for away charging. Only valid when AwayPluggedIn.
     EvAwayCharge {
-        power_kw: f64,
+        power_w: f64,
     },
     /// Tell EV BMS to be at target_soc by departure_hour.
     EvSetReadyBy {
@@ -347,21 +347,21 @@ impl ControlSignal {
                 }
             }
             Self::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc,
                 max_soc,
             } => {
-                if !active_power_kw.is_finite() {
+                if !active_power_w.is_finite() {
                     return Err(HaresError::Control(format!(
-                        "PowerSetpoint active_power_kw must be finite, got {active_power_kw}"
+                        "PowerSetpoint active_power_w must be finite, got {active_power_w}"
                     )));
                 }
-                if let Some(r) = reactive_power_kvar
+                if let Some(r) = reactive_power_var
                     && !r.is_finite()
                 {
                     return Err(HaresError::Control(format!(
-                        "PowerSetpoint reactive_power_kvar must be finite, got {r}"
+                        "PowerSetpoint reactive_power_var must be finite, got {r}"
                     )));
                 }
                 // The SOC window carries the same semantics as SOCTarget's
@@ -391,19 +391,19 @@ impl ControlSignal {
                 }
             }
             Self::PowerLimit {
-                max_power_kw,
-                ramp_rate_kw_per_s,
+                max_power_w,
+                ramp_rate_w_per_s,
             } => {
-                if !max_power_kw.is_finite() || *max_power_kw < 0.0 {
+                if !max_power_w.is_finite() || *max_power_w < 0.0 {
                     return Err(HaresError::Control(format!(
-                        "PowerLimit max_power_kw must be finite and >= 0, got {max_power_kw}"
+                        "PowerLimit max_power_w must be finite and >= 0, got {max_power_w}"
                     )));
                 }
-                if let Some(r) = ramp_rate_kw_per_s
+                if let Some(r) = ramp_rate_w_per_s
                     && (!r.is_finite() || *r < 0.0)
                 {
                     return Err(HaresError::Control(format!(
-                        "PowerLimit ramp_rate_kw_per_s must be finite and >= 0, got {r}"
+                        "PowerLimit ramp_rate_w_per_s must be finite and >= 0, got {r}"
                     )));
                 }
             }
@@ -493,10 +493,10 @@ impl ControlSignal {
                     )));
                 }
             }
-            Self::ReactiveSetpoint { kvar } => {
-                if !kvar.is_finite() {
+            Self::ReactiveSetpoint { var } => {
+                if !var.is_finite() {
                     return Err(HaresError::Control(format!(
-                        "ReactiveSetpoint kvar must be finite, got {kvar}"
+                        "ReactiveSetpoint var must be finite, got {var}"
                     )));
                 }
             }
@@ -539,17 +539,17 @@ impl ControlSignal {
             }
             Self::IdealCapacityModeOverride { .. } => {}
             Self::EvPlugIn { .. } => {}
-            Self::EvDrive { kwh } => {
-                if !kwh.is_finite() || *kwh < 0.0 {
+            Self::EvDrive { energy_j } => {
+                if !energy_j.is_finite() || *energy_j < 0.0 {
                     return Err(HaresError::Control(format!(
-                        "EvDrive kwh must be finite and >= 0, got {kwh}"
+                        "EvDrive energy_j must be finite and >= 0, got {energy_j}"
                     )));
                 }
             }
-            Self::EvAwayCharge { power_kw } => {
-                if !power_kw.is_finite() || *power_kw < 0.0 {
+            Self::EvAwayCharge { power_w } => {
+                if !power_w.is_finite() || *power_w < 0.0 {
                     return Err(HaresError::Control(format!(
-                        "EvAwayCharge power_kw must be finite and >= 0, got {power_kw}"
+                        "EvAwayCharge power_w must be finite and >= 0, got {power_w}"
                     )));
                 }
             }
@@ -672,14 +672,14 @@ mod tests {
                 max_rh: Some(0.60),
             },
             ControlSignal::PowerSetpoint {
-                active_power_kw: 4.2,
-                reactive_power_kvar: Some(0.5),
+                active_power_w: 4.2,
+                reactive_power_var: Some(0.5),
                 min_soc: None,
                 max_soc: None,
             },
             ControlSignal::PowerLimit {
-                max_power_kw: 5.0,
-                ramp_rate_kw_per_s: Some(0.2),
+                max_power_w: 5.0,
+                ramp_rate_w_per_s: Some(0.2),
             },
             ControlSignal::SOCTarget {
                 target_soc: 0.7,
@@ -723,8 +723,8 @@ mod tests {
             ControlSignal::EvPlugIn {
                 state: EvConnectionState::HomePluggedIn,
             },
-            ControlSignal::EvDrive { kwh: 5.0 },
-            ControlSignal::EvAwayCharge { power_kw: 11.5 },
+            ControlSignal::EvDrive { energy_j: 5.0e6 },
+            ControlSignal::EvAwayCharge { power_w: 11_500.0 },
             ControlSignal::EvSetReadyBy {
                 departure_hour: 7.0,
                 target_soc: 0.8,
@@ -1045,14 +1045,14 @@ mod tests {
     #[test]
     fn power_setpoint_valid() {
         assert_ok(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: Some(1.0),
+            active_power_w: 5.0,
+            reactive_power_var: Some(1.0),
             min_soc: None,
             max_soc: None,
         });
         assert_ok(&ControlSignal::PowerSetpoint {
-            active_power_kw: -3.0,
-            reactive_power_kvar: None,
+            active_power_w: -3.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         });
@@ -1061,20 +1061,20 @@ mod tests {
     #[test]
     fn power_setpoint_nan_inf_rejected() {
         assert_err(&ControlSignal::PowerSetpoint {
-            active_power_kw: f64::NAN,
-            reactive_power_kvar: None,
+            active_power_w: f64::NAN,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         });
         assert_err(&ControlSignal::PowerSetpoint {
-            active_power_kw: f64::INFINITY,
-            reactive_power_kvar: None,
+            active_power_w: f64::INFINITY,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         });
         assert_err(&ControlSignal::PowerSetpoint {
-            active_power_kw: 0.0,
-            reactive_power_kvar: Some(f64::NAN),
+            active_power_w: 0.0,
+            reactive_power_var: Some(f64::NAN),
             min_soc: None,
             max_soc: None,
         });
@@ -1083,21 +1083,21 @@ mod tests {
     #[test]
     fn power_setpoint_soc_window_valid() {
         assert_ok(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5.0,
+            reactive_power_var: None,
             min_soc: Some(0.2),
             max_soc: Some(0.9),
         });
         // Bounds are inclusive; a single-sided window is valid.
         assert_ok(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5.0,
+            reactive_power_var: None,
             min_soc: Some(0.0),
             max_soc: Some(1.0),
         });
         assert_ok(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5.0,
+            reactive_power_var: None,
             min_soc: Some(0.5),
             max_soc: None,
         });
@@ -1113,8 +1113,8 @@ mod tests {
             (None, Some(f64::NEG_INFINITY)),
         ] {
             assert_err(&ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
-                reactive_power_kvar: None,
+                active_power_w: 5.0,
+                reactive_power_var: None,
                 min_soc,
                 max_soc,
             });
@@ -1127,14 +1127,14 @@ mod tests {
         // every equipment arm treats the pair as a discharge floor / charge
         // ceiling and none re-checks the ordering.
         assert_err(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5.0,
+            reactive_power_var: None,
             min_soc: Some(0.8),
             max_soc: Some(0.2),
         });
         assert_err(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5.0,
+            reactive_power_var: None,
             min_soc: Some(0.5),
             max_soc: Some(0.5),
         });
@@ -1143,36 +1143,36 @@ mod tests {
     #[test]
     fn power_limit_valid() {
         assert_ok(&ControlSignal::PowerLimit {
-            max_power_kw: 5.0,
-            ramp_rate_kw_per_s: Some(0.5),
+            max_power_w: 5.0,
+            ramp_rate_w_per_s: Some(0.5),
         });
         assert_ok(&ControlSignal::PowerLimit {
-            max_power_kw: 0.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 0.0,
+            ramp_rate_w_per_s: None,
         });
     }
 
     #[test]
     fn power_limit_negative_rejected() {
         assert_err(&ControlSignal::PowerLimit {
-            max_power_kw: -1.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: -1.0,
+            ramp_rate_w_per_s: None,
         });
         assert_err(&ControlSignal::PowerLimit {
-            max_power_kw: 5.0,
-            ramp_rate_kw_per_s: Some(-0.1),
+            max_power_w: 5.0,
+            ramp_rate_w_per_s: Some(-0.1),
         });
     }
 
     #[test]
     fn power_limit_nan_inf_rejected() {
         assert_err(&ControlSignal::PowerLimit {
-            max_power_kw: f64::NAN,
-            ramp_rate_kw_per_s: None,
+            max_power_w: f64::NAN,
+            ramp_rate_w_per_s: None,
         });
         assert_err(&ControlSignal::PowerLimit {
-            max_power_kw: f64::INFINITY,
-            ramp_rate_kw_per_s: Some(0.5),
+            max_power_w: f64::INFINITY,
+            ramp_rate_w_per_s: Some(0.5),
         });
     }
 
@@ -1337,27 +1337,29 @@ mod tests {
 
     #[test]
     fn ev_drive_valid() {
-        assert_ok(&ControlSignal::EvDrive { kwh: 5.0 });
-        assert_ok(&ControlSignal::EvDrive { kwh: 0.0 });
+        assert_ok(&ControlSignal::EvDrive { energy_j: 5.0e6 });
+        assert_ok(&ControlSignal::EvDrive { energy_j: 0.0 });
     }
 
     #[test]
     fn ev_drive_invalid() {
-        assert_err(&ControlSignal::EvDrive { kwh: -1.0 });
-        assert_err(&ControlSignal::EvDrive { kwh: f64::NAN });
-        assert_err(&ControlSignal::EvDrive { kwh: f64::INFINITY });
+        assert_err(&ControlSignal::EvDrive { energy_j: -1.0 });
+        assert_err(&ControlSignal::EvDrive { energy_j: f64::NAN });
+        assert_err(&ControlSignal::EvDrive {
+            energy_j: f64::INFINITY,
+        });
     }
 
     #[test]
     fn ev_away_charge_valid() {
-        assert_ok(&ControlSignal::EvAwayCharge { power_kw: 7.2 });
-        assert_ok(&ControlSignal::EvAwayCharge { power_kw: 0.0 });
+        assert_ok(&ControlSignal::EvAwayCharge { power_w: 7_200.0 });
+        assert_ok(&ControlSignal::EvAwayCharge { power_w: 0.0 });
     }
 
     #[test]
     fn ev_away_charge_invalid() {
-        assert_err(&ControlSignal::EvAwayCharge { power_kw: -1.0 });
-        assert_err(&ControlSignal::EvAwayCharge { power_kw: f64::NAN });
+        assert_err(&ControlSignal::EvAwayCharge { power_w: -1.0 });
+        assert_err(&ControlSignal::EvAwayCharge { power_w: f64::NAN });
     }
 
     #[test]
@@ -1478,16 +1480,14 @@ mod tests {
 
     #[test]
     fn reactive_setpoint_nan_rejected() {
-        assert_err(&ControlSignal::ReactiveSetpoint { kvar: f64::NAN });
-        assert_err(&ControlSignal::ReactiveSetpoint {
-            kvar: f64::INFINITY,
-        });
+        assert_err(&ControlSignal::ReactiveSetpoint { var: f64::NAN });
+        assert_err(&ControlSignal::ReactiveSetpoint { var: f64::INFINITY });
     }
 
     #[test]
     fn reactive_setpoint_valid() {
-        assert_ok(&ControlSignal::ReactiveSetpoint { kvar: 5.0 });
-        assert_ok(&ControlSignal::ReactiveSetpoint { kvar: -3.0 });
+        assert_ok(&ControlSignal::ReactiveSetpoint { var: 5.0 });
+        assert_ok(&ControlSignal::ReactiveSetpoint { var: -3.0 });
     }
 
     #[test]

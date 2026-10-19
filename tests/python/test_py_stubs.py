@@ -131,7 +131,7 @@ class TestControlSignalInterface:
         assert sig is not None
 
     def test_power_setpoint_smoke(self) -> None:
-        sig = hares.ControlSignal.power_setpoint(kw=3.0)
+        sig = hares.ControlSignal.power_setpoint(active_power_w=3000.0)
         assert sig is not None
 
     def test_to_dict_returns_dict(self) -> None:
@@ -141,7 +141,7 @@ class TestControlSignalInterface:
         assert d  # non-empty
 
     def test_from_dict_round_trip(self) -> None:
-        sig = hares.ControlSignal.power_setpoint(kw=2.0)
+        sig = hares.ControlSignal.power_setpoint(active_power_w=2000.0)
         d = sig.to_dict()
         sig2 = hares.ControlSignal.from_dict(d)
         assert sig2.to_dict() == d

@@ -304,7 +304,7 @@ mod tier_mapping_tests {
         let signals: [ControlSignal; 6] = [
             ControlSignal::demand_response(DRLevel::High, Some(3600.0)),
             ControlSignal::CurtailmentPercent { percent: 25.0 },
-            ControlSignal::ReactiveSetpoint { kvar: 10.0 },
+            ControlSignal::ReactiveSetpoint { var: 10.0 },
             ControlSignal::PowerFactorSetpoint { power_factor: 0.95 },
             ControlSignal::InverterPriorityMode {
                 priority: InverterPriority::Watt,
@@ -340,8 +340,8 @@ mod tier_mapping_tests {
             ControlSignal::EvPlugIn {
                 state: EvConnectionState::HomePluggedIn,
             },
-            ControlSignal::EvDrive { kwh: 5.0 },
-            ControlSignal::EvAwayCharge { power_kw: 11.5 },
+            ControlSignal::EvDrive { energy_j: 5.0e6 },
+            ControlSignal::EvAwayCharge { power_w: 11_500.0 },
             ControlSignal::EvSetReadyBy {
                 departure_hour: 7.0,
                 target_soc: 0.8,
@@ -376,7 +376,7 @@ mod tier_mapping_tests {
             ControlSignal::demand_response(DRLevel::High, Some(3600.0)),
             ControlSignal::protocol_native(ProtocolId(1), vec![]),
             ControlSignal::CurtailmentPercent { percent: 25.0 },
-            ControlSignal::ReactiveSetpoint { kvar: 10.0 },
+            ControlSignal::ReactiveSetpoint { var: 10.0 },
             ControlSignal::PowerFactorSetpoint { power_factor: 0.95 },
             ControlSignal::InverterPriorityMode {
                 priority: InverterPriority::Watt,
@@ -395,8 +395,8 @@ mod tier_mapping_tests {
             ControlSignal::EvPlugIn {
                 state: EvConnectionState::HomePluggedIn,
             },
-            ControlSignal::EvDrive { kwh: 5.0 },
-            ControlSignal::EvAwayCharge { power_kw: 11.5 },
+            ControlSignal::EvDrive { energy_j: 5.0e6 },
+            ControlSignal::EvAwayCharge { power_w: 11_500.0 },
             ControlSignal::EvSetReadyBy {
                 departure_hour: 7.0,
                 target_soc: 0.8,

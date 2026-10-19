@@ -92,16 +92,14 @@ fn base_env() -> EnvironmentState {
     }
 }
 
-fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> EquipmentConfig {
-    // The config enters in SI: the kWh argument converts once here.
+fn battery_cfg(capacity_energy_j: f64, initial_soc: f64, inverter_eta: f64) -> EquipmentConfig {
     EquipmentConfig::from_typed(
         "Battery".to_string(),
         "Battery".to_string(),
         BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_j: uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(capacity_kwh)
-                .get::<uom::si::energy::joule>(),
+            capacity_j: capacity_energy_j,
             max_charge_w: 5000.0,
             max_discharge_w: 5000.0,
             n_series: None,
@@ -157,13 +155,13 @@ fn make_battery(cfg: &EquipmentConfig) -> Battery {
 // ---------------------------------------------------------------------------
 #[test]
 fn battery_charge_cycle_soc_accounting() {
-    let cfg = battery_cfg(10.0, 0.2, 0.97);
+    let cfg = battery_cfg(3.6e7, 0.2, 0.97);
     let mut bat = make_battery(&cfg);
     let env = base_env();
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0000,
-        reactive_power_kvar: None,
+        active_power_w: 3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -185,7 +183,7 @@ fn battery_charge_cycle_soc_accounting() {
     );
 
     // OCHRE accounting: ΔSOC = P_ac × eta_inv × hours / capacity
-    let expected_delta = 3.0 * 1.0 * 0.97 / 10.0;
+    let expected_delta = 3000.0 * 3600.0 * 0.97 / 3.6e7;
     // Ohmic losses at 0.3C rate are small; allow 10% tolerance
     assert!(
         (delta_soc - expected_delta).abs() < expected_delta * 0.10,
@@ -208,13 +206,13 @@ fn battery_charge_cycle_soc_accounting() {
 // ---------------------------------------------------------------------------
 #[test]
 fn battery_discharge_cycle_soc_accounting() {
-    let cfg = battery_cfg(10.0, 0.8, 0.97);
+    let cfg = battery_cfg(3.6e7, 0.8, 0.97);
     let mut bat = make_battery(&cfg);
     let env = base_env();
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -2.0,
-        reactive_power_kvar: None,
+        active_power_w: -2000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -235,7 +233,7 @@ fn battery_discharge_cycle_soc_accounting() {
         "discharging must decrease SOC; before={soc_before:.4} after={soc_after:.4}"
     );
 
-    let expected_delta = 2.0 * 1.0 / (0.97 * 10.0);
+    let expected_delta = 2000.0 * 3600.0 / (0.97 * 3.6e7);
     assert!(
         (delta_soc - expected_delta).abs() < expected_delta * 0.10,
         "SOC loss {delta_soc:.4} must be within 10% of P/(eta×cap)={expected_delta:.4}"
@@ -260,12 +258,12 @@ fn battery_soc_limits_enforced() {
 
     // Charge from near-max
     {
-        let cfg = battery_cfg(10.0, 0.94, 0.97);
+        let cfg = battery_cfg(3.6e7, 0.94, 0.97);
         let mut bat = make_battery(&cfg);
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0000,
-            reactive_power_kvar: None,
+            active_power_w: 5.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -285,12 +283,12 @@ fn battery_soc_limits_enforced() {
 
     // Discharge from near-min
     {
-        let cfg = battery_cfg(10.0, 0.06, 0.97);
+        let cfg = battery_cfg(3.6e7, 0.06, 0.97);
         let mut bat = make_battery(&cfg);
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -321,7 +319,7 @@ fn battery_soc_limits_enforced() {
 // ---------------------------------------------------------------------------
 #[test]
 fn battery_degradation_model_documented() {
-    let cfg = battery_cfg(10.0, 0.5, 0.97);
+    let cfg = battery_cfg(3.6e7, 0.5, 0.97);
     let mut bat = make_battery(&cfg);
     let env = base_env();
     let dt = Duration::from_secs(3600); // 1-hour steps for fast cycling
@@ -331,8 +329,8 @@ fn battery_degradation_model_documented() {
     for i in 0..200 {
         let power_kw = if i % 10 < 5 { 1.0 } else { -1.0 };
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: power_kw,
-            reactive_power_kvar: None,
+            active_power_w: power_kw,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -764,8 +762,8 @@ fn generator_fuel_efficiency_at_half_load() {
 
     // Command 5 kW (50% load); HARES generator convention: positive = generation output
     eq.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 5.0000,
-        reactive_power_kvar: None,
+        active_power_w: 5000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -889,8 +887,8 @@ fn generator_ramp_rate_is_kw_per_second() {
 
     // Command full load; HARES generator convention: positive = generation output
     eq.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 10.0000,
-        reactive_power_kvar: None,
+        active_power_w: 10.0000,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -998,8 +996,8 @@ fn generator_capacity_min_enforced() {
     // Per OCHRE semantics: minimum operating power clamped UP to capacity_min when on.
     // HARES: values between 0 and capacity_min are clamped up; exact 0 keeps generator off.
     eq.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0000, // positive = generation in HARES convention
-        reactive_power_kvar: None,
+        active_power_w: 1.0000, // positive = generation in HARES convention
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -1029,7 +1027,7 @@ fn generator_capacity_min_enforced() {
 // ---------------------------------------------------------------------------
 #[test]
 fn battery_control_signal_not_a_stub() {
-    let cfg = battery_cfg(13.5, 0.5, 0.97);
+    let cfg = battery_cfg(4.86e7, 0.5, 0.97);
     let env = base_env();
     let dt = Duration::from_secs(60);
 
@@ -1045,15 +1043,15 @@ fn battery_control_signal_not_a_stub() {
         bat.step(&env, dt, &mut ports).unwrap();
         bat.telemetry()
             .get("active_power_kw")
-            .expect("active_power_kw must exist")
+            .expect("active_power_w must exist")
     };
 
     // Step with charge setpoint → expect positive power draw
     let power_charge = {
         let mut bat = make_battery(&cfg);
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0000,
-            reactive_power_kvar: None,
+            active_power_w: 3000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -1062,15 +1060,15 @@ fn battery_control_signal_not_a_stub() {
         bat.step(&env, dt, &mut ports).unwrap();
         bat.telemetry()
             .get("active_power_kw")
-            .expect("active_power_kw must exist")
+            .expect("active_power_w must exist")
     };
 
     // Step with discharge setpoint → expect negative power
     let power_discharge = {
         let mut bat = make_battery(&cfg);
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -3.0,
-            reactive_power_kvar: None,
+            active_power_w: -3000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -1079,7 +1077,7 @@ fn battery_control_signal_not_a_stub() {
         bat.step(&env, dt, &mut ports).unwrap();
         bat.telemetry()
             .get("active_power_kw")
-            .expect("active_power_kw must exist")
+            .expect("active_power_w must exist")
     };
 
     eprintln!(
@@ -1117,17 +1115,17 @@ fn battery_control_signal_not_a_stub() {
 // ---------------------------------------------------------------------------
 #[test]
 fn battery_round_trip_efficiency_below_unity() {
-    let cfg = battery_cfg(13.5, 0.4, 0.97);
+    let cfg = battery_cfg(4.86e7, 0.4, 0.97);
     let mut bat = make_battery(&cfg);
     let env = base_env();
     let dt = Duration::from_secs(60);
     let n_steps = 30_u32;
-    let charge_kw = 3.0;
+    let charge_w = 3000.0;
 
     // Charge phase
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: charge_kw,
-        reactive_power_kvar: None,
+        active_power_w: charge_w,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -1145,8 +1143,8 @@ fn battery_round_trip_efficiency_below_unity() {
 
     // Discharge phase
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -charge_kw,
-        reactive_power_kvar: None,
+        active_power_w: -charge_w,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })

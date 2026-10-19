@@ -23,6 +23,7 @@ pub(crate) mod mode_flow_guard;
 pub mod output;
 pub mod panic_hook;
 pub mod ports;
+pub mod removed_keys;
 pub mod resolved;
 pub mod rng;
 pub mod schedule;

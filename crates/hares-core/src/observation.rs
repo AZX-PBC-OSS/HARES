@@ -209,7 +209,7 @@ fn resolve_field(
     if field == "outdoor_humidity_ratio" {
         return Ok(ObservationKind::OutdoorHumidityRatio);
     }
-    if field == "total_electric_kw" || field == "total_power_w" {
+    if field == "total_power_w" {
         return Ok(ObservationKind::TotalPowerKw);
     }
     if field == "reactive_power_var" {

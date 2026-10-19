@@ -79,7 +79,7 @@ impl ChargingPreference for DepartureDeadline {
         {
             return Constraint::Override(PreferenceVote {
                 target_soc: Some(dep_target_soc),
-                power_kw: Some(ctx.max_charge_kw),
+                power_w: Some(ctx.max_charge_w),
                 departure_hour: Some(departure_minute as f64 / 60.0),
                 min_soc: None,
                 max_soc: None,
@@ -92,7 +92,7 @@ impl ChargingPreference for DepartureDeadline {
         if hours_left < needed * 1.2 {
             Constraint::Override(PreferenceVote {
                 target_soc: Some(dep_target_soc),
-                power_kw: Some(ctx.max_charge_kw),
+                power_w: Some(ctx.max_charge_w),
                 departure_hour: Some(departure_minute as f64 / 60.0),
                 min_soc: None,
                 max_soc: None,
@@ -125,7 +125,7 @@ impl ChargingPreference for DepartureDeadline {
 
         PreferenceVote {
             target_soc: Some(dep_target_soc),
-            power_kw: None,
+            power_w: None,
             departure_hour: Some(departure_minute as f64 / 60.0),
             min_soc: None,
             max_soc: None,
@@ -165,9 +165,9 @@ mod tests {
     fn make_ctx(env: &hares_types::EnvironmentState, soc: f64, minute: u16) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: soc,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 216_000_000.0,
+            max_charge_w: 7200.0,
+            max_discharge_w: 5000.0,
             env,
             current_minute: minute,
             next_departure_minute: Some(420),
@@ -339,12 +339,12 @@ mod tests {
         }
     }
 
-    // Finding 2: capacity_kwh sensitivity
+    // Finding 2: capacity_j sensitivity
     #[test]
-    fn capacity_kwh_changes_urgency_threshold() {
+    fn capacity_j_changes_urgency_threshold() {
         let env = TestEnvBuilder::new().hour(5).build();
 
-        // SOC gap 0.5, max_charge_kw=7.2, time_to_departure=2h (120 min)
+        // SOC gap 0.5, max_charge_w=7.2, time_to_departure=2h (120 min)
         // Default env temp is 10°C → temp_mult=1.11, effective_eff=0.9/1.11=0.811
         // Small battery (10 kWh): needed = 0.5*10/(7.2*0.811) ≈ 0.86h
         //   2h > 0.86 * 1.2 = 1.03h → Inactive
@@ -365,9 +365,9 @@ mod tests {
         // current_minute=300 (05:00), departure=420, 120 min = 2h
         let ctx_small = DecisionContext {
             current_soc: 0.4,
-            capacity_kwh: 10.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 3.6e7,
+            max_charge_w: 7200.0,
+            max_discharge_w: 5000.0,
             env: &env,
             current_minute: 300,
             next_departure_minute: Some(420),
@@ -377,9 +377,9 @@ mod tests {
 
         let ctx_large = DecisionContext {
             current_soc: 0.4,
-            capacity_kwh: 100.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 3.6e8,
+            max_charge_w: 7200.0,
+            max_discharge_w: 5000.0,
             env: &env,
             current_minute: 300,
             next_departure_minute: Some(420),
@@ -422,9 +422,9 @@ mod tests {
         // computation at all.
         let ctx_b = DecisionContext {
             current_soc: 0.8,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 216_000_000.0,
+            max_charge_w: 7200.0,
+            max_discharge_w: 5000.0,
             env: &env,
             current_minute: 300,
             next_departure_minute: None,
@@ -437,9 +437,9 @@ mod tests {
         // 1h < 1.03 * 1.2 = 1.24h → Override
         let ctx_a_high_soc = DecisionContext {
             current_soc: 0.8,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 216_000_000.0,
+            max_charge_w: 7200.0,
+            max_discharge_w: 5000.0,
             env: &env,
             current_minute: 300,
             next_departure_minute: Some(360),
@@ -467,9 +467,9 @@ mod tests {
         // established there is no trip today.
         let ctx_c = DecisionContext {
             current_soc: 0.8,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 216_000_000.0,
+            max_charge_w: 7200.0,
+            max_discharge_w: 5000.0,
             env: &env,
             current_minute: 465, // 07:45
             next_departure_minute: None,

@@ -699,12 +699,7 @@ impl Equipment for TanklessWH {
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
-            ControlSignal::PowerLimit { max_power_kw, .. } => {
-                // The signal carries kW until the control-layer commit; the
-                // working value is W (SI), converted once here.
-                let max_power_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
-                        .get::<uom::si::power::watt>();
+            ControlSignal::PowerLimit { max_power_w, .. } => {
                 // For gas units, max_power_w caps fuel consumption; thermal limit
                 // = fuel_limit × efficiency. For electric units, it directly caps
                 // electrical input which equals thermal output / efficiency.
@@ -1714,8 +1709,8 @@ mod tests {
 
         // Limit input power to 10 kW → thermal limit = 10,000 * 0.8 = 8,000 W
         eq.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 10.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 10.0,
+            ramp_rate_w_per_s: None,
         })
         .unwrap();
 
@@ -1748,8 +1743,8 @@ mod tests {
         // PowerLimit { max_power_w: 5.0 } → thermal limit = 5,000 * 0.8 = 4,000 W.
         // With flow=1.0 kg/s, delta_T demands exceed 4,000 W → over-capacity.
         eq.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 5.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 5000.0,
+            ramp_rate_w_per_s: None,
         })
         .unwrap();
 
@@ -1895,8 +1890,8 @@ mod tests {
 
         // Apply PowerLimit → step → limit active
         eq.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 5.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 5000.0,
+            ramp_rate_w_per_s: None,
         })
         .unwrap();
         step_once(&mut eq);
@@ -1933,8 +1928,8 @@ mod tests {
 
         // Apply power limit, save, restore
         eq.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 5.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 5000.0,
+            ramp_rate_w_per_s: None,
         })
         .unwrap();
 

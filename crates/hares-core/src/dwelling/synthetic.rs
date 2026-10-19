@@ -900,7 +900,7 @@ pub(crate) fn build_synthetic_building(
     if let Some(el) = &config.event_load {
         let mut extension_children: Vec<hares_io::hpxml::building::XmlNode> = vec![
             hares_io::hpxml::building::XmlNode {
-                name: "active_power_w".to_string(),
+                name: "active_power_kw".to_string(),
                 attrs: HashMap::new(),
                 text: el.active_power_w.to_string(),
                 children: Vec::new(),

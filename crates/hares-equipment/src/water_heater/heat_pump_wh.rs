@@ -1447,12 +1447,7 @@ impl Equipment for HeatPumpWH {
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
-            ControlSignal::PowerLimit { max_power_kw, .. } => {
-                // The signal carries kW until the control-layer commit; the
-                // working value is W (SI), converted once here.
-                let max_power_w =
-                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
-                        .get::<uom::si::power::watt>();
+            ControlSignal::PowerLimit { max_power_w, .. } => {
                 let rated_w = self.compressor_power_w + self.backup_element_power_w;
                 if rated_w > 0.0 {
                     let max_fraction = ((max_power_w) / rated_w).clamp(0.0, 1.0);

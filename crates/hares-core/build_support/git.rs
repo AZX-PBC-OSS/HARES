@@ -206,11 +206,20 @@ mod tests {
     const SHA256_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// Runs git in `root`, asserting success, and returns its stdout.
+    /// The scratch repo's environment is neutralized: the host's signing
+    /// and identity configuration must never reach it (a signing agent's
+    /// failure is this test's flake class).
     fn git(root: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .arg("-C")
             .arg(root)
             .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "HARES")
+            .env("GIT_AUTHOR_EMAIL", "hares@example.invalid")
+            .env("GIT_COMMITTER_NAME", "HARES")
+            .env("GIT_COMMITTER_EMAIL", "hares@example.invalid")
             .output()
             .expect("git runs");
         assert!(
