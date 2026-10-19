@@ -5204,13 +5204,38 @@ impl Dwelling {
     /// manager. `voltage_pu == 0.0` signals a utility outage; whether the
     /// home bus stays energized is resolved per step from island-capable
     /// sources (see `GridState::bus_energized`).
-    pub fn set_grid_voltage(&mut self, voltage_pu: f64) {
+    ///
+    /// The override is the documented outage setter, and every load's
+    /// gating keys on the voltage it stores, so the value is validated
+    /// here: exactly `0.0` (the outage signal) or a finite per-unit
+    /// voltage in `[0.5, 1.5]`, the band the HELICS voltage contract
+    /// admits. Anything else (NaN, infinity, a negative or out-of-band
+    /// value, a volts-vs-per-unit mixup) is rejected instead of landing
+    /// in the grid state: a NaN override would read as energized by
+    /// every per-unit comparison downstream and silently un-gate every
+    /// load during an intended outage.
+    ///
+    /// # Errors
+    ///
+    /// `HaresError::Dwelling` naming the value and the accepted band when
+    /// `voltage_pu` is not exactly `0.0` and not a finite value in
+    /// `[0.5, 1.5]` pu.
+    pub fn set_grid_voltage(&mut self, voltage_pu: f64) -> Result<()> {
+        let valid =
+            voltage_pu == 0.0 || (voltage_pu.is_finite() && (0.5..=1.5).contains(&voltage_pu));
+        if !valid {
+            return Err(HaresError::Dwelling(format!(
+                "set_grid_voltage: {voltage_pu} pu is not a valid grid voltage override: \
+                 exactly 0.0 (a utility outage) or a finite value in [0.5, 1.5] pu is required"
+            )));
+        }
         self.environment.set_grid_override(GridState {
             voltage_pu,
             frequency_hz: DEFAULT_GRID_FREQUENCY_HZ,
             island_bus_voltage_pu: None,
         });
         self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
+        Ok(())
     }
 
     /// Selects the named observation channels into a flat contiguous

@@ -202,6 +202,8 @@ pub enum FleetError {
     AlreadyFinished { total_steps: u64 },
     #[error("dwelling_index {index} out of range (len={len})")]
     NoSuchHome { index: usize, len: usize },
+    #[error("dwelling at index {index} refused the grid voltage override: {message}")]
+    InvalidGridVoltage { index: usize, message: String },
     #[error("dwelling {bldg_id} telemetry snapshot failed: {source}")]
     Telemetry {
         bldg_id: i64,
@@ -1847,7 +1849,8 @@ impl SteppableFleet {
     /// # Errors
     ///
     /// [`FleetError::NoSuchHome`] naming the index and the length when the
-    /// index is out of range.
+    /// index is out of range; the dwelling's own validation error when the
+    /// override is not exactly `0.0` or a finite value in `[0.5, 1.5]` pu.
     pub fn set_grid_voltage(&mut self, dwelling_index: usize, voltage_pu: f64) -> Result<()> {
         let len = self.dwellings.len();
         let dwelling = self
@@ -1857,15 +1860,25 @@ impl SteppableFleet {
                 index: dwelling_index,
                 len,
             })?;
-        dwelling.set_grid_voltage(voltage_pu);
-        Ok(())
+        dwelling
+            .set_grid_voltage(voltage_pu)
+            .map_err(|err| FleetError::InvalidGridVoltage {
+                index: dwelling_index,
+                message: err.to_string(),
+            })
     }
 
     /// Applies a shared grid voltage override to all dwellings.
-    pub fn set_grid_voltage_all(&mut self, voltage_pu: f64) {
-        for dwelling in &mut self.dwellings {
-            dwelling.set_grid_voltage(voltage_pu);
+    ///
+    /// # Errors
+    ///
+    /// The dwelling validation error of the first home the override fails
+    /// at (every home runs the same validation, so one name is enough).
+    pub fn set_grid_voltage_all(&mut self, voltage_pu: f64) -> Result<()> {
+        for index in 0..self.dwellings.len() {
+            self.set_grid_voltage(index, voltage_pu)?;
         }
+        Ok(())
     }
 
     /// Queues a control signal for one dwelling by equipment name.

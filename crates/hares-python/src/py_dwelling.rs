@@ -1133,11 +1133,14 @@ impl PyDwelling {
         // Loud on non-finite per-unit voltage at the boundary (the
         // shared validators' section rationale, `utils.rs`): a NaN
         // voltage silently lands in the grid state and stops every
-        // per-unit comparison downstream. Finiteness only — the
-        // nominal-range contract is the grid model's.
+        // per-unit comparison downstream. The engine's setter validates
+        // the full contract (exactly 0.0 or a finite value in
+        // [0.5, 1.5] pu); finiteness is re-checked here so the Python
+        // caller sees the boundary's error class for NaN before the
+        // dwelling is acquired.
         validate_finite(voltage_pu, "voltage_pu")?;
         let mut dwelling = self.acquire()?;
-        dwelling.set_grid_voltage(voltage_pu);
+        dwelling.set_grid_voltage(voltage_pu).map_err(to_py_err)?;
         Ok(())
     }
 

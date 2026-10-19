@@ -419,10 +419,16 @@ impl GridState {
     /// backup source). Loads must force off at the control level when this is
     /// false; source-type equipment (battery discharge, generator, V2G EV)
     /// must NOT gate on this — they are what keeps it true.
+    ///
+    /// NaN-robust by construction: a non-finite voltage compares false
+    /// against `> 0.0`, so a poisoned state de-energizes the bus (every
+    /// load off) instead of un-gating it: a NaN override that passed
+    /// `NaN != 0.0` would run every load at full power on a bus whose
+    /// voltage is meaningless.
     #[inline]
     #[must_use]
     pub fn bus_energized(&self) -> bool {
-        self.bus_voltage_pu() != 0.0
+        self.bus_voltage_pu() > 0.0
     }
 
     /// True when the home is islanded: the utility is out but a backup
@@ -811,6 +817,31 @@ mod tests {
                 .expect("deserialize legacy GridState");
         assert_eq!(decoded.island_bus_voltage_pu, None);
         assert!(decoded.bus_energized());
+    }
+
+    #[test]
+    fn bus_energized_is_nan_robust() {
+        // A non-finite voltage must de-energize the bus, never un-gate it:
+        // `NaN != 0.0` reads as energized and runs every load at full
+        // power on a bus whose voltage is meaningless. The setter
+        // validates, and this comparison is the second belt.
+        let nan = GridState {
+            voltage_pu: f64::NAN,
+            frequency_hz: 60.0,
+            island_bus_voltage_pu: None,
+        };
+        assert!(nan.bus_voltage_pu().is_nan());
+        assert!(!nan.bus_energized());
+
+        // The same holds for a poisoned island value surfacing through the
+        // outage path.
+        let nan_island = GridState {
+            voltage_pu: 0.0,
+            frequency_hz: 60.0,
+            island_bus_voltage_pu: Some(f64::NAN),
+        };
+        assert!(!nan_island.bus_energized());
+        assert!(!nan_island.islanded());
     }
 
     #[test]

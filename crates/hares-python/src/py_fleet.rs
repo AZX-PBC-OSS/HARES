@@ -712,7 +712,7 @@ impl PySteppableFleet {
 
     pub fn set_grid_voltage_all(&self, voltage_pu: f64) -> PyResult<()> {
         let mut fleet = self.acquire()?;
-        fleet.set_grid_voltage_all(voltage_pu);
+        fleet.set_grid_voltage_all(voltage_pu).map_err(to_py_err)?;
         Ok(())
     }
 

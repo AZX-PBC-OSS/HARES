@@ -114,7 +114,9 @@ fn islanded_run_warnings(tag: &str) -> usize {
     add_battery_with_discharge_limit(&mut dwelling, 0.6, 0.5);
 
     dwelling.step().expect("nominal step");
-    dwelling.set_grid_voltage(0.0);
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
     dwelling.step().expect("islanded step");
     dwelling.step().expect("second islanded step");
     dwelling.step().expect("third islanded step");
@@ -125,10 +127,6 @@ fn islanded_run_warnings(tag: &str) -> usize {
         .iter()
         .filter(|w| w.source.as_ref() == "island")
         .count()
-}
-
-fn write_minimal_toml(path: &Path) {
-    write_minimal_toml_of_duration(path, 1200);
 }
 
 fn write_minimal_toml_of_duration(path: &Path, duration_s: u64) {
@@ -351,7 +349,9 @@ fn outage_without_backup_deenergizes_bus_and_drops_loads() {
     );
 
     // Utility outage.
-    dwelling.set_grid_voltage(0.0);
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
     dwelling.step().expect("outage step");
 
     let grid = &dwelling.latest_env().grid;
@@ -379,7 +379,9 @@ fn outage_without_backup_deenergizes_bus_and_drops_loads() {
     );
 
     // Restoration: the load returns.
-    dwelling.set_grid_voltage(1.0);
+    dwelling
+        .set_grid_voltage(1.0)
+        .expect("the override is in contract");
     dwelling.step().expect("restored step");
     let summary = dwelling
         .save_checkpoint()
@@ -402,7 +404,9 @@ fn outage_with_battery_islands_and_keeps_loads_running() {
     dwelling.step().expect("nominal step");
 
     // Utility outage: the battery islands the home.
-    dwelling.set_grid_voltage(0.0);
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
     dwelling.step().expect("islanded step");
 
     let grid = &dwelling.latest_env().grid;
@@ -455,7 +459,9 @@ fn islanded_load_beyond_discharge_capability_reports_unserved() {
 
     // Utility outage: the battery islands the home but its 0.5 kW discharge
     // limit leaves ~1 kW of the base load unserved.
-    dwelling.set_grid_voltage(0.0);
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
     dwelling.step().expect("islanded step");
     assert!(
         dwelling.latest_env().grid.islanded(),
@@ -484,7 +490,9 @@ fn outage_with_depleted_battery_does_not_island() {
     add_battery(&mut dwelling, 0.1); // at min_soc floor
 
     dwelling.step().expect("nominal step");
-    dwelling.set_grid_voltage(0.0);
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
     dwelling.step().expect("outage step");
 
     let grid = &dwelling.latest_env().grid;
@@ -558,7 +566,9 @@ fn ev_at_discharge_floor_with_latched_export_does_not_hold_bus() {
         "the floor curtails the commanded export: zero watts, got {delivered} W"
     );
 
-    dwelling.set_grid_voltage(0.0);
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
     dwelling.step().expect("outage step");
     let grid = &dwelling.latest_env().grid;
     assert!(grid.grid_outage());
@@ -611,7 +621,9 @@ fn dr_shed_ev_does_not_island() {
         "a GridEmergency shed zeroes the commanded export, got {delivered} W"
     );
 
-    dwelling.set_grid_voltage(0.0);
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
     dwelling.step().expect("outage step");
     let grid = &dwelling.latest_env().grid;
     assert!(
@@ -651,7 +663,9 @@ fn island_follows_ev_delivery_and_collapses_when_it_stops() {
         "the driver's V2G vote dispatches export from the first step, got {prev_delivered} W"
     );
 
-    dwelling.set_grid_voltage(0.0);
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
     let mut energized_steps = 0;
     for _ in 0..50 {
         dwelling.step().expect("outage step");
@@ -698,7 +712,9 @@ fn islanded_pack_energy_is_bounded_by_island_sources() {
     add_ev(&mut dwelling, 0.3, false, false, Vec::new());
 
     dwelling.step().expect("nominal step");
-    dwelling.set_grid_voltage(0.0);
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
 
     let mut prev_ev_soc = equipment_soc(&dwelling, "EV");
     let mut prev_battery_soc = equipment_soc(&dwelling, "Battery");
