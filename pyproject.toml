@@ -159,7 +159,7 @@ testpaths = ["tests/python"]
 # `ochre` the parity tests import; the `ochre` dependency group installs its
 # dependencies only.
 pythonpath = ["vendors/OCHRE"]
-addopts = "-n auto -m 'not slow and not ochre'"
+addopts = "-n 4 -m 'not slow and not ochre'"
 # A passing test's tmp_path directory is removed; a failing test's is kept to
 # debug, and only for the last three sessions.
 tmp_path_retention_policy = "failed"
