@@ -1244,8 +1244,11 @@ mod tests {
     }
 
     #[test]
-    fn evaluator_no_match_returns_zero() {
-        // Tariff with only a summer on-peak period -- winter timestamps have no match.
+    fn evaluator_no_match_rejected_at_construction() {
+        // A tariff whose schedule covers only a summer on-peak window
+        // leaves every other hour with no matching period; the evaluator's
+        // only price for such an hour was the $0/kWh fallback, so the
+        // tariff is rejected at construction instead of built.
         let partial = ElectricTariff {
             tou_schedule: vec![TouPeriod {
                 name: "summer-peak".into(),
@@ -1259,11 +1262,16 @@ mod tests {
             }],
             ..Default::default()
         };
-        // January weekday -- no matching period.
+        // January weekday -- no matching period, and no period claims the
+        // month at all.
         let start = New_York.with_ymd_and_hms(2025, 1, 6, 17, 0, 0).unwrap();
-        let ev = make_evaluator(partial, start, start + Duration::hours(1), 3600);
-        assert_eq!(ev.current_price(), 0.0);
-        assert_eq!(ev.current_period_name(), "");
+        let err = TariffEvaluator::new(partial, start, start + Duration::hours(1), 3600)
+            .err()
+            .expect("a coverage gap is a construction error, not free electricity");
+        assert!(
+            err.to_string().contains("no TOU period covers month"),
+            "the error names the uncovered month: {err}"
+        );
     }
 
     #[test]
@@ -1773,22 +1781,39 @@ mod tests {
 
         let tariff = ElectricTariff {
             name: Some("urdb-demand-tou".into()),
-            tou_schedule: vec![TouPeriod {
-                name: "peak".into(),
-                // Weekdays 16:00–21:00 (minutes 960–1260).
-                schedule: vec![TimeWindow::new(DayFilter::Weekdays, 960, 1260, 0.0)],
-                season: SeasonFilter::All,
-            }],
+            tou_schedule: vec![
+                TouPeriod {
+                    name: "peak".into(),
+                    // Weekdays 16:00–21:00 (minutes 960–1260).
+                    schedule: vec![TimeWindow::new(DayFilter::Weekdays, 960, 1260, 0.0)],
+                    season: SeasonFilter::All,
+                },
+                // The coverage base: every hour the peak window leaves
+                // unmatched must still price, or the energy validation
+                // rejects the tariff.
+                TouPeriod {
+                    name: "off-peak".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::All,
+                },
+            ],
             demand_tou_schedule: vec![TouPeriod {
                 name: "demand_0".into(),
                 schedule: vec![TimeWindow::new(DayFilter::Weekdays, 960, 1260, 0.0)],
                 season: SeasonFilter::All,
             }],
-            energy_rates: vec![EnergyRate {
-                period_name: "peak".into(),
-                season: SeasonFilter::All,
-                rate_per_kwh: 0.30,
-            }],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "peak".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.30,
+                },
+                EnergyRate {
+                    period_name: "off-peak".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.10,
+                },
+            ],
             demand_rates: vec![DemandRate {
                 period_name: Some("demand_0".into()),
                 season: SeasonFilter::All,

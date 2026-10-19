@@ -1,4 +1,6 @@
-use hares_types::{BillingCycle, HaresError, SeasonFilter, SeasonalSplit, TouPeriod};
+use hares_types::{
+    BillingCycle, HaresError, SeasonFilter, SeasonalSplit, TouPeriod, season_contains_month,
+};
 use serde::{Deserialize, Serialize};
 
 /// Per-kWh energy rate for a TOU period and season.
@@ -445,6 +447,100 @@ impl ElectricTariff {
                 "ev_tou_period_name '{ev_name}' references unknown TOU period"
             )));
         }
+        self.validate_energy_coverage()?;
+        Ok(())
+    }
+
+    /// Coverage validation for a tariff that prices energy through TOU
+    /// periods: the evaluator's unmatched-period and missing-rate fallbacks
+    /// price the step's import at $0/kWh, so a schedule or rate gap is
+    /// silently free electricity. Two gaps are rejected here, both resolved
+    /// exactly as the evaluator resolves them (first period whose season
+    /// claims the month and whose windows contain the weekday and
+    /// minute-of-day; first rate matching the period and the month):
+    ///
+    /// - every hour of the week is covered in every month some period
+    ///   claims, and every month is claimed by some period;
+    /// - every (period, month) pair the schedule claims carries an energy
+    ///   rate, as does the EV sub-tariff's period when configured.
+    ///
+    /// Real-time-pricing tariffs price energy from `rtp_schedule` instead,
+    /// so the period machinery is not their import-price source and the
+    /// checks do not apply. A tariff with no TOU periods at all prices no
+    /// energy through them by construction (its billing rests on demand,
+    /// fixed and tiered charges) and is likewise outside this contract.
+    fn validate_energy_coverage(&self) -> Result<(), HaresError> {
+        if self.rtp_schedule.is_some() || self.tou_schedule.is_empty() {
+            return Ok(());
+        }
+        let split = self.seasonal_split.as_ref();
+        let claims = |month: u8| -> Vec<&TouPeriod> {
+            self.tou_schedule
+                .iter()
+                .filter(|p| season_contains_month(p.season, split, month))
+                .collect()
+        };
+        for month in 1..=12u8 {
+            let claiming = claims(month);
+            if claiming.is_empty() {
+                return Err(HaresError::Tariff(format!(
+                    "no TOU period covers month {month}: every month must have a period, \
+                     or the hours it leaves unmatched price electricity at $0/kWh"
+                )));
+            }
+            for weekday in [
+                chrono::Weekday::Mon,
+                chrono::Weekday::Tue,
+                chrono::Weekday::Wed,
+                chrono::Weekday::Thu,
+                chrono::Weekday::Fri,
+                chrono::Weekday::Sat,
+                chrono::Weekday::Sun,
+            ] {
+                for minute in 0..1440u16 {
+                    let covered = claiming
+                        .iter()
+                        .any(|p| p.schedule.iter().any(|tw| tw.contains(weekday, minute)));
+                    if !covered {
+                        return Err(HaresError::Tariff(format!(
+                            "no TOU period covers {weekday:?} at {minute:02}:{:02} \
+                             in month {month}: the schedule must cover 24x7, or the \
+                             uncovered hours price electricity at $0/kWh",
+                            minute / 60
+                        )));
+                    }
+                }
+            }
+            for period in &claiming {
+                let rated = self.energy_rates.iter().any(|er| {
+                    er.period_name == period.name && season_contains_month(er.season, split, month)
+                });
+                if !rated {
+                    return Err(HaresError::Tariff(format!(
+                        "TOU period '{}' has no energy rate for month {month}: every \
+                         period-month pair the schedule claims must carry a rate, or \
+                         its hours price electricity at $0/kWh",
+                        period.name
+                    )));
+                }
+            }
+        }
+        if let Some(ev_name) = &self.ev_tou_period_name
+            && !ev_name.is_empty()
+        {
+            for month in 1..=12u8 {
+                let rated = self.energy_rates.iter().any(|er| {
+                    er.period_name == *ev_name && season_contains_month(er.season, split, month)
+                });
+                if !rated {
+                    return Err(HaresError::Tariff(format!(
+                        "ev_tou_period_name '{ev_name}' has no energy rate for month \
+                         {month}: the EV sub-tariff must carry a rate in every month, \
+                         or its hours price EV energy at $0/kWh"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -539,7 +635,7 @@ mod tests {
                 },
                 TouPeriod {
                     name: "off-peak".into(),
-                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 480, 0.0)],
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
                     season: SeasonFilter::All,
                 },
             ],
@@ -685,7 +781,7 @@ mod tests {
         let tariff = ElectricTariff {
             tou_schedule: vec![TouPeriod {
                 name: "ev-off-peak".into(),
-                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 480, 0.0)],
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
                 season: SeasonFilter::All,
             }],
             energy_rates: vec![EnergyRate {
@@ -1200,5 +1296,164 @@ mod tests {
             err.to_string().contains("extra_key"),
             "the error names the key: {err}"
         );
+    }
+
+    /// A TOU hour no period matches is a validate error, not silently free
+    /// electricity: the evaluator's unmatched-hour fallback prices the
+    /// step's import at $0/kWh, so a schedule gap bills the uncovered
+    /// hours' energy at nothing.
+    #[test]
+    fn tou_hour_with_no_matching_period_fails_validate() {
+        let tariff = ElectricTariff {
+            tou_schedule: vec![TouPeriod {
+                name: "peak".into(),
+                // Weekday afternoons only: evenings, nights and weekends
+                // match no period.
+                schedule: vec![TimeWindow::new(DayFilter::Weekdays, 840, 1260, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "peak".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.30,
+            }],
+            ..Default::default()
+        };
+        let err = tariff.validate().expect_err("a schedule gap must fail");
+        assert!(
+            err.to_string().contains("no TOU period covers"),
+            "the error names the uncovered hour: {err}"
+        );
+    }
+
+    /// A month no period claims (a summer-only schedule) leaves the whole
+    /// month silently free.
+    #[test]
+    fn month_no_period_claims_fails_validate() {
+        let tariff = ElectricTariff {
+            tou_schedule: vec![TouPeriod {
+                name: "summer-flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::Summer,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "summer-flat".into(),
+                season: SeasonFilter::Summer,
+                rate_per_kwh: 0.30,
+            }],
+            ..Default::default()
+        };
+        let err = tariff.validate().expect_err("a season gap must fail");
+        assert!(
+            err.to_string().contains("no TOU period covers month"),
+            "the error names the uncovered month: {err}"
+        );
+    }
+
+    /// A matched period whose season has no energy rate is a validate
+    /// error: the evaluator's missing-rate fallback prices those hours at
+    /// $0/kWh.
+    #[test]
+    fn period_without_rate_for_claimed_month_fails_validate() {
+        let tariff = ElectricTariff {
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            // Summer rate only: the winter months the period claims have
+            // no rate.
+            energy_rates: vec![EnergyRate {
+                period_name: "flat".into(),
+                season: SeasonFilter::Summer,
+                rate_per_kwh: 0.30,
+            }],
+            ..Default::default()
+        };
+        let err = tariff.validate().expect_err("a rate gap must fail");
+        assert!(
+            err.to_string().contains("no energy rate for month"),
+            "the error names the period and month: {err}"
+        );
+    }
+
+    /// The EV sub-tariff's period must carry a rate in every month: the
+    /// per-step EV price resolves by (period name, month) and falls back
+    /// to $0/kWh on a gap. A period that claims only its own season's
+    /// months passes the period-rate check while its rate still misses
+    /// the months the EV sub-meter prices.
+    #[test]
+    fn ev_tou_period_without_month_rate_fails_validate() {
+        let err = ElectricTariff {
+            tou_schedule: vec![
+                TouPeriod {
+                    name: "flat".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::All,
+                },
+                TouPeriod {
+                    name: "ev".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::Summer,
+                },
+            ],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "flat".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.15,
+                },
+                EnergyRate {
+                    period_name: "ev".into(),
+                    season: SeasonFilter::Summer,
+                    rate_per_kwh: 0.05,
+                },
+            ],
+            ev_tou_period_name: Some("ev".into()),
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("an EV rate gap must fail");
+        assert!(
+            err.to_string()
+                .contains("ev_tou_period_name 'ev' has no energy rate"),
+            "the error names the EV period: {err}"
+        );
+    }
+
+    /// The covered tariff's shape: a schedule whose windows cover every
+    /// hour of the week with a rate for every claimed month validates.
+    #[test]
+    fn fully_covered_tariff_validates() {
+        let tariff = ElectricTariff {
+            tou_schedule: vec![
+                TouPeriod {
+                    name: "peak".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Weekdays, 840, 1260, 0.0)],
+                    season: SeasonFilter::All,
+                },
+                TouPeriod {
+                    name: "off-peak".into(),
+                    schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                    season: SeasonFilter::All,
+                },
+            ],
+            energy_rates: vec![
+                EnergyRate {
+                    period_name: "peak".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.30,
+                },
+                EnergyRate {
+                    period_name: "off-peak".into(),
+                    season: SeasonFilter::All,
+                    rate_per_kwh: 0.10,
+                },
+            ],
+            ..Default::default()
+        };
+        tariff
+            .validate()
+            .expect("full 24x7 coverage with rates must validate");
     }
 }

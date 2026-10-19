@@ -8224,25 +8224,11 @@ impl Dwelling {
         }
 
         // Post-solver: accumulate billing state from metered power.
-        if let Some(ref mut evaluator) = self.tariff_evaluator {
-            let net_kw = self.electrical_solver.net_active_w();
-            let dt_secs = self.latest_env.time_step_secs();
-            let tz = evaluator.simulation_start().timezone();
-            // The evaluator's contract: step() receives the step's end
-            // time, so the period closes on the fold of the step its
-            // boundary ends, and the boundary step books to the period it
-            // opens.
-            let step_end =
-                self.latest_env.current_time + Duration::milliseconds((dt_secs * 1000.0) as i64);
-            let current_tz = step_end.with_timezone(&tz);
-            if let Some(summary) = evaluator.step(net_kw, 0.0, dt_secs, current_tz) {
-                self.billing_summaries.push(summary);
-            }
-        }
-
-        // Capture electrical summary for next step's EnvironmentState. The
-        // summary is W (SI); the actors' pv_kw working value converts once
-        // from it until the control layer holds SI.
+        // The per-end-use signed flows are summed once: they feed both the
+        // electrical summary captured below and, for the EV end use, the
+        // tariff's EV sub-meter. A configured `ev_tou_period_name` bills
+        // the EV's import at its own rate, so the evaluator needs the EV's
+        // share of this step's net flow.
         let mut battery_w = 0.0;
         let mut ev_w = 0.0;
         let mut pv_w = 0.0;
@@ -8259,6 +8245,25 @@ impl Dwelling {
                 pv_w += co.flows.electric_w.map_or(0.0, |e| e.signed_w());
             }
         }
+        if let Some(ref mut evaluator) = self.tariff_evaluator {
+            let net_kw = self.electrical_solver.net_active_w();
+            let dt_secs = self.latest_env.time_step_secs();
+            let tz = evaluator.simulation_start().timezone();
+            // The evaluator's contract: step() receives the step's end
+            // time, so the period closes on the fold of the step its
+            // boundary ends, and the boundary step books to the period it
+            // opens.
+            let step_end =
+                self.latest_env.current_time + Duration::milliseconds((dt_secs * 1000.0) as i64);
+            let current_tz = step_end.with_timezone(&tz);
+            if let Some(summary) = evaluator.step(net_kw, ev_w, dt_secs, current_tz) {
+                self.billing_summaries.push(summary);
+            }
+        }
+
+        // Capture electrical summary for next step's EnvironmentState. The
+        // summary is W (SI); the actors' pv_kw working value converts once
+        // from it until the control layer holds SI.
         let net_grid = self.electrical_solver.net_active_w();
         // The electrical summary observation is checked once here, where it
         // is built (the consumers' per-decide PV re-checks were deleted):
