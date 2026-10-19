@@ -105,10 +105,10 @@ fn dwelling_billing_boundary_step_belongs_to_its_own_month() {
 
     let mut dwelling = dwelling();
     let dt_secs = dwelling.latest_env().time_step_secs();
-    let mut import_kwh: Vec<f64> = Vec::with_capacity(35 * 24);
+    let mut import_j: Vec<f64> = Vec::with_capacity(35 * 24);
     for _ in 0..35 * 24 {
         let result = dwelling.step().expect("the boundary run steps");
-        import_kwh.push(result.net_electric_power_kw.max(0.0) * dt_secs / 3600.0);
+        import_j.push(result.net_electric_power_w.max(0.0) * dt_secs);
     }
     dwelling.finalize_billing();
 
@@ -139,15 +139,21 @@ fn dwelling_billing_boundary_step_belongs_to_its_own_month() {
     );
 
     // Membership is read from the totals: the summary records no per-step
-    // membership, so the split is pinned through the sums.
+    // membership, so the split is pinned through the sums. The evaluator
+    // accumulates each period's import in joules and converts once at the
+    // close, so the sums convert once too.
     let mut first_sum = 0.0f64;
-    for energy in &import_kwh[..744] {
+    for energy in &import_j[..744] {
         first_sum += energy;
     }
     let mut second_sum = 0.0f64;
-    for energy in &import_kwh[744..] {
+    for energy in &import_j[744..] {
         second_sum += energy;
     }
+    let first_sum = uom::si::f64::Energy::new::<uom::si::energy::joule>(first_sum)
+        .get::<uom::si::energy::kilowatt_hour>();
+    let second_sum = uom::si::f64::Energy::new::<uom::si::energy::joule>(second_sum)
+        .get::<uom::si::energy::kilowatt_hour>();
     assert_eq!(
         first.total_import_kwh.to_bits(),
         first_sum.to_bits(),

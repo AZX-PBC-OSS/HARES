@@ -3,7 +3,7 @@ use hares_types::{
     ChargingLevel, EV_CHARGING_LEVEL_LABELS, EV_CONNECTION_STATE_LABELS, Telemetry, TelemetryField,
 };
 
-use super::config::{DEFAULT_CAPACITY_KWH, DEFAULT_FUEL_ECONOMY_KWH_PER_MI, DEFAULT_SOC};
+use super::config::{DEFAULT_CAPACITY_J, DEFAULT_FUEL_ECONOMY_J_PER_M, DEFAULT_SOC};
 use super::telemetry_code;
 
 pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
@@ -21,9 +21,9 @@ pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
     t.insert(tk::V2L_POWER_KW, 0.0);
     t.insert(tk::CAPACITY_FADE_PCT, 0.0);
     t.insert(tk::AWAY_CHARGE_POWER_KW, 0.0);
-    t.insert(tk::CAPACITY_KWH, DEFAULT_CAPACITY_KWH);
-    t.insert(tk::CAPACITY_KWH_RATED, DEFAULT_CAPACITY_KWH);
-    t.insert(tk::FUEL_ECONOMY_KWH_PER_MI, DEFAULT_FUEL_ECONOMY_KWH_PER_MI);
+    t.insert(tk::CAPACITY_KWH, DEFAULT_CAPACITY_J);
+    t.insert(tk::CAPACITY_KWH_RATED, DEFAULT_CAPACITY_J);
+    t.insert(tk::FUEL_ECONOMY_KWH_PER_MI, DEFAULT_FUEL_ECONOMY_J_PER_M);
     t.insert(tk::DRIVE_SHORTFALL_KWH, 0.0);
     t.insert(tk::DR_POWER_FRACTION, 1.0);
     t.insert(tk::DR_LEVEL, 0.0);

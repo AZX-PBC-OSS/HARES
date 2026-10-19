@@ -9,7 +9,7 @@
 //! - `Q_actual = P_actual * tan(acos(pf)) * (zq * V² + iq * V + pq)`
 //!
 //! Sign convention: reactive power is signed, positive = inductive/lagging
-//! (absorbing vars), matching `CoreFlows::reactive_power_kvar`.
+//! (absorbing vars), matching `CoreFlows::reactive_power_var`.
 //!
 //! Divergence from OCHRE (intentional, kept): OCHRE cross-wires the real and
 //! reactive coefficient arrays at off-nominal voltage (`Equipment.py:211-214`);
@@ -66,7 +66,7 @@ fn default_v0() -> f64 {
 /// must travel with them.
 ///
 /// Derefs to [`ZipLoad`] for field access and computation (`apply`,
-/// `reactive_kvar`), so equipment that stores a `ResolvedZip` reads exactly
+/// `reactive_var`), so equipment that stores a `ResolvedZip` reads exactly
 /// like one that stores a `ZipLoad`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedZip {
@@ -216,7 +216,7 @@ impl ZipLoad {
     ///
     /// This is the Rule R1 constructor for typed equipment: reactive power is
     /// computed *from* the already-computed real power via
-    /// [`ZipLoad::reactive_kvar`], never *through* the real-power ZIP
+    /// [`ZipLoad::reactive_var`], never *through* the real-power ZIP
     /// polynomial, guaranteeing bit-identical real power at all voltages.
     pub fn reactive_only(zq: f64, iq: f64, pq: f64, pf: f64) -> Self {
         Self {
@@ -246,46 +246,46 @@ impl ZipLoad {
 
     /// Apply full ZIP voltage-dependent scaling to a real power (kW).
     ///
-    /// Returns `(real_kw, reactive_kvar)`.
-    /// Returns `(0.0, 0.0)` when `p_kw` is zero or voltage is zero (grid
+    /// Returns `(real_w, reactive_var)`.
+    /// Returns `(0.0, 0.0)` when `p_w` is zero or voltage is zero (grid
     /// outage). `pf` is a power factor (cos φ); reactive power converts via
     /// `tan(acos(pf))` to obtain the reactive/active power ratio. When
     /// `pf ≈ 0`, no reactive power is produced — `pf = 0` is the default
     /// sentinel for "no ZIP reactive coefficients configured."
-    pub fn apply(&self, p_kw: f64, voltage_pu: f64) -> (f64, f64) {
-        if p_kw == 0.0 || voltage_pu == 0.0 {
+    pub fn apply(&self, p_w: f64, voltage_pu: f64) -> (f64, f64) {
+        if p_w == 0.0 || voltage_pu == 0.0 {
             return (0.0, 0.0);
         }
         let v_norm = voltage_pu / self.v0;
         let zip_multiplier = self.zp * v_norm * v_norm + self.ip * v_norm + self.pp;
-        let real_kw = p_kw * zip_multiplier;
+        let real_w = p_w * zip_multiplier;
         let reactive_base = self.zq * v_norm * v_norm + self.iq * v_norm + self.pq;
         // pf = 0 is the sentinel for "no reactive ZIP configured" — skip
         // tan(acos(0.0)) which diverges, and produce zero reactive power.
-        let reactive_kvar = if self.pf.abs() < 1e-9 {
+        let reactive_var = if self.pf.abs() < 1e-9 {
             0.0
         } else {
             let tan_phi = self.pf.clamp(-1.0, 1.0).acos().tan();
-            real_kw * tan_phi * reactive_base
+            real_w * tan_phi * reactive_base
         };
-        (real_kw, reactive_kvar)
+        (real_w, reactive_var)
     }
 
     /// Reactive power (kVAR) from an already-computed real power (kW)
     /// (Rule R1: Q-only, real power is never touched).
     ///
-    /// `Q = p_kw * tan(acos(pf)) * (zq * V² + iq * V + pq)` with
+    /// `Q = p_w * tan(acos(pf)) * (zq * V² + iq * V + pq)` with
     /// `V = voltage_pu / v0`. Zero when `pf` is the `0.0` sentinel.
-    /// Returns `0.0` when `p_kw` is zero or voltage is zero (grid outage),
+    /// Returns `0.0` when `p_w` is zero or voltage is zero (grid outage),
     /// matching the guard in [`ZipLoad::apply`] — de-energized equipment
     /// draws no vars.
-    pub fn reactive_kvar(&self, p_kw: f64, voltage_pu: f64) -> f64 {
-        if p_kw == 0.0 || voltage_pu == 0.0 {
+    pub fn reactive_var(&self, p_w: f64, voltage_pu: f64) -> f64 {
+        if p_w == 0.0 || voltage_pu == 0.0 {
             return 0.0;
         }
         let v_norm = voltage_pu / self.v0;
         let reactive_base = self.zq * v_norm * v_norm + self.iq * v_norm + self.pq;
-        p_kw * self.tan_phi() * reactive_base
+        p_w * self.tan_phi() * reactive_base
     }
 }
 
@@ -614,18 +614,18 @@ mod tests {
     /// `ZipCoefficients::apply` arithmetic (hares-equipment
     /// scheduled_load.rs) expression-for-expression. `ZipLoad::apply` must
     /// match it bit-for-bit at nonzero power/voltage.
-    fn legacy_apply(zip: &ZipLoad, p_kw: f64, voltage_pu: f64) -> (f64, f64) {
+    fn legacy_apply(zip: &ZipLoad, p_w: f64, voltage_pu: f64) -> (f64, f64) {
         let v_norm = voltage_pu / zip.v0;
         let zip_multiplier = zip.zp * v_norm * v_norm + zip.ip * v_norm + zip.pp;
-        let real_kw = p_kw * zip_multiplier;
+        let real_w = p_w * zip_multiplier;
         let reactive_base = zip.zq * v_norm * v_norm + zip.iq * v_norm + zip.pq;
-        let reactive_kvar = if zip.pf.abs() < 1e-9 {
+        let reactive_var = if zip.pf.abs() < 1e-9 {
             0.0
         } else {
             let tan_phi = zip.pf.clamp(-1.0, 1.0).acos().tan();
-            real_kw * tan_phi * reactive_base
+            real_w * tan_phi * reactive_base
         };
-        (real_kw, reactive_kvar)
+        (real_w, reactive_var)
     }
 
     #[test]
@@ -634,18 +634,18 @@ mod tests {
             let zip = zip_defaults_for_class(name)
                 .unwrap_or_else(|| panic!("class table missing row for {name:?}"));
             for &v in &[0.9, 1.0, 1.1] {
-                for &p_kw in &[0.372, 1.0, 4.815] {
-                    let (real, reactive) = zip.apply(p_kw, v);
-                    let (exp_real, exp_reactive) = legacy_apply(&zip, p_kw, v);
+                for &p_w in &[0.372, 1.0, 4.815] {
+                    let (real, reactive) = zip.apply(p_w, v);
+                    let (exp_real, exp_reactive) = legacy_apply(&zip, p_w, v);
                     assert_eq!(
                         real.to_bits(),
                         exp_real.to_bits(),
-                        "{name}: real power diverged at p={p_kw} v={v}: {real} vs {exp_real}"
+                        "{name}: real power diverged at p={p_w} v={v}: {real} vs {exp_real}"
                     );
                     assert_eq!(
                         reactive.to_bits(),
                         exp_reactive.to_bits(),
-                        "{name}: reactive diverged at p={p_kw} v={v}: {reactive} vs {exp_reactive}"
+                        "{name}: reactive diverged at p={p_w} v={v}: {reactive} vs {exp_reactive}"
                     );
                 }
             }
@@ -677,12 +677,12 @@ mod tests {
             pf: 0.9,
             v0: 1.0,
         };
-        let p_kw = 2.0;
+        let p_w = 2.0;
         let v = 0.5;
-        let (real, reactive) = zip.apply(p_kw, v);
+        let (real, reactive) = zip.apply(p_w, v);
 
         // P through (zp, ip, pp): 0.5·0.25 + 0.5 = 0.625 of the draw.
-        let expected_real = p_kw * (0.5 * v * v + 0.5);
+        let expected_real = p_w * (0.5 * v * v + 0.5);
         // Q through (zq, iq, pq) and tan(acos(pf)): 1.0·v of the real base.
         let expected_reactive = expected_real * zip.pf.clamp(-1.0, 1.0).acos().tan() * v;
         assert!(
@@ -695,9 +695,9 @@ mod tests {
         );
 
         // The cross-wired numbers differ: P through (zq, iq, pq) would be
-        // p_kw·v, Q through (zp, ip, pp) would be p_kw·v²·tan(acos(pf))·0.625.
-        let cross_real = p_kw * v;
-        let cross_reactive = p_kw * (v * v) * zip.pf.clamp(-1.0, 1.0).acos().tan() * 0.625;
+        // p_w·v, Q through (zp, ip, pp) would be p_w·v²·tan(acos(pf))·0.625.
+        let cross_real = p_w * v;
+        let cross_reactive = p_w * (v * v) * zip.pf.clamp(-1.0, 1.0).acos().tan() * 0.625;
         assert!((real - cross_real).abs() > 1e-9);
         assert!((reactive - cross_reactive).abs() > 1e-9);
     }
@@ -708,9 +708,9 @@ mod tests {
         // path reduces exactly to P·tan(acos(pf)).
         let pf = 0.84;
         let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, pf);
-        let p_kw = 3.6;
-        let expected = p_kw * pf.acos().tan();
-        assert_eq!(zip.reactive_kvar(p_kw, 1.0), expected);
+        let p_w = 3.6;
+        let expected = p_w * pf.acos().tan();
+        assert_eq!(zip.reactive_var(p_w, 1.0), expected);
 
         // Class rows have reactive coefficients summing to ~1, so at nominal
         // voltage Q ≈ P·tan(acos(pf)) within floating-point roundoff.
@@ -719,8 +719,8 @@ mod tests {
             if zip.pf.abs() < 1e-9 || (zip.pf - 1.0).abs() < 1e-9 {
                 continue;
             }
-            let q = zip.reactive_kvar(p_kw, 1.0);
-            let expected = p_kw * zip.pf.clamp(-1.0, 1.0).acos().tan();
+            let q = zip.reactive_var(p_w, 1.0);
+            let expected = p_w * zip.pf.clamp(-1.0, 1.0).acos().tan();
             assert!(
                 (q - expected).abs() < 1e-9,
                 "{name}: Q at nominal = {q}, expected ≈ {expected}"
@@ -735,10 +735,10 @@ mod tests {
             ..ZipLoad::reactive_only(12.53, -21.11, 9.58, 0.0)
         };
         assert_eq!(zip.tan_phi(), 0.0);
-        assert_eq!(zip.reactive_kvar(5.0, 1.05), 0.0);
+        assert_eq!(zip.reactive_var(5.0, 1.05), 0.0);
         assert_eq!(zip.apply(5.0, 1.05).1, 0.0);
         // constant_power() carries the sentinel by construction.
-        assert_eq!(ZipLoad::constant_power().reactive_kvar(5.0, 1.0), 0.0);
+        assert_eq!(ZipLoad::constant_power().reactive_var(5.0, 1.0), 0.0);
     }
 
     #[test]
@@ -748,7 +748,7 @@ mod tests {
         let zip = zip_defaults_for_class("Lighting").expect("row");
         assert_eq!(zip.pf, 1.0);
         assert_eq!(zip.tan_phi(), 0.0);
-        assert_eq!(zip.reactive_kvar(2.0, 1.1), 0.0);
+        assert_eq!(zip.reactive_var(2.0, 1.1), 0.0);
         assert_eq!(zip.apply(2.0, 1.1).1, 0.0);
     }
 
@@ -757,10 +757,10 @@ mod tests {
         let zip = ZipLoad::reactive_only(14.78, -23.71, 9.93, 0.84);
         assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
         for &v in &[0.9, 1.0, 1.1] {
-            let p_kw = 2.75;
-            let (real, reactive) = zip.apply(p_kw, v);
-            assert_eq!(real.to_bits(), p_kw.to_bits(), "real changed at v={v}");
-            assert_eq!(reactive, zip.reactive_kvar(p_kw, v));
+            let p_w = 2.75;
+            let (real, reactive) = zip.apply(p_w, v);
+            assert_eq!(real.to_bits(), p_w.to_bits(), "real changed at v={v}");
+            assert_eq!(reactive, zip.reactive_var(p_w, v));
         }
     }
 
@@ -910,11 +910,11 @@ mod tests {
         // vars, even though the reactive polynomial at v=0 reduces to a
         // nonzero pq term.
         let zip = zip_defaults_for_class("ASHP Heater").expect("row");
-        assert_eq!(zip.reactive_kvar(2.5, 0.0), 0.0);
-        assert_eq!(zip.reactive_kvar(0.0, 1.0), 0.0);
-        assert_eq!(zip.reactive_kvar(0.0, 0.0), 0.0);
-        // apply() and reactive_kvar() agree at v=0.
-        assert_eq!(zip.apply(2.5, 0.0).1, zip.reactive_kvar(2.5, 0.0));
+        assert_eq!(zip.reactive_var(2.5, 0.0), 0.0);
+        assert_eq!(zip.reactive_var(0.0, 1.0), 0.0);
+        assert_eq!(zip.reactive_var(0.0, 0.0), 0.0);
+        // apply() and reactive_var() agree at v=0.
+        assert_eq!(zip.apply(2.5, 0.0).1, zip.reactive_var(2.5, 0.0));
     }
 
     #[test]
@@ -975,7 +975,7 @@ mod tests {
             let zip = zip_defaults_for_class(name).expect("row");
             assert_eq!(zip.pf, 1.0);
             assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
-            assert_eq!(zip.reactive_kvar(3.2, 1.05), 0.0);
+            assert_eq!(zip.reactive_var(3.2, 1.05), 0.0);
             assert_eq!(zip.apply(3.2, 0.95).0.to_bits(), 3.2_f64.to_bits());
         }
     }

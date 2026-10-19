@@ -14,7 +14,7 @@ from array import array
 import pytest
 from conftest import make_dwelling
 
-_OBS_FIELDS = ["total_power_kw", "outdoor_temp"]
+_OBS_FIELDS = ["total_power_w", "outdoor_temp"]
 _SETPOINT_BOUNDS = [(-50.0, 80.0)]
 
 

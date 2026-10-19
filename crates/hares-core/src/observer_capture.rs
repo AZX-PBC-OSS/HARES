@@ -45,10 +45,10 @@ pub(crate) fn capture_environment(
         zone_humidity_ratios: env.zones.iter().map(|z| (z.id, z.humidity_ratio)).collect(),
         solar_irradiance: env.weather.solar_irradiance.clone(),
         wf_allows_leap_years,
-        pv_generation_kw: env.electrical.pv_generation_kw,
-        pv_actual_kw: env.electrical.actual_pv_kw,
-        net_grid_kw: env.electrical.net_grid_kw,
-        base_load_kw: env.electrical.base_load_kw,
+        pv_generation_w: env.electrical.pv_generation_w,
+        pv_actual_w: env.electrical.actual_pv_w,
+        net_grid_w: env.electrical.net_grid_w,
+        base_load_w: env.electrical.base_load_w,
         equipment_core_size: env.equipment_core.len(),
         equipment_telemetry_size: env.equipment_telemetry.len(),
         raw_day_of_year,
@@ -144,11 +144,11 @@ pub(crate) fn diff_ports(before: &PortSlots, after: &PortSlots) -> EquipmentCont
 
     EquipmentContribution {
         thermal,
-        electrical_load_kw: after.electrical.load_power_w - before.electrical.load_power_w,
-        electrical_gen_kw: after.electrical.generation_power_w
+        electrical_load_w: after.electrical.load_power_w - before.electrical.load_power_w,
+        electrical_gen_w: after.electrical.generation_power_w
             - before.electrical.generation_power_w,
-        electrical_reactive_kvar: after.electrical.reactive_power_kvar
-            - before.electrical.reactive_power_kvar,
+        electrical_reactive_var: after.electrical.reactive_power_var
+            - before.electrical.reactive_power_var,
         fuel_consumption_w,
         fluid,
     }
@@ -188,9 +188,9 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
 
     PortsCapture {
         thermal,
-        electrical_load_kw: ports.electrical.load_power_w,
-        electrical_gen_kw: ports.electrical.generation_power_w,
-        electrical_reactive_kvar: ports.electrical.reactive_power_kvar,
+        electrical_load_w: ports.electrical.load_power_w,
+        electrical_gen_w: ports.electrical.generation_power_w,
+        electrical_reactive_var: ports.electrical.reactive_power_var,
         fuel_consumption_w,
         fluid,
     }
@@ -200,9 +200,9 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
 /// grouped because they describe one ZIP/port balance state.
 pub(crate) struct PortBalance {
     pub zip_load_scale: f64,
-    pub port_load_raw_kw: f64,
-    pub port_load_adjusted_kw: f64,
-    pub residual_kw: f64,
+    pub port_load_raw_w: f64,
+    pub port_load_adjusted_w: f64,
+    pub residual_w: f64,
 }
 
 /// Captures all four domain solver outputs + envelope component gains,
@@ -217,9 +217,9 @@ pub(crate) fn capture_solvers(
 ) -> SolverCapture {
     let PortBalance {
         zip_load_scale,
-        port_load_raw_kw,
-        port_load_adjusted_kw,
-        residual_kw,
+        port_load_raw_w,
+        port_load_adjusted_w,
+        residual_w,
     } = balance;
     SolverCapture {
         thermal_update: thermal_update.clone(),
@@ -228,9 +228,9 @@ pub(crate) fn capture_solvers(
         fluid_update: fluid_update.clone(),
         envelope_gains: thermal_solver.component_gains().clone(),
         zip_load_scale,
-        port_load_raw_kw,
-        port_load_adjusted_kw,
-        residual_kw,
+        port_load_raw_w,
+        port_load_adjusted_w,
+        residual_w,
     }
 }
 
@@ -371,7 +371,7 @@ mod tests {
             electrical: ElectricalAccumulator {
                 load_power_w: 1.0,
                 generation_power_w: -2.0,
-                reactive_power_kvar: 0.5,
+                reactive_power_var: 0.5,
                 ..Default::default()
             },
             ..Default::default()
@@ -380,15 +380,15 @@ mod tests {
             electrical: ElectricalAccumulator {
                 load_power_w: 4.0,
                 generation_power_w: -2.0,
-                reactive_power_kvar: 1.0,
+                reactive_power_var: 1.0,
                 ..Default::default()
             },
             ..Default::default()
         };
         let contrib = diff_ports(&before, &after);
-        approx_eq(contrib.electrical_load_kw, 3.0);
-        approx_eq(contrib.electrical_gen_kw, 0.0);
-        approx_eq(contrib.electrical_reactive_kvar, 0.5);
+        approx_eq(contrib.electrical_load_w, 3.0);
+        approx_eq(contrib.electrical_gen_w, 0.0);
+        approx_eq(contrib.electrical_reactive_var, 0.5);
     }
 
     #[test]
@@ -652,15 +652,15 @@ mod tests {
         let after = PortSlots {
             electrical: ElectricalAccumulator {
                 load_power_w: 5000.0,
-                reactive_power_kvar: 3.23,
+                reactive_power_var: 3.23,
                 ..Default::default()
             },
             ..Default::default()
         };
         let contrib = diff_ports(&before, &after);
-        approx_eq(contrib.electrical_load_kw, 0.0);
-        approx_eq(contrib.electrical_gen_kw, 0.0);
-        approx_eq(contrib.electrical_reactive_kvar, 3.23);
+        approx_eq(contrib.electrical_load_w, 0.0);
+        approx_eq(contrib.electrical_gen_w, 0.0);
+        approx_eq(contrib.electrical_reactive_var, 3.23);
     }
 
     #[test]
@@ -668,7 +668,7 @@ mod tests {
         let before = PortSlots {
             electrical: ElectricalAccumulator {
                 generation_power_w: -2000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
                 ..Default::default()
             },
             ..Default::default()
@@ -676,13 +676,13 @@ mod tests {
         let after = PortSlots {
             electrical: ElectricalAccumulator {
                 generation_power_w: -2000.0,
-                reactive_power_kvar: -1.5,
+                reactive_power_var: -1.5,
                 ..Default::default()
             },
             ..Default::default()
         };
         let contrib = diff_ports(&before, &after);
-        approx_eq(contrib.electrical_reactive_kvar, -1.5);
+        approx_eq(contrib.electrical_reactive_var, -1.5);
     }
 
     #[test]

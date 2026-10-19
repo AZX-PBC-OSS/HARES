@@ -382,14 +382,16 @@ fn l1_sae_baseline_charging_preserves_energy_relationship() {
     let mut ports = PortSlots::default();
     ev.step(&env, dt, &mut ports).unwrap();
 
-    let wall_kw = ev
+    let wall_w = ev
         .telemetry()
         .get("active_power_kw")
         .expect("active_power_kw should be present in telemetry");
 
     assert!(
-        (wall_kw - SAE_L1_BASELINE_WALL_KW).abs() < 1e-9,
-        "wall power should be {SAE_L1_BASELINE_WALL_KW} kW, got {wall_kw}"
+        (wall_w - SAE_L1_BASELINE_WALL_KW * 1000.0).abs() < 1e-6,
+        "wall power should be {} W ({} kW), got {wall_w}",
+        SAE_L1_BASELINE_WALL_KW * 1000.0,
+        SAE_L1_BASELINE_WALL_KW
     );
 
     let soc_after = ev
@@ -397,12 +399,12 @@ fn l1_sae_baseline_charging_preserves_energy_relationship() {
         .get("soc")
         .expect("soc should be present in telemetry");
 
-    let dt_hours = dt.as_secs_f64() / 3600.0;
     // The divisor is the usable capacity (rated × the temperature derate
     // at the ambient-resolved 20 °C pack temperature), not the rated value.
     let usable_kwh =
         capacity_kwh * hares_equipment::battery::CapacityDerateModel::default().evaluate(20.0);
-    let expected_soc_delta = wall_kw * dt_hours * TYPICAL_L1_EFFICIENCY / usable_kwh;
+    let expected_soc_delta =
+        wall_w * dt.as_secs_f64() * TYPICAL_L1_EFFICIENCY / (usable_kwh * 3.6e6);
     let actual_soc_delta = soc_after - soc_before;
 
     assert!(
@@ -413,7 +415,7 @@ fn l1_sae_baseline_charging_preserves_energy_relationship() {
 
     // Verify the battery-side effective power matches the CSV convention:
     // 1.44 kW wall × 0.875 efficiency = 1.26 kW battery-side.
-    let battery_side_kw = wall_kw * TYPICAL_L1_EFFICIENCY;
+    let battery_side_kw = wall_w * TYPICAL_L1_EFFICIENCY / 1000.0;
     assert!(
         (battery_side_kw - 1.26).abs() < 1e-9,
         "battery-side effective power should be 1.26 kW, got {battery_side_kw}"

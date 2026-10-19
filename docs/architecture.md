@@ -158,7 +158,7 @@ Equipment writes contributions via a push model. Solvers read accumulated totals
 ```rust
 pub enum PortContribution {
     Thermal  { zone, sensible_gain_w, latent_gain_w, category },
-    Electrical { active_power_w, reactive_power_kvar },
+    Electrical { active_power_w, reactive_power_var },
     Fuel     { fuel_type, consumption_w },
     Fluid    { loop_id, flow_rate_kg_s, supply_temp_c, return_temp_c, fluid_type },
     Custom   { domain_id, payload: [f64; 16] },

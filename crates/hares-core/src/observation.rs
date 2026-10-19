@@ -209,10 +209,10 @@ fn resolve_field(
     if field == "outdoor_humidity_ratio" {
         return Ok(ObservationKind::OutdoorHumidityRatio);
     }
-    if field == "total_electric_kw" || field == "total_power_kw" {
+    if field == "total_electric_kw" || field == "total_power_w" {
         return Ok(ObservationKind::TotalPowerKw);
     }
-    if field == "reactive_power_kvar" {
+    if field == "reactive_power_var" {
         return Ok(ObservationKind::ReactivePowerKvar);
     }
 
@@ -288,6 +288,18 @@ fn resolve_field(
         }
     }
 
+    // A renamed observation key's error names its replacement: the
+    // run-state commit (B-14 commit 3) renamed the total power's key.
+    let renamed = match field {
+        "total_power_kw" | "total_electric_kw" | "total_electric_w" => Some("total_power_w"),
+        _ => None,
+    };
+    if let Some(renamed) = renamed {
+        return Err(HaresError::Control(format!(
+            "unknown telemetry field key `{field}`: the key is `{renamed}` now, \
+             and its value is watts (SI)"
+        )));
+    }
     Err(HaresError::Control(format!(
         "unknown telemetry field key `{field}`"
     )))
@@ -399,8 +411,8 @@ fn telemetry_read(
     Ok(match &source.kind {
         ObservationKind::OutdoorTemp => telemetry.outdoor_temp_c,
         ObservationKind::OutdoorHumidityRatio => telemetry.outdoor_humidity_ratio,
-        ObservationKind::TotalPowerKw => telemetry.total_power_kw,
-        ObservationKind::ReactivePowerKvar => telemetry.reactive_power_kvar,
+        ObservationKind::TotalPowerKw => telemetry.total_power_w,
+        ObservationKind::ReactivePowerKvar => telemetry.reactive_power_var,
         ObservationKind::ZoneTemperature { position, .. } => {
             telemetry.zone_temperatures_c[*position]
         }
@@ -410,7 +422,7 @@ fn telemetry_read(
             telemetry.energy_balance_residuals[*position]
         }
         ObservationKind::EquipmentSoc { index } => telemetry.equipment_soc[*index],
-        ObservationKind::EquipmentPower { index } => telemetry.equipment_power_kw[*index],
+        ObservationKind::EquipmentPower { index } => telemetry.equipment_power_w[*index],
         ObservationKind::TimeSin => time_feature(telemetry, false),
         ObservationKind::TimeCos => time_feature(telemetry, true),
         ObservationKind::ActorDot { actor, channel } => {

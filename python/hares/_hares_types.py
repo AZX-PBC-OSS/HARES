@@ -30,13 +30,13 @@ class StepResult(TypedDict, extra_items=float):
     """
 
     timestamp: datetime.datetime
-    net_electric_power_kw: float
+    net_electric_power_w: float
     hvac_heating_w: float
     hvac_cooling_w: float
     gas_power_w: float
 
 class SteppableStepResult(StepResult):
-    reactive_power_kvar: NotRequired[float]
+    reactive_power_var: NotRequired[float]
 
 class FleetStepEntry(TypedDict):
     """Single per-dwelling entry returned by ``SteppableFleet.step()``."""

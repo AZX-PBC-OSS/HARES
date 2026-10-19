@@ -10,12 +10,12 @@ pub struct V2HDischarge {
 
 impl ChargingPreference for V2HDischarge {
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote {
-        let pv = ctx.env.electrical.actual_pv_kw_or_fallback();
+        let pv = hares_core_units::w_to_kw(ctx.env.electrical.actual_pv_w_or_fallback());
 
         // The observation's own build site checks finiteness, and a negative
         // PV observation fails the step there; no per-decide re-check.
 
-        let load = ctx.env.electrical.base_load_kw;
+        let load = hares_core_units::w_to_kw(ctx.env.electrical.base_load_w);
         let deficit = load - pv;
 
         // The soc floor is a constraint on *this preference's vote* — do not
@@ -86,8 +86,8 @@ mod tests {
         // own charging votes.
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 1.0,
-                base_load_kw: 4.0,
+                pv_generation_w: 1000.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             })
             .build();
@@ -115,8 +115,8 @@ mod tests {
     fn discharges_when_deficit_and_soc_above_threshold() {
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 1.0,
-                base_load_kw: 4.0,
+                pv_generation_w: 1000.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             })
             .build();
@@ -137,8 +137,8 @@ mod tests {
     fn idles_when_no_deficit() {
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 5.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 5000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -158,8 +158,8 @@ mod tests {
     fn idles_when_soc_below_threshold() {
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 1.0,
-                base_load_kw: 4.0,
+                pv_generation_w: 1000.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             })
             .build();
@@ -179,8 +179,8 @@ mod tests {
     fn idles_when_soc_exactly_at_threshold() {
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 1.0,
-                base_load_kw: 4.0,
+                pv_generation_w: 1000.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             })
             .build();
@@ -201,8 +201,8 @@ mod tests {
     fn clamps_discharge_to_max() {
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 0.0,
-                base_load_kw: 10.0,
+                pv_generation_w: 0.0,
+                base_load_w: 10000.0,
                 ..Default::default()
             })
             .build();
@@ -224,9 +224,9 @@ mod tests {
         // Load=4.0, deficit = 4.0 - 2.0 = 2.0 (not 4.0 - 8.0 = -4.0 which would idle).
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 8.0,
-                actual_pv_kw: 2.0,
-                base_load_kw: 4.0,
+                pv_generation_w: 8000.0,
+                actual_pv_w: 2000.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             })
             .build();
@@ -249,9 +249,9 @@ mod tests {
         // Load=4.0, deficit = 4.0 - 1.0 = 3.0.
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 1.0,
-                actual_pv_kw: 0.0,
-                base_load_kw: 4.0,
+                pv_generation_w: 1000.0,
+                actual_pv_w: 0.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             })
             .build();
@@ -265,5 +265,13 @@ mod tests {
 
         assert_eq!(vote.label, "v2h:discharging");
         assert!((vote.power_kw.unwrap() - (-3.0)).abs() < 1e-9);
+    }
+}
+
+/// The kW working value of an SI summary read: the actors' kW-era working
+/// values convert once at the read until the control-layer commit.
+pub(crate) mod hares_core_units {
+    pub(crate) fn w_to_kw(w: f64) -> f64 {
+        uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
     }
 }

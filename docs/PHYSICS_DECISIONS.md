@@ -942,3 +942,34 @@ type (`resources/airflow.rb:337, 570-597`): `always unavailable`
 closes the step's natural ventilation, `always available` and `regular
 schedule` leave it. Direction of the delta: less heating, cooling and
 occupant energy on the flagged days, never a renormalized remainder.
+
+## The run state is held in SI units
+
+The run state — billing accumulators, metrics totals and peaks, equipment
+state and checkpoints, the electrical ports and summary, the per-step
+results and the telemetry under every reporting key — is held and
+computed in SI: watts, joules, VAR and joules per metre. Every quantity
+leaves the engine's objects in SI, and each reporting surface converts
+once at its own boundary: the output columns convert once in the row
+plan (`Unit::from_si`, the kW/kWh/therms-per-hour cells the reports
+name), the billing summaries convert once at their close, the metrics
+records convert once at `finish`, and the HELICS/gym surfaces publish SI
+with their own units. OCHRE holds the same quantities in kW and kWh; the
+boundary converts once.
+
+Two units `uom` 0.38 lacks are defined in `hares-types::si_units` with
+`uom`'s exported `unit!` macro, at the factors HARES's conversion
+constants already carried (so the move is bitwise neutral):
+
+- the `therm` (energy) = 100 000 × `uom`'s `btu_it` = 105 505 600 J.
+  `uom`'s `btu_it` is the rounded 1055.056 J, so this therm is 14.738 J
+  (1.3969e-7 relative) larger than OpenStudio-HPXML v1.12.0's
+  (1055.05585262 J per Btu); the gas therms/hour columns carry that
+  relative move. Adopting the exact OpenStudio-HPXML constant is a
+  numeric change of its own commit.
+- the `btu_it_per_hour` (power) = 0.293 071 07 W (NIST), the value
+  `BTU_PER_HOUR_TO_WATT` held before the move.
+
+The scheduled load's gas schedule enters in W (`gas_constant_w`,
+`gas_profile_max_w`); the parent's therms-per-hour raw keys are removed
+and name their replacement.

@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use hares_physics::units::power_w_to_kw;
 use hares_types::{
     DomainId, DomainSolver, DomainUpdate, ELECTRICAL, EnvironmentState, HaresError, PortSlots,
 };
@@ -85,8 +84,8 @@ impl Default for ElectricalSolverConfig {
 #[derive(Debug, Clone)]
 pub struct ElectricalSolver {
     config: ElectricalSolverConfig,
-    net_active_kw: f64,
-    net_reactive_kvar: f64,
+    net_active_w: f64,
+    net_reactive_var: f64,
 }
 
 impl ElectricalSolver {
@@ -98,8 +97,8 @@ impl ElectricalSolver {
         }
         Ok(Self {
             config,
-            net_active_kw: 0.0,
-            net_reactive_kvar: 0.0,
+            net_active_w: 0.0,
+            net_reactive_var: 0.0,
         })
     }
 
@@ -108,8 +107,8 @@ impl ElectricalSolver {
     /// Value becomes stale after the next `resolve()` call and is not
     /// synchronization-safe with concurrent mutation.
     #[must_use]
-    pub fn net_active_kw(&self) -> f64 {
-        self.net_active_kw
+    pub fn net_active_w(&self) -> f64 {
+        self.net_active_w
     }
 
     /// Returns most recent net reactive power result.
@@ -117,8 +116,8 @@ impl ElectricalSolver {
     /// Value becomes stale after the next `resolve()` call and is not
     /// synchronization-safe with concurrent mutation.
     #[must_use]
-    pub fn net_reactive_kvar(&self) -> f64 {
-        self.net_reactive_kvar
+    pub fn net_reactive_var(&self) -> f64 {
+        self.net_reactive_var
     }
 
     /// Returns the ZIP load scale factor for the given per-unit voltage.
@@ -130,7 +129,7 @@ impl ElectricalSolver {
     ///
     /// Used internally by `resolve()` and exposed so callers (e.g. the electrical
     /// balance invariant check) can apply the same scaling to port-side load
-    /// accumulation for a like-for-like comparison with `net_active_kw()`.
+    /// accumulation for a like-for-like comparison with `net_active_w()`.
     #[must_use]
     pub fn zip_load_scale(&self, voltage_pu: f64) -> f64 {
         let raw_voltage_pu = voltage_pu;
@@ -173,7 +172,7 @@ impl ElectricalSolver {
     /// (un-gated) load visible at the meter and in the electrical-balance
     /// invariant instead of masking it with the clamped-ZIP attenuation.
     ///
-    /// Callers comparing port-side accumulation against `net_active_kw()`
+    /// Callers comparing port-side accumulation against `net_active_w()`
     /// (invariant checker, observer) must use this method so both sides see
     /// the same scale.
     #[must_use]
@@ -198,14 +197,14 @@ impl DomainSolver for ElectricalSolver {
         _dt: Duration,
         out: &mut DomainUpdate,
     ) -> std::result::Result<(), HaresError> {
-        let p_load = power_w_to_kw(ports.electrical.load_power_w);
-        let p_gen = power_w_to_kw(ports.electrical.generation_power_w);
+        let p_load = ports.electrical.load_power_w;
+        let p_gen = ports.electrical.generation_power_w;
         let load_scale = self.effective_load_scale(&env.grid);
 
         let p_load_adj = p_load * load_scale;
         let p_gen_adj = p_gen;
-        self.net_active_kw = p_load_adj + p_gen_adj;
-        self.net_reactive_kvar = ports.electrical.reactive_power_kvar;
+        self.net_active_w = p_load_adj + p_gen_adj;
+        self.net_reactive_var = ports.electrical.reactive_power_var;
 
         out.domain_id = ELECTRICAL;
         out.zone_temperatures_c.clear();
@@ -213,8 +212,8 @@ impl DomainSolver for ElectricalSolver {
             .custom_payload
             .get_or_insert_with(|| Vec::with_capacity(2));
         payload.clear();
-        payload.push(self.net_active_kw);
-        payload.push(self.net_reactive_kvar);
+        payload.push(self.net_active_w);
+        payload.push(self.net_reactive_var);
         Ok(())
     }
 }
@@ -295,26 +294,26 @@ mod tests {
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 1000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 2000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 3000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         let update = solver
             .resolve_new(&ports, &env, Duration::from_secs(60))
             .unwrap();
         assert_eq!(update.domain_id, hares_types::ELECTRICAL);
-        assert_eq!(solver.net_active_kw(), 6.0);
+        assert_eq!(solver.net_active_w(), 6000.0);
     }
 
     #[test]
@@ -330,12 +329,12 @@ mod tests {
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 6000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
-        let expected = 6.0 * (0.5 * 0.95 * 0.95 + 0.3 * 0.95 + 0.2);
-        assert!((solver.net_active_kw() - expected).abs() <= 1e-10);
+        let expected = 6000.0 * (0.5 * 0.95 * 0.95 + 0.3 * 0.95 + 0.2);
+        assert!((solver.net_active_w() - expected).abs() <= 1e-10);
     }
 
     #[test]
@@ -350,24 +349,24 @@ mod tests {
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: -5000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 3000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
 
         let env_nominal = env_with_voltage(1.0);
         let _ = solver.resolve_new(&ports, &env_nominal, Duration::from_secs(60));
-        assert!((solver.net_active_kw() - (-2.0)).abs() <= 1e-12);
+        assert!((solver.net_active_w() - (-2_000.0)).abs() <= 1e-9);
 
         let env_low_v = env_with_voltage(0.95);
         let _ = solver.resolve_new(&ports, &env_low_v, Duration::from_secs(60));
-        let expected = 3.0 * (0.5 * 0.95 * 0.95 + 0.3 * 0.95 + 0.2) - 5.0;
-        assert!((solver.net_active_kw() - expected).abs() <= 1e-10);
+        let expected = 3000.0 * (0.5 * 0.95 * 0.95 + 0.3 * 0.95 + 0.2) - 5000.0;
+        assert!((solver.net_active_w() - expected).abs() <= 1e-10);
     }
 
     #[test]
@@ -378,19 +377,19 @@ mod tests {
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 1500.0,
-                reactive_power_kvar: 0.2,
+                reactive_power_var: 0.2,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: -500.0,
-                reactive_power_kvar: -0.1,
+                reactive_power_var: -0.1,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
-        let p_grid = solver.net_active_kw();
+        let p_grid = solver.net_active_w();
         let p_equipment_sum = ports.electrical.net_active_w();
-        assert!((p_grid - p_equipment_sum / 1_000.0).abs() < 0.001);
+        assert!((p_grid - p_equipment_sum).abs() < 1.0);
     }
 
     #[test]
@@ -410,22 +409,22 @@ mod tests {
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 1500.0,
-                reactive_power_kvar: 0.2,
+                reactive_power_var: 0.2,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: -500.0,
-                reactive_power_kvar: -0.1,
+                reactive_power_var: -0.1,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
-        let p_grid = solver.net_active_kw();
-        // Raw comparison would fail: |p_grid - ports.electrical.net_active_w() / 1_000.0| > 0.001
+        let p_grid = solver.net_active_w();
+        // Raw comparison would fail: |p_grid - ports.electrical.net_active_w()| > 1.0
         let scale = solver.zip_load_scale(env.grid.voltage_pu);
         let port_net_adj =
             ports.electrical.load_power_w * scale + ports.electrical.generation_power_w;
-        assert!((p_grid - port_net_adj / 1_000.0).abs() < 0.001);
+        assert!((p_grid - port_net_adj).abs() < 1.0);
     }
 
     #[test]
@@ -445,16 +444,16 @@ mod tests {
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 10000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
-        let p_grid = solver.net_active_kw();
+        let p_grid = solver.net_active_w();
         let scale = solver.zip_load_scale(env.grid.voltage_pu);
         let port_net = ports.electrical.load_power_w * scale + ports.electrical.generation_power_w;
-        let residual = (p_grid - port_net / 1_000.0).abs();
+        let residual = (p_grid - port_net).abs();
         assert!(
-            residual < 0.001,
+            residual < 1.0,
             "ZIP-adjusted residual should be near-zero, got {residual}"
         );
     }
@@ -468,8 +467,8 @@ mod tests {
             .resolve_new(&ports, &env, Duration::from_secs(60))
             .unwrap();
         assert_eq!(update.custom_payload, Some(vec![0.0, 0.0]));
-        assert_eq!(solver.net_active_kw(), 0.0);
-        assert_eq!(solver.net_reactive_kvar(), 0.0);
+        assert_eq!(solver.net_active_w(), 0.0);
+        assert_eq!(solver.net_reactive_var(), 0.0);
     }
 
     #[test]
@@ -489,15 +488,15 @@ mod tests {
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 10000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
-        let expected = 10.0 * (0.2 * 0.9025 + 0.2 * 0.95 + 0.6);
+        let expected = 10_000.0 * (0.2 * 0.9025 + 0.2 * 0.95 + 0.6);
         assert!(
-            (solver.net_active_kw() - expected).abs() <= 1e-10,
+            (solver.net_active_w() - expected).abs() <= 1e-10,
             "net={}, expected={}",
-            solver.net_active_kw(),
+            solver.net_active_w(),
             expected
         );
     }
@@ -519,22 +518,22 @@ mod tests {
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 10000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: -3000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
         let load_scale = 0.5 * 0.9025 + 0.3 * 0.95 + 0.2;
-        let expected = 10.0 * load_scale + (-3.0);
+        let expected = 10_000.0 * load_scale + (-3_000.0);
         assert!(
-            (solver.net_active_kw() - expected).abs() <= 1e-10,
+            (solver.net_active_w() - expected).abs() <= 1e-10,
             "net={}, expected={}",
-            solver.net_active_kw(),
+            solver.net_active_w(),
             expected
         );
     }
@@ -571,7 +570,7 @@ mod tests {
         assert!((solver.zip_load_scale(1.05) - 1.0).abs() <= 1e-10);
     }
 
-    /// Helper: run solver with given voltage and ZIP config, return net_active_kw.
+    /// Helper: run solver with given voltage and ZIP config, return net_active_w.
     fn run_with_voltage(zip: SolverZipCoefficients, voltage_pu: f64, load_w: f64) -> f64 {
         let mut solver = ElectricalSolver::new(ElectricalSolverConfig {
             zip,
@@ -583,11 +582,11 @@ mod tests {
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: load_w,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
-        solver.net_active_kw()
+        solver.net_active_w()
     }
 
     #[test]
@@ -599,18 +598,18 @@ mod tests {
         // V=0.5 (below range) → clamped to 0.9.
         // load_scale at V=0.9: 0.5*0.81 + 0.3*0.9 + 0.2 = 0.875
         let result_low = run_with_voltage(zip, 0.5, load_w);
-        let expected_low = load_w / 1000.0 * 0.875;
+        let expected_low = load_w * 0.875;
         assert!((result_low - expected_low).abs() <= 1e-10);
 
         // V=1.3 (above range) → clamped to 1.1.
         // load_scale at V=1.1: 0.5*1.21 + 0.3*1.1 + 0.2 = 1.135
         let result_high = run_with_voltage(zip, 1.3, load_w);
-        let expected_high = load_w / 1000.0 * 1.135;
+        let expected_high = load_w * 1.135;
         assert!((result_high - expected_high).abs() <= 1e-10);
 
         // V=1.0 (in range) → passes through unchanged, scale = 1.0.
         let result_normal = run_with_voltage(zip, 1.0, load_w);
-        let expected_normal = load_w / 1000.0;
+        let expected_normal = load_w;
         assert!((result_normal - expected_normal).abs() <= 1e-10);
     }
 
@@ -627,8 +626,8 @@ mod tests {
 
         let result_zero = run_with_voltage(zip, 0.0, load_w);
         assert!(
-            (result_zero - 10.0).abs() <= 1e-10,
-            "dead-bus scale must be 1.0 (leak-visible), got {result_zero} kW"
+            (result_zero - 10_000.0).abs() <= 1e-7,
+            "dead-bus scale must be 1.0 (leak-visible), got {result_zero} W"
         );
 
         // A merely sagged (nonzero) voltage still goes through the clamped
@@ -719,10 +718,10 @@ mod tests {
         ports
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 10_000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         let _ = solver.resolve_new(&ports, &env, Duration::from_secs(60));
-        assert!((solver.net_active_kw() - 10.0).abs() <= 1e-10);
+        assert!((solver.net_active_w() - 10_000.0).abs() <= 1e-7);
     }
 }

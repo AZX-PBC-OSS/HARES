@@ -98,7 +98,7 @@ def _battery_power(step: dict) -> float:
     if not isinstance(equip, dict):
         return 0.0
     idx = _battery_index(equip)
-    powers = equip.get("power_kw") if idx is not None else None
+    powers = equip.get("power_w") if idx is not None else None
     if idx is None or powers is None:
         return 0.0
     return powers[idx]
@@ -323,10 +323,10 @@ class TestDataQuality:
         for i, step in enumerate(sim_result["steps"]):
             r = step["result"]
             if isinstance(r, dict):
-                p = r.get("net_electric_power_kw")
+                p = r.get("net_electric_power_w")
                 if p is not None:
                     assert math.isfinite(p), f"Non-finite power at step {i}: {p}"
-                    assert abs(p) < 100, f"Unreasonable power at step {i}: {p} kW"
+                    assert abs(p) < 100_000.0, f"Unreasonable power at step {i}: {p} W"
 
 
 # ── Tariff telemetry ─────────────────────────────────────────────────

@@ -1514,8 +1514,23 @@ impl Dwelling {
                     .collect()
             })
             .collect();
+        // The union schema's value columns' declared units ride the plan:
+        // the write converts each producer's SI value once.
+        let units: Vec<hares_types::Unit> = union_schema
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|field| {
+                field
+                    .metadata()
+                    .get("unit")
+                    .and_then(|symbol| hares_types::Unit::from_symbol(symbol))
+                    .unwrap_or(hares_types::Unit::None)
+            })
+            .collect();
         let row_plan = RowPlan::from_resolved_projections(
             union_schema.fields().len().saturating_sub(1),
+            units,
             projections,
         );
 

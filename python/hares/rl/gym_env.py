@@ -74,7 +74,7 @@ class RewardContext(TypedDict):
     step: StepResult
     telemetry_zone: dict[str, Any]
     telemetry_equipment: dict[str, Any]
-    total_power_kw: float
+    total_power_w: float
 
 
 # ---------------------------------------------------------------------------
@@ -239,10 +239,10 @@ def observation_field_bounds(field: str) -> tuple[float, float]:
         return (0.0, 1.0)
     if key == "outdoor_humidity_ratio":
         return (0.0, 0.1)
-    if key in {"total_power_kw", "total_electric_kw"}:
-        return (-100.0, 100.0)
-    if key == "reactive_power_kvar":
-        return (-100.0, 100.0)
+    if key == "total_power_w":
+        return (-100_000.0, 100_000.0)
+    if key == "reactive_power_var":
+        return (-100_000.0, 100_000.0)
     if _bracket_name(key, "zone_temp") is not None:
         return (0.0, 50.0)
     if _bracket_name(key, "setpoint_heat") is not None:
@@ -254,7 +254,7 @@ def observation_field_bounds(field: str) -> tuple[float, float]:
     if _bracket_name(key, "equipment_soc") is not None:
         return (0.0, 1.0)
     if _bracket_name(key, "equipment_power") is not None:
-        return (0.0, 100.0)
+        return (0.0, 100_000.0)
     if key in {"battery_soc", "ev_soc"}:
         return (0.0, 1.0)
     if key in {"time_sin", "time_cos"}:
@@ -298,11 +298,11 @@ def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) 
         if key in {"outdoor_humidity_ratio"}:
             out.append(float(zone.get("outdoor_humidity_ratio", float("nan"))))
             continue
-        if key in {"total_power_kw", "total_electric_kw"}:
-            out.append(float(telemetry.total_power_kw))
+        if key == "total_power_w":
+            out.append(float(telemetry.total_power_w))
             continue
-        if key == "reactive_power_kvar":
-            out.append(float(telemetry.reactive_power_kvar))
+        if key == "reactive_power_var":
+            out.append(float(telemetry.reactive_power_var))
             continue
 
         zone_name = _bracket_name(key, "zone_temp")
@@ -327,7 +327,7 @@ def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) 
             continue
         equip_name = _bracket_name(key, "equipment_power")
         if equip_name is not None:
-            out.append(float(equipment["power_kw"][equip_idx[equip_name.strip().lower()]]))
+            out.append(float(equipment["power_w"][equip_idx[equip_name.strip().lower()]]))
             continue
 
         if key == "battery_soc":
@@ -678,14 +678,15 @@ class DwellingGymEnv(_GYM_BASE):
 
         if self._reward_fn is None:
             # The batch path's default reward: the negative net electric
-            # power of the step.
-            reward = -float(step_data["net_electric_power_kw"])
+            # power of the step in kW, converted once from the step's
+            # watts, so a trained policy's reward scale does not change.
+            reward = -float(step_data["net_electric_power_w"]) / 1000.0
         else:
             reward_context = RewardContext(
                 step=step_data,
                 telemetry_zone=telemetry.zone(),
                 telemetry_equipment=telemetry.equipment(),
-                total_power_kw=float(telemetry.total_power_kw),
+                total_power_w=float(telemetry.total_power_w),
             )
             reward = float(self._reward_fn(reward_context))
         warning_count, warning_messages = drain_step_warnings(self._dwelling)

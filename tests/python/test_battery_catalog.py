@@ -151,7 +151,7 @@ class TestBatteryThermalBehavior:
             dw.step()
             tel = dw.telemetry().equipment()
             idx = tel["names"].index("Tesla Powerwall 3")
-            power = tel["power_kw"][idx]
+            power = tel["power_w"][idx]
             max_power = max(max_power, power)
 
         # Heater (300W = 0.3 kW) + standby (10W = 0.01 kW) should be visible
@@ -176,7 +176,7 @@ class TestBatteryThermalBehavior:
             dw.step()
             tel = dw.telemetry().equipment()
             idx = tel["names"].index("Enphase IQ 5P")
-            power = tel["power_kw"][idx]
+            power = tel["power_w"][idx]
             max_power = max(max_power, power)
 
         # No heater -- only standby (15W = 0.015 kW)

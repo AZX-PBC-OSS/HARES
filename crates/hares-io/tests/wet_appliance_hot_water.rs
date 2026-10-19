@@ -185,15 +185,15 @@ fn adjusted_annual_kwh_is_not_adjusted_twice() {
     let washer = wet_appliance_spec(&specs, "Clothes Washer");
     let dishwasher = wet_appliance_spec(&specs, "Dishwasher");
     // `AdjustedAnnualkWh` is the adjusted annual energy: it is the resolved
-    // energy, not the rated input of a second adjustment.
+    // energy, not the rated input of a second adjustment. Held in joules.
     assert_eq!(
-        spec_f64(washer, "annual_electric_kwh"),
-        420.0,
+        spec_f64(washer, "annual_electric_j"),
+        420.0 * 3.6e6,
         "washer AdjustedAnnualkWh must be used as the adjusted energy without a second adjustment"
     );
     assert_eq!(
-        spec_f64(dishwasher, "annual_electric_kwh"),
-        500.0,
+        spec_f64(dishwasher, "annual_electric_j"),
+        500.0 * 3.6e6,
         "dishwasher AdjustedAnnualkWh must be used as the adjusted energy without a second adjustment"
     );
 }

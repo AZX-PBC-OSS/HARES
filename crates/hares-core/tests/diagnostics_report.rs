@@ -72,8 +72,8 @@ fn diagnostics_columns(n_zones: usize) -> Vec<String> {
         cols.push(format!("zone{i}_latent_gain_w"));
     }
     cols.extend([
-        "electrical_net_kw".to_string(),
-        "electrical_net_kvar".to_string(),
+        "electrical_net_w".to_string(),
+        "electrical_net_var".to_string(),
         "port_radiant_w".to_string(),
         "port_shortwave_w".to_string(),
         "port_convective_w".to_string(),
@@ -194,10 +194,7 @@ fn diagnostics_in_memory_with_verbosity_0_report() {
             "timestamp_s" => 1,
             "outdoor_temp_c" => 2,
             "air_density_kg_m3" => 5,
-            n if n.ends_with("_temp_c")
-                || n == "electrical_net_kw"
-                || n == "electrical_net_kvar" =>
-            {
+            n if n.ends_with("_temp_c") || n == "electrical_net_w" || n == "electrical_net_var" => {
                 4
             }
             _ => 1,

@@ -376,6 +376,21 @@ pub static REMOVED_KEYS: &[RemovedKey] = &[
         key: "ScheduledLoad.power_constant_kw",
         replacement: "ScheduledLoad.power_constant_w (W)",
     },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "ScheduledLoad.gas_profile_max",
+        replacement: "ScheduledLoad.gas_profile_max_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "ScheduledLoad.gas_constant",
+        replacement: "ScheduledLoad.gas_constant_w (W)",
+    },
+    RemovedKey {
+        scope: KeyScope::EquipmentConfig,
+        key: "ScheduledLoad.gas_schedule_is_w",
+        replacement: "ScheduledLoad.gas_constant_w (W): the gas schedule's values are watts",
+    },
 ];
 
 /// The replacement text of the removed key matching `scope` and `key`, if

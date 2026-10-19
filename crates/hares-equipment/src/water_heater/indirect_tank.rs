@@ -591,8 +591,8 @@ impl Equipment for IndirectTank {
 
         let core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: None,
-                reactive_power_kvar: None,
+                electric_w: None,
+                reactive_power_var: None,
                 fuel_w: None,
                 thermal_output_w: Some(hx_power_w.max(0.0)),
                 sensible_cooling_w: None,
@@ -606,7 +606,7 @@ impl Equipment for IndirectTank {
             },
             performance: CorePerformance {
                 cop: None,
-                main_power_kw: None,
+                main_power_w: None,
             },
         };
         self.core_output = core_output;
@@ -701,8 +701,8 @@ impl Equipment for IndirectTank {
         .resolve_idle(has_nonzero_flow, Some(decoded.hx_power_w.max(0.0)));
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: None,
-                reactive_power_kvar: None,
+                electric_w: None,
+                reactive_power_var: None,
                 fuel_w: None,
                 thermal_output_w: Some(decoded.hx_power_w.max(0.0)),
                 sensible_cooling_w: None,

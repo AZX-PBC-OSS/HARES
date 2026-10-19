@@ -68,7 +68,7 @@ pub const DEFAULT_SYSTEM_HEAD_LOSS_M: f64 = 3.0;
 ///   Use [`DEFAULT_SYSTEM_HEAD_LOSS_M`] for a typical residential brazed-plate
 ///   HX at design flow. Set to 0.0 for borehole loop only.
 #[must_use]
-pub fn compute_ground_loop_pump_power_kw(
+pub fn compute_ground_loop_pump_power_w(
     loop_depth_m: f64,
     pipe_diameter_m: f64,
     flow_rate_m3_per_s: f64,
@@ -133,8 +133,8 @@ pub fn compute_ground_loop_pump_power_kw(
     // Combined wire-to-water efficiency.
     let total_efficiency = pump_efficiency * motor_efficiency;
 
-    // Electrical input power [kW].
-    hydraulic_power_w / (total_efficiency * 1000.0)
+    // Electrical input power [W].
+    hydraulic_power_w / total_efficiency
 }
 
 #[cfg(test)]
@@ -151,30 +151,30 @@ mod tests {
 
     #[test]
     fn zero_power_for_zero_flow() {
-        let kw = compute_ground_loop_pump_power_kw(60.0, 0.025, 0.0, 0.5, 0.5, 3.0);
-        assert_eq!(kw, 0.0, "zero flow must produce zero pump power");
+        let w = compute_ground_loop_pump_power_w(60.0, 0.025, 0.0, 0.5, 0.5, 3.0);
+        assert_eq!(w, 0.0, "zero flow must produce zero pump power");
     }
 
     #[test]
     fn zero_power_for_zero_depth() {
-        let kw = compute_ground_loop_pump_power_kw(0.0, 0.025, 0.00019, 0.5, 0.5, 3.0);
-        assert_eq!(kw, 0.0, "zero depth must produce zero pump power");
+        let w = compute_ground_loop_pump_power_w(0.0, 0.025, 0.00019, 0.5, 0.5, 3.0);
+        assert_eq!(w, 0.0, "zero depth must produce zero pump power");
     }
 
     #[test]
     fn zero_power_for_zero_efficiency() {
-        let kw = compute_ground_loop_pump_power_kw(60.0, 0.025, 0.00019, 0.0, 0.5, 3.0);
-        assert_eq!(kw, 0.0, "zero pump efficiency must produce zero power");
+        let w = compute_ground_loop_pump_power_w(60.0, 0.025, 0.00019, 0.0, 0.5, 3.0);
+        assert_eq!(w, 0.0, "zero pump efficiency must produce zero power");
     }
 
     #[test]
     fn zero_power_for_negative_inputs() {
         assert_eq!(
-            compute_ground_loop_pump_power_kw(-10.0, 0.025, 0.00019, 0.5, 0.5, 3.0),
+            compute_ground_loop_pump_power_w(-10.0, 0.025, 0.00019, 0.5, 0.5, 3.0),
             0.0
         );
         assert_eq!(
-            compute_ground_loop_pump_power_kw(60.0, -0.001, 0.00019, 0.5, 0.5, 3.0),
+            compute_ground_loop_pump_power_w(60.0, -0.001, 0.00019, 0.5, 0.5, 3.0),
             0.0
         );
     }
@@ -182,65 +182,60 @@ mod tests {
     #[test]
     fn typical_residential_pump_in_expected_range() {
         let (depth, diam, flow, pump_eta, motor_eta, sys_head) = typical_residential_params();
-        let kw =
-            compute_ground_loop_pump_power_kw(depth, diam, flow, pump_eta, motor_eta, sys_head);
+        let w = compute_ground_loop_pump_power_w(depth, diam, flow, pump_eta, motor_eta, sys_head);
         // For a single borehole at 3 GPM: expect 40–120 W.
         // 0.35 × 0.40 = 0.14 wire-to-water; ~4.7 m total head → ~62 W.
         assert!(
-            (0.04..=0.12).contains(&kw),
-            "single-borehole pump power must be 0.04–0.12 kW, got {kw:.4} kW"
+            (40.0..=120.0).contains(&w),
+            "single-borehole pump power must be 40–120 W, got {w:.4} W"
         );
     }
 
     #[test]
     fn pump_power_scales_linearly_with_system_head() {
         let (depth, diam, flow, pump_eta, motor_eta, _) = typical_residential_params();
-        let kw_no_hx =
-            compute_ground_loop_pump_power_kw(depth, diam, flow, pump_eta, motor_eta, 0.0);
-        let kw_with_hx =
-            compute_ground_loop_pump_power_kw(depth, diam, flow, pump_eta, motor_eta, 3.0);
+        let w_no_hx = compute_ground_loop_pump_power_w(depth, diam, flow, pump_eta, motor_eta, 0.0);
+        let w_with_hx =
+            compute_ground_loop_pump_power_w(depth, diam, flow, pump_eta, motor_eta, 3.0);
         assert!(
-            kw_with_hx > kw_no_hx,
+            w_with_hx > w_no_hx,
             "adding system head must increase pump power"
         );
     }
 
     #[test]
     fn pump_power_increases_with_depth() {
-        let kw_shallow = compute_ground_loop_pump_power_kw(30.0, 0.025, 0.00019, 0.5, 0.5, 0.0);
-        let kw_deep = compute_ground_loop_pump_power_kw(60.0, 0.025, 0.00019, 0.5, 0.5, 0.0);
+        let w_shallow = compute_ground_loop_pump_power_w(30.0, 0.025, 0.00019, 0.5, 0.5, 0.0);
+        let w_deep = compute_ground_loop_pump_power_w(60.0, 0.025, 0.00019, 0.5, 0.5, 0.0);
         assert!(
-            kw_deep > kw_shallow,
+            w_deep > w_shallow,
             "deeper boreholes must increase pump power (more pipe friction)"
         );
     }
 
     #[test]
     fn pump_power_decreases_with_larger_pipe() {
-        let kw_small = compute_ground_loop_pump_power_kw(60.0, 0.02, 0.00019, 0.5, 0.5, 0.0);
-        let kw_large = compute_ground_loop_pump_power_kw(60.0, 0.03, 0.00019, 0.5, 0.5, 0.0);
+        let w_small = compute_ground_loop_pump_power_w(60.0, 0.02, 0.00019, 0.5, 0.5, 0.0);
+        let w_large = compute_ground_loop_pump_power_w(60.0, 0.03, 0.00019, 0.5, 0.5, 0.0);
         assert!(
-            kw_large < kw_small,
+            w_large < w_small,
             "larger pipe diameter must reduce pump power (lower velocity, lower friction)"
         );
     }
 
     #[test]
     fn pump_power_increases_with_flow_rate() {
-        let kw_low = compute_ground_loop_pump_power_kw(60.0, 0.025, 0.0001, 0.5, 0.5, 0.0);
-        let kw_high = compute_ground_loop_pump_power_kw(60.0, 0.025, 0.0003, 0.5, 0.5, 0.0);
-        assert!(
-            kw_high > kw_low,
-            "higher flow rate must increase pump power"
-        );
+        let w_low = compute_ground_loop_pump_power_w(60.0, 0.025, 0.0001, 0.5, 0.5, 0.0);
+        let w_high = compute_ground_loop_pump_power_w(60.0, 0.025, 0.0003, 0.5, 0.5, 0.0);
+        assert!(w_high > w_low, "higher flow rate must increase pump power");
     }
 
     #[test]
     fn pump_power_decreases_with_better_efficiency() {
-        let kw_poor = compute_ground_loop_pump_power_kw(60.0, 0.025, 0.00019, 0.2, 0.3, 0.0);
-        let kw_good = compute_ground_loop_pump_power_kw(60.0, 0.025, 0.00019, 0.6, 0.8, 0.0);
+        let w_poor = compute_ground_loop_pump_power_w(60.0, 0.025, 0.00019, 0.2, 0.3, 0.0);
+        let w_good = compute_ground_loop_pump_power_w(60.0, 0.025, 0.00019, 0.6, 0.8, 0.0);
         assert!(
-            kw_good < kw_poor,
+            w_good < w_poor,
             "better pump+motor efficiency must reduce electrical power"
         );
     }
@@ -248,9 +243,9 @@ mod tests {
     #[test]
     fn laminar_flow_power_positive() {
         // Very low flow → Re < 2300 → laminar, f = 64/Re
-        let kw = compute_ground_loop_pump_power_kw(60.0, 0.025, 0.00001, 0.5, 0.5, 0.0);
+        let w = compute_ground_loop_pump_power_w(60.0, 0.025, 0.00001, 0.5, 0.5, 0.0);
         assert!(
-            kw > 0.0,
+            w > 0.0,
             "laminar flow must still produce positive pump power"
         );
     }

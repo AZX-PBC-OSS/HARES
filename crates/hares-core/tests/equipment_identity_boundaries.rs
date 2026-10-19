@@ -127,7 +127,8 @@ impl BoundaryProbe {
     fn with_electric_load(mut self, kw: f64) -> Self {
         self.electric_load_kw = kw;
         self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC;
-        self.core_output.flows.electric_kw = Some(ElectricPower::Consumption(kw));
+        // The core flow is W (SI); the probe's kW intent converts once.
+        self.core_output.flows.electric_w = Some(ElectricPower::Consumption(kw * 1000.0));
         self
     }
 }
@@ -175,7 +176,7 @@ impl Equipment for BoundaryProbe {
         if self.electric_load_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: self.electric_load_kw * 1000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })?;
         }
         Ok(())

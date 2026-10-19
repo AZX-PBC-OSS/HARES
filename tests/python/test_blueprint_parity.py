@@ -21,7 +21,7 @@ def test_blueprint_parity_default():
         r2 = dw2.step()
         assert r1 is not None
         assert r2 is not None
-        assert abs(r1["net_electric_power_kw"] - r2["net_electric_power_kw"]) < 1e-6
+        assert abs(r1["net_electric_power_w"] - r2["net_electric_power_w"]) < 1e-6
 
 
 def test_blueprint_equipment_names():

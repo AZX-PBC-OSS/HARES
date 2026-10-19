@@ -209,6 +209,56 @@ impl Unit {
     pub fn is_energy(self) -> bool {
         matches!(self, Self::KilowattHour)
     }
+
+    /// Converts an SI value of this unit's dimension to this reporting
+    /// unit: the one reporting conversion the row plan applies when it
+    /// fills a report row. Every run-state value is SI from B-14's
+    /// run-state commit on, so a `kW` column reads `net_electric_power_w`
+    /// converted here, a `therms/hour` column the W gas power converted
+    /// here, and every SI or dimensionless unit is the identity.
+    ///
+    /// A rate in therms per hour is `therm` over `uom`'s `hour`; the
+    /// `kVAR` spelling is the kilo prefix over the volt-ampere-reactive's
+    /// watt dimension.
+    #[must_use]
+    pub fn from_si(self, value: f64) -> f64 {
+        use crate::si_units::energy::therm;
+        use uom::si::energy::{joule, kilowatt_hour};
+        use uom::si::f64::{Energy, Power, Time};
+        use uom::si::power::{kilowatt, watt};
+        match self {
+            Self::Kilowatt | Self::VoltAmpereReactive => {
+                Power::new::<watt>(value).get::<kilowatt>()
+            }
+            Self::KilowattHour => Energy::new::<joule>(value).get::<kilowatt_hour>(),
+            Self::ThermPerHour => {
+                (Power::new::<watt>(value) * Time::new::<uom::si::time::hour>(1.0)).get::<therm>()
+            }
+            _ => value,
+        }
+    }
+
+    /// The inverse of [`Unit::from_si`]: a reporting-unit value of this
+    /// unit's dimension to SI. `metrics_from_table` applies it to every
+    /// input column of a table in reporting units before the calculator
+    /// reads it.
+    #[must_use]
+    pub fn to_si(self, value: f64) -> f64 {
+        use crate::si_units::energy::therm;
+        use uom::si::energy::{joule, kilowatt_hour};
+        use uom::si::f64::{Energy, Power, Time};
+        use uom::si::power::{kilowatt, watt};
+        match self {
+            Self::Kilowatt | Self::VoltAmpereReactive => {
+                Power::new::<kilowatt>(value).get::<watt>()
+            }
+            Self::KilowattHour => Energy::new::<kilowatt_hour>(value).get::<joule>(),
+            Self::ThermPerHour => {
+                (Energy::new::<therm>(value) / Time::new::<uom::si::time::hour>(1.0)).get::<watt>()
+            }
+            _ => value,
+        }
+    }
 }
 
 /// The fleet's across-homes rule for a [`VariableKind::Quantity`], declared
@@ -1053,7 +1103,7 @@ mod tests {
 
     #[test]
     fn telemetry_field_serialises_compactly() {
-        let field = TelemetryField::power_kw("electric_kw", "power");
+        let field = TelemetryField::power_kw("electric_w", "power");
         let json = serde_json::to_string(&field).expect("serialise");
         let decoded: TelemetryField = serde_json::from_str(&json).expect("decode");
         assert_eq!(decoded, field);

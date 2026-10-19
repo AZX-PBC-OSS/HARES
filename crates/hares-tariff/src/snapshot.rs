@@ -170,20 +170,20 @@ pub struct BillingStateSnapshot {
     /// start, or the attach or switch instant for a period a tariff joined
     /// mid-way.
     pub active_since: LocalInstant,
-    pub cumulative_import_kwh: f64,
-    pub cumulative_export_kwh: f64,
+    pub cumulative_import_j: f64,
+    pub cumulative_export_j: f64,
     pub cumulative_energy_cost_usd: f64,
     pub cumulative_export_credit_usd: f64,
-    pub peak_demand_kw: f64,
-    pub period_peak_demand_kw: Vec<f64>,
-    pub prior_peaks_kw: Vec<f64>,
-    pub prior_period_peaks: Vec<Vec<f64>>,
+    pub peak_demand_w: f64,
+    pub period_peak_demand_w: Vec<f64>,
+    pub prior_peaks_w: Vec<f64>,
+    pub prior_period_peaks_w: Vec<Vec<f64>>,
     pub demand_window: DemandWindowSnapshot,
     pub billing_cycle: BillingCycle,
     pub max_prior_periods: usize,
     pub running_cpp_event_hours: u32,
     pub last_cpp_hour: Option<usize>,
-    pub cumulative_ev_kwh: f64,
+    pub cumulative_ev_j: f64,
     pub steps_in_period: u64,
 }
 
@@ -332,8 +332,8 @@ mod tests {
             }
         }
         assert_eq!(
-            original.billing_state().cumulative_import_kwh().to_bits(),
-            restored.billing_state().cumulative_import_kwh().to_bits()
+            original.billing_state().cumulative_import_j().to_bits(),
+            restored.billing_state().cumulative_import_j().to_bits()
         );
     }
 
@@ -567,7 +567,7 @@ mod tests {
         TariffEvaluator::from_snapshot(&decoded).expect("restore");
         let bits_of = |s: &TariffSnapshot| {
             (
-                s.billing.cumulative_import_kwh.to_bits(),
+                s.billing.cumulative_import_j.to_bits(),
                 s.billing.cumulative_energy_cost_usd.to_bits(),
                 s.billing.demand_window.running_sum.to_bits(),
             )

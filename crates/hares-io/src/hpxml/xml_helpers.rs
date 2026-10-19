@@ -153,10 +153,8 @@ pub(crate) fn child_energy_j(
                 .get::<uom::si::energy::joule>(),
         ),
         "therm" | "therm/year" | "therm/yr" => Some(
-            uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
-                conv::energy_therms_to_kwh(value),
-            )
-            .get::<uom::si::energy::joule>(),
+            uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(value)
+                .get::<uom::si::energy::joule>(),
         ),
         other => {
             tracing::warn!(
@@ -170,7 +168,7 @@ pub(crate) fn child_energy_j(
     }
 }
 
-pub(crate) fn child_load_kwh(node: &XmlNode) -> Option<f64> {
+pub(crate) fn child_annual_energy_j(node: &XmlNode) -> Option<f64> {
     let load = node.child(&LOAD)?;
     let value = child_f64(load, &VALUE)?;
     let units_raw = child_text(load, &UNITS);
@@ -178,22 +176,27 @@ pub(crate) fn child_load_kwh(node: &XmlNode) -> Option<f64> {
         .as_deref()
         .unwrap_or("kwh/year")
         .to_ascii_lowercase();
+    // One uom conversion per arm, at the read: the reader returns J per
+    // year (the annual consumption the raw keys carry).
     match units.as_str() {
-        "kwh/year" | "kwh/yr" | "kwh" => Some(value),
-        "w" => Some(conv::power_watt_to_kwh_per_year(value)),
+        "kwh/year" | "kwh/yr" | "kwh" => Some(
+            uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(value)
+                .get::<uom::si::energy::joule>(),
+        ),
+        "w" => Some(conv::power_watt_to_j_per_year(value)),
         other => {
             tracing::warn!(
                 units = other,
                 value,
                 "Unrecognized load energy unit from PlugLoadUnits/PoolHeaterUnits; \
-                 cannot convert to kWh/year. Accepted: kWh/year, W."
+                 cannot convert to joules per year. Accepted: kWh/year, W."
             );
             None
         }
     }
 }
 
-pub(crate) fn child_load_therms(node: &XmlNode) -> Option<f64> {
+pub(crate) fn child_annual_fuel_energy_j(node: &XmlNode) -> Option<f64> {
     let load = node.child(&LOAD)?;
     let value = child_f64(load, &VALUE)?;
     let units_raw = child_text(load, &UNITS);
@@ -201,15 +204,20 @@ pub(crate) fn child_load_therms(node: &XmlNode) -> Option<f64> {
         .as_deref()
         .unwrap_or("therm/year")
         .to_ascii_lowercase();
+    // One uom conversion per arm, at the read: the reader returns J per
+    // year (the HARES therm is the unit `si_units` defines).
     match units.as_str() {
-        "therm/year" | "therm/yr" | "therm" => Some(value),
-        "btuh" => Some(conv::power_btuh_to_therms_per_year(value)),
+        "therm/year" | "therm/yr" | "therm" => Some(
+            uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(value)
+                .get::<uom::si::energy::joule>(),
+        ),
+        "btuh" => Some(conv::power_btuh_to_j_per_year(value)),
         other => {
             tracing::warn!(
                 units = other,
                 value,
                 "Unrecognized load energy unit from PoolHeaterUnits; \
-                 cannot convert to therms/year. Accepted: therm/year, Btuh."
+                 cannot convert to joules per year. Accepted: therm/year, Btuh."
             );
             None
         }
@@ -616,63 +624,72 @@ mod tests {
     }
 
     #[test]
-    fn child_load_kwh_parses_kwh_year() {
+    fn child_annual_energy_j_parses_kwh_year() {
         let node = load_node(2700.0, Some("kWh/year"));
-        assert!((child_load_kwh(&node).unwrap() - 2700.0).abs() < 1e-10);
+        assert!((child_annual_energy_j(&node).unwrap() - 2700.0 * 3.6e6).abs() < 1e-3);
     }
 
     #[test]
-    fn child_load_kwh_converts_watts() {
-        // 1000 W * 8760 / 1000 = 8760 kWh/year
+    fn child_annual_energy_j_converts_watts() {
+        // 1000 W * 8760 h * 3600 s = 3.1536e10 J/year
         let node = load_node(1000.0, Some("W"));
-        assert!((child_load_kwh(&node).unwrap() - 8760.0).abs() < 1e-10);
+        assert!((child_annual_energy_j(&node).unwrap() - 3.1536e10).abs() < 1e4);
     }
 
     #[test]
-    fn child_load_kwh_defaults_to_kwh_year_when_units_absent() {
+    fn child_annual_energy_j_defaults_to_kwh_year_when_units_absent() {
         let node = load_node(500.0, None);
-        assert!((child_load_kwh(&node).unwrap() - 500.0).abs() < 1e-10);
+        assert!((child_annual_energy_j(&node).unwrap() - 500.0 * 3.6e6).abs() < 1e-3);
     }
 
     #[test]
-    fn child_load_kwh_rejects_unrecognized_unit() {
+    fn child_annual_energy_j_rejects_unrecognized_unit() {
         let node = load_node(100.0, Some("gigajoules"));
-        assert!(child_load_kwh(&node).is_none());
+        assert!(child_annual_energy_j(&node).is_none());
     }
 
     #[test]
-    fn child_load_therms_parses_therm_year() {
+    fn child_annual_fuel_energy_j_parses_therm_year() {
         let node = load_node(500.0, Some("therm/year"));
-        assert!((child_load_therms(&node).unwrap() - 500.0).abs() < 1e-10);
+        let got = child_annual_fuel_energy_j(&node).unwrap();
+        let want = uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(500.0)
+            .get::<uom::si::energy::joule>();
+        assert!((got - want).abs() < 1e-6);
     }
 
     #[test]
-    fn child_load_therms_converts_btuh() {
-        // 100000 Btuh * 8760 / 100000 = 8760 therms/year
+    fn child_annual_fuel_energy_j_converts_btuh() {
+        // 100000 Btuh over the year = 8760 therms/year, through the parent
+        // factors.
         let node = load_node(100_000.0, Some("Btuh"));
-        assert!((child_load_therms(&node).unwrap() - 8760.0).abs() < 1e-10);
+        let got = child_annual_fuel_energy_j(&node).unwrap();
+        let want = uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(8760.0)
+            .get::<uom::si::energy::joule>();
+        assert!((got - want).abs() < want * 1e-6);
     }
 
     #[test]
-    fn child_load_therms_rejects_unrecognized_unit() {
+    fn child_annual_fuel_energy_j_rejects_unrecognized_unit() {
         let node = load_node(100.0, Some("MW"));
-        assert!(child_load_therms(&node).is_none());
+        assert!(child_annual_fuel_energy_j(&node).is_none());
     }
 
     #[test]
-    fn child_load_kwh_rejects_therm_units() {
+    fn child_annual_energy_j_rejects_therm_units() {
         // cross-unit conversion intentionally NOT added here:
-        // callers use child_load_kwh→Electric, child_load_therms→Gas for fuel type detection.
+        // callers use child_annual_energy_j→Electric,
+        // child_annual_fuel_energy_j→Gas for fuel type detection.
         let node = load_node(100.0, Some("therm/year"));
-        assert!(child_load_kwh(&node).is_none());
+        assert!(child_annual_energy_j(&node).is_none());
     }
 
     #[test]
-    fn child_load_therms_rejects_kwh_units() {
+    fn child_annual_fuel_energy_j_rejects_kwh_units() {
         // cross-unit conversion intentionally NOT added here:
-        // callers use child_load_kwh→Electric, child_load_therms→Gas for fuel type detection.
+        // callers use child_annual_energy_j→Electric,
+        // child_annual_fuel_energy_j→Gas for fuel type detection.
         let node = load_node(2930.0, Some("kWh"));
-        assert!(child_load_therms(&node).is_none());
+        assert!(child_annual_fuel_energy_j(&node).is_none());
     }
 
     // --- child_energy_j tests ---
@@ -723,20 +740,16 @@ mod tests {
     #[test]
     fn child_energy_j_converts_therms() {
         let node = energy_node("Usage", 10.0, Some("therm"));
-        let expected = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
-            conv::energy_therms_to_kwh(10.0),
-        )
-        .get::<uom::si::energy::joule>();
+        let expected = uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(10.0)
+            .get::<uom::si::energy::joule>();
         assert!((child_energy_j(&node, &USAGE).unwrap() - expected).abs() < 1e-6);
     }
 
     #[test]
     fn child_energy_j_converts_therm_per_year() {
         let node = energy_node("Usage", 10.0, Some("therm/year"));
-        let expected = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
-            conv::energy_therms_to_kwh(10.0),
-        )
-        .get::<uom::si::energy::joule>();
+        let expected = uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(10.0)
+            .get::<uom::si::energy::joule>();
         assert!((child_energy_j(&node, &USAGE).unwrap() - expected).abs() < 1e-6);
     }
 

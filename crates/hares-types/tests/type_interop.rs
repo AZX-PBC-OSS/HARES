@@ -136,7 +136,7 @@ fn electrical_contribution_routes_load_vs_generation() {
     slots
         .accumulate(&PortContribution::Electrical {
             active_power_w: 1_500.0,
-            reactive_power_kvar: 0.0,
+            reactive_power_var: 0.0,
         })
         .expect("accumulate load must succeed");
 
@@ -155,7 +155,7 @@ fn electrical_contribution_routes_load_vs_generation() {
     slots
         .accumulate(&PortContribution::Electrical {
             active_power_w: -1_000.0,
-            reactive_power_kvar: 0.0,
+            reactive_power_var: 0.0,
         })
         .expect("accumulate generation must succeed");
 
@@ -200,7 +200,7 @@ fn zero_resets_all_slots_while_preserving_structure() {
     slots
         .accumulate(&PortContribution::Electrical {
             active_power_w: 2_000.0,
-            reactive_power_kvar: 0.5,
+            reactive_power_var: 0.5,
         })
         .expect("accumulate electrical");
 
@@ -245,7 +245,7 @@ fn zero_resets_all_slots_while_preserving_structure() {
         "generation_power after zero",
     );
     approx_eq(
-        slots.electrical.reactive_power_kvar,
+        slots.electrical.reactive_power_var,
         0.0,
         "reactive after zero",
     );

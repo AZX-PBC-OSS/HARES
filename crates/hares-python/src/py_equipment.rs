@@ -1052,13 +1052,13 @@ impl PyCoreOutput {
 #[pymethods]
 impl PyCoreOutput {
     #[getter]
-    fn electric_kw(&self) -> Option<f64> {
-        self.inner.flows.electric_kw.map(|e| e.net_consumption_kw())
+    fn electric_w(&self) -> Option<f64> {
+        self.inner.flows.electric_w.map(|e| e.net_consumption_w())
     }
 
     #[getter]
     fn electric_convention(&self) -> Option<String> {
-        match self.inner.flows.electric_kw {
+        match self.inner.flows.electric_w {
             Some(ElectricPower::Consumption(_)) => Some("consumption".to_string()),
             Some(ElectricPower::Generation(_)) => Some("generation".to_string()),
             Some(ElectricPower::Bidirectional(_)) => Some("bidirectional".to_string()),
@@ -1067,8 +1067,8 @@ impl PyCoreOutput {
     }
 
     #[getter]
-    fn reactive_power_kvar(&self) -> Option<f64> {
-        self.inner.flows.reactive_power_kvar
+    fn reactive_power_var(&self) -> Option<f64> {
+        self.inner.flows.reactive_power_var
     }
 
     #[getter]
@@ -1116,8 +1116,8 @@ impl PyCoreOutput {
 
     fn __repr__(&self) -> String {
         format!(
-            "CoreOutput(electric_kw={:?}, mode={:?}, soc={:?})",
-            self.electric_kw(),
+            "CoreOutput(electric_w={:?}, mode={:?}, soc={:?})",
+            self.electric_w(),
             self.operating_mode(),
             self.soc()
         )
@@ -1401,7 +1401,7 @@ mod tests {
     #[test]
     fn py_core_output_missing_electric_has_no_convention() {
         let py_core = PyCoreOutput::new(RustCoreOutput::default());
-        assert_eq!(py_core.electric_kw(), None);
+        assert_eq!(py_core.electric_w(), None);
         assert_eq!(py_core.electric_convention(), None);
     }
 
@@ -1409,7 +1409,7 @@ mod tests {
     fn py_core_output_reports_electric_convention_variants() {
         let consumption = PyCoreOutput::new(RustCoreOutput {
             flows: hares_types::CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.2)),
+                electric_w: Some(ElectricPower::Consumption(1200.0)),
                 ..Default::default()
             },
             ..Default::default()
@@ -1421,7 +1421,7 @@ mod tests {
 
         let generation = PyCoreOutput::new(RustCoreOutput {
             flows: hares_types::CoreFlows {
-                electric_kw: Some(ElectricPower::Generation(1.2)),
+                electric_w: Some(ElectricPower::Generation(1200.0)),
                 ..Default::default()
             },
             ..Default::default()
@@ -1433,7 +1433,7 @@ mod tests {
 
         let bidirectional = PyCoreOutput::new(RustCoreOutput {
             flows: hares_types::CoreFlows {
-                electric_kw: Some(ElectricPower::Bidirectional(-0.2)),
+                electric_w: Some(ElectricPower::Bidirectional(-200.0)),
                 ..Default::default()
             },
             ..Default::default()

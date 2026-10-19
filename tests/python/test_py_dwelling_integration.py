@@ -247,7 +247,7 @@ class TestControlInjection:
             f"Battery SOC should increase toward target 0.9, got {soc}. "
             f"If stuck at 0.3, check cell_temp vs min_charge_temp_c lockout."
         )
-        power = tel["power_kw"][idx]
+        power = tel["power_w"][idx]
         assert power > 0, f"Battery should be drawing power to charge, got {power}"
 
     def test_control_reflected_in_telemetry(self):
@@ -265,7 +265,7 @@ class TestControlInjection:
         equip = t.equipment()
         assert name in equip["names"]
         idx = equip["names"].index(name)
-        assert math.isfinite(equip["power_kw"][idx])
+        assert math.isfinite(equip["power_w"][idx])
 
         zone = t.zone()
         # The furnace (heating-only) writes sp.heating_c into CoreOutput.setpoint_c
@@ -371,10 +371,10 @@ class TestTelemetry:
 
         equip = t.equipment()
         assert isinstance(equip, dict)
-        for key in ("names", "modes", "soc", "power_kw"):
+        for key in ("names", "modes", "soc", "power_w"):
             assert key in equip, f"Missing equipment key: {key}"
 
-        power = t.total_power_kw
+        power = t.total_power_w
         assert isinstance(power, float)
         assert math.isfinite(power)
 
@@ -505,7 +505,7 @@ class TestBatchStep:
         from hares import batch_step
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        plan = dw.observation_plan(["total_power_kw"])
+        plan = dw.observation_plan(["total_power_w"])
         buf = array("d", bytes(8))
         results = batch_step([dw], [[]], [plan], [], {}, [], buf)
         assert isinstance(results, list)
@@ -530,7 +530,7 @@ class TestBatchStep:
 
         def worker(dw_list):
             try:
-                plans = [d.observation_plan(["total_power_kw"]) for d in dw_list]
+                plans = [d.observation_plan(["total_power_w"]) for d in dw_list]
                 buf = array("d", bytes(8 * len(dw_list)))
                 for _ in range(5):
                     results = batch_step(
@@ -581,7 +581,7 @@ class TestBatchStep:
 
         def worker(dw_list):
             try:
-                plans = [d.observation_plan(["total_power_kw"]) for d in dw_list]
+                plans = [d.observation_plan(["total_power_w"]) for d in dw_list]
                 buf = array("d", bytes(8 * len(dw_list)))
                 for _ in range(3):
                     results = batch_step(
@@ -746,7 +746,7 @@ class TestEvControlSignals:
         dw.step()
         tel = dw.telemetry().equipment()
         idx = tel["names"].index("EV1")
-        assert tel["power_kw"][idx] == 0.0
+        assert tel["power_w"][idx] == 0.0
 
     def test_ev_drive_deducts_soc(self):
         from hares import ControlSignal, EV, EvConnectionState
@@ -789,7 +789,7 @@ class TestEvControlSignals:
         tel = dw.telemetry().equipment()
         idx = tel["names"].index("EV1")
         # Residential power should be 0 (away charging)
-        assert tel["power_kw"][idx] == 0.0
+        assert tel["power_w"][idx] == 0.0
         # SOC should increase
         assert tel["soc"][idx] > 0.3
 

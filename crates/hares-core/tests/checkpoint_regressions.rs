@@ -100,9 +100,9 @@ fn prior_electrical_summary_survives_checkpoint_restart() {
 
     // The dwelling had a 1.5 kW base load for 3 steps — summary must be non-zero.
     assert!(
-        checkpoint.prior_electrical_summary.base_load_kw > 0.0,
-        "after 3 steps with 1.5 kW base load, base_load_kw must be >0; got {}",
-        checkpoint.prior_electrical_summary.base_load_kw,
+        checkpoint.prior_electrical_summary.base_load_w > 0.0,
+        "after 3 steps with 1.5 kW base load, base_load_w must be >0; got {}",
+        checkpoint.prior_electrical_summary.base_load_w,
     );
 
     // Restore into a fresh dwelling.
@@ -183,8 +183,8 @@ fn equipment_core_populated_after_checkpoint_restore() {
     // before the next step() repopulates it.
     for (id, co) in &env.equipment_core {
         assert!(
-            co.flows.electric_kw.is_some(),
-            "equipment_core entry for {:?} must have non-default electric_kw after checkpoint restore; got flows={:?}",
+            co.flows.electric_w.is_some(),
+            "equipment_core entry for {:?} must have non-default electric_w after checkpoint restore; got flows={:?}",
             id,
             co.flows,
         );
@@ -334,8 +334,8 @@ fn first_post_restore_step_produces_valid_equipment_output() {
     let env = dwelling_b.latest_env();
     let has_power = env.equipment_core.iter().any(|(_, co)| {
         co.flows
-            .electric_kw
-            .is_some_and(|e| e.net_consumption_kw().abs() > 0.0)
+            .electric_w
+            .is_some_and(|e| e.net_consumption_w().abs() > 0.0)
     });
     assert!(
         has_power,

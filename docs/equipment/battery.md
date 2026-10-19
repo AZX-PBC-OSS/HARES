@@ -28,9 +28,9 @@ V_terminal = V_oc/2 + sqrt((V_oc/2)^2 + P_dc * R)
 
 ## SOC Tracking
 
-Direct Coulomb counting:
+Direct Coulomb counting (the pack's stored energy is joules):
 ```
-SOC_new = SOC_old + (effective_dc_power_kw * dt_hours) / capacity_kwh
+SOC_new = SOC_old + (effective_dc_power_w * dt_s) / capacity_j
 ```
 
 - Ohmic losses subtracted from effective power (both charge and discharge directions)
@@ -144,7 +144,7 @@ graph TD
 | Signal | Effect |
 |--------|--------|
 | `PowerSetpoint` | Direct AC power target (kW). Clears SOCTarget and SelfConsumption |
-| `SOCTarget` | Proportional controller: `target_kw = error * capacity / dt`. Clears PowerSetpoint |
+| `SOCTarget` | Proportional controller: the commanded power `= error * capacity / dt`. Clears PowerSetpoint |
 | `SelfConsumption` | Charge from PV surplus, discharge to offset load. `solar_only_charging` flag prevents grid charging |
 | `GridConnect` | Enable/disable grid power flow |
 
@@ -172,12 +172,12 @@ graph TD
 ```mermaid
 graph LR
     BAT["Battery"]
-    BAT -->|"actual_kw + standby + heater"| EL["Electrical Port<br/>(+ = charging, - = discharging)"]
+    BAT -->|"actual_w + standby + heater"| EL["Electrical Port<br/>(+ = charging, - = discharging)"]
     BAT -->|"ohmic_loss_w only"| TH["Thermal Port<br/>(Zone, if configured)"]
 ```
 
-- **Electrical**: `active_power_kw = actual_power + standby_kw (5W) + heater_kw`. Reactive per [power-factor.md](./power-factor.md): control-precedence then baseline pf, kVA-clamped
-- **Deliberate physics — inverter-side vs port-side P**: the baseline reactive power and the kVA clamp use the *inverter-side* `actual_power_kw` (AC charge/discharge power through the inverter), while the electrical-port P additionally includes standby electronics and the cell heater. Standby and heater draws are not inverter throughput, so whenever they are nonzero the *port-level* ratio Q/P deviates slightly from `tan(acos(pf))`. This is intentional, not drift — the inverter holds the displacement power factor only on the power it converts
+- **Electrical**: `active_power_kw (W) = actual_power + standby (5 W) + heater`, all W. Reactive per [power-factor.md](./power-factor.md): control-precedence then baseline pf, kVA-clamped
+- **Deliberate physics — inverter-side vs port-side P**: the baseline reactive power and the kVA clamp use the *inverter-side* `actual_power_w` (AC charge/discharge power through the inverter), while the electrical-port P additionally includes standby electronics and the cell heater. Standby and heater draws are not inverter throughput, so whenever they are nonzero the *port-level* ratio Q/P deviates slightly from `tan(acos(pf))`. This is intentional, not drift — the inverter holds the displacement power factor only on the power it converts
 - **Thermal**: only I^2R ohmic losses to zone (heater energy enters cell thermal mass first, couples via UA; no double-counting)
 - **Category**: `ThermalCategory::InternalGain`
 
@@ -186,7 +186,7 @@ graph LR
 | Field | Unit | Description |
 |-------|------|-------------|
 | `soc` | 0-1 | State of charge |
-| `active_power_kw` | kW | Grid-side power (+ = consuming) |
+| `active_power_kw` | W | Grid-side power (+ = consuming). The key keeps its kW reporting spelling; the value is W (SI) |
 | `ohmic_loss_w` | W | I^2R dissipation |
 | `standby_power_w` | W | BMS/inverter idle draw |
 | `cell_temp_c` | C | Cell pack temperature |
@@ -194,7 +194,7 @@ graph LR
 | `discharge_derate` | 0-1 | Temperature derating factor |
 | `cycle_count` | - | Equivalent full cycles (rainflow) |
 | `capacity_fade_pct` | 0-1 | Capacity degradation fraction |
-| `reactive_power_kvar` | kvar | Signed bus reactive power (positive = absorbing) |
+| `reactive_power_kvar` | var | Signed bus reactive power (positive = absorbing). The key keeps its kvar reporting spelling; the value is VAR (SI) |
 
 ## Grid Outage Behaviour
 
@@ -213,6 +213,6 @@ explicit `PowerSetpoint` charge command beyond the PV/generator surplus is
 curtailed to that surplus; self-consumption charging is unaffected (it
 already charges only from surplus). Discharge is never clamped by the island
 state: downstream (thermal-stage) loads step after the battery, and any
-residual island imbalance is reported as `island_unserved_kw` /
-`island_excess_kw` in `DwellingTelemetry`. See
+residual island imbalance is reported as `island_unserved_w` /
+`island_excess_w` in `DwellingTelemetry`. See
 [outage-behavior.md](../outage-behavior.md).

@@ -291,7 +291,7 @@ fn zone_id_0_equipment_fails_init_naming_the_unit() {
 // When the FSM is in Defrosting and an external signal forces the compressor
 // off (e.g. ctrl_mode_override = Off mid-cycle), the capacity/power override
 // must not apply. Without the hp_on guard, the equipment reports non-zero
-// electric_kw while commanded off — a phantom draw of ~1.5–2 kW for a
+// electric_w while commanded off — a phantom draw of ~1.5–2 kW for a
 // 10 kW unit. The FSM continues advancing (defrost completes on elapsed
 // time), but the compute_step override is gated on hp_on.
 // ---------------------------------------------------------------------------
@@ -391,11 +391,11 @@ fn discrete_defrost_no_phantom_draw_when_compressor_off() {
     eq.update_control(&env);
     eq.step(&env, dt, &mut ports).unwrap();
 
-    let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(-1.0);
+    let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(-1.0);
     assert_eq!(
-        electric_kw, 0.0,
-        "electric_kw must be zero when compressor is off even if FSM is Defrosting; \
-         got {electric_kw:.6} kW — phantom draw bug"
+        electric_w, 0.0,
+        "electric_w must be zero when compressor is off even if FSM is Defrosting; \
+         got {electric_w:.6} kW — phantom draw bug"
     );
 
     // Verify FSM is still advancing (defrost_elapsed_s increases)
@@ -1199,7 +1199,7 @@ fn ashp_sub_consumption_telemetry() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let tel = eq.telemetry();
-    let electric_kw = tel
+    let electric_w = tel
         .get(tk::ELECTRIC_KW)
         .expect("ELECTRIC_KW must be present");
     let compressor_kw = tel
@@ -1220,8 +1220,8 @@ fn ashp_sub_consumption_telemetry() {
         .expect("ER_CAPACITY_W must be present");
 
     assert!(
-        electric_kw > 1e-6,
-        "ASHP must draw power when heating; got {electric_kw:.4} kW"
+        electric_w > 1e-6,
+        "ASHP must draw power when heating; got {electric_w:.4} kW"
     );
     assert!(compressor_kw >= 0.0, "compressor_kw must be non-negative");
     assert!(fan_kw >= 0.0, "fan_kw must be non-negative");
@@ -1251,11 +1251,11 @@ fn ashp_sub_consumption_telemetry() {
     );
 
     // Sub-consumptions must sum to total within floating-point tolerance.
-    // electric_kw = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw
+    // electric_w = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw
     let sub_sum = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw;
     assert!(
-        (sub_sum - electric_kw).abs() < electric_kw * 0.001,
-        "sub-consumption sum ({sub_sum:.6} kW) must equal ELECTRIC_KW ({electric_kw:.6} kW) within 0.1%"
+        (sub_sum - electric_w).abs() < electric_w * 0.001,
+        "sub-consumption sum ({sub_sum:.6} kW) must equal ELECTRIC_KW ({electric_w:.6} kW) within 0.1%"
     );
 }
 
@@ -2227,10 +2227,10 @@ fn defrost_discrete_cycle_transitions_to_defrosting() {
                 "ReverseCycle Defrosting must produce hp_capacity_w = 0; got {hp_cap:.1} W"
             );
             // Verify: electric power is non-zero (compressor running in reverse)
-            let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+            let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
             assert!(
-                electric_kw > 0.0,
-                "ReverseCycle Defrosting must draw non-zero electric power; got {electric_kw:.3} kW"
+                electric_w > 0.0,
+                "ReverseCycle Defrosting must draw non-zero electric power; got {electric_w:.3} kW"
             );
             break;
         }
@@ -3736,8 +3736,8 @@ fn furnace_core_output_carries_thermal_field() {
 
     // Electric power and mode ARE present (existing fields).
     assert!(
-        co.flows.electric_kw.is_some(),
-        "furnace CoreOutput must carry electric_kw"
+        co.flows.electric_w.is_some(),
+        "furnace CoreOutput must carry electric_w"
     );
     assert_eq!(
         co.state.operating_mode,
@@ -4821,19 +4821,19 @@ fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
     let core = eq.core_output();
     let core_kw = core
         .flows
-        .electric_kw
+        .electric_w
         .expect("a heating furnace step must report its electric power")
-        .net_consumption_kw();
+        .net_consumption_w();
     assert!(
         core_kw > 0.0,
         "the furnace must draw positive power in heating mode, got {core_kw}"
     );
     assert!(
-        (ports.electrical.load_power_w - core_kw * 1000.0).abs() < 1e-6,
+        (ports.electrical.load_power_w - core_kw).abs() < 1e-6,
         "core_output electric power must equal the port contribution exactly once: \
          port {} W vs core {} W",
         ports.electrical.load_power_w,
-        core_kw * 1000.0
+        core_kw
     );
 
     // The EBM window must still span capacitance * hysteresis: the release
@@ -4842,10 +4842,10 @@ fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
     let ebm_min = t.get(tk::EBM_MIN_ENERGY_KWH).unwrap_or(f64::NAN);
     let ebm_max = t.get(tk::EBM_MAX_ENERGY_KWH).unwrap_or(f64::NAN);
     let range = ebm_max - ebm_min;
-    let expected = ZONE_CAPACITANCE_J_PER_K / 3.6e6 * ThermostatConfig::default().hysteresis_c;
+    let expected = ZONE_CAPACITANCE_J_PER_K * ThermostatConfig::default().hysteresis_c;
     assert!(
-        (range - expected).abs() < 1e-9,
-        "the EBM energy window must stay capacitance * hysteresis ({expected} kWh), got {range}"
+        (range - expected).abs() < expected * 1e-9,
+        "the EBM energy window must stay capacitance * hysteresis ({expected} J), got {range}"
     );
 }
 
@@ -4898,10 +4898,10 @@ fn sub_band_deadbands_are_rejected_and_the_unit_keeps_heating() {
         .telemetry()
         .get(tk::EBM_MAX_ENERGY_KWH)
         .unwrap_or(f64::NAN);
-    let expected = ZONE_CAPACITANCE_J_PER_K / 3.6e6 * ThermostatConfig::default().hysteresis_c;
+    let expected = ZONE_CAPACITANCE_J_PER_K * ThermostatConfig::default().hysteresis_c;
     assert!(
-        (ebm_max - ebm_min - expected).abs() < 1e-9,
-        "the EBM window must equal capacitance * default hysteresis ({expected} kWh), got {}",
+        (ebm_max - ebm_min - expected).abs() < expected * 1e-9,
+        "the EBM window must equal capacitance * default hysteresis ({expected} J), got {}",
         ebm_max - ebm_min
     );
 }
@@ -4925,7 +4925,7 @@ fn configured_hysteresis_below_a_thermostat_band_is_rejected() {
             },
         )
         .and_then(|mut cfg| {
-            cfg.zone_capacitance_j_per_k = 2.0 * 3.6e6;
+            cfg.zone_capacitance_j_per_k = 7200000.0 * 3.6e6;
             let registry = EquipmentRegistry::new();
             let mut eq = registry.create("ASHP Heater", cfg.clone())?;
             eq.init(&cfg, &env_with_zone_temp(15.0))
@@ -4994,10 +4994,10 @@ fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
             *window =
                 t.get(tk::EBM_MAX_ENERGY_KWH).unwrap() - t.get(tk::EBM_MIN_ENERGY_KWH).unwrap();
         }
-        let expected = ZONE_CAPACITANCE_J_PER_K / 3.6e6 * BAND_C;
+        let expected = ZONE_CAPACITANCE_J_PER_K * BAND_C;
         assert!(
-            (windows[0] - expected).abs() < 1e-9 && windows[1] == windows[0],
-            "{kind}: continuous window {} kWh, restored {} kWh, expected {expected}",
+            (windows[0] - expected).abs() < expected * 1e-9 && windows[1] == windows[0],
+            "{kind}: continuous window {} J, restored {} J, expected {expected}",
             windows[0],
             windows[1]
         );
@@ -5014,7 +5014,7 @@ const STEP_TELEMETRY: [&str; 5] = [
 ];
 
 /// A step whose equivalent battery model fails (a 0.1 C band on a
-/// 1e-15 kWh/K zone puts the window below f64 resolution) leaves no state
+/// 1e-15 J/K zone puts the window below f64 resolution) leaves no state
 /// behind: the checkpoint, the core output and the step telemetry are what
 /// they were before it.
 #[test]
@@ -5123,7 +5123,7 @@ fn a_failed_hvac_step_leaves_no_partial_state() {
     ];
     let registry = EquipmentRegistry::new();
     for (kind, mut cfg, signal, env) in cases {
-        cfg.zone_capacitance_j_per_k = 3.6e-9;
+        cfg.zone_capacitance_j_per_k = 1e-15;
         let mut eq = registry.create(kind, cfg.clone()).unwrap();
         eq.init(&cfg, &env).unwrap();
         eq.apply_control(signal).unwrap();
@@ -5158,7 +5158,7 @@ fn a_failed_hvac_step_leaves_no_partial_state() {
 #[test]
 fn a_step_without_its_zone_errors_instead_of_assuming_a_temperature() {
     let mut cfg = electric_baseboard_config("bb_no_zone");
-    cfg.zone_capacitance_j_per_k = 2.0 * 3.6e6;
+    cfg.zone_capacitance_j_per_k = 7200000.0 * 3.6e6;
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Baseboard", cfg.clone()).unwrap();
     eq.init(&cfg, &env_with_zone_temp(18.0)).unwrap();

@@ -1102,7 +1102,8 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
 
 - **Quantity:** which ZIP coefficient array drives real power and which
   drives reactive power at off-nominal bus voltage.
-- **Reference behavior:** OCHRE cross-wires them:
+- **Reference behavior:** OCHRE cross-wires them (the quoted names are
+  OCHRE's own Python, in its kW):
   `ochre/Equipment/Equipment.py:200-218` (`run_zip`) computes
   `reactive_kvar = electric_kw * pf_mult * zip_p.dot(v_quadratic)` and
   `electric_kw = electric_kw * zip_q.dot(v_quadratic)`, so the real

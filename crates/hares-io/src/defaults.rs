@@ -38,7 +38,6 @@ use crate::schedule_resolve::DEFAULT_SCHEDULES_CSV;
 
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::BTU_PER_HR_PER_W;
-use hares_physics::units::power_kw_to_w;
 use hares_types::parse_trimmed_f64;
 /// ZIP load model parameters for voltage-dependent power modelling.
 ///
@@ -193,13 +192,14 @@ const KNOWN_WATER_HEATING_UNITS: &[&str] = &[
 /// without conversion — the invariant checker flags them at startup.
 ///
 /// Conversion factors:
-/// - kW → W: via [`power_kw_to_w`] (1 kW = 1000 W, NIST SP 330 §7.3)
+/// - kW → W: the uom kilowatt-to-watt conversion (1 kW = 1000 W, NIST SP 330 §7.3)
 fn convert_water_heating_value_to_si(value: f64, unit: &str) -> f64 {
     match unit {
         // Power: kW → W conversion. HARES stores electric element power in W
         // (see wh_config.rs validation ranges). If a CSV row declares kW, the
         // value must be multiplied by 1000 to match the SI internal convention.
-        "kW" => power_kw_to_w(value),
+        "kW" => uom::si::f64::Power::new::<uom::si::power::kilowatt>(value)
+            .get::<uom::si::power::watt>(),
         // All other known units are already in SI or are dimensionless — no conversion needed.
         "W" | "degC" | "deltaC" | "K" | "C" | "m3" | "L" | "m" | "W_per_K" | "m2_K_per_W"
         | "L_per_day" | "kg_per_s" | "dimensionless" | "" => value,

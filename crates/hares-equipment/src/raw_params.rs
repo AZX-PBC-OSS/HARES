@@ -219,7 +219,7 @@ impl RawParams {
         self.named(key).is_some()
     }
 
-    /// The list, for an error to show: `a, b, phase_<n>_power_kw (n below
+    /// The list, for an error to show: `a, b, phase_<n>_power_w (n below
     /// phase_len), month_multiplier_<n> (n below 12)`.
     #[must_use]
     pub fn describe(&self) -> String {
@@ -541,12 +541,11 @@ mod tests {
                     ("power_schedule_col", number(0.0)),
                     ("gas_schedule_source", text("column")),
                     ("gas_schedule_col", number(1.0)),
-                    ("gas_schedule_is_w", ConfigValue::Bool(true)),
                     (KEY_USAGE_MULTIPLIER, number(2.0)),
                 ],
                 [
                     profile("power_schedule_source", "power_profile_max_w"),
-                    profile("gas_schedule_source", "gas_profile_max"),
+                    profile("gas_schedule_source", "gas_profile_max_w"),
                     vec![
                         ("power_profile_weekday", numbers(24, 1.0)),
                         ("power_profile_weekend", numbers(24, 1.0)),
@@ -561,7 +560,7 @@ mod tests {
                     ("power_schedule_source", text("constant")),
                     ("power_constant_w", number(100.0)),
                     ("gas_schedule_source", text("constant")),
-                    ("gas_constant", number(0.1)),
+                    ("gas_constant_w", number(100.0)),
                 ],
             ]
         } else {

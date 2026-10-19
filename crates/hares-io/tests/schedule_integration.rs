@@ -53,7 +53,10 @@ fn make_schedule(columns: &[(&str, &[f64])]) -> ScheduleTimeSeries {
 
 fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
     let mut parameters = Map::new();
-    parameters.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+    parameters.insert(
+        "annual_electric_j".to_string(),
+        Value::from(annual_kwh * 3.6e6),
+    );
     parameters.insert("sensible_gain_fraction".to_string(), Value::from(0.0));
     EquipmentSpec {
         instance_name: None,
@@ -259,8 +262,8 @@ fn io_injection_to_scheduled_load_step_column_source() {
     eq.step(&env, Duration::from_secs(60), &mut ports)
         .expect("scheduled load step should pass");
 
-    let expected_kw = schedule.columns[col_idx][0];
-    assert!((ports.electrical.net_active_w() - expected_kw * 1000.0).abs() < 1e-9);
+    let expected_w = schedule.columns[col_idx][0];
+    assert!((ports.electrical.net_active_w() - expected_w).abs() < 1e-9);
 }
 
 #[test]
@@ -489,14 +492,14 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
     let ref_spec = specs.iter().find(|s| s.name == "Refrigerator").expect(
         "resolve_equipment should produce a Refrigerator spec from the HPXML Appliances section",
     );
-    // Confirm annual energy was parsed
+    // Confirm annual energy was parsed (held in joules)
     assert!(
         ref_spec
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64())
-            .is_some_and(|kwh| kwh > 0.0),
-        "Refrigerator spec must carry annual_electric_kwh > 0"
+            .is_some_and(|j| j > 0.0),
+        "Refrigerator spec must carry annual_electric_j > 0"
     );
 
     // The refrigerator schedule column uses a constant fraction of 1.0 for all hours.
@@ -532,10 +535,10 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
     eq.step(&env, Duration::from_secs(3600), &mut ports)
         .expect("ScheduledLoad step should succeed");
 
-    let electric_kw = ports.electrical.net_active_w();
+    let electric_w = ports.electrical.net_active_w();
     assert!(
-        electric_kw > 0.0,
-        "Refrigerator must draw positive electrical power; got {electric_kw} W"
+        electric_w > 0.0,
+        "Refrigerator must draw positive electrical power; got {electric_w} W"
     );
 
     // Refrigerators have 100% sensible gain fraction, so total_sensible_gain_w == electric_w.
@@ -548,8 +551,8 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         "Refrigerator must produce positive sensible heat gain; got {sensible_w} W"
     );
     assert!(
-        (sensible_w - electric_kw).abs() < 1e-6,
-        "Refrigerator total_sensible_gain_w ({sensible_w} W) should equal electric_w ({electric_kw} W)"
+        (sensible_w - electric_w).abs() < 1e-6,
+        "Refrigerator total_sensible_gain_w ({sensible_w} W) should equal electric_w ({electric_w} W)"
     );
 }
 

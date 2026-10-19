@@ -749,8 +749,8 @@ mod tests {
         assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
         assert_eq!(zip.pf, 0.97);
         for v in [0.9, 1.0, 1.1] {
-            let p_kw = 2.4;
-            assert_eq!(zip.apply(p_kw, v).0.to_bits(), p_kw.to_bits());
+            let p_w = 2.4;
+            assert_eq!(zip.apply(p_w, v).0.to_bits(), p_w.to_bits());
         }
     }
 

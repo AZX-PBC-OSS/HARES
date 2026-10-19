@@ -540,7 +540,7 @@ fn a_scheduled_load_takes_the_parameters_the_resolver_left_out() {
     let base = inputs_wh(&cz2a_day(None), &["Indoor Lighting"])[0];
     let doubled = inputs_wh(
         &cz2a_day(Some(serde_json::json!({
-            "Indoor Lighting": { "month_multiplier_0": 2.0, "gas_schedule_is_w": false },
+            "Indoor Lighting": { "month_multiplier_0": 2.0 },
         }))),
         &["Indoor Lighting"],
     )[0];

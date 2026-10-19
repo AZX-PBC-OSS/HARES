@@ -4,7 +4,6 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, Timelike};
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_types::telemetry_keys as tk;
 use hares_types::zip::{ResolvedZip, ZipLoad};
 use hares_types::{
@@ -61,26 +60,21 @@ pub struct Ev {
     telemetry: Telemetry,
     core_output: CoreOutput,
 
-    /// Current usable pack capacity [kWh], degraded from rated by state of
+    /// Current usable pack capacity (J), degraded from rated by state of
     /// health. Updated at each day boundary in `update_degradation` as
-    /// `battery_capacity_kwh_rated * SOH`. This is the divisor used for all
+    /// `battery_capacity_j_rated * SOH`. This is the divisor used for all
     /// SOC arithmetic (driving, charging, V2L/V2G discharge) so the runtime
     /// SOC, range, and charging duration reflect the aged pack — mirroring
-    /// the Battery model's `capacity_kwh_nominal` (battery/mod.rs).
-    battery_capacity_kwh: f64,
-    /// Rated (beginning-of-life) pack capacity [kWh], held constant from
-    /// initialization. Mirrors the Battery model's `capacity_kwh_rated`.
-    /// Not stored in the checkpoint: `init` sets it from config, and
-    /// `load_state` recomputes `battery_capacity_kwh` from it and the
-    /// restored SOH.
-    battery_capacity_kwh_rated: f64,
-    /// The config's capacity and charge power as they entered, in SI
-    /// (J, W): the read-back reports them directly, so the stored units
-    /// and the kWh/kW working values above stay separate.
+    /// the Battery model's `capacity_j_nominal` (battery/mod.rs).
     battery_capacity_j: f64,
+    /// Rated (beginning-of-life) pack capacity (J), held constant from
+    /// initialization. Not stored in the checkpoint: `init` sets it from
+    /// config, and `load_state` recomputes `battery_capacity_j` from it and
+    /// the restored SOH.
+    battery_capacity_j_rated: f64,
     max_charging_power_w: f64,
     charging_level: ChargingLevel,
-    rated_power_kw: f64,
+    rated_power_w: f64,
     charging_efficiency: f64,
     l1_current_a: Option<f64>,
     l1_voltage_v: f64,
@@ -99,10 +93,10 @@ pub struct Ev {
     cell_resistance_ohm: f64,
     v2l_enabled: bool,
     v2l_soc_reserve: f64,
-    v2l_max_discharge_kw: f64,
+    v2l_max_discharge_w: f64,
     v2g_enabled: bool,
     v2g_soc_reserve: f64,
-    v2g_max_discharge_kw: f64,
+    v2g_max_discharge_w: f64,
     discharge_respects_deadline: bool,
     /// Reversible temperature-capacity derate (the NREL SSC d0 Arrhenius —
     /// the same model the stationary Battery applies): a cold pack holds
@@ -129,34 +123,32 @@ pub struct Ev {
     /// zero, heater drawing, charger import raised to the heater's
     /// AC-equivalent) nets exactly zero and reports `Heating`, not
     /// `Charging`.
-    pack_net_charge_kw: f64,
+    pack_net_charge_w: f64,
     /// Drive energy [kWh] dispatched since the last step, awaiting its
     /// thermal application: the SOC debit happens at signal time; the I²R
     /// heat at the trip's equivalent discharge current is applied over the
     /// next step (which knows the timestep), then the pending clears.
-    pending_drive_kwh: f64,
+    pending_drive_j: f64,
     /// Operating mode computed on the last step (or restored from a
     /// checkpoint). `update_control` reports it — mode is a step outcome,
     /// not something re-derivable from port power mid-control-phase.
     last_mode: OperatingMode,
     connection_state: EvConnectionState,
-    away_charger_power_kw: f64,
-    away_charge_actual_kw: f64,
-    active_power_kw: f64,
+    away_charger_power_w: f64,
+    away_charge_actual_w: f64,
+    active_power_w: f64,
     /// Cumulative drive energy [kWh] dispatched by the driver actor but not
     /// deliverable by the pack (a trip longer than the vehicle's remaining
     /// range). Published as `DRIVE_SHORTFALL_KWH` so a drive shortfall is
     /// observable output state, never silently dropped mobility.
-    drive_shortfall_kwh: f64,
+    drive_shortfall_j: f64,
 
     ready_soc: f64,
     ready_by_hour: Option<f64>,
     ready_by_soc: Option<f64>,
 
     chemistry: BatteryChemistry,
-    fuel_economy_kwh_per_mi: f64,
-    /// The config's fuel economy as it entered, in J/m (SI): the
-    /// read-back reports the pack's parameters in SI directly.
+    /// The pack's fuel economy in J/m (SI).
     fuel_economy_j_per_m: f64,
     custom_ocv: bool,
     custom_u_neg: bool,
@@ -169,19 +161,19 @@ pub struct Ev {
     last_daily_update_day: i32,
 
     v2l_active: bool,
-    v2l_power_kw: f64,
+    v2l_power_w: f64,
 
     charging_strategy: ChargingStrategy,
     plug_in_policy: PlugInPolicy,
 
-    power_limit_kw: Option<f64>,
+    power_limit_w: Option<f64>,
     /// External active power setpoint [kW]. Positive = charging command,
     /// negative = V2G/V2L discharge command. When set, the interaction
     /// with Ready‑By deadline enforcement depends on `charging_priority`:
     /// `DeadlineGuarantee` treats this as a soft floor and raises power
     /// above it when the deadline is urgent; `ExternalAuthority` bypasses
     /// deadline enforcement entirely.
-    power_setpoint_kw: Option<f64>,
+    power_setpoint_w: Option<f64>,
     /// How the EV resolves conflicts between an external PowerSetpoint and
     /// the internal Ready‑By departure deadline. See [`ChargingPriority`].
     charging_priority: ChargingPriority,
@@ -213,13 +205,13 @@ pub struct Ev {
     // IEEE 1547-2018 / SAE J3072 require reactive capability).
     /// Reactive-power override [kVAR]. `None` = no override (baseline
     /// power-factor path); `Some(0.0)` is a commanded zero and forces Q = 0.
-    q_setpoint_kvar: Option<f64>,
+    q_setpoint_var: Option<f64>,
     power_factor: f64,
-    charger_capacity_kva: f64,
+    charger_capacity_va: f64,
     /// Reactive power emitted on the last step [kVAR] — same signed value on
     /// port, CoreOutput, and telemetry. Positive = absorbing, negative =
     /// supplying.
-    reactive_power_kvar: f64,
+    reactive_power_var: f64,
 
     /// Guards against post-registration LUT mutation via the `Equipment` trait
     /// setters. Set to `true` by `Dwelling::add_equipment` → `mark_initialized()`.
@@ -249,11 +241,11 @@ enum DischargeLeg {
 struct ChargeStepPower {
     /// Charge-leg AC power [kW] — the charging conversion only, never
     /// the heater's AC-equivalent.
-    charge_leg_ac_kw: f64,
+    charge_leg_ac_w: f64,
     /// Actual post-cap heater draw [W], pack-side DC.
     heater_draw_w: f64,
     /// Exported AC power [kW] (negative); zero unless discharging.
-    export_ac_kw: f64,
+    export_ac_w: f64,
     /// True while resolving a V2L/V2G discharge.
     is_discharge: bool,
 }
@@ -293,13 +285,12 @@ impl Ev {
         // constructor builds holds the typed defaults until `init_typed`
         // applies the config.
         let charging_level = ChargingLevel::L2;
-        let battery_capacity_kwh = DEFAULT_CAPACITY_KWH;
-        let rated_power_kw = DEFAULT_MAX_CHARGING_POWER_KW;
+        let battery_capacity_j = DEFAULT_CAPACITY_J;
+        let rated_power_w = DEFAULT_MAX_CHARGING_POWER_W;
         let soc_max = DEFAULT_SOC_MAX;
 
         let initial_connection_state = EvConnectionState::HomePluggedIn;
         let chemistry = BatteryChemistry::Nmc;
-        let fuel_economy_kwh_per_mi = DEFAULT_FUEL_ECONOMY_KWH_PER_MI;
         let fuel_economy_j_per_m = DEFAULT_FUEL_ECONOMY_J_PER_M;
         let charging_strategy = ChargingStrategy::Immediate { target_soc: 1.0 };
         let plug_in_policy = PlugInPolicy::Always;
@@ -310,18 +301,11 @@ impl Ev {
             ports: vec![PortDeclaration::electrical()],
             telemetry: default_telemetry(charging_level),
             core_output: CoreOutput::default(),
-            battery_capacity_kwh,
-            battery_capacity_kwh_rated: battery_capacity_kwh,
-            battery_capacity_j: uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
-                DEFAULT_CAPACITY_KWH,
-            )
-            .get::<uom::si::energy::joule>(),
-            max_charging_power_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(
-                DEFAULT_MAX_CHARGING_POWER_KW,
-            )
-            .get::<uom::si::power::watt>(),
+            battery_capacity_j: DEFAULT_CAPACITY_J,
+            battery_capacity_j_rated: DEFAULT_CAPACITY_J,
+            max_charging_power_w: DEFAULT_MAX_CHARGING_POWER_W,
             charging_level,
-            rated_power_kw,
+            rated_power_w,
             charging_efficiency: DEFAULT_EFFICIENCY,
             l1_current_a: None,
             l1_voltage_v: DEFAULT_L1_VOLTAGE_V,
@@ -331,17 +315,17 @@ impl Ev {
             full_power_temp_c: DEFAULT_FULL_POWER_TEMP_C,
             heater_power_w: DEFAULT_HEATER_POWER_W,
             heater_threshold_c: DEFAULT_HEATER_THRESHOLD_C,
-            thermal_mass_j_per_k: default_thermal_mass_j_per_k(battery_capacity_kwh),
-            ua_w_per_k: default_ua_w_per_k(battery_capacity_kwh),
+            thermal_mass_j_per_k: default_thermal_mass_j_per_k(battery_capacity_j),
+            ua_w_per_k: default_ua_w_per_k(battery_capacity_j),
             n_series: DEFAULT_N_SERIES,
-            n_parallel: default_n_parallel(battery_capacity_kwh),
+            n_parallel: default_n_parallel(battery_capacity_j),
             cell_resistance_ohm: DEFAULT_CELL_RESISTANCE_OHM,
             v2l_enabled: false,
             v2l_soc_reserve: DEFAULT_V2L_SOC_RESERVE,
-            v2l_max_discharge_kw: DEFAULT_V2L_MAX_DISCHARGE_KW,
+            v2l_max_discharge_w: DEFAULT_V2L_MAX_DISCHARGE_W,
             v2g_enabled: false,
             v2g_soc_reserve: DEFAULT_V2G_SOC_RESERVE,
-            v2g_max_discharge_kw: DEFAULT_V2G_MAX_DISCHARGE_KW,
+            v2g_max_discharge_w: DEFAULT_V2G_MAX_DISCHARGE_W,
             discharge_respects_deadline: true,
             capacity_derate_model: crate::battery::CapacityDerateModel::default(),
             soc: DEFAULT_SOC.clamp(0.0, 1.0),
@@ -349,28 +333,27 @@ impl Ev {
             heater_active: false,
             heater_draw_w: 0.0,
             ohmic_loss_w: 0.0,
-            pack_net_charge_kw: 0.0,
-            pending_drive_kwh: 0.0,
+            pack_net_charge_w: 0.0,
+            pending_drive_j: 0.0,
             last_mode: OperatingMode::Off,
             connection_state: initial_connection_state,
-            away_charger_power_kw: 0.0,
-            away_charge_actual_kw: 0.0,
-            active_power_kw: 0.0,
-            drive_shortfall_kwh: 0.0,
+            away_charger_power_w: 0.0,
+            away_charge_actual_w: 0.0,
+            active_power_w: 0.0,
+            drive_shortfall_j: 0.0,
             ready_soc: soc_max,
             ready_by_hour: None,
             ready_by_soc: None,
             chemistry,
-            fuel_economy_kwh_per_mi,
             fuel_economy_j_per_m,
             custom_ocv: false,
             custom_u_neg: false,
             v2l_active: false,
-            v2l_power_kw: 0.0,
+            v2l_power_w: 0.0,
             charging_strategy,
             plug_in_policy,
-            power_limit_kw: None,
-            power_setpoint_kw: None,
+            power_limit_w: None,
+            power_setpoint_w: None,
             charging_priority,
             power_setpoint_min_soc: None,
             power_setpoint_max_soc: None,
@@ -383,12 +366,12 @@ impl Ev {
             soc_target_max: None,
             cc_cv_transition_soc: DEFAULT_CC_CV_TRANSITION_SOC,
             cc_cv_derating: 1.0,
-            q_setpoint_kvar: None,
+            q_setpoint_var: None,
             power_factor: 1.0,
-            charger_capacity_kva: rated_power_kw
-                .max(DEFAULT_V2G_MAX_DISCHARGE_KW)
-                .max(DEFAULT_V2L_MAX_DISCHARGE_KW),
-            reactive_power_kvar: 0.0,
+            charger_capacity_va: rated_power_w
+                .max(DEFAULT_V2G_MAX_DISCHARGE_W)
+                .max(DEFAULT_V2L_MAX_DISCHARGE_W),
+            reactive_power_var: 0.0,
             initialized: false,
             degradation: crate::battery::degradation::DegradationState::default(),
             rainflow: crate::battery::degradation::RainflowCounter::default(),
@@ -419,11 +402,8 @@ impl Ev {
         // SI (J, W, J/m), the pack still works in kWh and kW until the
         // run-state commit. The SI values are kept for the read-back,
         // which reports them directly.
+        self.battery_capacity_j_rated = c.capacity_j;
         self.battery_capacity_j = c.capacity_j;
-        self.battery_capacity_kwh =
-            uom::si::f64::Energy::new::<uom::si::energy::joule>(c.capacity_j)
-                .get::<uom::si::energy::kilowatt_hour>();
-        self.battery_capacity_kwh_rated = self.battery_capacity_kwh;
 
         self.charging_level = match c.charging_level.as_deref() {
             None => ChargingLevel::L2,
@@ -457,8 +437,7 @@ impl Ev {
             );
         }
         self.max_charging_power_w = clamped;
-        self.rated_power_kw = uom::si::f64::Power::new::<uom::si::power::watt>(clamped)
-            .get::<uom::si::power::kilowatt>();
+        self.rated_power_w = clamped;
 
         self.min_charge_temp_c = c.min_charge_temp_c.unwrap_or(DEFAULT_MIN_CHARGE_TEMP_C);
         self.full_power_temp_c = c.full_power_temp_c.unwrap_or(DEFAULT_FULL_POWER_TEMP_C);
@@ -466,14 +445,14 @@ impl Ev {
         self.heater_threshold_c = c.heater_threshold_c.unwrap_or(DEFAULT_HEATER_THRESHOLD_C);
         self.thermal_mass_j_per_k = c
             .thermal_mass_j_per_k
-            .unwrap_or_else(|| default_thermal_mass_j_per_k(self.battery_capacity_kwh_rated));
+            .unwrap_or_else(|| default_thermal_mass_j_per_k(self.battery_capacity_j));
         self.ua_w_per_k = c
             .ua_w_per_k
-            .unwrap_or_else(|| default_ua_w_per_k(self.battery_capacity_kwh_rated));
+            .unwrap_or_else(|| default_ua_w_per_k(self.battery_capacity_j));
         self.n_series = c.n_series.unwrap_or(DEFAULT_N_SERIES);
         self.n_parallel = c
             .n_parallel
-            .unwrap_or_else(|| default_n_parallel(self.battery_capacity_kwh_rated));
+            .unwrap_or_else(|| default_n_parallel(self.battery_capacity_j));
         self.cell_resistance_ohm = c.cell_resistance_ohm.unwrap_or(DEFAULT_CELL_RESISTANCE_OHM);
 
         self.cc_cv_transition_soc = c
@@ -482,22 +461,10 @@ impl Ev {
 
         self.v2l_enabled = c.v2l_enabled.unwrap_or(false);
         self.v2l_soc_reserve = c.v2l_soc_reserve.unwrap_or(DEFAULT_V2L_SOC_RESERVE);
-        self.v2l_max_discharge_kw = c
-            .v2l_max_discharge_w
-            .map(|w| {
-                uom::si::f64::Power::new::<uom::si::power::watt>(w)
-                    .get::<uom::si::power::kilowatt>()
-            })
-            .unwrap_or(DEFAULT_V2L_MAX_DISCHARGE_KW);
+        self.v2l_max_discharge_w = c.v2l_max_discharge_w.unwrap_or(DEFAULT_V2L_MAX_DISCHARGE_W);
         self.v2g_enabled = c.v2g_enabled.unwrap_or(false);
         self.v2g_soc_reserve = c.v2g_soc_reserve.unwrap_or(DEFAULT_V2G_SOC_RESERVE);
-        self.v2g_max_discharge_kw = c
-            .v2g_max_discharge_w
-            .map(|w| {
-                uom::si::f64::Power::new::<uom::si::power::watt>(w)
-                    .get::<uom::si::power::kilowatt>()
-            })
-            .unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_KW);
+        self.v2g_max_discharge_w = c.v2g_max_discharge_w.unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_W);
 
         self.discharge_respects_deadline = c.discharge_respects_deadline;
         self.capacity_derate_model = crate::battery::CapacityDerateModel::default();
@@ -518,32 +485,18 @@ impl Ev {
         self.fuel_economy_j_per_m = c
             .fuel_economy_j_per_m
             .unwrap_or(DEFAULT_FUEL_ECONOMY_J_PER_M);
-        self.fuel_economy_kwh_per_mi = self.fuel_economy_j_per_m
-            * (uom::si::f64::Length::new::<uom::si::length::mile>(1.0)
-                .get::<uom::si::length::meter>()
-                / uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(1.0)
-                    .get::<uom::si::energy::joule>());
         self.ready_soc = c.ready_soc.unwrap_or(self.soc_max);
-        self.power_limit_kw = c.power_limit_w.map(|w| {
-            uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
-        });
+        self.power_limit_w = c.power_limit_w;
         self.charging_priority = c.charging_priority.unwrap_or_default();
 
         self.power_factor = c.power_factor.unwrap_or(1.0);
-        self.charger_capacity_kva = c
-            .charger_capacity_va
-            .map(|va| {
-                // An apparent power, dimensionally W: one conversion at
-                // construction, the working value stays kVA.
-                uom::si::f64::Power::new::<uom::si::power::watt>(va)
-                    .get::<uom::si::power::kilowatt>()
-            })
-            .unwrap_or_else(|| {
-                self.rated_power_kw
-                    .max(self.v2g_max_discharge_kw)
-                    .max(self.v2l_max_discharge_kw)
-            });
-        self.q_setpoint_kvar = None;
+        // An apparent power, dimensionally W: the held value is VA (SI).
+        self.charger_capacity_va = c.charger_capacity_va.unwrap_or_else(|| {
+            self.rated_power_w
+                .max(self.v2g_max_discharge_w)
+                .max(self.v2l_max_discharge_w)
+        });
+        self.q_setpoint_var = None;
 
         self.connection_state = match c.initial_connection_state.as_deref() {
             Some(s) => s.parse::<EvConnectionState>().map_err(|e| {
@@ -606,25 +559,25 @@ impl Ev {
         self.charging_curve_lut = None;
         self.ready_by_hour = None;
         self.ready_by_soc = None;
-        self.away_charger_power_kw = 0.0;
-        self.away_charge_actual_kw = 0.0;
+        self.away_charger_power_w = 0.0;
+        self.away_charge_actual_w = 0.0;
         self.heater_active = false;
         self.heater_draw_w = 0.0;
         self.ohmic_loss_w = 0.0;
-        self.pack_net_charge_kw = 0.0;
-        self.pending_drive_kwh = 0.0;
+        self.pack_net_charge_w = 0.0;
+        self.pending_drive_j = 0.0;
         self.last_mode = OperatingMode::Off;
-        self.active_power_kw = 0.0;
+        self.active_power_w = 0.0;
         self.v2l_active = false;
-        self.v2l_power_kw = 0.0;
-        self.power_setpoint_kw = None;
+        self.v2l_power_w = 0.0;
+        self.power_setpoint_w = None;
         self.power_setpoint_min_soc = None;
         self.power_setpoint_max_soc = None;
         self.soc_target = None;
         self.soc_target_min = None;
         self.soc_target_max = None;
         self.cc_cv_derating = 1.0;
-        self.reactive_power_kvar = 0.0;
+        self.reactive_power_var = 0.0;
         // The usable capacity is temperature-dependent (the reversible
         // derate) and the pack temperature was just resolved by the
         // cascade above — refresh before the first telemetry so the
@@ -641,13 +594,13 @@ impl Ev {
     /// Compute the charge-leg demand [kW AC] for this timestep: the power
     /// the BMS wants to charge at, after capability (rated power, charging
     /// level, temperature derate / LUT), the headroom-to-target taper, the
-    /// commanded `power_setpoint_kw` (a *total*-draw bound with the
-    /// heater's AC-equivalent carved out — see `heater_ac_eq_kw`), and the
+    /// commanded `power_setpoint_w` (a *total*-draw bound with the
+    /// heater's AC-equivalent carved out — see `heater_ac_eq_w`), and the
     /// Ready-By deadline logic. Supply-cap allocation between the charge
     /// leg and the heater, and the DR multiplier, happen in
     /// [`run_charging_physics`] — one allocator, one priority rule.
     ///
-    /// Returns `(demand_kw, deadline_raise_active)`: the flag is true when
+    /// Returns `(demand_w, deadline_raise_active)`: the flag is true when
     /// a `DeadlineGuarantee` ready-by deadline raised the demand above what
     /// the commanded setpoint alone would allow — the documented exception
     /// under which the allocator lets the total draw exceed the command
@@ -658,14 +611,14 @@ impl Ev {
     ///
     /// `charge_derate` is applied before the taper limit so that the taper
     /// correctly prevents SOC overshoot even under cold-temperature derating.
-    /// `max_power_kw` is the charger's rated power (home rated or away charger).
-    fn compute_charging_power_kw(
+    /// `max_power_w` is the charger's rated power (home rated or away charger).
+    fn compute_charging_power_w(
         &mut self,
         now: DateTime<FixedOffset>,
         dt: Duration,
         charge_derate: f64,
-        max_power_kw: f64,
-        heater_ac_eq_kw: f64,
+        max_power_w: f64,
+        heater_ac_eq_w: f64,
     ) -> crate::Result<(f64, bool)> {
         // `min_charge_temp_c` safety cutoff, unconditional: charging Li-ion
         // at or below the plating boundary is blocked under every
@@ -736,10 +689,10 @@ impl Ev {
             return Ok((0.0, false));
         }
 
-        let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
+        let dt_s = dt.as_secs_f64().max(MIN_TIMESTEP_HOURS * 3600.0);
         let rated = match self.charging_level {
-            ChargingLevel::L1 => self.l1_power_kw().min(max_power_kw),
-            ChargingLevel::L2 => self.rated_power_kw.min(max_power_kw),
+            ChargingLevel::L1 => self.l1_power_w().min(max_power_w),
+            ChargingLevel::L2 => self.rated_power_w.min(max_power_w),
         };
         // The shared c-rate rule (pack_electrical): power over the
         // degradation-adjusted rating, never the live usable capacity —
@@ -750,10 +703,10 @@ impl Ev {
         // Battery sibling (whose `capacity_kwh_nominal` is the same
         // rated × SOH rating). Hoisted above the `as_mut` borrow: the
         // method reads all of `self`, which the LUT borrow excludes.
-        let lut_divisor_kwh = self.degradation_adjusted_capacity_kwh();
+        let lut_divisor_j = self.degradation_adjusted_capacity_j();
         let curve_limited_rated = if let Some(lut) = self.charging_curve_lut.as_mut() {
             let soh = 1.0 - self.degradation.capacity_fade_fraction();
-            let c_rate = crate::pack_electrical::charging_lut_c_rate(rated, lut_divisor_kwh);
+            let c_rate = crate::pack_electrical::charging_lut_c_rate(rated, lut_divisor_j);
             rated * lut.interpolate(&[self.soc, self.battery_temp_c, c_rate, soh])? as f64
         } else {
             rated
@@ -771,18 +724,18 @@ impl Ev {
             curve_limited_rated * charge_derate
         };
 
-        // A commanded `power_setpoint_kw` is a total-draw bound: the
+        // A commanded `power_setpoint_w` is a total-draw bound: the
         // heater's AC-equivalent is carved out within the command and the
         // charge leg receives the remainder, so the vehicle never draws
         // more than its dispatch commands. With no heater running this is
         // the plain setpoint bound.
-        let setpoint_charge_bound_kw = match self.power_setpoint_kw {
-            Some(sp) => (sp - heater_ac_eq_kw).max(0.0).min(derated_rated),
+        let setpoint_charge_bound_w = match self.power_setpoint_w {
+            Some(sp) => (sp - heater_ac_eq_w).max(0.0).min(derated_rated),
             None => derated_rated,
         };
         let mut requested = self
-            .power_setpoint_kw
-            .map_or(derated_rated, |_| setpoint_charge_bound_kw)
+            .power_setpoint_w
+            .map_or(derated_rated, |_| setpoint_charge_bound_w)
             .max(0.0)
             .min(derated_rated);
 
@@ -809,7 +762,7 @@ impl Ev {
 
             match self.charging_priority {
                 ChargingPriority::DeadlineGuarantee => {
-                    if self.power_setpoint_kw.is_some() {
+                    if self.power_setpoint_w.is_some() {
                         // External setpoint is a soft floor: BMS deadline
                         // enforcement raises power above the setpoint when
                         // the deadline is urgent. When the BMS reports no
@@ -831,7 +784,7 @@ impl Ev {
                     }
                 }
                 ChargingPriority::ExternalAuthority => {
-                    if self.power_setpoint_kw.is_some() {
+                    if self.power_setpoint_w.is_some() {
                         // External controller bears sole responsibility;
                         // BMS deadline logic is not applied. CC‑CV
                         // tapering is a BMS‑level mechanism; since the
@@ -852,26 +805,26 @@ impl Ev {
         // Ready-By active with a PowerSetpoint above the rated power: the
         // scheduler's urgency power and the equipment's rated power disagree.
         // Warn once per run per EV (non-fatal; the warning log bounds it).
-        if let (Some(_ready_hour), Some(sp_kw)) = (self.ready_by_hour, self.power_setpoint_kw)
-            && sp_kw > 0.0
+        if let (Some(_ready_hour), Some(sp_w)) = (self.ready_by_hour, self.power_setpoint_w)
+            && sp_w > 0.0
             && !self.ready_by_power_warned
         {
             // When both Ready-By and PowerSetpoint are active, the
             // setpoint originates from the scheduler's urgency power
-            // (ctx.max_charge_kw). It must not exceed the equipment's
+            // (ctx.max_charge_w). It must not exceed the equipment's
             // rated power by more than a small tolerance; divergence
             // beyond 110% indicates the schedule and equipment
             // configuration disagree about the EV's capabilities.
-            let max_allowed = self.rated_power_kw * 1.1;
-            if sp_kw > max_allowed {
+            let max_allowed = self.rated_power_w * 1.1;
+            if sp_w > max_allowed {
                 self.ready_by_power_warned = true;
                 self.warnings.push(Warning::new(
                     self.descriptor.name.as_str(),
                     format!(
-                        "EV: PowerSetpoint ({sp_kw} kW) exceeds rated power \
+                        "EV: PowerSetpoint ({sp_w} kW) exceeds rated power \
                          ({} kW) while Ready-By active: scheduler urgency \
                          power inconsistent with equipment capabilities",
-                        self.rated_power_kw
+                        self.rated_power_w
                     ),
                 ));
             }
@@ -899,7 +852,7 @@ impl Ev {
                 ev_ready_by_power_before_setpoint,
                 ev_ready_by_power_after_setpoint,
                 soc = self.soc,
-                "compute_charging_power_kw: LUT active={lut_active}, CC‑CV derating multiplier={cc_cv_mult}",
+                "compute_charging_power_w: LUT active={lut_active}, CC‑CV derating multiplier={cc_cv_mult}",
             );
         }
 
@@ -910,8 +863,8 @@ impl Ev {
         // as bounding the *total* import at `(headroom_dc + heater_dc)/η`
         // with the heater carved out; either form lands the pack exactly on
         // target, never above it.
-        let taper_limit = (soc_limit - self.soc).max(0.0) * self.battery_capacity_kwh
-            / dt_hours
+        let taper_limit = (soc_limit - self.soc).max(0.0) * self.battery_capacity_j
+            / dt_s
             / self.charging_efficiency;
 
         let power = requested.min(derated_rated).min(taper_limit).max(0.0);
@@ -919,8 +872,8 @@ impl Ev {
         // the commanded setpoint alone would allow — the documented
         // exception the allocator honors (see the method doc).
         let deadline_raise_active = self
-            .power_setpoint_kw
-            .is_some_and(|_| power > setpoint_charge_bound_kw + 1e-12);
+            .power_setpoint_w
+            .is_some_and(|_| power > setpoint_charge_bound_w + 1e-12);
         Ok((power, deadline_raise_active))
     }
     /// Returns the CC‑CV tapering multiplier for a given SOC.
@@ -967,7 +920,7 @@ impl Ev {
 
         let eff_power = derated_rated * self.charging_efficiency * cc_cv_mult;
         let hours_needed = if eff_power > 0.0 {
-            soc_deficit * self.battery_capacity_kwh / eff_power
+            soc_deficit * self.battery_capacity_j / (eff_power * 3600.0)
         } else {
             return derated_rated;
         };
@@ -1068,43 +1021,43 @@ impl Ev {
         &self,
         leg: DischargeLeg,
         dt: Duration,
-        heater_desired_dc_kw: f64,
+        heater_desired_dc_w: f64,
     ) -> (f64, f64) {
         let effective_floor = self.effective_discharge_floor(leg);
         if self.soc <= effective_floor {
             // At the floor both the export and the heater stop.
             return (0.0, 0.0);
         }
-        let setpoint_magnitude = self.power_setpoint_kw.unwrap_or(0.0).abs();
-        let max_discharge_kw = match leg {
-            DischargeLeg::V2G => self.v2g_max_discharge_kw,
-            DischargeLeg::V2L => self.v2l_max_discharge_kw,
+        let setpoint_magnitude = self.power_setpoint_w.unwrap_or(0.0).abs();
+        let max_discharge_w = match leg {
+            DischargeLeg::V2G => self.v2g_max_discharge_w,
+            DischargeLeg::V2L => self.v2l_max_discharge_w,
         };
-        let dt_hours = (dt.as_secs_f64() / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
+        let dt_s = dt.as_secs_f64().max(MIN_TIMESTEP_HOURS * 3600.0);
         let eta = self.charging_efficiency.max(0.01);
         // Budget the cap in the DC domain the pack actually draws from: the
         // pack delivers the exported AC power at 1/charging_efficiency in
         // DC, so the sustainable AC power for the available DC energy is
         // that energy times the efficiency, spread over the step — or every
         // floor landing overshoots by one step's (1/efficiency − 1).
-        let available_dc_kw = (self.soc - effective_floor) * self.battery_capacity_kwh / dt_hours;
-        let commanded_ac = setpoint_magnitude.min(max_discharge_kw).max(0.0);
+        let available_dc_w = (self.soc - effective_floor) * self.battery_capacity_j / dt_s;
+        let commanded_ac = setpoint_magnitude.min(max_discharge_w).max(0.0);
 
-        let (heater_dc_kw, export_ac_kw) = if self.battery_temp_c <= self.min_charge_temp_c {
+        let (heater_dc_w, export_ac_w) = if self.battery_temp_c <= self.min_charge_temp_c {
             // Heater priority below the chargeable temperature.
-            let heater = heater_desired_dc_kw.min(available_dc_kw).max(0.0);
-            let export = commanded_ac.min((available_dc_kw - heater).max(0.0) * eta);
+            let heater = heater_desired_dc_w.min(available_dc_w).max(0.0);
+            let export = commanded_ac.min((available_dc_w - heater).max(0.0) * eta);
             (heater, export)
         } else {
             // Export priority; the heater takes the remaining DC headroom.
-            let export = commanded_ac.min(available_dc_kw * eta);
-            let heater = heater_desired_dc_kw
-                .min((available_dc_kw - export / eta).max(0.0))
+            let export = commanded_ac.min(available_dc_w * eta);
+            let heater = heater_desired_dc_w
+                .min((available_dc_w - export / eta).max(0.0))
                 .max(0.0);
             (heater, export)
         };
 
-        (-(export_ac_kw * self.dr_power_fraction()), heater_dc_kw)
+        (-(export_ac_w * self.dr_power_fraction()), heater_dc_w)
     }
 
     fn charge_derate_factor(&self) -> f64 {
@@ -1125,18 +1078,18 @@ impl Ev {
         }
     }
 
-    fn l1_power_kw(&self) -> f64 {
+    fn l1_power_w(&self) -> f64 {
         match self.l1_current_a {
-            Some(current_a) => power_w_to_kw(current_a * self.l1_voltage_v).max(0.0),
-            None => self.rated_power_kw,
+            Some(current_a) => (current_a * self.l1_voltage_v).max(0.0),
+            None => self.rated_power_w,
         }
     }
 
     /// Compute reactive power [kVAR] for the given grid-side active power.
     ///
     /// Precedence (mirrors battery/mod.rs exactly):
-    /// 1. `q_setpoint_kvar` (from `ReactiveSetpoint` or
-    ///    `PowerSetpoint.reactive_power_kvar`) — absolute override, passes
+    /// 1. `q_setpoint_var` (from `ReactiveSetpoint` or
+    ///    `PowerSetpoint.reactive_power_var`) — absolute override, passes
     ///    through as-commanded.
     /// 2. Else `power_factor` baseline: `Q = P · tan(acos(pf))` via
     ///    `ZipLoad::reactive_only` (no inline formula). Baseline sign follows
@@ -1144,29 +1097,28 @@ impl Ev {
     ///    Q<0 supplying.
     ///
     /// kVA clamp: `|Q| ≤ sqrt(max(0, S² − P²))` with
-    /// `S = charger_capacity_kva` — active-power priority (P never
+    /// `S = charger_capacity_va` — active-power priority (P never
     /// curtailed by Q).
-    fn compute_reactive_kvar(&self, active_power_kw: f64) -> f64 {
+    fn compute_reactive_var(&self, active_power_w: f64) -> f64 {
         // A `Some` q_setpoint (including a commanded 0.0) is an absolute
         // override; only `None` falls through to the power-factor baseline.
-        let q = match self.q_setpoint_kvar {
+        let q = match self.q_setpoint_var {
             Some(q) => q,
             None if self.power_factor < 1.0 => {
                 let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
-                active_power_kw * zip.tan_phi()
+                active_power_w * zip.tan_phi()
             }
             None => 0.0,
         };
-        let s = self.charger_capacity_kva;
-        let p2 = active_power_kw * active_power_kw;
+        let s = self.charger_capacity_va;
+        let p2 = active_power_w * active_power_w;
         let q_max = (s * s - p2).max(0.0).sqrt();
         q.clamp(-q_max, q_max)
     }
 
     fn write_telemetry(&mut self) {
         self.telemetry.set(tk::SOC, self.soc);
-        self.telemetry
-            .set(tk::ACTIVE_POWER_KW, self.active_power_kw);
+        self.telemetry.set(tk::ACTIVE_POWER_KW, self.active_power_w);
         self.telemetry.set(
             tk::CONNECTION_STATE,
             match self.connection_state {
@@ -1191,33 +1143,42 @@ impl Ev {
         self.telemetry.set(tk::CC_CV_DERATE, self.cc_cv_derating);
         self.telemetry
             .set(tk::V2L_ACTIVE, if self.v2l_active { 1.0 } else { 0.0 });
-        self.telemetry.set(tk::V2L_POWER_KW, self.v2l_power_kw);
+        self.telemetry.set(tk::V2L_POWER_KW, self.v2l_power_w);
         self.telemetry.set(
             tk::CAPACITY_FADE_PCT,
             self.degradation.capacity_fade_fraction() * 100.0,
         );
         self.telemetry
-            .set(tk::AWAY_CHARGE_POWER_KW, self.away_charge_actual_kw);
+            .set(tk::AWAY_CHARGE_POWER_KW, self.away_charge_actual_w);
         self.telemetry
-            .set(tk::CAPACITY_KWH, self.battery_capacity_kwh);
+            .set(tk::CAPACITY_KWH, self.battery_capacity_j);
         self.telemetry
-            .set(tk::CAPACITY_KWH_RATED, self.battery_capacity_kwh_rated);
+            .set(tk::CAPACITY_KWH_RATED, self.battery_capacity_j_rated);
+        self.telemetry.set(
+            tk::FUEL_ECONOMY_KWH_PER_MI,
+            // The reporting unit is kWh/mi; the held value is J/m (SI),
+            // converted once here.
+            uom::si::f64::Energy::new::<uom::si::energy::joule>(
+                self.fuel_economy_j_per_m
+                    * uom::si::f64::Length::new::<uom::si::length::mile>(1.0)
+                        .get::<uom::si::length::meter>(),
+            )
+            .get::<uom::si::energy::kilowatt_hour>(),
+        );
         self.telemetry
-            .set(tk::FUEL_ECONOMY_KWH_PER_MI, self.fuel_economy_kwh_per_mi);
-        self.telemetry
-            .set(tk::DRIVE_SHORTFALL_KWH, self.drive_shortfall_kwh);
+            .set(tk::DRIVE_SHORTFALL_KWH, self.drive_shortfall_j);
         self.telemetry
             .set(tk::DR_POWER_FRACTION, self.dr_power_fraction());
         self.telemetry
             .set(tk::DR_LEVEL, dr_level_code(self.dr_level));
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, self.reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, self.reactive_power_var);
 
         #[cfg(feature = "observe")]
         tracing::debug!(
-            effective_wall_kwh_per_mi = self.fuel_economy_kwh_per_mi,
-            battery_capacity_kwh = self.battery_capacity_kwh,
-            battery_capacity_kwh_rated = self.battery_capacity_kwh_rated,
+            effective_wall_j_per_m = self.fuel_economy_j_per_m,
+            battery_capacity_j = self.battery_capacity_j,
+            battery_capacity_j_rated = self.battery_capacity_j_rated,
             capacity_fade_pct = self.degradation.capacity_fade_fraction() * 100.0,
             charging_efficiency = self.charging_efficiency,
             "EV runtime: effective wall-to-wheels fuel economy diagnostic",
@@ -1226,7 +1187,7 @@ impl Ev {
 
     /// Usable pack capacity [kWh]: rated × SOH × the reversible
     /// temperature derate — the same factored layering as the stationary
-    /// Battery (`capacity_kwh = capacity_kwh_nominal × derate`,
+    /// Battery (`capacity_j = capacity_kwh_nominal × derate`,
     /// battery/mod.rs): the degradation fade stays temperature-independent
     /// (see the `deg_const` notes on why both branches' reversible
     /// temperature scaling lives at the equipment layer), and the
@@ -1242,17 +1203,17 @@ impl Ev {
     fn refresh_usable_capacity(&mut self) {
         let soh = 1.0 - self.degradation.capacity_fade_fraction();
         let derate = self.capacity_derate_model.evaluate(self.battery_temp_c);
-        self.battery_capacity_kwh = self.battery_capacity_kwh_rated * soh * derate;
+        self.battery_capacity_j = self.battery_capacity_j_rated * soh * derate;
     }
 
-    /// Degradation-adjusted pack capacity [kWh] — `rated × SOH`, the
+    /// Degradation-adjusted pack capacity (J) — `rated × SOH`, the
     /// temperature-independent rating (the EV's counterpart of the
-    /// Battery's `capacity_kwh_nominal`). The charging-LUT c-rate divisor
+    /// Battery's `capacity_j_nominal`). The charging-LUT c-rate divisor
     /// uses this, never the live usable capacity, which moves with the
     /// pack temperature (the reversible derate). The driver's seed
     /// (`actor_seed`) uses the rated capacity: it is a build parameter.
-    fn degradation_adjusted_capacity_kwh(&self) -> f64 {
-        self.battery_capacity_kwh_rated * (1.0 - self.degradation.capacity_fade_fraction())
+    fn degradation_adjusted_capacity_j(&self) -> f64 {
+        self.battery_capacity_j_rated * (1.0 - self.degradation.capacity_fade_fraction())
     }
 
     fn update_degradation(&mut self, env: &EnvironmentState, dt_s: f64) -> crate::Result<()> {
@@ -1277,10 +1238,10 @@ impl Ev {
             // undegraded divisor, understating range loss and charge duration.
             self.refresh_usable_capacity();
             let soh = 1.0 - self.degradation.capacity_fade_fraction();
-            if !(self.battery_capacity_kwh > 0.0 || soh <= 0.0) {
+            if !(self.battery_capacity_j > 0.0 || soh <= 0.0) {
                 return Err(HaresError::InvariantViolation {
                     check_name: "ev_battery_capacity_kwh_underflow".to_string(),
-                    value: self.battery_capacity_kwh,
+                    value: self.battery_capacity_j,
                     tolerance: 0.0,
                 });
             }
@@ -1342,7 +1303,7 @@ impl Ev {
     ///   takes the remainder — the heater never consumes dispatch budget
     ///   that charging could have used, so a dispatched limit can never
     ///   produce a heater-monopolized blackout. A *commanded*
-    ///   `power_setpoint_kw` is a total-draw bound: the heater is carved
+    ///   `power_setpoint_w` is a total-draw bound: the heater is carved
     ///   out within the command and the charge leg receives the remainder,
     ///   so the vehicle never draws more than its dispatch commands — with
     ///   one documented exception: a `DeadlineGuarantee` ready-by deadline
@@ -1355,7 +1316,7 @@ impl Ev {
     ///   (the withdrawn ceiling form agrees with the multiplier only at
     ///   full demand and would silently weaken dispatch obedience in the
     ///   derated regime). A commanded zero (`GridEmergency`, or
-    ///   `power_limit_kw = 0`) zeroes the port.
+    ///   `power_limit_w = 0`) zeroes the port.
     /// - **Explicit-Euler overshoot note** — the heater's per-step
     ///   temperature rise is bounded by `P·dt/C` (≈9 K at the 5 kW default,
     ///   480 kJ/K mass, 900 s steps): a thermostat duty cycle around the
@@ -1392,7 +1353,7 @@ impl Ev {
         // Discharge leg: a negative setpoint at home with V2G/V2L enabled.
         let discharge_leg = match self.connection_state {
             EvConnectionState::HomePluggedIn
-                if self.power_setpoint_kw.is_some_and(|sp| sp < 0.0) =>
+                if self.power_setpoint_w.is_some_and(|sp| sp < 0.0) =>
             {
                 if self.v2g_enabled {
                     Some(DischargeLeg::V2G)
@@ -1417,100 +1378,99 @@ impl Ev {
                 }
                 // Away: the only modeled supply is the commanded away
                 // charger.
-                EvConnectionState::AwayPluggedIn => self.away_charger_power_kw > 0.0,
+                EvConnectionState::AwayPluggedIn => self.away_charger_power_w > 0.0,
                 // Contact open: drift only.
                 EvConnectionState::Disconnected => false,
             };
-        let heater_desired_dc_kw = if heater_eligible {
-            power_w_to_kw(self.heater_power_w)
+        let heater_desired_dc_w = if heater_eligible {
+            self.heater_power_w
         } else {
             0.0
         };
-        let heater_ac_eq_kw = heater_desired_dc_kw / self.charging_efficiency.max(0.01);
+        let heater_ac_eq_w = heater_desired_dc_w / self.charging_efficiency.max(0.01);
 
         if let Some(leg) = discharge_leg {
-            let (export_ac_kw, heater_dc_kw) =
-                self.compute_discharge(leg, dt, heater_desired_dc_kw);
+            let (export_ac_w, heater_dc_w) = self.compute_discharge(leg, dt, heater_desired_dc_w);
             return Ok(ChargeStepPower {
-                charge_leg_ac_kw: 0.0,
-                heater_draw_w: power_kw_to_w(heater_dc_kw),
-                export_ac_kw,
+                charge_leg_ac_w: 0.0,
+                heater_draw_w: (heater_dc_w),
+                export_ac_w,
                 is_discharge: true,
             });
         }
 
         // Charger capability bound: the EVSE rating for the configured
         // level (home rated power, or the away charger's commanded rating).
-        let max_power_kw = match self.connection_state {
-            EvConnectionState::HomePluggedIn => self.rated_power_kw,
-            EvConnectionState::AwayPluggedIn => self.away_charger_power_kw,
+        let max_power_w = match self.connection_state {
+            EvConnectionState::HomePluggedIn => self.rated_power_w,
+            EvConnectionState::AwayPluggedIn => self.away_charger_power_w,
             EvConnectionState::Disconnected => 0.0,
         };
-        let evse_rating_kw = match self.charging_level {
-            ChargingLevel::L1 => self.l1_power_kw(),
-            ChargingLevel::L2 => self.rated_power_kw,
+        let evse_rating_w = match self.charging_level {
+            ChargingLevel::L1 => self.l1_power_w(),
+            ChargingLevel::L2 => self.rated_power_w,
         }
-        .min(max_power_kw);
+        .min(max_power_w);
 
-        let (charge_demand_kw, deadline_raise_active) = self.compute_charging_power_kw(
+        let (charge_demand_w, deadline_raise_active) = self.compute_charging_power_w(
             env.current_time,
             dt,
             charge_derate,
-            max_power_kw,
-            heater_ac_eq_kw,
+            max_power_w,
+            heater_ac_eq_w,
         )?;
 
         // Supply bound on the charger's AC input: `min(rating, dispatched
         // power_limit)` at home; the away charger's rating away (the away
         // site's EVSE is not dispatched through the home's power_limit).
-        let supply_bound_kw = match self.connection_state {
+        let supply_bound_w = match self.connection_state {
             EvConnectionState::HomePluggedIn => self
-                .power_limit_kw
-                .map(|lim| evse_rating_kw.min(lim.max(0.0)))
-                .unwrap_or(evse_rating_kw),
-            _ => evse_rating_kw,
+                .power_limit_w
+                .map(|lim| evse_rating_w.min(lim.max(0.0)))
+                .unwrap_or(evse_rating_w),
+            _ => evse_rating_w,
         };
-        // A commanded `power_setpoint_kw` (including a commanded 0.0) is a
+        // A commanded `power_setpoint_w` (including a commanded 0.0) is a
         // total-draw bound on charge + heater AC-equivalent — UNLESS a
         // `DeadlineGuarantee` ready-by deadline raised the charge demand
         // above the command (the setpoint is a soft floor under that
         // priority, a pinned contract): then the supply-bound priority
         // rule governs and the total may legitimately exceed the command.
-        let commanded_total_kw = self
-            .power_setpoint_kw
+        let commanded_total_w = self
+            .power_setpoint_w
             .filter(|sp| *sp >= 0.0)
             .filter(|_| !deadline_raise_active)
-            .map(|sp| supply_bound_kw.min(sp.max(0.0)));
-        let total_bound_kw = commanded_total_kw.unwrap_or(supply_bound_kw);
+            .map(|sp| supply_bound_w.min(sp.max(0.0)));
+        let total_bound_w = commanded_total_w.unwrap_or(supply_bound_w);
         // Within a binding command the heater is carved out first and the
         // charge leg receives the remainder (the vehicle never draws more
         // than its dispatch commands); within the supply bound charging
         // draws first and the heater takes the remainder.
-        let setpoint_binding = commanded_total_kw.is_some_and(|c| c < supply_bound_kw);
+        let setpoint_binding = commanded_total_w.is_some_and(|c| c < supply_bound_w);
 
-        let (charge_ac_kw, heater_ac_kw) = if self.battery_temp_c <= self.min_charge_temp_c {
+        let (charge_ac_w, heater_ac_w) = if self.battery_temp_c <= self.min_charge_temp_c {
             // Below the plating cutoff charging is physically zero; warming
             // the pack is the only path to ever charging.
-            let h = heater_ac_eq_kw.min(total_bound_kw);
+            let h = heater_ac_eq_w.min(total_bound_w);
             (0.0, h)
         } else if setpoint_binding {
-            let h = heater_ac_eq_kw.min(total_bound_kw);
-            let c = charge_demand_kw.min((total_bound_kw - h).max(0.0));
+            let h = heater_ac_eq_w.min(total_bound_w);
+            let c = charge_demand_w.min((total_bound_w - h).max(0.0));
             (c, h)
         } else {
             // Supply-bound: charging draws first, the heater takes the
             // remainder — the heater never takes budget charging could use.
-            let c = charge_demand_kw.min(total_bound_kw);
-            let h = heater_ac_eq_kw.min((total_bound_kw - c).max(0.0));
+            let c = charge_demand_w.min(total_bound_w);
+            let h = heater_ac_eq_w.min((total_bound_w - c).max(0.0));
             (c, h)
         };
 
         // DR multiplier on the allocated AC total.
         let dr = self.dr_power_fraction();
         Ok(ChargeStepPower {
-            charge_leg_ac_kw: charge_ac_kw * dr,
-            heater_draw_w: power_kw_to_w(heater_ac_kw * dr * self.charging_efficiency.max(0.01)),
-            export_ac_kw: 0.0,
+            charge_leg_ac_w: charge_ac_w * dr,
+            heater_draw_w: (heater_ac_w * dr * self.charging_efficiency.max(0.01)),
+            export_ac_w: 0.0,
             is_discharge: false,
         })
     }
@@ -1534,10 +1494,9 @@ impl Ev {
     /// equivalent discharge current through the same solve — the
     /// discharge-side instance of the same loss-attribution rule.
     fn apply_soc_and_thermal(&mut self, dt: Duration, step: &ChargeStepPower, ambient_c: f64) {
-        let dt_s = dt.as_secs_f64();
-        let dt_hours = (dt_s / SECONDS_PER_HOUR).max(MIN_TIMESTEP_HOURS);
+        let dt_s = dt.as_secs_f64().max(MIN_TIMESTEP_HOURS * 3600.0);
         let eta = self.charging_efficiency.max(0.01);
-        let heater_dc_kw = power_w_to_kw(step.heater_draw_w);
+        let heater_dc_w = step.heater_draw_w;
 
         // Pack-side net rate — what the cells actually gain or lose
         // through their terminals. While connected the charger's raised
@@ -1557,31 +1516,30 @@ impl Ev {
         // current as cell heating while SOC nets it out of the pack: two
         // pictures of the same state that cannot both be true (the
         // D2 loss-attribution class — one effect, attributed once).
-        let net_dc_kw = if step.is_discharge {
-            let export_dc_kw = -step.export_ac_kw / eta;
-            -(export_dc_kw + heater_dc_kw)
+        let net_dc_w = if step.is_discharge {
+            let export_dc_w = -step.export_ac_w / eta;
+            -(export_dc_w + heater_dc_w)
         } else {
-            step.charge_leg_ac_kw * eta
+            step.charge_leg_ac_w * eta
         };
 
         // SOC via the pack-side net rate. A fully-degraded pack (SOH ≤ 0,
         // usable capacity 0) cannot store energy — the same guard the
         // stationary Battery applies — and degradation tracking still
         // continues (it updates SOH and must not be skipped).
-        if self.battery_capacity_kwh > 0.0 {
-            self.soc =
-                (self.soc + net_dc_kw * dt_hours / self.battery_capacity_kwh).clamp(0.0, 1.0);
+        if self.battery_capacity_j > 0.0 {
+            self.soc = (self.soc + net_dc_w * dt_s / self.battery_capacity_j).clamp(0.0, 1.0);
         }
-        self.pack_net_charge_kw = net_dc_kw;
+        self.pack_net_charge_w = net_dc_w;
 
         // Drive energy dispatched since the last step: the SOC debit
         // already happened at signal time; apply the I²R heat at the trip's
         // equivalent discharge current over this step (the driver actor
         // dispatches `EvDrive` per step, so the equivalent power is
         // `pending/dt_hours`).
-        let drive_dc_kw = if self.pending_drive_kwh > 0.0 {
-            let p = self.pending_drive_kwh / dt_hours;
-            self.pending_drive_kwh = 0.0;
+        let drive_dc_w = if self.pending_drive_j > 0.0 {
+            let p = self.pending_drive_j / dt_s;
+            self.pending_drive_j = 0.0;
             p
         } else {
             0.0
@@ -1593,7 +1551,7 @@ impl Ev {
         let cell_ocv = self.ocv_table.voltage_at_soc(self.soc);
         let solved = self
             .pack_electrical()
-            .solve(cell_ocv, power_kw_to_w(net_dc_kw - drive_dc_kw));
+            .solve(cell_ocv, net_dc_w - drive_dc_w);
         self.ohmic_loss_w = solved.ohmic_loss_w;
 
         // Unified lumped thermal equation.
@@ -1641,22 +1599,22 @@ impl Ev {
     /// into those classifiers while emitting no zone thermal power; that
     /// invariant is documented here so the change is not made casually.
     fn classify_mode(
-        net_charge_kw: f64,
-        export_ac_kw: f64,
+        net_charge_w: f64,
+        export_ac_w: f64,
         heater_draw_w: f64,
-        reactive_kvar: f64,
+        reactive_var: f64,
     ) -> OperatingMode {
-        if net_charge_kw > 0.0 {
+        if net_charge_w > 0.0 {
             OperatingMode::Charging
-        } else if export_ac_kw < 0.0 {
+        } else if export_ac_w < 0.0 {
             OperatingMode::Discharging
         } else if heater_draw_w > 0.0 {
-            if net_charge_kw >= 0.0 {
+            if net_charge_w >= 0.0 {
                 OperatingMode::Heating
             } else {
                 OperatingMode::Standby
             }
-        } else if reactive_kvar != 0.0 {
+        } else if reactive_var != 0.0 {
             OperatingMode::On
         } else {
             OperatingMode::Off
@@ -1669,7 +1627,7 @@ impl Equipment for Ev {
         vec![
             hares_types::ResolvedParameter::new(
                 "battery_capacity_j",
-                self.battery_capacity_j,
+                self.battery_capacity_j_rated,
                 hares_types::Unit::Joule,
             ),
             hares_types::ResolvedParameter::new(
@@ -1750,15 +1708,15 @@ impl Equipment for Ev {
             && !power.is_discharge
             && !env.grid.bus_energized()
         {
-            power.charge_leg_ac_kw = 0.0;
+            power.charge_leg_ac_w = 0.0;
             power.heater_draw_w = 0.0;
         }
 
         match self.connection_state {
             EvConnectionState::HomePluggedIn => {
                 self.v2l_active = power.is_discharge;
-                self.v2l_power_kw = if power.is_discharge {
-                    -power.export_ac_kw
+                self.v2l_power_w = if power.is_discharge {
+                    -power.export_ac_w
                 } else {
                     0.0
                 };
@@ -1768,19 +1726,19 @@ impl Equipment for Ev {
                 // the heater (the BMS raise), export when discharging. The
                 // pack-side heater is not an AC-side load, so it adds no
                 // port power of its own.
-                let inverter_leg_kw = if power.is_discharge {
-                    power.export_ac_kw
+                let inverter_leg_w = if power.is_discharge {
+                    power.export_ac_w
                 } else {
-                    power.charge_leg_ac_kw
+                    power.charge_leg_ac_w
                 };
-                self.active_power_kw = if power.is_discharge {
-                    power.export_ac_kw
+                self.active_power_w = if power.is_discharge {
+                    power.export_ac_w
                 } else {
-                    power.charge_leg_ac_kw
-                        + power_w_to_kw(power.heater_draw_w) / self.charging_efficiency.max(0.01)
+                    power.charge_leg_ac_w
+                        + (power.heater_draw_w) / self.charging_efficiency.max(0.01)
                 };
 
-                self.away_charge_actual_kw = 0.0;
+                self.away_charge_actual_w = 0.0;
 
                 // Reactive power: smart-inverter var control (IEEE 1547-2018 /
                 // SAE J3072). Both the power-factor baseline and the kVA
@@ -1793,16 +1751,16 @@ impl Equipment for Ev {
                 // standby and cell-heater loads on top). A de-energized bus
                 // produces no vars either — a commanded q-setpoint cannot
                 // be served by a dead EVSE.
-                let q_kvar = if power.is_discharge || env.grid.bus_energized() {
-                    self.compute_reactive_kvar(inverter_leg_kw)
+                let q_var = if power.is_discharge || env.grid.bus_energized() {
+                    self.compute_reactive_var(inverter_leg_w)
                 } else {
                     0.0
                 };
-                self.reactive_power_kvar = q_kvar;
+                self.reactive_power_var = q_var;
 
                 ports.accumulate(&PortContribution::Electrical {
-                    active_power_w: power_kw_to_w(self.active_power_kw),
-                    reactive_power_kvar: q_kvar,
+                    active_power_w: (self.active_power_w),
+                    reactive_power_var: q_var,
                 })?;
             }
             EvConnectionState::AwayPluggedIn => {
@@ -1811,25 +1769,25 @@ impl Equipment for Ev {
                 // away charger supplies both the charge leg and the heater
                 // off-site; the heater's energy appears in no dwelling
                 // energy balance — the load genuinely is off-site.
-                // `away_charge_actual_kw` keeps its documented meaning:
+                // `away_charge_actual_w` keeps its documented meaning:
                 // the actual charge intake after taper, never the rating,
                 // and never overloaded with heater draw — the heater draw
                 // is observable through `HEATER_POWER_W`.
                 self.v2l_active = false;
-                self.v2l_power_kw = 0.0;
-                self.active_power_kw = 0.0;
-                self.reactive_power_kvar = 0.0;
-                self.away_charge_actual_kw = power.charge_leg_ac_kw;
+                self.v2l_power_w = 0.0;
+                self.active_power_w = 0.0;
+                self.reactive_power_var = 0.0;
+                self.away_charge_actual_w = power.charge_leg_ac_w;
             }
             EvConnectionState::Disconnected => {
                 // Contact open: no grid connection, Q must be 0, no supply
                 // for the heater (thermal drift + drive I²R only, applied
                 // by the unified equation below).
-                self.active_power_kw = 0.0;
-                self.away_charge_actual_kw = 0.0;
+                self.active_power_w = 0.0;
+                self.away_charge_actual_w = 0.0;
                 self.v2l_active = false;
-                self.v2l_power_kw = 0.0;
-                self.reactive_power_kvar = 0.0;
+                self.v2l_power_w = 0.0;
+                self.reactive_power_var = 0.0;
             }
         }
 
@@ -1864,16 +1822,16 @@ impl Equipment for Ev {
             // through `HEATER_POWER_W`.
             EvConnectionState::AwayPluggedIn => OperatingMode::Off,
             _ => Self::classify_mode(
-                self.pack_net_charge_kw,
-                power.export_ac_kw,
+                self.pack_net_charge_w,
+                power.export_ac_w,
                 power.heater_draw_w,
-                self.reactive_power_kvar,
+                self.reactive_power_var,
             ),
         };
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Bidirectional(self.active_power_kw)),
-                reactive_power_kvar: Some(self.reactive_power_kvar),
+                electric_w: Some(ElectricPower::Bidirectional(self.active_power_w)),
+                reactive_power_var: Some(self.reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -1901,7 +1859,7 @@ impl Equipment for Ev {
     fn resolved_zip(&self) -> Option<ResolvedZip> {
         // Live runtime state: constant-power reactive-only ZIP carrying the
         // current effective power factor (config baseline, later mutated by
-        // PowerFactorSetpoint) — mirrors `compute_reactive_kvar`'s baseline.
+        // PowerFactorSetpoint) — mirrors `compute_reactive_var`'s baseline.
         // Real power is charging-strategy-controlled, never ZIP-scaled, so
         // the resolved regime is reactive-only.
         Some(ResolvedZip::reactive_only(ZipLoad::reactive_only(
@@ -1925,9 +1883,16 @@ impl Equipment for Ev {
             // configuration, never the pack's live or aged state (a
             // temperature-scaled value would also freeze one step's weather
             // into the driver's range-anxiety and needed-hours arithmetic).
-            capacity_kwh: self.battery_capacity_kwh_rated,
-            max_charge_kw: self.rated_power_kw,
-            fuel_economy_kwh_per_mi: self.fuel_economy_kwh_per_mi,
+            capacity_j: self.battery_capacity_j_rated,
+            max_charge_w: self.rated_power_w,
+            // The seed's field is kWh/mi until the control-layer commit;
+            // convert the held J/m once here.
+            fuel_economy_kwh_per_mi: uom::si::f64::Energy::new::<uom::si::energy::joule>(
+                self.fuel_economy_j_per_m
+                    * uom::si::f64::Length::new::<uom::si::length::mile>(1.0)
+                        .get::<uom::si::length::meter>(),
+            )
+            .get::<uom::si::energy::kilowatt_hour>(),
         })
     }
 
@@ -1936,10 +1901,10 @@ impl Equipment for Ev {
             &EvCheckpoint {
                 soc: self.soc,
                 connection_state: self.connection_state,
-                away_charger_power_kw: self.away_charger_power_kw,
-                active_power_kw: self.active_power_kw,
-                power_limit_kw: self.power_limit_kw,
-                power_setpoint_kw: self.power_setpoint_kw,
+                away_charger_power_w: self.away_charger_power_w,
+                active_power_w: self.active_power_w,
+                power_limit_w: self.power_limit_w,
+                power_setpoint_w: self.power_setpoint_w,
                 power_setpoint_min_soc: self.power_setpoint_min_soc,
                 power_setpoint_max_soc: self.power_setpoint_max_soc,
                 dr_level: self.dr_level,
@@ -1953,22 +1918,22 @@ impl Equipment for Ev {
                 ready_by_soc: self.ready_by_soc,
                 v2l_enabled: self.v2l_enabled,
                 v2l_soc_reserve: self.v2l_soc_reserve,
-                v2l_max_discharge_kw: self.v2l_max_discharge_kw,
+                v2l_max_discharge_w: self.v2l_max_discharge_w,
                 v2g_enabled: self.v2g_enabled,
                 v2g_soc_reserve: self.v2g_soc_reserve,
-                v2g_max_discharge_kw: self.v2g_max_discharge_kw,
+                v2g_max_discharge_w: self.v2g_max_discharge_w,
                 degradation: self.degradation.clone(),
                 rainflow: self.rainflow.clone(),
                 last_daily_update_day: self.last_daily_update_day,
-                q_setpoint_kvar: self.q_setpoint_kvar,
+                q_setpoint_var: self.q_setpoint_var,
                 power_factor: self.power_factor,
-                drive_shortfall_kwh: self.drive_shortfall_kwh,
-                pending_drive_kwh: self.pending_drive_kwh,
-                reactive_power_kvar: self.reactive_power_kvar,
+                drive_shortfall_j: self.drive_shortfall_j,
+                pending_drive_j: self.pending_drive_j,
+                reactive_power_var: self.reactive_power_var,
                 heater_draw_w: self.heater_draw_w,
                 v2l_active: self.v2l_active,
-                v2l_power_kw: self.v2l_power_kw,
-                away_charge_actual_kw: self.away_charge_actual_kw,
+                v2l_power_w: self.v2l_power_w,
+                away_charge_actual_w: self.away_charge_actual_w,
                 last_mode: self.last_mode,
             },
             Self::checkpoint_version(),
@@ -1985,10 +1950,10 @@ impl Equipment for Ev {
         )?;
         self.soc = cp.soc;
         self.connection_state = cp.connection_state;
-        self.away_charger_power_kw = cp.away_charger_power_kw;
-        self.active_power_kw = cp.active_power_kw;
-        self.power_limit_kw = cp.power_limit_kw;
-        self.power_setpoint_kw = cp.power_setpoint_kw;
+        self.away_charger_power_w = cp.away_charger_power_w;
+        self.active_power_w = cp.active_power_w;
+        self.power_limit_w = cp.power_limit_w;
+        self.power_setpoint_w = cp.power_setpoint_w;
         self.power_setpoint_min_soc = cp.power_setpoint_min_soc;
         self.power_setpoint_max_soc = cp.power_setpoint_max_soc;
         self.dr_level = cp.dr_level;
@@ -2015,20 +1980,20 @@ impl Equipment for Ev {
         self.ready_by_soc = cp.ready_by_soc;
         self.v2l_enabled = cp.v2l_enabled;
         self.v2l_soc_reserve = cp.v2l_soc_reserve;
-        self.v2l_max_discharge_kw = cp.v2l_max_discharge_kw;
+        self.v2l_max_discharge_w = cp.v2l_max_discharge_w;
         self.v2g_enabled = cp.v2g_enabled;
         self.v2g_soc_reserve = cp.v2g_soc_reserve;
-        self.v2g_max_discharge_kw = cp.v2g_max_discharge_kw;
+        self.v2g_max_discharge_w = cp.v2g_max_discharge_w;
         self.degradation = cp.degradation;
         self.rainflow = cp.rainflow;
         self.last_daily_update_day = cp.last_daily_update_day;
-        self.q_setpoint_kvar = cp.q_setpoint_kvar;
+        self.q_setpoint_var = cp.q_setpoint_var;
         self.power_factor = cp.power_factor;
-        self.drive_shortfall_kwh = cp.drive_shortfall_kwh;
-        self.pending_drive_kwh = cp.pending_drive_kwh;
+        self.drive_shortfall_j = cp.drive_shortfall_j;
+        self.pending_drive_j = cp.pending_drive_j;
         self.last_mode = cp.last_mode;
 
-        // `battery_capacity_kwh_rated` is static config set by `init`, not
+        // `battery_capacity_j` is static config set by `init`, not
         // stored in the checkpoint (the caller must call `init` before
         // `load_state`). Recompute the usable capacity from the rated
         // capacity, the restored SOH, and the restored pack temperature's
@@ -2049,10 +2014,10 @@ impl Equipment for Ev {
         // needs the dispatch-active answer; this corner is what proved
         // the earlier `last_mode` derivation unfaithful.
         self.v2l_active = cp.v2l_active;
-        self.v2l_power_kw = cp.v2l_power_kw;
+        self.v2l_power_w = cp.v2l_power_w;
         // The away session's actual intake is checkpointed and restored
         // verbatim (the same lossless pattern): it is the charge-side
-        // counterpart of `v2l_power_kw` — the documented way away charging
+        // counterpart of `v2l_power_w` — the documented way away charging
         // is observed (`AWAY_CHARGE_POWER_KW`) — and its basis (the away
         // charge leg) is not derivable at restore (the away state
         // publishes zero port power, so no checkpointed column
@@ -2061,7 +2026,7 @@ impl Equipment for Ev {
         // the leg — the same restored-state-disagrees-with-saved-state
         // family the heater draw, reactive flow, and V2L dispatch state
         // fixes closed.
-        self.away_charge_actual_kw = cp.away_charge_actual_kw;
+        self.away_charge_actual_w = cp.away_charge_actual_w;
         // The ohmic loss and pack-side net rate are step outcomes the
         // next step recomputes from live state; the heater draw and the
         // reactive flow are step-published values restored verbatim (the
@@ -2079,16 +2044,16 @@ impl Equipment for Ev {
         // q-setpoint needs at a bound-binding session. The verbatim
         // restore keeps the published (mode, flows) pair both
         // guard-valid and faithful to the step-published values.
-        self.reactive_power_kvar = cp.reactive_power_kvar;
+        self.reactive_power_var = cp.reactive_power_var;
         self.ohmic_loss_w = 0.0;
-        self.pack_net_charge_kw = 0.0;
+        self.pack_net_charge_w = 0.0;
 
         self.write_telemetry();
         self.core_output = {
             CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Bidirectional(self.active_power_kw)),
-                    reactive_power_kvar: Some(self.reactive_power_kvar),
+                    electric_w: Some(ElectricPower::Bidirectional(self.active_power_w)),
+                    reactive_power_var: Some(self.reactive_power_var),
                     fuel_w: None,
                     thermal_output_w: None,
                     sensible_cooling_w: None,
@@ -2108,34 +2073,34 @@ impl Equipment for Ev {
 
     fn checkpoint_version() -> u32 {
         // v2: EvCheckpoint gained the reactive-control fields.
-        // v3: `q_setpoint_kvar` became Option<f64> (None = no var override;
+        // v3: `q_setpoint_var` became Option<f64> (None = no var override;
         //     Some(0.0) is a commanded zero).
-        // v4: gained `drive_shortfall_kwh` (cumulative drive-energy
+        // v4: gained `drive_shortfall_j` (cumulative drive-energy
         //     shortfall accounting; see the EvDrive arm in apply_signal).
-        // v5: gained `pending_drive_kwh` (drive energy awaiting its I²R
+        // v5: gained `pending_drive_j` (drive energy awaiting its I²R
         //     thermal application on the next step) and `last_mode` (the
         //     step-outcome operating mode `update_control` reports); dropped
         //     `heater_active` (derived state — true exactly when the actual
         //     draw > 0, recomputed every step).
-        // v6: gained `reactive_power_kvar` (the step-published reactive
+        // v6: gained `reactive_power_var` (the step-published reactive
         //     flow, restored verbatim — the inverter-leg basis it is
         //     computed on is not derivable from the checkpoint).
         // v7: gained `heater_draw_w` (the step-published heater draw,
         //     restored verbatim — the charge-leg/heater split of the port
         //     total is transient step state, not derivable at restore);
         //     `heater_active` is derived from the restored draw (draw > 0).
-        // v8: gained `v2l_active`/`v2l_power_kw` (the step-published V2L
+        // v8: gained `v2l_active`/`v2l_power_w` (the step-published V2L
         //     dispatch state and export, restored verbatim — the step keys
         //     the dispatch on presence, not the computed export, so a
         //     floor-held or DR-zeroed dispatch publishes dispatch-active
         //     with zero export and mode `Off`, which no checkpointed basis
         //     can derive; the floor-held corner proved the v7-era
         //     `last_mode` derivation unfaithful there).
-        // v9: gained `away_charge_actual_kw` (the step-published away
+        // v9: gained `away_charge_actual_w` (the step-published away
         //     session intake, restored verbatim — its basis, the away
         //     charge leg, is not derivable at restore because the away
         //     state publishes zero port power; the charge-side
-        //     counterpart of `v2l_power_kw`, completing the family).
+        //     counterpart of `v2l_power_w`, completing the family).
         9
     }
 
@@ -2170,14 +2135,24 @@ impl Equipment for Ev {
                 min_soc,
                 max_soc,
             } => {
+                // The signal carries kW and kVAR until the control-layer
+                // commit; the working values are W and VAR (SI), converted
+                // once here.
+                let active_power_w =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*active_power_kw)
+                        .get::<uom::si::power::watt>();
+                let reactive_power_var = reactive_power_kvar.map(|q| {
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(q)
+                        .get::<uom::si::power::watt>()
+                });
                 // Validate the ENTIRE signal before mutating any state so a
                 // rejected setpoint leaves no partial effect (e.g. an armed
                 // q_setpoint from a signal whose active power was refused).
-                if let Some(q) = reactive_power_kvar
+                if let Some(q) = reactive_power_var
                     && !q.is_finite()
                 {
                     return Err(HaresError::Control(
-                        "EV PowerSetpoint reactive_power_kvar must be finite".to_string(),
+                        "EV PowerSetpoint reactive_power_var must be finite".to_string(),
                     ));
                 }
                 // Self-contained guard (see EvDrive): a non-finite active
@@ -2185,9 +2160,9 @@ impl Equipment for Ev {
                 // swallows NaN) or saturate v2g/v2l discharge to the
                 // hardware maximum — battery, PV, and scheduled load all
                 // guard this value at the arm level too.
-                if !active_power_kw.is_finite() {
+                if !active_power_w.is_finite() {
                     return Err(HaresError::Control(format!(
-                        "EV PowerSetpoint active_power_kw must be finite, got {active_power_kw}"
+                        "EV PowerSetpoint active_power_w must be finite, got {active_power_w}"
                     )));
                 }
                 // A non-finite SOC window would be silently substituted with
@@ -2208,20 +2183,25 @@ impl Equipment for Ev {
                         "EV PowerSetpoint max_soc must be finite, got {m}"
                     )));
                 }
-                if *active_power_kw < 0.0 && !self.v2l_enabled && !self.v2g_enabled {
+                if active_power_w < 0.0 && !self.v2l_enabled && !self.v2g_enabled {
                     return Err(HaresError::Control(
                         "negative PowerSetpoint requires v2l_enabled or v2g_enabled".to_string(),
                     ));
                 }
-                if let Some(q) = reactive_power_kvar {
-                    self.q_setpoint_kvar = Some(*q);
+                if let Some(q) = reactive_power_var {
+                    self.q_setpoint_var = Some(q);
                 }
-                self.power_setpoint_kw = Some(*active_power_kw);
+                self.power_setpoint_w = Some(active_power_w);
                 self.power_setpoint_min_soc = *min_soc;
                 self.power_setpoint_max_soc = *max_soc;
             }
             ControlSignal::PowerLimit { max_power_kw, .. } => {
-                self.power_limit_kw = Some((*max_power_kw).max(0.0));
+                // The signal carries kW until the control-layer commit; the
+                // working value is W (SI), converted once here.
+                let max_power_w =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
+                        .get::<uom::si::power::watt>();
+                self.power_limit_w = Some((max_power_w).max(0.0));
             }
             ControlSignal::SOCTarget {
                 target_soc,
@@ -2258,20 +2238,25 @@ impl Equipment for Ev {
                 self.soc_target_max = *max_soc;
                 // A fresh charge target supersedes any zero-power hold
                 // dispatched during a prior idle window: without this clear,
-                // `compute_charging_power_kw` would keep consulting the
-                // latched `power_setpoint_kw` first and silently veto the
+                // `compute_charging_power_w` would keep consulting the
+                // latched `power_setpoint_w` first and silently veto the
                 // new target ("never charges" instead of "always charges").
-                self.power_setpoint_kw = None;
+                self.power_setpoint_w = None;
                 self.power_setpoint_min_soc = None;
                 self.power_setpoint_max_soc = None;
             }
             ControlSignal::ReactiveSetpoint { kvar } => {
+                // The signal carries kVAR until the control-layer commit; the
+                // working value is VAR (SI), converted once here.
                 if !kvar.is_finite() {
                     return Err(HaresError::Control(
                         "EV ReactiveSetpoint kvar must be finite".to_string(),
                     ));
                 }
-                self.q_setpoint_kvar = Some(*kvar);
+                self.q_setpoint_var = Some(
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*kvar)
+                        .get::<uom::si::power::watt>(),
+                );
             }
             ControlSignal::PowerFactorSetpoint { power_factor } => {
                 if !power_factor.is_finite() || *power_factor <= 0.0 || *power_factor > 1.0 {
@@ -2280,7 +2265,7 @@ impl Equipment for Ev {
                     ));
                 }
                 self.power_factor = *power_factor;
-                self.q_setpoint_kvar = None;
+                self.q_setpoint_var = None;
             }
             ControlSignal::EvPlugIn { state } => {
                 // Validate transitions: no direct home<->away
@@ -2298,8 +2283,8 @@ impl Equipment for Ev {
                     _ => {}
                 }
                 self.connection_state = *state;
-                self.away_charger_power_kw = 0.0;
-                self.away_charge_actual_kw = 0.0;
+                self.away_charger_power_w = 0.0;
+                self.away_charge_actual_w = 0.0;
                 if *state == EvConnectionState::Disconnected {
                     self.ready_by_hour = None;
                     self.ready_by_soc = None;
@@ -2309,11 +2294,11 @@ impl Equipment for Ev {
                     // defaults instead of whatever the previous session left
                     // behind. A latched zero-power hold would silently zero
                     // away charging (the away arm consults the same
-                    // `power_setpoint_kw`); a stale home-side `soc_target`
+                    // `power_setpoint_w`); a stale home-side `soc_target`
                     // would govern away charging by accident of whatever the
                     // home strategy last set, not by design. No caller or
                     // test relies on these surviving a plug cycle.
-                    self.power_setpoint_kw = None;
+                    self.power_setpoint_w = None;
                     self.power_setpoint_min_soc = None;
                     self.power_setpoint_max_soc = None;
                     self.soc_target = None;
@@ -2336,8 +2321,12 @@ impl Equipment for Ev {
                         "EvDrive kwh must be finite and >= 0, got {kwh}"
                     )));
                 }
-                let available_kwh = self.battery_capacity_kwh * self.soc;
-                if *kwh > available_kwh {
+                // The signal carries kWh until the control-layer commit;
+                // the energy is J (SI), converted once here.
+                let energy_j = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(*kwh)
+                    .get::<uom::si::energy::joule>();
+                let available_j = self.battery_capacity_j * self.soc;
+                if energy_j > available_j {
                     // A finite drive exceeding the pack's remaining energy is
                     // a physical situation — a trip longer than the
                     // vehicle's range — not an invalid value: deliver what
@@ -2352,23 +2341,27 @@ impl Equipment for Ev {
                     // loudly above; a rejected step would instead vanish
                     // into a dwelling warning string while the day's
                     // profile kept reporting the dispatched energy.
-                    self.drive_shortfall_kwh += *kwh - available_kwh;
+                    self.drive_shortfall_j += energy_j - available_j;
                     self.soc = 0.0;
                     // Only the delivered energy drives the pack — the I²R
                     // heat of a trip is proportional to the current that
                     // actually flowed.
-                    self.pending_drive_kwh += available_kwh;
+                    self.pending_drive_j += available_j;
                 } else {
-                    self.soc = (self.soc - *kwh / self.battery_capacity_kwh).clamp(0.0, 1.0);
+                    self.soc = (self.soc - energy_j / self.battery_capacity_j).clamp(0.0, 1.0);
                     // The SOC debit happens here; the trip's I²R heat is
                     // applied over the next step at the equivalent
-                    // discharge current (`pending_drive_kwh / dt_hours`),
+                    // discharge current (`pending_drive_j / dt_hours`),
                     // because the signal carries energy, not duration —
                     // and the driver dispatches one EvDrive per step.
-                    self.pending_drive_kwh += *kwh;
+                    self.pending_drive_j += energy_j;
                 }
             }
             ControlSignal::EvAwayCharge { power_kw } => {
+                // The signal carries kW until the control-layer commit; the
+                // working value is W (SI), converted once here.
+                let power_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(*power_kw)
+                    .get::<uom::si::power::watt>();
                 if self.connection_state != EvConnectionState::AwayPluggedIn {
                     return Err(HaresError::Control(
                         "EvAwayCharge rejected: EV must be AwayPluggedIn".to_string(),
@@ -2377,12 +2370,12 @@ impl Equipment for Ev {
                 // Self-contained guard (see EvDrive): a non-finite or negative
                 // charge power would silently no-op (`> 0.0` compares false)
                 // instead of being reported.
-                if !power_kw.is_finite() || *power_kw < 0.0 {
+                if !power_w.is_finite() || power_w < 0.0 {
                     return Err(HaresError::Control(format!(
-                        "EvAwayCharge power_kw must be finite and >= 0, got {power_kw}"
+                        "EvAwayCharge power_w must be finite and >= 0, got {power_w}"
                     )));
                 }
-                self.away_charger_power_kw = *power_kw;
+                self.away_charger_power_w = power_w;
             }
             ControlSignal::EvSetReadyBy {
                 departure_hour,
@@ -2406,7 +2399,7 @@ impl Equipment for Ev {
                 // Same hold-clearing rule as `SOCTarget`: a ready-by target
                 // means "charge toward this by departure", which a latched
                 // zero-power hold from a prior idle window would veto.
-                self.power_setpoint_kw = None;
+                self.power_setpoint_w = None;
                 self.power_setpoint_min_soc = None;
                 self.power_setpoint_max_soc = None;
             }

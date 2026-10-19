@@ -33,7 +33,6 @@ use hares_types::{
 use serde::{Deserialize, Serialize};
 
 use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 use crate::config::EquipmentTypedConfig;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
@@ -337,12 +336,6 @@ impl GeneratorConfig {
 #[cfg(test)]
 use crate::config::{KEY_EQUIPMENT_ID, KEY_ZONE_ID};
 
-/// One conversion at construction: the config enters in W (SI), the
-/// generator still works in kW until the run-state commit.
-fn w_to_kw(w: f64) -> f64 {
-    uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
-}
-
 #[cfg(test)]
 const KEY_RATED_POWER_W: &str = "rated_power_w";
 #[cfg(test)]
@@ -431,22 +424,22 @@ const LUBE_FRACTION_OF_THERMAL: f64 = 0.10;
 const EXHAUST_FRACTION_OF_THERMAL: f64 = 0.60;
 
 /// Conservative ramp rate for a residential-class reciprocating generator.
-/// A 10 kW unit ramps to full load in ~10 s → 1 kW/s.
+/// A 10 kW unit ramps to full load in ~10 s → 1 kW/s (1000 W/s).
 /// OCHRE uses 0.1 kW/min (~0.0017 kW/s) which is unrealistically slow for
-/// residential reciprocating units; we use kW/s for finer-grained control.
-const DEFAULT_DELTA_KW_PER_S: f64 = 1.0;
+/// residential reciprocating units; we use W/s for finer-grained control.
+const DEFAULT_DELTA_W_PER_S: f64 = 1000.0;
 
 /// Default rated output power. 10 kW covers most North American whole-home loads.
-const DEFAULT_RATED_POWER_KW: f64 = 10.0;
+const DEFAULT_RATED_POWER_W: f64 = 10_000.0;
 
 /// Default grid import limit for self-consumption control.
 /// 0.0 means the generator covers 100 % of load; set to a positive value to
 /// allow some baseline import and reduce generator cycling.
-const DEFAULT_GRID_IMPORT_LIMIT_KW: f64 = 0.0;
+const DEFAULT_GRID_IMPORT_LIMIT_W: f64 = 0.0;
 
 /// Default export limit: no grid export is allowed.
 /// Set > 0.0 to permit controlled islanding export.
-const DEFAULT_EXPORT_LIMIT_KW: f64 = 0.0;
+const DEFAULT_EXPORT_LIMIT_W: f64 = 0.0;
 
 /// Default CHP fluid loop flow rate (kg/s).
 /// 0.1 kg/s ≈ 6 L/min, typical for a small jacket-water heat recovery loop.
@@ -507,7 +500,7 @@ const DEFAULT_STACK_COOLER_R3: f64 = 0.0;
 /// Matches the default operating temperature.
 const DEFAULT_STACK_NOMINAL_TEMP_C: f64 = 70.0;
 
-const IDLE_KW_THRESHOLD: f64 = 1e-6;
+const IDLE_W_THRESHOLD: f64 = 1e-3;
 
 /// Fuel consumption at no-load idle as a fraction of full-load fuel rate.
 /// Generac Guardian 22 kW: ~56% (180k BTU/hr idle / 320k BTU/hr full).
@@ -808,9 +801,9 @@ impl GeneratorKind {
 
 #[derive(Serialize, Deserialize)]
 struct GeneratorCheckpoint {
-    current_power_kw: f64,
+    current_power_w: f64,
     mode: OperatingMode,
-    power_setpoint_kw: Option<f64>,
+    power_setpoint_w: Option<f64>,
     self_consumption_enabled: bool,
 }
 
@@ -826,15 +819,11 @@ pub struct Generator {
     kind: GeneratorKind,
 
     // Static config
-    rated_power_kw: f64,
-    /// The config's rated power as it entered, in W (SI): the read-back
-    /// reports it directly, so the stored unit and the kW working value
-    /// above stay separate.
     rated_power_w: f64,
     /// Minimum operating power for self-consumption mode (kW).
     /// Generator will not run below this level; it shuts off instead.
     /// OCHRE: `capacity_min` parameter.
-    capacity_min_kw: Option<f64>,
+    capacity_min_w: Option<f64>,
     efficiency: EfficiencyModel,
     /// Whether the efficiency curve points were loaded from a data file
     /// (`true`) or the hardcoded default (`false`). Used for diagnotic
@@ -848,9 +837,9 @@ pub struct Generator {
     eta_lube_oil: f64,
     eta_exhaust: f64,
     /// Maximum output-power change per second (kW/s).
-    delta_kw_per_s: f64,
-    grid_import_limit_kw: f64,
-    export_limit_kw: f64,
+    delta_w_per_s: f64,
+    grid_import_limit_w: f64,
+    export_limit_w: f64,
 
     // CHP fluid port (active when eta_thermal > 0.0 and loop_id is configured)
     chp_loop_id: Option<LoopId>,
@@ -891,9 +880,9 @@ pub struct Generator {
     parasitic_fraction: f64,
 
     // Dynamic state
-    current_power_kw: f64,
+    current_power_w: f64,
     mode: OperatingMode,
-    power_setpoint_kw: Option<f64>,
+    power_setpoint_w: Option<f64>,
     /// When false, generator is locked off regardless of net load.
     /// Set via `SelfConsumption { enabled: false }`.
     self_consumption_enabled: bool,
@@ -976,40 +965,30 @@ impl Generator {
             telemetry: default_telemetry(has_chp, kind == GeneratorKind::FuelCell),
             core_output: CoreOutput::default(),
             kind,
-            // One conversion per field at construction: the config
-            // enters in W (SI), the generator still works in kW until
-            // the run-state commit. The SI value is kept for the
-            // read-back, which reports it directly.
-            rated_power_w: typed.as_ref().map(|c| c.rated_power_w).unwrap_or(
-                uom::si::f64::Power::new::<uom::si::power::kilowatt>(DEFAULT_RATED_POWER_KW)
-                    .get::<uom::si::power::watt>(),
-            ),
-            rated_power_kw: typed
+            // The config enters in W (SI); the generator works in SI too.
+            rated_power_w: typed
                 .as_ref()
-                .map(|c| w_to_kw(c.rated_power_w))
-                .unwrap_or(DEFAULT_RATED_POWER_KW),
-            capacity_min_kw: typed.as_ref().and_then(|c| c.capacity_min_w).map(w_to_kw),
+                .map(|c| c.rated_power_w)
+                .unwrap_or(DEFAULT_RATED_POWER_W),
+            capacity_min_w: typed.as_ref().and_then(|c| c.capacity_min_w),
             efficiency,
             curve_from_file,
             eta_thermal,
             eta_jacket_water,
             eta_lube_oil,
             eta_exhaust,
-            delta_kw_per_s: typed
+            delta_w_per_s: typed
                 .as_ref()
                 .and_then(|c| c.delta_w_per_s)
-                .map(w_to_kw)
-                .unwrap_or(DEFAULT_DELTA_KW_PER_S),
-            grid_import_limit_kw: typed
+                .unwrap_or(DEFAULT_DELTA_W_PER_S),
+            grid_import_limit_w: typed
                 .as_ref()
                 .and_then(|c| c.grid_import_limit_w)
-                .map(w_to_kw)
-                .unwrap_or(DEFAULT_GRID_IMPORT_LIMIT_KW),
-            export_limit_kw: typed
+                .unwrap_or(DEFAULT_GRID_IMPORT_LIMIT_W),
+            export_limit_w: typed
                 .as_ref()
                 .and_then(|c| c.export_limit_w)
-                .map(w_to_kw)
-                .unwrap_or(DEFAULT_EXPORT_LIMIT_KW),
+                .unwrap_or(DEFAULT_EXPORT_LIMIT_W),
             chp_loop_id,
             flow_rate_kg_s: typed
                 .as_ref()
@@ -1068,33 +1047,33 @@ impl Generator {
                 .as_ref()
                 .and_then(|c| c.parasitic_fraction)
                 .unwrap_or(0.0),
-            current_power_kw: 0.0,
+            current_power_w: 0.0,
             mode: OperatingMode::Off,
-            power_setpoint_kw: None,
+            power_setpoint_w: None,
             self_consumption_enabled: true,
         }
     }
 
-    /// Clamp `target_kw` to enforce the ramp-rate limit on power increases.
+    /// Clamp `target_w` to enforce the ramp-rate limit on power increases.
     ///
     /// OCHRE Generator.py:129 -- ramp rate only constrains increasing generation.
     /// Shutdown and power reduction are instantaneous.
-    fn apply_ramp_limit(&self, target_kw: f64, dt_s: f64) -> f64 {
-        let delta = target_kw - self.current_power_kw;
+    fn apply_ramp_limit(&self, target_w: f64, dt_s: f64) -> f64 {
+        let delta = target_w - self.current_power_w;
         let clamped_delta = if delta > 0.0 {
-            delta.min(self.delta_kw_per_s * dt_s)
+            delta.min(self.delta_w_per_s * dt_s)
         } else {
             delta // no ramp limit on decrease
         };
-        (self.current_power_kw + clamped_delta).clamp(0.0, self.max_ac_kw())
+        (self.current_power_w + clamped_delta).clamp(0.0, self.max_ac_w())
     }
 
     /// Maximum grid-visible AC output (kW), accounting for inverter losses for fuel cells.
-    fn max_ac_kw(&self) -> f64 {
+    fn max_ac_w(&self) -> f64 {
         if self.kind == GeneratorKind::FuelCell {
-            self.rated_power_kw * self.inverter_efficiency
+            self.rated_power_w * self.inverter_efficiency
         } else {
-            self.rated_power_kw
+            self.rated_power_w
         }
     }
 
@@ -1108,16 +1087,16 @@ impl Generator {
     ///   desired_import = clamp(net_load, -export_limit, import_limit)
     ///   target_generation = net_load - desired_import
     ///
-    /// When `capacity_min_kw` is set, generator will not operate below that level;
+    /// When `capacity_min_w` is set, generator will not operate below that level;
     /// it shuts off instead (OCHRE `get_power_limits` min operating power).
     /// This check is applied after resolving the target regardless of source.
-    fn determine_target_kw(&self, net_load_kw: f64, grid_outage: bool) -> f64 {
+    fn determine_target_w(&self, net_load_w: f64, grid_outage: bool) -> f64 {
         // Standby mode: suppress dispatch when utility is alive.
         if self.standby_mode && !grid_outage {
             return 0.0;
         }
-        let max_ac = self.max_ac_kw();
-        let raw = if let Some(sp) = self.power_setpoint_kw {
+        let max_ac = self.max_ac_w();
+        let raw = if let Some(sp) = self.power_setpoint_w {
             sp.clamp(0.0, max_ac)
         } else if !self.self_consumption_enabled {
             // SelfConsumption disabled: generator is locked off unless an
@@ -1127,10 +1106,10 @@ impl Generator {
             // Self-consumption: match OCHRE formula exactly.
             // desired_import = clamp(net_load, -export_limit, import_limit)
             // target = net_load - desired_import
-            let desired_import = net_load_kw
-                .min(self.grid_import_limit_kw)
-                .max(-self.export_limit_kw);
-            (net_load_kw - desired_import).clamp(0.0, max_ac)
+            let desired_import = net_load_w
+                .min(self.grid_import_limit_w)
+                .max(-self.export_limit_w);
+            (net_load_w - desired_import).clamp(0.0, max_ac)
         };
 
         // Enforce minimum operating power regardless of control source.
@@ -1138,11 +1117,11 @@ impl Generator {
         // which in OCHRE's negative-generation convention means the generator must
         // produce at least capacity_min when it is on. Values between 0 and capacity_min
         // are clamped UP to capacity_min; a request of exactly 0 keeps the generator off.
-        if let Some(min_kw) = self.capacity_min_kw
+        if let Some(min_w) = self.capacity_min_w
             && raw > 0.0
-            && raw < min_kw
+            && raw < min_w
         {
-            return min_kw;
+            return min_w;
         }
         raw
     }
@@ -1172,22 +1151,15 @@ impl Generator {
         }
         self.descriptor.zone = c.zone_id.map(ZoneId);
         self.rated_power_w = c.rated_power_w;
-        self.rated_power_kw = w_to_kw(c.rated_power_w);
-        self.capacity_min_kw = c.capacity_min_w.map(w_to_kw);
+        self.capacity_min_w = c.capacity_min_w;
         self.eta_thermal = c.eta_thermal.unwrap_or(self.eta_thermal);
         let (eta_jacket_water, eta_lube_oil, eta_exhaust) = resolve_heat_recovery_etas(&Some(&c));
         self.eta_jacket_water = eta_jacket_water;
         self.eta_lube_oil = eta_lube_oil;
         self.eta_exhaust = eta_exhaust;
-        self.delta_kw_per_s = c.delta_w_per_s.map(w_to_kw).unwrap_or(self.delta_kw_per_s);
-        self.grid_import_limit_kw = c
-            .grid_import_limit_w
-            .map(w_to_kw)
-            .unwrap_or(self.grid_import_limit_kw);
-        self.export_limit_kw = c
-            .export_limit_w
-            .map(w_to_kw)
-            .unwrap_or(self.export_limit_kw);
+        self.delta_w_per_s = c.delta_w_per_s.unwrap_or(self.delta_w_per_s);
+        self.grid_import_limit_w = c.grid_import_limit_w.unwrap_or(self.grid_import_limit_w);
+        self.export_limit_w = c.export_limit_w.unwrap_or(self.export_limit_w);
         self.flow_rate_kg_s = c.flow_rate_kg_s.unwrap_or(self.flow_rate_kg_s);
         self.supply_temp_c = c.supply_temp_c.unwrap_or(self.supply_temp_c);
         self.return_temp_c = c.return_temp_c.unwrap_or(self.return_temp_c);
@@ -1235,9 +1207,9 @@ impl Generator {
         }
         self.ports = ports;
 
-        self.current_power_kw = 0.0;
+        self.current_power_w = 0.0;
         self.mode = OperatingMode::Off;
-        self.power_setpoint_kw = None;
+        self.power_setpoint_w = None;
         self.self_consumption_enabled = true;
 
         let has_chp =
@@ -1282,10 +1254,10 @@ impl Equipment for Generator {
         // modeled as unlimited (no on-site tank model), so availability does
         // not deplete. A standby-mode generator reports available during
         // normal operation because islanding is its entire purpose.
-        self.rated_power_kw > 0.0
+        self.rated_power_w > 0.0
             && self.grid_forming
             && (self.self_consumption_enabled
-                || self.power_setpoint_kw.unwrap_or(0.0) > IDLE_KW_THRESHOLD)
+                || self.power_setpoint_w.unwrap_or(0.0) > IDLE_W_THRESHOLD)
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
@@ -1293,8 +1265,8 @@ impl Equipment for Generator {
         // so callers see an up-to-date value before the next step() runs.
         // OperatingMode has no dedicated "On" variant; Standby is used for active
         // generation (matches OCHRE's generator state machine conventions).
-        let target = self.power_setpoint_kw.unwrap_or(self.current_power_kw);
-        if target > IDLE_KW_THRESHOLD {
+        let target = self.power_setpoint_w.unwrap_or(self.current_power_w);
+        if target > IDLE_W_THRESHOLD {
             self.mode = OperatingMode::Standby;
         } else {
             self.mode = OperatingMode::Off;
@@ -1316,47 +1288,47 @@ impl Equipment for Generator {
         }
 
         // Read Stage 1 accumulated net load (load + any earlier generation).
-        let net_load_kw = power_w_to_kw(ports.electrical.net_active_w());
+        let net_load_w = ports.electrical.net_active_w();
 
-        let unconstrained_kw = self.determine_target_kw(net_load_kw, env.grid.grid_outage());
+        let unconstrained_w = self.determine_target_w(net_load_w, env.grid.grid_outage());
         // Ramp rate only constrains power increases (OCHRE Generator.py:129).
         // Flag is true only when ramping up and the increase exceeds the limit.
-        let ramp_delta = unconstrained_kw - self.current_power_kw;
+        let ramp_delta = unconstrained_w - self.current_power_w;
         let ramp_limited =
-            ramp_delta > 0.0 && ramp_delta > self.delta_kw_per_s * dt_s + IDLE_KW_THRESHOLD;
-        let output_kw = self.apply_ramp_limit(unconstrained_kw, dt_s);
+            ramp_delta > 0.0 && ramp_delta > self.delta_w_per_s * dt_s + IDLE_W_THRESHOLD;
+        let output_w = self.apply_ramp_limit(unconstrained_w, dt_s);
 
         // Parasitic electrical load: auxiliary pumps, cooling fans, fuel compressors
         // (fuel cells), and control electronics consume a fraction of gross output.
         // IEA Annex 42 FC+Micro-CHP Test Protocol: residential micro-CHP parasitic
         // loads range 2–15 % of rated output. Deducted before the electrical port
         // write so downstream consumers see the net value automatically.
-        let parasitic_kw = if self.parasitic_fraction > 0.0 && output_kw > IDLE_KW_THRESHOLD {
-            output_kw * self.parasitic_fraction
+        let parasitic_w = if self.parasitic_fraction > 0.0 && output_w > IDLE_W_THRESHOLD {
+            output_w * self.parasitic_fraction
         } else {
             0.0
         };
 
-        let net_output_kw = output_kw - parasitic_kw;
+        let net_output_w = output_w - parasitic_w;
 
-        self.current_power_kw = output_kw;
+        self.current_power_w = output_w;
 
         // Fuel cells use a DC intermediate with inverter conversion.
-        // Combustion generators send output_kw directly to the grid.
-        // For fuel cells, output_kw is the AC target; the stack must produce
+        // Combustion generators send output_w directly to the grid.
+        // For fuel cells, output_w is the AC target; the stack must produce
         // more DC to compensate for inverter losses.
         let is_fuel_cell = self.kind == GeneratorKind::FuelCell;
-        let dc_kw = if is_fuel_cell && output_kw > IDLE_KW_THRESHOLD {
-            output_kw / self.inverter_efficiency
+        let dc_w = if is_fuel_cell && output_w > IDLE_W_THRESHOLD {
+            output_w / self.inverter_efficiency
         } else {
-            output_kw
+            output_w
         };
-        let dc_power_w = power_kw_to_w(dc_kw);
+        let dc_power_w = dc_w;
 
         // Capacity ratio uses DC power for fuel cells (stack rating),
         // AC power for combustion generators.
         // EnergyPlus FuelCellElectricGenerator.cc:1697 — curve vs Pel/NomPel.
-        let capacity_ratio = dc_kw / self.rated_power_kw;
+        let capacity_ratio = dc_w / self.rated_power_w;
         let eta = self.efficiency.evaluate(capacity_ratio);
 
         // Observer capture: record efficiency curve source and points in use.
@@ -1382,7 +1354,7 @@ impl Equipment for Generator {
 
         // Derive fuel and heat flows.
         // Fuel is computed from DC stack power, not AC output.
-        let is_running = output_kw > IDLE_KW_THRESHOLD;
+        let is_running = output_w > IDLE_W_THRESHOLD;
         let load_fuel_w = if is_running && eta > 0.0 {
             dc_power_w / eta
         } else {
@@ -1392,11 +1364,11 @@ impl Equipment for Generator {
         // full-load fuel even at zero electrical output. Generac Guardian 22 kW
         // spec sheet: ~56% at idle. Kohler 20RESCL: ~40-45%.
         // Full-load reference fuel rate uses rated stack power: P_rated / eta_rated.
-        // For fuel cells, rated_power_kw is the DC stack rating (max_ac_kw =
-        // rated_power_kw * inverter_efficiency).
+        // For fuel cells, rated_power_w is the DC stack rating (max_ac_w =
+        // rated_power_w * inverter_efficiency).
         let rated_eta = self.efficiency.rated();
         let idle_fuel_w = if is_running && rated_eta > 0.0 {
-            (power_kw_to_w(self.rated_power_kw) / rated_eta) * self.no_load_fuel_fraction
+            ((self.rated_power_w) / rated_eta) * self.no_load_fuel_fraction
         } else {
             0.0
         };
@@ -1415,7 +1387,7 @@ impl Equipment for Generator {
             );
         }
 
-        let electrical_w = power_kw_to_w(output_kw);
+        let electrical_w = output_w;
         // EnergyPlus FuelCellElectricGenerator.cc:2112-2116 — inverter model.
         let inverter_loss_w = if is_fuel_cell {
             dc_power_w - electrical_w
@@ -1423,7 +1395,7 @@ impl Equipment for Generator {
             0.0
         };
         // EnergyPlus FuelCellElectricGenerator.cc:1859-1865 — stack cooler polynomial.
-        let stack_cooling_w = if is_fuel_cell && output_kw > IDLE_KW_THRESHOLD {
+        let stack_cooling_w = if is_fuel_cell && output_w > IDLE_W_THRESHOLD {
             compute_stack_cooler_heat(
                 dc_power_w,
                 self.stack_temp_c,
@@ -1462,7 +1434,7 @@ impl Equipment for Generator {
             q_lube_eff_w,
             q_exhaust_eff_w,
             q_flue_eff_w,
-        ) = if has_thermal && q_thermal_available_w > IDLE_KW_THRESHOLD {
+        ) = if has_thermal && q_thermal_available_w > IDLE_W_THRESHOLD {
             if let Some(max_temp) = self.heat_rec_max_temp_c {
                 let cp = CP_LIQUID_WATER_J_KG_K;
                 let loop_return_c = self.return_temp_c;
@@ -1535,7 +1507,7 @@ impl Equipment for Generator {
         // Observer capture: record heat recovery capping diagnostics.
         #[cfg(feature = "observe")]
         {
-            if has_thermal && q_thermal_available_w > IDLE_KW_THRESHOLD {
+            if has_thermal && q_thermal_available_w > IDLE_W_THRESHOLD {
                 let loop_return_c = self.return_temp_c;
                 tracing::debug!(
                     q_thermal_available_w,
@@ -1585,8 +1557,8 @@ impl Equipment for Generator {
         // control is out of scope for this model; Q=0 keeps parity with OCHRE and
         // avoids inventing unvalidated PF behavior.
         ports.accumulate(&PortContribution::Electrical {
-            active_power_w: power_kw_to_w(-net_output_kw),
-            reactive_power_kvar: 0.0,
+            active_power_w: (-net_output_w),
+            reactive_power_var: 0.0,
         })?;
 
         // Write fuel port.
@@ -1598,7 +1570,7 @@ impl Equipment for Generator {
         }
 
         // Write zone thermal ports, differentiated by category.
-        if zone_jacket_loss_w > IDLE_KW_THRESHOLD
+        if zone_jacket_loss_w > IDLE_W_THRESHOLD
             && let Some(zone) = self.descriptor.zone
         {
             ports.accumulate(&PortContribution::Thermal {
@@ -1609,7 +1581,7 @@ impl Equipment for Generator {
                 category: ThermalCategory::JacketLoss,
             })?;
         }
-        if zone_internal_gain_w > IDLE_KW_THRESHOLD
+        if zone_internal_gain_w > IDLE_W_THRESHOLD
             && let Some(zone) = self.descriptor.zone
         {
             ports.accumulate(&PortContribution::Thermal {
@@ -1624,12 +1596,12 @@ impl Equipment for Generator {
         // Parasitic auxiliary power becomes sensible heat in the building zone.
         // Pump and fan motors reject heat locally; this is separate from
         // combustion-derived waste heat (flue, jacket, etc.).
-        if parasitic_kw > IDLE_KW_THRESHOLD
+        if parasitic_w > IDLE_W_THRESHOLD
             && let Some(zone) = self.descriptor.zone
         {
             ports.accumulate(&PortContribution::Thermal {
                 zone,
-                sensible_gain_w: parasitic_kw * 1000.0,
+                sensible_gain_w: parasitic_w,
                 radiant_gain_w: 0.0,
                 latent_gain_w: 0.0,
                 category: ThermalCategory::InternalGain,
@@ -1640,7 +1612,7 @@ impl Equipment for Generator {
         // Compute flow dynamically from thermal output and configured ΔT so the
         // fluid port carries the correct energy: m_dot = Q / (cp × ΔT).
         // ASHRAE HoF 2021 Ch.1 Eq.2.
-        if q_thermal_effective_w > IDLE_KW_THRESHOLD
+        if q_thermal_effective_w > IDLE_W_THRESHOLD
             && let Some(loop_id) = self.chp_loop_id
         {
             let delta_t_c = self.supply_temp_c - self.return_temp_c;
@@ -1700,15 +1672,15 @@ impl Equipment for Generator {
             }
         }
 
-        let mode = if output_kw > IDLE_KW_THRESHOLD {
+        let mode = if output_w > IDLE_W_THRESHOLD {
             OperatingMode::Standby
         } else {
             OperatingMode::Off
         };
         self.mode = mode;
 
-        self.telemetry.set(tk::ELECTRIC_OUTPUT_KW, output_kw);
-        self.telemetry.set(tk::PARASITIC_KW, parasitic_kw);
+        self.telemetry.set(tk::ELECTRIC_OUTPUT_KW, output_w);
+        self.telemetry.set(tk::PARASITIC_KW, parasitic_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
         self.telemetry.set(tk::FUEL_IDLE_W, idle_fuel_w);
         self.telemetry.set(tk::FUEL_LOAD_W, load_fuel_w);
@@ -1762,7 +1734,7 @@ impl Equipment for Generator {
             }
         }
         if is_fuel_cell {
-            self.telemetry.set(tk::FUEL_CELL_DC_KW, dc_kw);
+            self.telemetry.set(tk::FUEL_CELL_DC_KW, dc_w);
             self.telemetry
                 .set(tk::FUEL_CELL_INVERTER_LOSS_W, inverter_loss_w);
             self.telemetry
@@ -1771,7 +1743,7 @@ impl Equipment for Generator {
             #[cfg(feature = "observe")]
             {
                 tracing::debug!(
-                    fuel_cell_dc_kw = dc_kw,
+                    fuel_cell_dc_w = dc_w,
                     fuel_cell_inverter_loss_w = inverter_loss_w,
                     fuel_cell_stack_heat_w = stack_cooling_w,
                     inverter_efficiency = self.inverter_efficiency,
@@ -1782,8 +1754,8 @@ impl Equipment for Generator {
         }
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Generation(net_output_kw.max(0.0))),
-                reactive_power_kvar: None,
+                electric_w: Some(ElectricPower::Generation(net_output_w.max(0.0))),
+                reactive_power_var: None,
                 fuel_w: Some(FuelPower {
                     fuel_type: FuelType::Gas,
                     consumption_w: fuel_w.max(0.0),
@@ -1823,9 +1795,9 @@ impl Equipment for Generator {
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &GeneratorCheckpoint {
-                current_power_kw: self.current_power_kw,
+                current_power_w: self.current_power_w,
                 mode: self.mode,
-                power_setpoint_kw: self.power_setpoint_kw,
+                power_setpoint_w: self.power_setpoint_w,
                 self_consumption_enabled: self.self_consumption_enabled,
             },
             Self::checkpoint_version(),
@@ -1840,7 +1812,7 @@ impl Equipment for Generator {
             "Generator",
             self.descriptor().id,
         )?;
-        self.current_power_kw = cp.current_power_kw;
+        self.current_power_w = cp.current_power_w;
         // The restored mode is re-derived from the restored output power
         // (the same derivation `update_control` applies), not restored
         // verbatim: the checkpointed mode can be a *provisional* value
@@ -1851,49 +1823,49 @@ impl Equipment for Generator {
         // `Generation(power)` + fuel, which the mode/flow guard rejects
         // (Rule 2: Off with non-zero flows). The mode consistent with
         // the restored flows is a pure function of the restored power.
-        self.mode = if cp.current_power_kw > IDLE_KW_THRESHOLD {
+        self.mode = if cp.current_power_w > IDLE_W_THRESHOLD {
             OperatingMode::Standby
         } else {
             OperatingMode::Off
         };
-        self.power_setpoint_kw = cp.power_setpoint_kw;
+        self.power_setpoint_w = cp.power_setpoint_w;
         self.self_consumption_enabled = cp.self_consumption_enabled;
 
         // Recompute derived telemetry from restored power so consumers see
         // consistent values without needing to run a step first.
         let is_fuel_cell = self.kind == GeneratorKind::FuelCell;
-        let dc_kw = if is_fuel_cell && self.current_power_kw > IDLE_KW_THRESHOLD {
-            self.current_power_kw / self.inverter_efficiency
+        let dc_w = if is_fuel_cell && self.current_power_w > IDLE_W_THRESHOLD {
+            self.current_power_w / self.inverter_efficiency
         } else {
-            self.current_power_kw
+            self.current_power_w
         };
-        let capacity_ratio = dc_kw / self.rated_power_kw;
+        let capacity_ratio = dc_w / self.rated_power_w;
         let eta = self.efficiency.evaluate(capacity_ratio);
-        let is_running = self.current_power_kw > IDLE_KW_THRESHOLD;
+        let is_running = self.current_power_w > IDLE_W_THRESHOLD;
         let rated_eta = self.efficiency.rated();
         let idle_fuel_w = if is_running && rated_eta > 0.0 {
-            (power_kw_to_w(self.rated_power_kw) / rated_eta) * self.no_load_fuel_fraction
+            ((self.rated_power_w) / rated_eta) * self.no_load_fuel_fraction
         } else {
             0.0
         };
         let load_fuel_w = if is_running && eta > 0.0 {
-            power_kw_to_w(dc_kw) / eta
+            (dc_w) / eta
         } else {
             0.0
         };
         let fuel_w = idle_fuel_w.max(load_fuel_w);
 
         // Recompute parasitic deduction from restored gross output and config fraction.
-        let parasitic_kw =
-            if self.parasitic_fraction > 0.0 && self.current_power_kw > IDLE_KW_THRESHOLD {
-                self.current_power_kw * self.parasitic_fraction
+        let parasitic_w =
+            if self.parasitic_fraction > 0.0 && self.current_power_w > IDLE_W_THRESHOLD {
+                self.current_power_w * self.parasitic_fraction
             } else {
                 0.0
             };
 
         self.telemetry
-            .set(tk::ELECTRIC_OUTPUT_KW, self.current_power_kw);
-        self.telemetry.set(tk::PARASITIC_KW, parasitic_kw);
+            .set(tk::ELECTRIC_OUTPUT_KW, self.current_power_w);
+        self.telemetry.set(tk::PARASITIC_KW, parasitic_w);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_w);
         self.telemetry.set(tk::FUEL_IDLE_W, idle_fuel_w);
         self.telemetry.set(tk::FUEL_LOAD_W, load_fuel_w);
@@ -1906,7 +1878,7 @@ impl Equipment for Generator {
             let q_lube_w = fuel_w * self.eta_lube_oil;
             let q_exhaust_w = fuel_w * self.eta_exhaust;
             let q_thermal_w = q_jacket_w + q_lube_w + q_exhaust_w;
-            let q_flue_w = fuel_w - power_kw_to_w(self.current_power_kw) - q_thermal_w;
+            let q_flue_w = fuel_w - (self.current_power_w) - q_thermal_w;
             self.telemetry.set(tk::THERMAL_AVAILABLE_W, q_thermal_w);
             self.telemetry.set(tk::THERMAL_OUTPUT_W, q_thermal_w);
             // On load_state, the checkpoint does not know whether capping was
@@ -1932,8 +1904,8 @@ impl Equipment for Generator {
                 .set(tk::SUPPLY_TEMP_EXHAUST_C, self.supply_temp_exhaust_c);
         }
         if is_fuel_cell {
-            let dc_power_w = power_kw_to_w(dc_kw);
-            let inverter_loss_w = power_kw_to_w(dc_kw - self.current_power_kw);
+            let dc_power_w = dc_w;
+            let inverter_loss_w = dc_w - self.current_power_w;
             let stack_cooling_w = compute_stack_cooler_heat(
                 dc_power_w,
                 self.stack_temp_c,
@@ -1943,18 +1915,18 @@ impl Equipment for Generator {
                 self.stack_cooler_r2,
                 self.stack_cooler_r3,
             );
-            self.telemetry.set(tk::FUEL_CELL_DC_KW, dc_kw);
+            self.telemetry.set(tk::FUEL_CELL_DC_KW, dc_w);
             self.telemetry
                 .set(tk::FUEL_CELL_INVERTER_LOSS_W, inverter_loss_w);
             self.telemetry
                 .set(tk::FUEL_CELL_STACK_HEAT_W, stack_cooling_w);
         }
         let q_thermal_w = fuel_w * self.eta_thermal;
-        let net_output_kw = self.current_power_kw - parasitic_kw;
+        let net_output_w = self.current_power_w - parasitic_w;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Generation(net_output_kw.max(0.0))),
-                reactive_power_kvar: None,
+                electric_w: Some(ElectricPower::Generation(net_output_w.max(0.0))),
+                reactive_power_var: None,
                 fuel_w: Some(FuelPower {
                     fuel_type: FuelType::Gas,
                     consumption_w: fuel_w.max(0.0),
@@ -1985,24 +1957,29 @@ impl Equipment for Generator {
             ControlSignal::PowerSetpoint {
                 active_power_kw, ..
             } => {
+                // The signal carries kW until the control-layer commit; the
+                // stored setpoint is W (SI), converted once here.
                 if !active_power_kw.is_finite() {
                     return Err(HaresError::Control(
                         "generator PowerSetpoint active_power_kw must be finite".to_string(),
                     ));
                 }
+                let setpoint_w =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*active_power_kw)
+                        .get::<uom::si::power::watt>();
                 // Setpoint persists until explicitly cleared (via ModeOverride::Standby
                 // or a new PowerSetpoint). This matches OCHRE's behaviour where the
                 // controller retains the last commanded value across timesteps, avoiding
                 // oscillation when the caller does not re-send a setpoint every step.
-                self.power_setpoint_kw = Some(active_power_kw.max(0.0));
+                self.power_setpoint_w = Some(setpoint_w.max(0.0));
             }
             ControlSignal::ModeOverride { mode } => match mode {
                 OperatingMode::Off => {
-                    self.power_setpoint_kw = Some(0.0);
+                    self.power_setpoint_w = Some(0.0);
                 }
                 OperatingMode::Standby => {
                     // Return to self-consumption control.
-                    self.power_setpoint_kw = None;
+                    self.power_setpoint_w = None;
                 }
                 other => {
                     return Err(HaresError::Control(format!(
@@ -2013,7 +1990,7 @@ impl Equipment for Generator {
             ControlSignal::ModeOverrideRelease => {
                 // Return to self-consumption control, the same semantics the
                 // Standby mode command carries.
-                self.power_setpoint_kw = None;
+                self.power_setpoint_w = None;
             }
             ControlSignal::SelfConsumption { enabled, .. } => {
                 // Toggle self-consumption mode on or off.
@@ -2667,18 +2644,18 @@ mod tests {
     }
 
     /// Helper: ramp to steady-state with a setpoint and fast ramp.
-    fn ramp_to_steady_state(generator: &mut Generator, setpoint_kw: f64, env: &EnvironmentState) {
+    fn ramp_to_steady_state(generator: &mut Generator, setpoint_w: f64, env: &EnvironmentState) {
         generator
             .apply_control(&ControlSignal::PowerSetpoint {
-                active_power_kw: setpoint_kw,
+                active_power_kw: setpoint_w,
                 reactive_power_kvar: None,
                 min_soc: None,
                 max_soc: None,
             })
             .unwrap();
         let mut slots = ports_for(generator);
-        // With 1 kW/s and 1s steps, need rated_power_kw steps + 1 margin.
-        let steps = (generator.rated_power_kw as usize) + 1;
+        // With 1 kW/s and 1s steps, need rated_power_w steps + 1 margin.
+        let steps = (generator.rated_power_w as usize) + 1;
         for _ in 0..steps {
             slots.zero();
             generator
@@ -2902,7 +2879,7 @@ mod tests {
 
     #[test]
     fn idle_fuel_zero_when_generator_off() {
-        // When the generator is off (output_kw == 0), idle fuel must be zero.
+        // When the generator is off (output_w == 0), idle fuel must be zero.
         let config = gen_config(&[(KEY_NO_LOAD_FUEL_FRACTION, 0.40.into())]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator.init(&config, &base_env()).unwrap();
@@ -2914,15 +2891,15 @@ mod tests {
 
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
         let idle_fuel_w = generator.telemetry().get(tk::FUEL_IDLE_W).unwrap();
-        let electric_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
 
-        assert!(electric_kw < IDLE_KW_THRESHOLD, "generator should be off");
+        assert!(electric_w < IDLE_W_THRESHOLD, "generator should be off");
         assert!(
-            fuel_w < IDLE_KW_THRESHOLD,
+            fuel_w < IDLE_W_THRESHOLD,
             "off generator must have zero fuel consumption"
         );
         assert!(
-            idle_fuel_w < IDLE_KW_THRESHOLD,
+            idle_fuel_w < IDLE_W_THRESHOLD,
             "off generator must have zero idle fuel"
         );
     }
@@ -3066,9 +3043,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let output_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+        let output_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
-        let expected_fuel_w = (output_kw / 0.30) * 1000.0;
+        let expected_fuel_w = output_w / 0.30;
         assert!(
             (fuel_w - expected_fuel_w).abs() < 1.0,
             "fuel_input_w={fuel_w}, expected={expected_fuel_w}"
@@ -3226,9 +3203,7 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(slots.electrical.generation_power_w < 0.0);
-        assert!(
-            (slots.electrical.generation_power_w + generator.current_power_kw * 1000.0).abs() < 1.0
-        );
+        assert!((slots.electrical.generation_power_w + generator.current_power_w).abs() < 1.0);
     }
 
     // =======================================================================
@@ -3257,9 +3232,9 @@ mod tests {
         slots.zero();
         generator.step(&base_env(), dt, &mut slots).unwrap();
         assert!(
-            (generator.current_power_kw - 2.0).abs() < 1e-9,
+            (generator.current_power_w - 2000.0).abs() < 1e-6,
             "step 1: got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
         assert_eq!(generator.telemetry().get(tk::RAMP_LIMITED).unwrap(), 1.0);
 
@@ -3268,9 +3243,9 @@ mod tests {
             generator.step(&base_env(), dt, &mut slots).unwrap();
         }
         assert!(
-            (generator.current_power_kw - 10.0).abs() < 1e-9,
+            (generator.current_power_w - 10_000.0).abs() < 1e-6,
             "step 5: got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
     }
 
@@ -3284,7 +3259,7 @@ mod tests {
         ramp_to_steady_state(&mut generator, 10.0, &base_env());
 
         assert!(
-            (generator.current_power_kw - 10.0).abs() < 1e-9,
+            (generator.current_power_w - 10_000.0).abs() < 1e-6,
             "precondition: at 10 kW"
         );
 
@@ -3301,9 +3276,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            generator.current_power_kw < IDLE_KW_THRESHOLD,
+            generator.current_power_w < IDLE_W_THRESHOLD,
             "shutdown from 10 kW should be instant (no ramp limit on decrease), got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
         assert_eq!(generator.mode, OperatingMode::Off);
     }
@@ -3324,9 +3299,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            (generator.current_power_kw - 4.0).abs() < 1e-9,
+            (generator.current_power_w - 4000.0).abs() < 1e-6,
             "got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
     }
 
@@ -3345,9 +3320,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            (generator.current_power_kw - 3.0).abs() < 1e-9,
+            (generator.current_power_w - 3000.0).abs() < 1e-6,
             "got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
     }
 
@@ -3361,7 +3336,7 @@ mod tests {
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
-        assert!(generator.current_power_kw < IDLE_KW_THRESHOLD);
+        assert!(generator.current_power_w < IDLE_W_THRESHOLD);
         assert_eq!(generator.mode, OperatingMode::Off);
     }
 
@@ -3383,9 +3358,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            (generator.current_power_kw - 3.0).abs() < 1e-9,
+            (generator.current_power_w - 3000.0).abs() < 1e-6,
             "should clamp up to capacity_min: {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
 
         // Load of 5 kW is above capacity_min → generator should run at requested load.
@@ -3395,9 +3370,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            (generator.current_power_kw - 5.0).abs() < 1e-9,
+            (generator.current_power_w - 5000.0).abs() < 1e-6,
             "should run at 5 kW: {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
     }
 
@@ -3426,9 +3401,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            (generator.current_power_kw - 3.0).abs() < 1e-9,
+            (generator.current_power_w - 3000.0).abs() < 1e-6,
             "setpoint below capacity_min should clamp up to 3 kW, got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
 
         // Setpoint of 5 kW is above capacity_min → generator runs at 5 kW.
@@ -3445,16 +3420,16 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            (generator.current_power_kw - 5.0).abs() < 1e-9,
+            (generator.current_power_w - 5000.0).abs() < 1e-6,
             "setpoint above capacity_min should run at 5 kW, got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
     }
 
     #[test]
     fn setpoint_zero_turns_off_despite_capacity_min() {
         // A setpoint of exactly 0 must shut the generator off, not clamp up
-        // to capacity_min_kw. Only positive-but-below-min values clamp up.
+        // to capacity_min_w. Only positive-but-below-min values clamp up.
         let config = gen_config(&[
             (KEY_CAPACITY_MIN_W, 3000.0.into()),
             (KEY_DELTA_W_PER_S, 100000.0.into()),
@@ -3464,7 +3439,7 @@ mod tests {
 
         // First bring generator online.
         ramp_to_steady_state(&mut generator, 5.0, &base_env());
-        assert!(generator.current_power_kw > 0.0, "precondition: running");
+        assert!(generator.current_power_w > 0.0, "precondition: running");
 
         // Set power to 0 -- should shut off, not clamp to 3 kW.
         generator
@@ -3480,9 +3455,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            generator.current_power_kw < IDLE_KW_THRESHOLD,
+            generator.current_power_w < IDLE_W_THRESHOLD,
             "setpoint=0 should shut off generator, got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
         assert_eq!(generator.mode, OperatingMode::Off);
     }
@@ -3515,17 +3490,17 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let gross_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
-        let parasitic_kw = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
+        let gross_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+        let parasitic_w = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
         let net_generation_w = slots.electrical.generation_power_w;
 
         assert!(
-            (gross_kw - 10.0).abs() < 1e-9,
-            "gross output should be 10 kW, got {gross_kw}"
+            (gross_w - 10_000.0).abs() < 1e-6,
+            "gross output should be 10 kW, got {gross_w}"
         );
         assert!(
-            (parasitic_kw - 0.5).abs() < 1e-9,
-            "parasitic should be 0.5 kW at 5 %, got {parasitic_kw}"
+            (parasitic_w - 500.0).abs() < 1e-6,
+            "parasitic should be 500 W (5 % of 10 kW), got {parasitic_w}"
         );
         assert!(
             (net_generation_w.abs() - 9500.0).abs() < 1.0,
@@ -3555,16 +3530,16 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let gross_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
-        let parasitic_kw = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
+        let gross_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+        let parasitic_w = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
         let net_generation_w = slots.electrical.generation_power_w;
 
         assert!(
-            (gross_kw - 5.0).abs() < 1e-9,
+            (gross_w - 5000.0).abs() < 1e-6,
             "gross output should match setpoint"
         );
         assert!(
-            parasitic_kw < IDLE_KW_THRESHOLD,
+            parasitic_w < IDLE_W_THRESHOLD,
             "parasitic should be zero by default"
         );
         assert!(
@@ -3597,10 +3572,10 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let parasitic_kw = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
-        assert!(parasitic_kw > 0.0, "parasitic should be positive");
+        let parasitic_w = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
+        assert!(parasitic_w > 0.0, "parasitic should be positive");
 
-        let expected_parasitic_heat_w = parasitic_kw * 1000.0;
+        let expected_parasitic_heat_w = parasitic_w;
         let zone_internal_gain =
             slots.thermal[0].sensible_for_category(ThermalCategory::InternalGain);
         // Zone receives parasitic heat as InternalGain *plus* combustion waste heat,
@@ -3642,9 +3617,9 @@ mod tests {
             "no thermal port should be registered without a zone"
         );
         // Parasitic telemetry is still recorded even without a zone.
-        let parasitic_kw = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
+        let parasitic_w = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
         assert!(
-            (parasitic_kw - 0.5).abs() < 1e-9,
+            (parasitic_w - 500.0).abs() < 1e-6,
             "parasitic telemetry still recorded"
         );
     }
@@ -3733,18 +3708,18 @@ mod tests {
             .unwrap();
         let parasitic_kw_1 = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
         assert!(
-            (parasitic_kw_1 - 0.5).abs() < 1e-9,
-            "step 1 parasitic should be 0.5 kW"
+            (parasitic_kw_1 - 500.0).abs() < 1e-6,
+            "step 1 parasitic should be 500 W"
         );
 
         // Step 2 (note: ports should NOT be zeroed between steps for accumulation test)
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
-        let parasitic_kw_2 = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
+        let parasitic_w_2 = generator.telemetry().get(tk::PARASITIC_KW).unwrap();
         assert!(
-            (parasitic_kw_2 - 0.5).abs() < 1e-9,
-            "step 2 parasitic should be 0.5 kW"
+            (parasitic_w_2 - 500.0).abs() < 1e-6,
+            "step 2 parasitic should be 500 W"
         );
 
         // The zone thermal accumulator internal gain should have ~2 * 0.5 kW = 1000 W
@@ -3762,7 +3737,7 @@ mod tests {
     #[test]
     fn parasitic_fraction_near_one_mode_stays_standby_with_gross_output() {
         // At parasitic_fraction ≈ 1.0 with low output, gross output crosses
-        // IDLE_KW_THRESHOLD while net output falls below it. Mode must track
+        // IDLE_W_THRESHOLD while net output falls below it. Mode must track
         // gross output (the engine is physically running and burning fuel) to
         // prevent validate_core_contract from rejecting Off with non-zero flows.
         let config = gen_config(&[
@@ -3786,9 +3761,9 @@ mod tests {
             .unwrap();
 
         assert!(
-            generator.current_power_kw > IDLE_KW_THRESHOLD,
+            generator.current_power_w > IDLE_W_THRESHOLD,
             "gross output {:.9} should exceed idle threshold",
-            generator.current_power_kw
+            generator.current_power_w
         );
         assert_eq!(
             generator.mode,
@@ -3834,13 +3809,13 @@ mod tests {
 
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
         let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
-        let electric_kw = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
         assert!(
             (thermal_w - fuel_w * 0.40).abs() < 1.0,
             "Q_thermal = P_fuel * eta_thermal"
         );
         // Without a fluid port, zone receives ALL waste heat (q_thermal + q_flue).
-        let total_waste_w = fuel_w - electric_kw * 1000.0;
+        let total_waste_w = fuel_w - electric_w;
         assert!(
             (slots.thermal[0].sensible_gain_w - total_waste_w).abs() < 1.0,
             "zone should get all waste heat ({total_waste_w} W), got {} W",
@@ -3871,9 +3846,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        // fuel_input_w, thermal_output_w, flue_loss_w are in W; electric_output_kw is in kW
+        // fuel_input_w, thermal_output_w, flue_loss_w are in W; electric_output_w is in kW
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
-        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
         let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
         let flue_w = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
         assert!(
@@ -3889,7 +3864,7 @@ mod tests {
     #[test]
     fn waste_heat_goes_to_zone_when_no_chp() {
         // Without CHP, all non-electrical energy becomes zone heat gains.
-        // OCHRE: sensible_gain = (electric_kw - power_input) * 1000
+        // OCHRE: sensible_gain = (electric_w - power_input) * 1000
         let config = gen_config(&[
             (KEY_ZONE_ID, 1.0.into()),
             (KEY_DELTA_W_PER_S, 100000.0.into()),
@@ -3911,7 +3886,7 @@ mod tests {
             .unwrap();
 
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
-        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
         let expected_heat_w = fuel_w - electric_w;
 
         assert!(expected_heat_w > 0.0, "waste heat must be positive");
@@ -4008,7 +3983,7 @@ mod tests {
             .unwrap();
 
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
-        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
         let thermal_w = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
         let flue_w = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
 
@@ -4285,7 +4260,7 @@ mod tests {
             .unwrap();
 
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
-        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
         let q_jacket_w = generator.telemetry().get(tk::JACKET_WATER_W).unwrap();
         let q_lube_w = generator.telemetry().get(tk::LUBE_OIL_W).unwrap();
         let q_exhaust_w = generator.telemetry().get(tk::EXHAUST_WATER_W).unwrap();
@@ -4400,7 +4375,7 @@ mod tests {
 
         // Total sensible gain = jacket + lube + exhaust + flue
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
-        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
         let total_waste_w = fuel_w - electric_w;
 
         assert!(
@@ -4533,15 +4508,15 @@ mod tests {
         generator.init(&config, &base_env()).unwrap();
         ramp_to_steady_state(&mut generator, 10.0, &base_env());
 
-        let saved = generator.current_power_kw;
+        let saved = generator.current_power_w;
         let bytes = generator.save_state().unwrap();
 
         let mut generator2 = Generator::new(config.clone(), GeneratorKind::GasGenerator);
         generator2.init(&config, &base_env()).unwrap();
         generator2.load_state(&bytes).unwrap();
 
-        assert!((generator2.current_power_kw - saved).abs() < f64::EPSILON);
-        assert_eq!(generator2.power_setpoint_kw, Some(10.0));
+        assert!((generator2.current_power_w - saved).abs() < f64::EPSILON);
+        assert_eq!(generator2.power_setpoint_w, Some(10_000.0));
         assert!(
             (generator2.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() - saved).abs()
                 < f64::EPSILON
@@ -4703,7 +4678,7 @@ mod tests {
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
-        assert!(generator.current_power_kw > 0.0);
+        assert!(generator.current_power_w > 0.0);
 
         generator
             .apply_control(&ControlSignal::ModeOverride {
@@ -4714,7 +4689,7 @@ mod tests {
         generator
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
-        assert!(generator.current_power_kw < IDLE_KW_THRESHOLD);
+        assert!(generator.current_power_w < IDLE_W_THRESHOLD);
     }
 
     #[test]
@@ -4730,14 +4705,14 @@ mod tests {
                 max_soc: None,
             })
             .unwrap();
-        assert!(generator.power_setpoint_kw.is_some());
+        assert!(generator.power_setpoint_w.is_some());
 
         generator
             .apply_control(&ControlSignal::ModeOverride {
                 mode: OperatingMode::Standby,
             })
             .unwrap();
-        assert!(generator.power_setpoint_kw.is_none());
+        assert!(generator.power_setpoint_w.is_none());
 
         // The mode release carries the same semantics as the Standby mode
         // command: return to self-consumption control.
@@ -4749,12 +4724,12 @@ mod tests {
                 max_soc: None,
             })
             .unwrap();
-        assert!(generator.power_setpoint_kw.is_some());
+        assert!(generator.power_setpoint_w.is_some());
         generator
             .apply_control(&ControlSignal::ModeOverrideRelease)
             .unwrap();
         assert!(
-            generator.power_setpoint_kw.is_none(),
+            generator.power_setpoint_w.is_none(),
             "the release must return the generator to its self-consumption control"
         );
     }
@@ -4794,9 +4769,9 @@ mod tests {
             .step(&env_outage, Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            generator.current_power_kw > IDLE_KW_THRESHOLD,
+            generator.current_power_w > IDLE_W_THRESHOLD,
             "generator serves the load during the outage, got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
 
         // Disabled (no self-consumption, no setpoint): not an island source.
@@ -4833,9 +4808,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            generator.current_power_kw < IDLE_KW_THRESHOLD,
+            generator.current_power_w < IDLE_W_THRESHOLD,
             "generator should be off when self_consumption disabled, got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
 
         // Re-enable self-consumption -- should start generating again.
@@ -4851,9 +4826,9 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            generator.current_power_kw > IDLE_KW_THRESHOLD,
+            generator.current_power_w > IDLE_W_THRESHOLD,
             "generator should run after re-enabling self_consumption, got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
     }
 
@@ -4879,9 +4854,9 @@ mod tests {
             .unwrap();
 
         assert!(
-            generator.current_power_kw < IDLE_KW_THRESHOLD,
+            generator.current_power_w < IDLE_W_THRESHOLD,
             "standby generator must not produce output at nominal voltage, got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
         assert_eq!(generator.mode, OperatingMode::Off);
     }
@@ -4909,9 +4884,9 @@ mod tests {
             .unwrap();
 
         assert!(
-            generator.current_power_kw > IDLE_KW_THRESHOLD,
+            generator.current_power_w > IDLE_W_THRESHOLD,
             "standby generator must serve load during outage, got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
     }
 
@@ -4936,7 +4911,7 @@ mod tests {
         generator
             .step(&env_outage, Duration::from_secs(1), &mut slots)
             .unwrap();
-        assert!(generator.current_power_kw > IDLE_KW_THRESHOLD);
+        assert!(generator.current_power_w > IDLE_W_THRESHOLD);
 
         // Restoration: generator stops (ramp down is instant on decrease).
         slots.zero();
@@ -4945,16 +4920,16 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            generator.current_power_kw < IDLE_KW_THRESHOLD,
+            generator.current_power_w < IDLE_W_THRESHOLD,
             "standby generator must stop on restoration, got {}",
-            generator.current_power_kw
+            generator.current_power_w
         );
         assert_eq!(generator.mode, OperatingMode::Off);
 
         // Fuel must be zero after stopping.
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
         assert!(
-            fuel_w < IDLE_KW_THRESHOLD,
+            fuel_w < IDLE_W_THRESHOLD,
             "fuel must be zero after standby generator stops"
         );
     }
@@ -4991,7 +4966,7 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
         assert!(
-            generator.current_power_kw < IDLE_KW_THRESHOLD,
+            generator.current_power_w < IDLE_W_THRESHOLD,
             "standby generator must be idle at nominal voltage"
         );
 
@@ -5031,11 +5006,11 @@ mod tests {
             .step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        assert!(generator.telemetry().get(tk::FUEL_INPUT_W).unwrap() < IDLE_KW_THRESHOLD);
-        assert!(generator.telemetry().get(tk::FUEL_IDLE_W).unwrap() < IDLE_KW_THRESHOLD);
-        assert!(generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() < IDLE_KW_THRESHOLD);
-        assert!(slots.electrical.generation_power_w.abs() < IDLE_KW_THRESHOLD);
-        assert!(slots.fuel.get(FuelType::Gas) < IDLE_KW_THRESHOLD);
+        assert!(generator.telemetry().get(tk::FUEL_INPUT_W).unwrap() < IDLE_W_THRESHOLD);
+        assert!(generator.telemetry().get(tk::FUEL_IDLE_W).unwrap() < IDLE_W_THRESHOLD);
+        assert!(generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() < IDLE_W_THRESHOLD);
+        assert!(slots.electrical.generation_power_w.abs() < IDLE_W_THRESHOLD);
+        assert!(slots.fuel.get(FuelType::Gas) < IDLE_W_THRESHOLD);
     }
 
     // =======================================================================
@@ -5045,7 +5020,7 @@ mod tests {
     #[test]
     fn telemetry_fuel_input_is_in_watts() {
         // A 10 kW generator at rated output with eta=0.30 should report:
-        //   electric_output_kw = 10
+        //   electric_output_w = 10
         //   fuel_input_w       = (10/0.30)*1000 ≈ 33333 W
         let config = gen_config(&[]);
         let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
@@ -5059,7 +5034,7 @@ mod tests {
 
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
         // At 10 kW electric / 0.30 eta → fuel ≈ 33333 W.
-        let expected_fuel_w = (10.0 / 0.30) * 1000.0;
+        let expected_fuel_w = 10_000.0 / 0.30;
         assert!(
             (fuel_w - expected_fuel_w).abs() < 1.0,
             "fuel_input_w={fuel_w}, expected≈{expected_fuel_w}"
@@ -5101,12 +5076,12 @@ mod tests {
             "eta_electric should be non-zero after load_state; got {eta}"
         );
 
-        // Consistency: fuel_w ≈ (electric_kw * 1000) / eta
-        let electric_kw = generator2.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
-        let expected_fuel_w = (electric_kw * 1000.0) / eta;
+        // Consistency: fuel_w ≈ (electric_w * 1000) / eta
+        let electric_w = generator2.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+        let expected_fuel_w = electric_w / eta;
         assert!(
             (fuel_w - expected_fuel_w).abs() < 1.0,
-            "fuel_input_w ({fuel_w}) inconsistent with electric_output_kw ({electric_kw}) * 1000 / eta ({eta})"
+            "fuel_input_w ({fuel_w}) inconsistent with electric_output_w ({electric_w}) * 1000 / eta ({eta})"
         );
     }
 
@@ -5565,21 +5540,21 @@ mod tests {
         fc.step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let ac_kw = fc.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
-        let dc_kw = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
+        let ac_w = fc.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
+        let dc_w = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
         let inv_loss_w = fc.telemetry().get(tk::FUEL_CELL_INVERTER_LOSS_W).unwrap();
 
         // AC output matches the setpoint.
-        assert!((ac_kw - 5.0).abs() < 1e-9, "AC output should be 5 kW");
+        assert!((ac_w - 5000.0).abs() < 1e-6, "AC output should be 5 kW");
         // DC must be higher than AC because inverter has losses.
-        assert!(dc_kw > ac_kw, "DC ({dc_kw} kW) must exceed AC ({ac_kw} kW)");
+        assert!(dc_w > ac_w, "DC ({dc_w} W) must exceed AC ({ac_w} W)");
         // P_ac = P_dc * inverter_efficiency
         assert!(
-            (ac_kw - dc_kw * 0.90).abs() < 1e-9,
-            "P_ac = P_dc * inverter_eta: {ac_kw} != {dc_kw} * 0.90"
+            (ac_w - dc_w * 0.90).abs() < 1e-6,
+            "P_ac = P_dc * inverter_eta: {ac_w} != {dc_w} * 0.90"
         );
         // Inverter loss = DC - AC
-        let expected_loss = (dc_kw - ac_kw) * 1000.0;
+        let expected_loss = dc_w - ac_w;
         assert!(
             (inv_loss_w - expected_loss).abs() < 1.0,
             "inverter_loss_w={inv_loss_w}, expected={expected_loss}"
@@ -5616,10 +5591,10 @@ mod tests {
         fc.step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let dc_kw = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
+        let dc_w = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
         let stack_heat_w = fc.telemetry().get(tk::FUEL_CELL_STACK_HEAT_W).unwrap();
         // With r0=0.2 and all other coeffs zero: qs_cool = 0.2 * P_dc_W
-        let expected_heat_w = 0.20 * dc_kw * 1000.0;
+        let expected_heat_w = 0.20 * dc_w;
         assert!(
             (stack_heat_w - expected_heat_w).abs() < 1.0,
             "stack cooling: {stack_heat_w} W, expected {expected_heat_w} W"
@@ -5654,10 +5629,10 @@ mod tests {
         fc.step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let dc_kw = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
+        let dc_w = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
         let stack_heat_w = fc.telemetry().get(tk::FUEL_CELL_STACK_HEAT_W).unwrap();
         // (r0 + r1*10) * Pel = (0.10 + 0.005*10) * Pel = 0.15 * Pel
-        let expected_heat_w = (0.10 + 0.005 * 10.0) * dc_kw * 1000.0;
+        let expected_heat_w = (0.10 + 0.005 * 10.0) * dc_w;
         assert!(
             (stack_heat_w - expected_heat_w).abs() < 1.0,
             "stack cooling with temp offset: {stack_heat_w} W, expected {expected_heat_w} W"
@@ -5694,15 +5669,15 @@ mod tests {
         fc.step(&base_env(), Duration::from_secs(1), &mut slots)
             .unwrap();
 
-        let dc_kw = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
+        let dc_w = fc.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap();
         let stack_heat_w = fc.telemetry().get(tk::FUEL_CELL_STACK_HEAT_W).unwrap();
-        // Pel = dc_kw * 1000, fuel_curve_power_factor = 1 + r2*Pel = 1 + 2e-5 * Pel
-        let pel_w = dc_kw * 1000.0;
+        // Pel = dc_w * 1000, fuel_curve_power_factor = 1 + r2*Pel = 1 + 2e-5 * Pel
+        let pel_w = dc_w;
         let fuel_curve_power_factor = 1.0 + 2e-5 * pel_w;
         let expected_heat_w = 0.20 * fuel_curve_power_factor * pel_w;
         assert!(
             (stack_heat_w - expected_heat_w).abs() < 1.0,
-            "r2=2e-5: stack_heat={stack_heat_w} W, expected={expected_heat_w} W (dc={dc_kw} kW, pel={pel_w} W, fuel_curve_pf={fuel_curve_power_factor})"
+            "r2=2e-5: stack_heat={stack_heat_w} W, expected={expected_heat_w} W (dc={dc_w} kW, pel={pel_w} W, fuel_curve_pf={fuel_curve_power_factor})"
         );
     }
 
@@ -5830,7 +5805,7 @@ mod tests {
         // No fuel cell telemetry on gas generator — fields not registered.
         assert!(
             generator.telemetry().get(tk::FUEL_CELL_DC_KW).is_none(),
-            "GasGenerator should not register fuel_cell_dc_kw"
+            "GasGenerator should not register fuel_cell_dc_w"
         );
         assert!(
             generator
@@ -5861,7 +5836,7 @@ mod tests {
         fc2.init(&config, &base_env()).unwrap();
         fc2.load_state(&bytes).unwrap();
 
-        assert!((fc2.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap() - 5.0 / 0.90).abs() < 1e-6);
+        assert!((fc2.telemetry().get(tk::FUEL_CELL_DC_KW).unwrap() - 5000.0 / 0.90).abs() < 1e-3);
         assert!(fc2.telemetry().get(tk::FUEL_CELL_INVERTER_LOSS_W).unwrap() > 0.0);
         assert!(fc2.telemetry().get(tk::FUEL_CELL_STACK_HEAT_W).unwrap() > 0.0);
     }
@@ -6183,7 +6158,7 @@ mod tests {
             .unwrap();
 
         let fuel_w = generator.telemetry().get(tk::FUEL_INPUT_W).unwrap();
-        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap() * 1000.0;
+        let electric_w = generator.telemetry().get(tk::ELECTRIC_OUTPUT_KW).unwrap();
         let q_available = generator.telemetry().get(tk::THERMAL_AVAILABLE_W).unwrap();
         let q_effective = generator.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap();
         let q_flue = generator.telemetry().get(tk::FLUE_LOSS_W).unwrap();
@@ -6494,12 +6469,12 @@ mod tests {
 
         let load_kw_values = [2.5, 5.0, 7.5, 10.0]; // 25%, 50%, 75%, 100%
 
-        for &setpoint_kw in &load_kw_values {
+        for &setpoint_w in &load_kw_values {
             let mut generator = Generator::new(config.clone(), GeneratorKind::GasGenerator);
             generator.init(&config, &base_env()).unwrap();
             generator
                 .apply_control(&ControlSignal::PowerSetpoint {
-                    active_power_kw: setpoint_kw,
+                    active_power_kw: setpoint_w,
                     reactive_power_kvar: None,
                     min_soc: None,
                     max_soc: None,
@@ -6521,7 +6496,7 @@ mod tests {
             let flow_err = (actual_flow - expected_flow).abs();
             assert!(
                 flow_err < 1e-6,
-                "at {setpoint_kw} kW: expected flow {expected_flow:.6} kg/s, \
+                "at {setpoint_w} kW: expected flow {expected_flow:.6} kg/s, \
                  got {actual_flow:.6} kg/s (diff {flow_err:.3e})"
             );
 
@@ -6530,7 +6505,7 @@ mod tests {
             let declared_w = slots.fluid[0].total_thermal_power_w;
             assert!(
                 (flow_implied_w - declared_w).abs() < 1.0,
-                "at {setpoint_kw} kW: flow-implied energy {flow_implied_w} W != \
+                "at {setpoint_w} kW: flow-implied energy {flow_implied_w} W != \
                  declared thermal_power {declared_w} W"
             );
         }
@@ -6849,7 +6824,7 @@ mod tests {
     /// fixes established for their siblings. The Generator is the third
     /// equipment that checkpoints an operating mode
     /// (`GeneratorCheckpoint.mode`); its restore rebuilds flows from the
-    /// restored `current_power_kw`, so the mid-generation face pairs
+    /// restored `current_power_w`, so the mid-generation face pairs
     /// `Standby` (guard-inactive) with nonzero generation — consistent.
     /// Pinned here so a future restore change (e.g. restoring a mode the
     /// rebuilt flows contradict) fails loudly instead of silently
@@ -6873,7 +6848,7 @@ mod tests {
             generator
                 .core_output()
                 .flows
-                .electric_kw
+                .electric_w
                 .is_some_and(|p| !p.is_zero()),
             "precondition: the saved state carries nonzero generation flow"
         );
@@ -6899,7 +6874,7 @@ mod tests {
             restored
                 .core_output()
                 .flows
-                .electric_kw
+                .electric_w
                 .is_some_and(|p| !p.is_zero()),
             "the restore rebuilds the generation flow from the restored power"
         );
@@ -6917,11 +6892,11 @@ mod tests {
     /// The restore contract's second face: a checkpoint saved in the
     /// window between a zeroing setpoint's arrival and the ramp-down
     /// step. The dwelling loop's between-steps order latches the setpoint
-    /// (`apply_control` → `power_setpoint_kw = Some(0.0)`) and then runs
+    /// (`apply_control` → `power_setpoint_w = Some(0.0)`) and then runs
     /// `update_control`, which derives the provisional mode from the
-    /// *pending* setpoint — `Off` — while `current_power_kw` is still at
+    /// *pending* setpoint — `Off` — while `current_power_w` is still at
     /// full output. A checkpoint saved in that window carries
-    /// `{current_power_kw: 5, mode: Off}`, and the restore rebuilds
+    /// `{current_power_w: 5, mode: Off}`, and the restore rebuilds
     /// `Generation(5.0)` + fuel from the restored power while publishing
     /// the checkpointed `Off` — the pair `check_mode_flow_consistency`
     /// Rule 2 rejects as a hard error. A checkpoint must restore a state
@@ -6959,9 +6934,9 @@ mod tests {
             "precondition: update_control derives Off from the pending zero setpoint"
         );
         assert!(
-            generator.current_power_kw > 1.0,
+            generator.current_power_w > 1.0,
             "precondition: output is still at full power in the window, got {:.3} kW",
-            generator.current_power_kw
+            generator.current_power_w
         );
 
         let checkpoint = generator.save_state().expect("save generator checkpoint");

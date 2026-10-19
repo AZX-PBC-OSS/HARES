@@ -38,7 +38,7 @@ fn electric_power_property_invariants_hold_for_random_finite_inputs() {
 
     for _ in 0..256 {
         let non_negative_kw = sample_range(&mut rng, 0.0, 1_000_000.0);
-        let signed_kw = sample_range(&mut rng, -1_000_000.0, 1_000_000.0);
+        let signed_w = sample_range(&mut rng, -1_000_000.0, 1_000_000.0);
         let negative_kw = -sample_range(&mut rng, 0.000_001, 1_000_000.0);
 
         match ElectricPower::consumption(non_negative_kw).expect("valid consumption") {
@@ -51,28 +51,28 @@ fn electric_power_property_invariants_hold_for_random_finite_inputs() {
             other => panic!("unexpected variant: {other:?}"),
         }
 
-        match ElectricPower::bidirectional(signed_kw).expect("valid bidirectional") {
-            ElectricPower::Bidirectional(value) => assert_eq!(value, signed_kw),
+        match ElectricPower::bidirectional(signed_w).expect("valid bidirectional") {
+            ElectricPower::Bidirectional(value) => assert_eq!(value, signed_w),
             other => panic!("unexpected variant: {other:?}"),
         }
 
         assert_eq!(
             ElectricPower::consumption(non_negative_kw)
                 .expect("valid consumption")
-                .net_consumption_kw(),
+                .net_consumption_w(),
             non_negative_kw,
         );
         assert_eq!(
             ElectricPower::generation(non_negative_kw)
                 .expect("valid generation")
-                .net_consumption_kw(),
+                .net_consumption_w(),
             -non_negative_kw,
         );
         assert_eq!(
-            ElectricPower::bidirectional(signed_kw)
+            ElectricPower::bidirectional(signed_w)
                 .expect("valid bidirectional")
-                .signed_kw(),
-            signed_kw,
+                .signed_w(),
+            signed_w,
         );
 
         assert!(ElectricPower::consumption(negative_kw).is_err());
@@ -195,11 +195,11 @@ fn core_output_rejects_nan_in_any_bare_f64_field() {
 
     let nan_fields = [
         (
-            "flows.reactive_power_kvar",
+            "flows.reactive_power_var",
             CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(1.0)),
-                    reactive_power_kvar: Some(f64::NAN),
+                    electric_w: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_var: Some(f64::NAN),
                     thermal_output_w: Some(1000.0),
                     ..Default::default()
                 },
@@ -217,8 +217,8 @@ fn core_output_rejects_nan_in_any_bare_f64_field() {
             "flows.thermal_output_w",
             CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(1.0)),
-                    reactive_power_kvar: Some(0.0),
+                    electric_w: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_var: Some(0.0),
                     thermal_output_w: Some(f64::NAN),
                     ..Default::default()
                 },
@@ -236,8 +236,8 @@ fn core_output_rejects_nan_in_any_bare_f64_field() {
             "flows.sensible_cooling_w",
             CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(1.0)),
-                    reactive_power_kvar: Some(0.0),
+                    electric_w: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_var: Some(0.0),
                     thermal_output_w: Some(1000.0),
                     sensible_cooling_w: Some(f64::NAN),
                     ..Default::default()
@@ -256,8 +256,8 @@ fn core_output_rejects_nan_in_any_bare_f64_field() {
             "flows.latent_cooling_w",
             CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(1.0)),
-                    reactive_power_kvar: Some(0.0),
+                    electric_w: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_var: Some(0.0),
                     thermal_output_w: Some(1000.0),
                     latent_cooling_w: Some(f64::NAN),
                     ..Default::default()
@@ -276,8 +276,8 @@ fn core_output_rejects_nan_in_any_bare_f64_field() {
             "state.setpoint_c",
             CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(1.0)),
-                    reactive_power_kvar: Some(0.0),
+                    electric_w: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_var: Some(0.0),
                     thermal_output_w: Some(1000.0),
                     ..Default::default()
                 },
@@ -295,8 +295,8 @@ fn core_output_rejects_nan_in_any_bare_f64_field() {
             "performance.cop",
             CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(1.0)),
-                    reactive_power_kvar: Some(0.0),
+                    electric_w: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_var: Some(0.0),
                     thermal_output_w: Some(1000.0),
                     ..Default::default()
                 },
@@ -311,11 +311,11 @@ fn core_output_rejects_nan_in_any_bare_f64_field() {
             },
         ),
         (
-            "performance.main_power_kw",
+            "performance.main_power_w",
             CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(1.0)),
-                    reactive_power_kvar: Some(0.0),
+                    electric_w: Some(ElectricPower::Consumption(1.0)),
+                    reactive_power_var: Some(0.0),
                     thermal_output_w: Some(1000.0),
                     ..Default::default()
                 },
@@ -325,7 +325,7 @@ fn core_output_rejects_nan_in_any_bare_f64_field() {
                 },
                 performance: CorePerformance {
                     cop: Some(3.0),
-                    main_power_kw: Some(f64::NAN),
+                    main_power_w: Some(f64::NAN),
                 },
             },
         ),
@@ -348,22 +348,22 @@ fn core_output_rejects_infinity_in_any_bare_f64_field() {
 
     let non_finite_values = [f64::INFINITY, f64::NEG_INFINITY];
     let field_names = [
-        "flows.reactive_power_kvar",
+        "flows.reactive_power_var",
         "flows.thermal_output_w",
         "flows.sensible_cooling_w",
         "flows.latent_cooling_w",
         "state.setpoint_c",
         "performance.cop",
-        "performance.main_power_kw",
+        "performance.main_power_w",
     ];
 
     for &non_finite in &non_finite_values {
         for &field_name in &field_names {
             let out = match field_name {
-                "flows.reactive_power_kvar" => CoreOutput {
+                "flows.reactive_power_var" => CoreOutput {
                     flows: CoreFlows {
-                        electric_kw: Some(ElectricPower::Consumption(1.0)),
-                        reactive_power_kvar: Some(non_finite),
+                        electric_w: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_var: Some(non_finite),
                         thermal_output_w: Some(1000.0),
                         ..Default::default()
                     },
@@ -378,8 +378,8 @@ fn core_output_rejects_infinity_in_any_bare_f64_field() {
                 },
                 "flows.thermal_output_w" => CoreOutput {
                     flows: CoreFlows {
-                        electric_kw: Some(ElectricPower::Consumption(1.0)),
-                        reactive_power_kvar: Some(0.0),
+                        electric_w: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_var: Some(0.0),
                         thermal_output_w: Some(non_finite),
                         ..Default::default()
                     },
@@ -394,8 +394,8 @@ fn core_output_rejects_infinity_in_any_bare_f64_field() {
                 },
                 "flows.sensible_cooling_w" => CoreOutput {
                     flows: CoreFlows {
-                        electric_kw: Some(ElectricPower::Consumption(1.0)),
-                        reactive_power_kvar: Some(0.0),
+                        electric_w: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_var: Some(0.0),
                         thermal_output_w: Some(1000.0),
                         sensible_cooling_w: Some(non_finite),
                         ..Default::default()
@@ -411,8 +411,8 @@ fn core_output_rejects_infinity_in_any_bare_f64_field() {
                 },
                 "flows.latent_cooling_w" => CoreOutput {
                     flows: CoreFlows {
-                        electric_kw: Some(ElectricPower::Consumption(1.0)),
-                        reactive_power_kvar: Some(0.0),
+                        electric_w: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_var: Some(0.0),
                         thermal_output_w: Some(1000.0),
                         latent_cooling_w: Some(non_finite),
                         ..Default::default()
@@ -428,8 +428,8 @@ fn core_output_rejects_infinity_in_any_bare_f64_field() {
                 },
                 "state.setpoint_c" => CoreOutput {
                     flows: CoreFlows {
-                        electric_kw: Some(ElectricPower::Consumption(1.0)),
-                        reactive_power_kvar: Some(0.0),
+                        electric_w: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_var: Some(0.0),
                         thermal_output_w: Some(1000.0),
                         ..Default::default()
                     },
@@ -444,8 +444,8 @@ fn core_output_rejects_infinity_in_any_bare_f64_field() {
                 },
                 "performance.cop" => CoreOutput {
                     flows: CoreFlows {
-                        electric_kw: Some(ElectricPower::Consumption(1.0)),
-                        reactive_power_kvar: Some(0.0),
+                        electric_w: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_var: Some(0.0),
                         thermal_output_w: Some(1000.0),
                         ..Default::default()
                     },
@@ -458,10 +458,10 @@ fn core_output_rejects_infinity_in_any_bare_f64_field() {
                         ..Default::default()
                     },
                 },
-                "performance.main_power_kw" => CoreOutput {
+                "performance.main_power_w" => CoreOutput {
                     flows: CoreFlows {
-                        electric_kw: Some(ElectricPower::Consumption(1.0)),
-                        reactive_power_kvar: Some(0.0),
+                        electric_w: Some(ElectricPower::Consumption(1.0)),
+                        reactive_power_var: Some(0.0),
                         thermal_output_w: Some(1000.0),
                         ..Default::default()
                     },
@@ -471,7 +471,7 @@ fn core_output_rejects_infinity_in_any_bare_f64_field() {
                     },
                     performance: CorePerformance {
                         cop: Some(3.0),
-                        main_power_kw: Some(non_finite),
+                        main_power_w: Some(non_finite),
                     },
                 },
                 _ => unreachable!(),
@@ -596,8 +596,8 @@ fn build_random_core_output_with_nan_in_slot(rng: &mut ChaCha8Rng, slot: usize) 
 
     CoreOutput {
         flows: CoreFlows {
-            electric_kw: Some(ElectricPower::Consumption(1.0)),
-            reactive_power_kvar: rpk,
+            electric_w: Some(ElectricPower::Consumption(1.0)),
+            reactive_power_var: rpk,
             thermal_output_w: tow,
             sensible_cooling_w: scw,
             latent_cooling_w: lcw,
@@ -609,7 +609,7 @@ fn build_random_core_output_with_nan_in_slot(rng: &mut ChaCha8Rng, slot: usize) 
         },
         performance: CorePerformance {
             cop: cop_opt,
-            main_power_kw: mpk,
+            main_power_w: mpk,
         },
     }
 }
@@ -620,8 +620,8 @@ fn core_output_all_finite_is_accepted() {
 
     let out = CoreOutput {
         flows: CoreFlows {
-            electric_kw: Some(ElectricPower::Consumption(1.0)),
-            reactive_power_kvar: Some(0.1),
+            electric_w: Some(ElectricPower::Consumption(1.0)),
+            reactive_power_var: Some(0.1),
             thermal_output_w: Some(1000.0),
             sensible_cooling_w: Some(-500.0),
             latent_cooling_w: Some(-200.0),
@@ -633,7 +633,7 @@ fn core_output_all_finite_is_accepted() {
         },
         performance: CorePerformance {
             cop: Some(3.5),
-            main_power_kw: Some(2.1),
+            main_power_w: Some(2.1),
         },
     };
     validate_core_contract(&desc, &out).expect("all-finite CoreOutput must be accepted");
@@ -720,7 +720,7 @@ fn random_active_mode_with_nonzero_flow_passes() {
 
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: electric,
+                electric_w: electric,
                 thermal_output_w: if expect_thermal { thermal } else { None },
                 ..Default::default()
             },
@@ -761,7 +761,7 @@ fn random_active_mode_zero_flows_rejected() {
         let out = if use_explicit_zero {
             CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(0.0)),
+                    electric_w: Some(ElectricPower::Consumption(0.0)),
                     thermal_output_w: Some(0.0),
                     ..Default::default()
                 },
@@ -804,7 +804,7 @@ fn random_off_mode_nonzero_flows_rejected() {
         let desc = mode_test_descriptor(&format!("OffFail {i}"));
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(sample_range(
+                electric_w: Some(ElectricPower::Consumption(sample_range(
                     &mut rng, 0.001, 50.0,
                 ))),
                 ..Default::default()
@@ -833,7 +833,7 @@ fn random_thermal_sign_vs_mode_enforced() {
         // Cooling + positive thermal → reject
         let bad = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(sample_range(&mut rng, 0.001, 200.0)),
                 ..Default::default()
             },
@@ -850,7 +850,7 @@ fn random_thermal_sign_vs_mode_enforced() {
         // HeatingHP + positive thermal → accept
         let good = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(sample_range(&mut rng, 0.001, 200.0)),
                 ..Default::default()
             },
@@ -866,7 +866,7 @@ fn random_thermal_sign_vs_mode_enforced() {
         // Heating + negative thermal → reject
         let bad_cool = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(-sample_range(&mut rng, 0.001, 200.0)),
                 ..Default::default()
             },
@@ -883,7 +883,7 @@ fn random_thermal_sign_vs_mode_enforced() {
         // Cooling + negative thermal → accept
         let good_cool = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(-sample_range(&mut rng, 0.001, 200.0)),
                 ..Default::default()
             },
@@ -909,7 +909,7 @@ fn random_charge_discharge_direction_enforced() {
         // Charging + Generation → reject
         let bad_charge = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Generation(sample_range(&mut rng, 0.1, 50.0))),
+                electric_w: Some(ElectricPower::Generation(sample_range(&mut rng, 0.1, 50.0))),
                 ..Default::default()
             },
             state: CoreState {
@@ -925,7 +925,7 @@ fn random_charge_discharge_direction_enforced() {
         // Discharging + Consumption → reject
         let bad_discharge = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(sample_range(
+                electric_w: Some(ElectricPower::Consumption(sample_range(
                     &mut rng, 0.1, 50.0,
                 ))),
                 ..Default::default()
@@ -951,8 +951,8 @@ fn random_negative_cop_rejected() {
         let cop_val = -sample_range(&mut rng, 0.001, 100.0);
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_var: Some(0.0),
                 thermal_output_w: Some(3000.0),
                 ..Default::default()
             },
@@ -971,7 +971,7 @@ fn random_negative_cop_rejected() {
     }
 }
 
-/// Random negative main_power_kw values must be rejected.
+/// Random negative main_power_w values must be rejected.
 #[test]
 fn random_negative_main_power_rejected() {
     let mut rng = ChaCha8Rng::seed_from_u64(0xBEEF_1000_u64);
@@ -980,8 +980,8 @@ fn random_negative_main_power_rejected() {
         let mpk = -sample_range(&mut rng, 0.001, 100.0);
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_var: Some(0.0),
                 thermal_output_w: Some(3000.0),
                 ..Default::default()
             },
@@ -991,11 +991,11 @@ fn random_negative_main_power_rejected() {
             },
             performance: CorePerformance {
                 cop: Some(3.0),
-                main_power_kw: Some(mpk),
+                main_power_w: Some(mpk),
             },
         };
         validate_core_contract(&desc, &out).expect_err(&format!(
-            "negative main_power_kw={mpk} must be rejected (trial {i})"
+            "negative main_power_w={mpk} must be rejected (trial {i})"
         ));
     }
 }
@@ -1009,8 +1009,8 @@ fn random_positive_sensible_cooling_rejected() {
         let sc = sample_range(&mut rng, 0.001, 50_000.0);
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_var: Some(0.0),
                 thermal_output_w: Some(-3000.0),
                 sensible_cooling_w: Some(sc),
                 ..Default::default()
@@ -1039,8 +1039,8 @@ fn random_positive_latent_cooling_rejected() {
         let lc = sample_range(&mut rng, 0.001, 20_000.0);
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_var: Some(0.0),
                 thermal_output_w: Some(-3000.0),
                 latent_cooling_w: Some(lc),
                 ..Default::default()
@@ -1075,8 +1075,8 @@ fn extreme_setpoint_c_still_passes_validation() {
         };
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_var: Some(0.0),
                 thermal_output_w: Some(3000.0),
                 ..Default::default()
             },
@@ -1107,8 +1107,8 @@ fn extreme_cop_still_passes_validation() {
         let cop = sample_range(&mut rng, 20.001, 500.0);
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_var: Some(0.0),
                 thermal_output_w: Some(3000.0),
                 ..Default::default()
             },

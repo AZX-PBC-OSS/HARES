@@ -40,7 +40,7 @@ Typed equipment (HVAC, water heaters, fans, pumps, etc.) computes its real elect
 
 1. Real power is computed exactly as before (no ZIP scaling on P)
 2. `ZipLoad::reactive_only(zq, iq, pq, pf)` forces the real side to `(0, 0, 1)` — `apply()` leaves P untouched
-3. Reactive power is derived **from** the already-computed real power: `Q = P · tan_phi() · (zq·V² + iq·V + pq)` via `ZipLoad::reactive_kvar(p_kw, voltage_pu)`
+3. Reactive power is derived **from** the already-computed real power: `Q = P · tan_phi() · (zq·V² + iq·V + pq)` via `ZipLoad::apply(p_w, voltage_pu)`, both sides in SI
 
 This is enforced by `resolve_reactive_zip()` in `crates/hares-equipment/src/config.rs:439-449`, which resolves the effective ZIP through the full precedence chain and then forces `(zp, ip, pp) = (0, 0, 1)`.
 
@@ -53,14 +53,14 @@ Only `ScheduledLoad` and `EventBasedLoad` retain full ZIP (real + reactive), mat
 **Positive = inductive/lagging/absorbing vars. Negative = capacitive/leading/supplying vars.**
 
 This is normative across all of HARES, matching:
-- `CoreFlows::reactive_power_kvar` doc: "Positive = inductive/lagging (IEEE 1547)"
+- `CoreFlows::reactive_power_var` doc: "Positive = inductive/lagging (IEEE 1547)"; the value is VAR (SI)
 - The "Total Reactive Power (kVAR)" output column
 - AMI convention
 - OCHRE Q-sign-follows-P convention
 
 The same signed value is pushed to **three channels per equipment** with **no negation anywhere**:
-1. **Port** (`PortContribution::Electrical.reactive_power_kvar`)
-2. **CoreOutput** (`CoreFlows.reactive_power_kvar`)
+1. **Port** (`PortContribution::Electrical.reactive_power_var`, VAR)
+2. **CoreOutput** (`CoreFlows.reactive_power_var`, VAR)
 3. **Telemetry** (`REACTIVE_POWER_KVAR` key)
 
 A debug-build validator `validate_port_core_electrical_consistency` (`crates/hares-types/src/equipment.rs:1252`) asserts these three channels agree on every equipment step. It fires in all three equipment dispatch phases of the dwelling step (search `crates/hares-core/src/dwelling/mod.rs` for `validate_port_core_electrical_consistency`; line numbers shift too often to cite).
@@ -197,7 +197,7 @@ For equipment that supports reactive control (PV, battery, EV):
 2. **PowerFactorSetpoint-updated `power_factor`**: sets the displacement power factor and clears `q_setpoint_kvar` to `None`, so future steps use the updated pf for baseline computation.
 3. **Baseline ZIP `pf`** (from config sidecar → class defaults → 1.0): static pf producing `Q = P · tan(acos(pf))` at reference voltage.
 
-On PV (generator at pf < 1), the baseline path produces negative Q (supplying vars): `bus_q_kvar = -|P_gen| · tan(acos(pf))` (see the `bus_q_kvar` computation in `pv/mod.rs`).
+On PV (generator at pf < 1), the baseline path produces negative Q (supplying vars): `bus_q_var = -|P_gen| · tan(acos(pf))` (see the `bus_q_var` computation in `pv/mod.rs`).
 
 On battery and EV, reactive power is clamped to respect the inverter's apparent-power rating: `|Q| ≤ sqrt(max(0, S² − P²))` with active-power priority — real power is never curtailed to make room for reactive (the kVA clamp in `battery/mod.rs` `step()` and `ev/mod.rs` `compute_reactive_kvar()`).
 
@@ -245,7 +245,7 @@ On battery and EV, reactive power is clamped to respect the inverter's apparent-
 
 ### Water Heaters
 
-- All types now carry `REACTIVE` core capability and report `reactive_power_kvar: Some(q)`
+- All types now carry `REACTIVE` core capability and report `reactive_power_var: Some(q)` (VAR)
 - Port, CoreOutput, and telemetry are consistent (the pre-existing port-vs-CoreOutput bug is fixed)
 - Checkpoint version 2 on all WH types — `REACTIVE_POWER_KVAR` persists across save/load
 - HPWH: blended 0.97 on total (compressor + backup + fan on single electrical port)

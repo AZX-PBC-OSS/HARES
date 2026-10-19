@@ -37,54 +37,54 @@ pub struct PriceSignal {
 /// so actors can make informed decisions (e.g., BMS self-consumption
 /// needs to know PV generation vs home load).
 ///
-/// `pv_generation_kw` may carry forecast values in forecast-driven
-/// simulation modes (e.g., model-predictive-control). `actual_pv_kw`
+/// `pv_generation_w` may carry forecast values in forecast-driven
+/// simulation modes (e.g., model-predictive-control). `actual_pv_w`
 /// always holds the observed PV output from the prior timestep's
 /// equipment step. Real-time dispatch strategies (solar surplus
-/// tracking, V2H) should read `actual_pv_kw` and fall back to
-/// `pv_generation_kw` when `actual_pv_kw` is zero.
+/// tracking, V2H) should read `actual_pv_w` and fall back to
+/// `pv_generation_w` when `actual_pv_w` is zero.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ElectricalSummary {
-    /// Total PV generation (kW), positive = producing.
+    /// Total PV generation (W), positive = producing.
     /// In forecast-driven modes this may carry forecast values;
     /// in normal simulation it holds the prior-step actual output.
-    pub pv_generation_kw: f64,
-    /// Total non-dispatchable load (kW), positive = consuming.
+    pub pv_generation_w: f64,
+    /// Total non-dispatchable load (W), positive = consuming.
     /// Excludes battery and EV (those are dispatchable).
-    pub base_load_kw: f64,
-    /// Net grid power (kW), positive = importing, negative = exporting.
-    pub net_grid_kw: f64,
-    /// Total battery power (kW), positive = charging, negative = discharging.
-    pub battery_power_kw: f64,
-    /// Total EV power (kW), positive = charging.
-    pub ev_power_kw: f64,
-    /// Actual (observed) PV generation from equipment step (kW), positive = producing.
+    pub base_load_w: f64,
+    /// Net grid power (W), positive = importing, negative = exporting.
+    pub net_grid_w: f64,
+    /// Total battery power (W), positive = charging, negative = discharging.
+    pub battery_power_w: f64,
+    /// Total EV power (W), positive = charging.
+    pub ev_power_w: f64,
+    /// Actual (observed) PV generation from equipment step (W), positive = producing.
     ///
     /// Always reflects real equipment output; never carries forecast values.
     /// Set to 0.0 when no PV equipment is present or when actual data is
     /// unavailable. Real-time dispatch strategies that must not over-commit
     /// on forecast values should use this field with a fallback to
-    /// `pv_generation_kw` when this value is zero.
+    /// `pv_generation_w` when this value is zero.
     #[serde(default)]
-    pub actual_pv_kw: f64,
+    pub actual_pv_w: f64,
 }
 
 impl ElectricalSummary {
     /// Best-available PV generation for real-time dispatch decisions.
     ///
-    /// Returns `actual_pv_kw` when it is non-zero (real observed output from
-    /// equipment step). Falls back to `pv_generation_kw` when `actual_pv_kw`
+    /// Returns `actual_pv_w` when it is non-zero (real observed output from
+    /// equipment step). Falls back to `pv_generation_w` when `actual_pv_w`
     /// is zero — because zero actual PV at night is indistinguishable from
     /// "no measurement available" in the current infrastructure. The `> 0.0`
     /// sentinel treats zero as absent, not as true zero-PV-now.
     ///
     /// Callers that must not over-commit on forecast values should use this
-    /// method instead of reading `pv_generation_kw` directly.
-    pub fn actual_pv_kw_or_fallback(&self) -> f64 {
-        if self.actual_pv_kw > 0.0 {
-            self.actual_pv_kw
+    /// method instead of reading `pv_generation_w` directly.
+    pub fn actual_pv_w_or_fallback(&self) -> f64 {
+        if self.actual_pv_w > 0.0 {
+            self.actual_pv_w
         } else {
-            self.pv_generation_kw
+            self.pv_generation_w
         }
     }
 }
@@ -925,31 +925,31 @@ mod tests {
                 ghg_intensity: Some(0.4),
             },
             electrical: ElectricalSummary {
-                pv_generation_kw: 3.5,
-                actual_pv_kw: 3.5,
-                base_load_kw: 1.2,
-                net_grid_kw: -2.3,
-                battery_power_kw: 0.0,
-                ev_power_kw: 0.0,
+                pv_generation_w: 3.5,
+                actual_pv_w: 3.5,
+                base_load_w: 1.2,
+                net_grid_w: -2.3,
+                battery_power_w: 0.0,
+                ev_power_w: 0.0,
             },
         };
 
         let json = serde_json::to_string(&state).expect("serialize");
         let decoded: EnvironmentState = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.price_signal.electricity_price, Some(0.25));
-        assert_eq!(decoded.electrical.pv_generation_kw, 3.5);
+        assert_eq!(decoded.electrical.pv_generation_w, 3.5);
         assert_eq!(decoded, state);
     }
 
     #[test]
     fn environment_state_default_electrical_summary() {
         let summary = ElectricalSummary::default();
-        assert_eq!(summary.pv_generation_kw, 0.0);
-        assert_eq!(summary.base_load_kw, 0.0);
-        assert_eq!(summary.net_grid_kw, 0.0);
-        assert_eq!(summary.battery_power_kw, 0.0);
-        assert_eq!(summary.ev_power_kw, 0.0);
-        assert_eq!(summary.actual_pv_kw, 0.0);
+        assert_eq!(summary.pv_generation_w, 0.0);
+        assert_eq!(summary.base_load_w, 0.0);
+        assert_eq!(summary.net_grid_w, 0.0);
+        assert_eq!(summary.battery_power_w, 0.0);
+        assert_eq!(summary.ev_power_w, 0.0);
+        assert_eq!(summary.actual_pv_w, 0.0);
     }
 
     #[test]

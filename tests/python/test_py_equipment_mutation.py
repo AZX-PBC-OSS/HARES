@@ -179,13 +179,13 @@ class TestAddEquipment:
         dw.step()
         tel = dw.telemetry().equipment()
         names = tel["names"]
-        powers = tel["power_kw"]
+        powers = tel["power_w"]
         ev_idx = names.index("TestEV")
         ev_power = powers[ev_idx]
 
         assert ev_power > 0, "EV did not charge despite being plugged in with low SOC"
-        assert ev_power <= 3.6 + 1e-6, (
-            f"EV charged at {ev_power:.2f} kW, exceeding configured max of 3.6 kW"
+        assert ev_power <= 3600.0 + 1e-6, (
+            f"EV charged at {ev_power:.2f} W, exceeding configured max of 3.6 kW"
         )
 
 
@@ -315,7 +315,7 @@ class TestUpdateEquipment:
         assert not math.isnan(tel["soc"][idx]), (
             "Battery SOC should be valid after OCV table update"
         )
-        assert not math.isnan(tel["power_kw"][idx]), (
+        assert not math.isnan(tel["power_w"][idx]), (
             "Battery power should be valid after OCV table update"
         )
 
@@ -351,7 +351,7 @@ class TestUpdateEquipment:
         assert not math.isnan(tel["soc"][idx]), (
             "Battery SOC should be valid after Uneg table update"
         )
-        assert not math.isnan(tel["power_kw"][idx]), (
+        assert not math.isnan(tel["power_w"][idx]), (
             "Battery power should be valid after Uneg table update"
         )
 
@@ -396,7 +396,7 @@ class TestSetEquipmentLut:
         assert not math.isnan(tel["soc"][idx]), (
             "Battery SOC should be valid after set_equipment_lut"
         )
-        assert not math.isnan(tel["power_kw"][idx]), (
+        assert not math.isnan(tel["power_w"][idx]), (
             "Battery power should be valid after set_equipment_lut"
         )
 
@@ -425,7 +425,7 @@ class TestSetEquipmentLut:
         assert not math.isnan(tel["soc"][idx]), (
             "Battery SOC should be valid after clearing OCV LUT"
         )
-        assert not math.isnan(tel["power_kw"][idx]), (
+        assert not math.isnan(tel["power_w"][idx]), (
             "Battery power should be valid after clearing OCV LUT"
         )
 
@@ -596,7 +596,7 @@ class TestBatteryConfigParams:
             assert "timestamp" in result
             tel = dw.telemetry().equipment()
             names = tel["names"]
-            powers = tel["power_kw"]
+            powers = tel["power_w"]
             idx = names.index("TestBat")
             import math
             assert not math.isnan(powers[idx]), "Battery power is NaN with inverted thermal params"

@@ -23,7 +23,7 @@ Clamped to 0.001 minimum to prevent division by zero.
 ## Energy Balance
 
 ```
-P_electric = target_kw (clamped by ramp rate)
+P_electric = the commanded power in W (clamped by ramp rate)
 P_fuel     = P_electric / eta(capacity_ratio)
 Q_thermal  = P_fuel * eta_thermal     (CHP heat recovery)
 Q_flue     = P_fuel - P_electric - Q_thermal
@@ -69,7 +69,7 @@ graph LR
 
 ## Telemetry
 
-`electric_output_kw`, `fuel_input_w`, `eta_electric`, `ramp_limited`, `thermal_output_w` (CHP), `flue_loss_w` (CHP)
+`electric_output_w`, `fuel_input_w`, `eta_electric`, `ramp_limited`, `thermal_output_w` (CHP), `flue_loss_w` (CHP)
 
 ## Grid Outage Behaviour
 

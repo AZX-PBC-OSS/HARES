@@ -93,7 +93,7 @@ class TestKnownFieldOverrides:
 
         def pv_generation_magnitude_kw(dw) -> float:
             gens = [
-                eq.core_output.electric_kw
+                eq.core_output.electric_w
                 for eq in dw.equipment()
                 if eq.descriptor.name.startswith("PV")
             ]

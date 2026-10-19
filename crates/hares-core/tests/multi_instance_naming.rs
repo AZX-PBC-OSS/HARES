@@ -101,7 +101,7 @@ impl TelemetryRecordSpy {
             telemetry,
             core_output: CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Generation(0.0)),
+                    electric_w: Some(ElectricPower::Generation(0.0)),
                     ..Default::default()
                 },
                 state: CoreState {

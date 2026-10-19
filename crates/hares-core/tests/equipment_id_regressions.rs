@@ -382,11 +382,12 @@ impl IdentityProbeEquipment {
     }
 
     /// A constant electric load: claimed in the core output and deposited
-    /// as the matching electrical port contribution each step.
+    /// as the matching electrical port contribution each step. The load is
+    /// given in kW (the caller's convenience) and applied in W.
     fn with_electric_load(mut self, kw: f64) -> Self {
         self.electric_load_kw = kw;
         self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC;
-        self.core_output.flows.electric_kw = Some(ElectricPower::Consumption(kw));
+        self.core_output.flows.electric_w = Some(ElectricPower::Consumption(kw * 1000.0));
         self
     }
 
@@ -471,7 +472,7 @@ impl Equipment for IdentityProbeEquipment {
         if self.electric_load_kw > 0.0 {
             ports.accumulate(&hares_types::PortContribution::Electrical {
                 active_power_w: self.electric_load_kw * 1000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })?;
         }
         Ok(())
@@ -2209,8 +2210,8 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
     // like the original for its manager (same mode and power limits), so
     // the manager stays bound to the name rather than being rebuilt.
     let Some(hares_equipment::ActorSeed::Battery {
-        max_charge_kw,
-        max_discharge_kw,
+        max_charge_w,
+        max_discharge_w,
         ..
     }) = dwelling
         .equipment()
@@ -2223,8 +2224,8 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
     };
     let battery_cfg: hares_equipment::BatteryConfig = serde_json::from_value(serde_json::json!({
         "capacity_j": 13.5 * 3.6e6,
-        "max_charge_w": max_charge_kw * 1000.0,
-        "max_discharge_w": max_discharge_kw * 1000.0,
+        "max_charge_w": max_charge_w,
+        "max_discharge_w": max_discharge_w,
         "bms_mode": bms_mode.to_string(),
     }))
     .expect("minimal BatteryConfig");

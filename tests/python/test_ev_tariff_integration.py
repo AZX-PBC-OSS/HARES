@@ -290,7 +290,7 @@ class TestChargingLoadProfile:
                 continue
             idx = tel["names"].index(ev_name)
             soc = tel["soc"][idx]
-            power = tel["power_kw"][idx]
+            power = tel["power_w"][idx]
 
             if prev_soc is not None and soc < prev_soc - 0.005:
                 total_driving_steps += 1

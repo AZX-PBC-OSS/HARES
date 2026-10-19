@@ -4,6 +4,13 @@
 //! types that multiple sibling crates need without introducing circular deps:
 //! port contributions, environment state, control signals, equipment descriptors.
 
+// The `unit!` macro of `uom` expands calls to the crate's hidden
+// `unit_units!` macro, so the crate must be in the macro namespace the
+// documented `#[macro_use]` way (`si_units.rs` defines the `therm` and
+// `btu_it_per_hour` units with it).
+#[macro_use]
+extern crate uom;
+
 pub mod alloc_count;
 pub mod control_signal;
 pub mod domain_solver;
@@ -20,6 +27,7 @@ pub mod resolved;
 pub mod rng;
 pub mod schedule;
 pub mod schema;
+pub mod si_units;
 pub mod telemetry;
 pub mod telemetry_keys;
 pub mod text;

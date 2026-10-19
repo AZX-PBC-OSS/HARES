@@ -222,14 +222,14 @@ class _FakeDwelling:
 
         equip_dict = _FakeEquipDict({
             "names": list(en),
-            "power_kw": list(ep),
+            "power_w": list(ep),
             "soc": list(es),
             "modes": list(em),
         })
 
         return SimpleNamespace(
-            total_power_kw=p_kw,
-            reactive_power_kvar=q_kvar,
+            total_power_w=p_kw,
+            reactive_power_var=q_kvar,
             zone=lambda: zone_dict,
             equipment=lambda: equip_dict,
             timestep_index=self._step_count,
@@ -330,13 +330,13 @@ def test_helics_dwelling_config_and_registration(monkeypatch: pytest.MonkeyPatch
 
     pubs = orchestrator.register_publications(prefix="grid/")
     assert [p.key for p in pubs] == [
-        "grid/house_1/total_power_kw",
-        "grid/house_1/reactive_power_kvar",
+        "grid/house_1/total_power_w",
+        "grid/house_1/reactive_power_var",
         "grid/house_1/zone_0/temp_air_c",
-        "grid/house_1/equipment_0/power_kw",
+        "grid/house_1/equipment_0/power_w",
         "grid/house_1/equipment_0/soc_pct",
         "grid/house_1/equipment_0/operating_mode",
-        "grid/house_1/pv_generation_kw",
+        "grid/house_1/pv_generation_w",
     ]
 
     subs = orchestrator.register_subscriptions(
@@ -395,7 +395,7 @@ def test_helics_dwelling_run_loop_relative_time_and_routing(monkeypatch: pytest.
         json.dumps(
             {
                 "Battery": {"type": "PowerSetpoint", "active_power_kw": 3.0},
-                "EV": {"type": "PowerLimit", "max_power_kw": 4.2},
+                "EV": {"type": "PowerLimit", "max_power_w": 4.2},
                 "Unknown": {"type": "PowerSetpoint", "active_power_kw": 1.0},
             }
         )
@@ -413,7 +413,7 @@ def test_helics_dwelling_run_loop_relative_time_and_routing(monkeypatch: pytest.
     # metadata returned to callers, not in the name passed to HELICS itself.
     first_request_idx = fake_helics.log.index(("request_time", 60.0))
     first_step_idx = fake_helics.log.index(("step", 1))
-    first_publish_idx = fake_helics.log.index(("publish", "total_power_kw", 3.0))
+    first_publish_idx = fake_helics.log.index(("publish", "total_power_w", 3.0))
     assert first_request_idx < first_step_idx < first_publish_idx
 
     assert dwelling.grid_voltage_values == [0.97, 0.97]
@@ -424,11 +424,11 @@ def test_helics_dwelling_run_loop_relative_time_and_routing(monkeypatch: pytest.
 
     assert dwelling.applied_controls == [
         ("Battery", {"parsed": {"type": "PowerSetpoint", "active_power_kw": 3.0}}),
-        ("EV", {"parsed": {"type": "PowerLimit", "max_power_kw": 4.2}}),
+        ("EV", {"parsed": {"type": "PowerLimit", "max_power_w": 4.2}}),
     ]
 
-    power_pub = fed.publications["total_power_kw"]
-    reactive_pub = fed.publications["reactive_power_kvar"]
+    power_pub = fed.publications["total_power_w"]
+    reactive_pub = fed.publications["reactive_power_var"]
     assert power_pub.published == [3.0, 4.0]
     assert reactive_pub.published == [0.5, 0.6]
 
@@ -636,7 +636,7 @@ def test_helics_dwelling_multi_rate_grants_only_steps_at_requested_time(
 
     fed = fake_helics.last_fed
     assert fed is not None
-    pub = fed.publications["total_power_kw"]
+    pub = fed.publications["total_power_w"]
     # 5 intermediate publishes (before step 1) + 1 step-1 publish + 1 step-2 publish
     assert len(pub.published) == 7
     # All intermediate publishes carry state from before step 1
@@ -681,7 +681,7 @@ def test_helics_dwelling_federation_termination_sentinel_exits_without_stepping(
     # No publish must have occurred for the terminated step
     fed = fake_helics.last_fed
     assert fed is not None
-    pub = fed.publications["total_power_kw"]
+    pub = fed.publications["total_power_w"]
     assert len(pub.published) == 0
     assert term_fed.disconnected is True
 
@@ -712,7 +712,7 @@ def test_helics_dwelling_federation_termination_sentinel_during_multi_rate_grant
     assert dwelling._step_count == 0
     fed = fake_helics.last_fed
     assert fed is not None
-    pub = fed.publications["total_power_kw"]
+    pub = fed.publications["total_power_w"]
     # Only intermediate publishes (before the termination sentinel)
     assert len(pub.published) == 2
     assert pub.published[0] == 3.0  # unchanged state, republished
@@ -900,10 +900,10 @@ def test_set_publication_info_attaches_unit_metadata(
     fed = fake_helics.last_fed
     assert fed is not None
 
-    power_pub = fed.publications["total_power_kw"]
-    reactive_pub = fed.publications["reactive_power_kvar"]
-    assert power_pub._info == "units=kW"
-    assert reactive_pub._info == "units=kvar"
+    power_pub = fed.publications["total_power_w"]
+    reactive_pub = fed.publications["reactive_power_var"]
+    assert power_pub._info == "units=W"
+    assert reactive_pub._info == "units=VAR"
 
 
 def test_register_publications_includes_zone_temperature_keys(
@@ -928,10 +928,10 @@ def test_register_publications_includes_equipment_keys(
     pubs = orchestrator.register_publications()
 
     keys = [p.key for p in pubs]
-    assert "house_1/equipment_0/power_kw" in keys
+    assert "house_1/equipment_0/power_w" in keys
     assert "house_1/equipment_0/soc_pct" in keys
     assert "house_1/equipment_0/operating_mode" in keys
-    assert "house_1/equipment_2/power_kw" in keys
+    assert "house_1/equipment_2/power_w" in keys
     assert "house_1/equipment_2/soc_pct" in keys
     assert "house_1/equipment_2/operating_mode" in keys
 
@@ -945,7 +945,7 @@ def test_register_publications_includes_pv_generation_key(
     pubs = orchestrator.register_publications()
 
     keys = [p.key for p in pubs]
-    assert "house_1/pv_generation_kw" in keys
+    assert "house_1/pv_generation_w" in keys
 
 
 def test_publish_results_outputs_zone_temperature(
@@ -1016,7 +1016,7 @@ def test_compute_pv_generation_sums_negative_power_from_pv_equipment(
         def equipment(self):
             return {
                 "names": ["PV_Array", "Battery", "Load"],
-                "power_kw": [-5.0, 0.0, 2.0],
+                "power_w": [-5.0, 0.0, 2.0],
                 "soc": [0.0, 0.5, 0.0],
                 "modes": [0.0, 0.0, 0.0],
             }
@@ -1038,7 +1038,7 @@ def test_compute_pv_generation_zero_when_no_pv_equipment(
         def equipment(self):
             return {
                 "names": ["Battery", "Load"],
-                "power_kw": [0.0, 2.0],
+                "power_w": [0.0, 2.0],
                 "soc": [0.5, 0.0],
                 "modes": [0.0, 0.0],
             }
@@ -1402,8 +1402,8 @@ def test_publication_list_available_from_registration(
     pubs = orchestrator.register_publications()
 
     pub_keys = [p.key for p in pubs]
-    assert "house_1/total_power_kw" in pub_keys
-    assert "house_1/reactive_power_kvar" in pub_keys
+    assert "house_1/total_power_w" in pub_keys
+    assert "house_1/reactive_power_var" in pub_keys
 
 
 def test_subscription_list_available_from_registration(
@@ -1480,3 +1480,69 @@ def test_diagnostic_row_includes_stale_and_mask_fields(
     assert row["helics_stale_subscription_count"] == 0
     assert row["helics_update_mask"] == 1  # voltage received data
 
+
+
+def test_helics_publications_are_si_with_their_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`der_pv_battery_900s`'s inputs, 4 steps through HELICSDwelling: each
+    step's `total_power_w`, `reactive_power_var`, `equipment_{i}/power_w`
+    and `pv_generation_w` publications equal, on bits, the dwelling's
+    telemetry values for that step, and their set_info is units=W or
+    units=VAR."""
+    from conftest import HARES_DEFAULTS, ROOT, SCHEDULE, WEATHER
+
+    module, _fake_helics = _import_dwelling_module(monkeypatch)
+
+    from hares import Dwelling, SimulationConfig
+
+    dw = Dwelling.from_hpxml(
+        str(ROOT / "tests/fixtures/hpxml/ochre_samples/base-pv-battery.xml"),
+        SCHEDULE,
+        WEATHER,
+        config=SimulationConfig(
+            start_time="2023-06-01T00:00:00-07:00",
+            duration=3600,
+            time_res=900,
+            master_seed=0,
+        ),
+        defaults=str(HARES_DEFAULTS),
+        bldg_id=1,
+        overrides={
+            "Battery": {
+                "bms_mode": '{"SelfConsumption": {"min_soc": 0.1, "max_soc": 0.95, "solar_only_charging": false}}'
+            }
+        },
+    )
+    dw.initialize()
+
+    orchestrator = module.HELICSDwelling(dw, fed_name="house_1")
+    orchestrator.register_publications()
+    fed = _fake_helics.last_fed
+    assert fed is not None
+    assert fed.publications["total_power_w"]._info == "units=W"
+    assert fed.publications["reactive_power_var"]._info == "units=VAR"
+    assert fed.publications["pv_generation_w"]._info == "units=W"
+
+    for _ in range(4):
+        dw.step()
+        tel = dw.telemetry()
+        orchestrator._publish_results()
+
+        total = fed.publications["total_power_w"]
+        reactive = fed.publications["reactive_power_var"]
+        assert total.published[-1] == tel.total_power_w, (
+            "the total power publication is the telemetry's own float, on bits"
+        )
+        assert reactive.published[-1] == tel.reactive_power_var, (
+            "the reactive publication is the telemetry's own float, on bits"
+        )
+        equipment = tel.equipment()
+        powers = list(equipment["power_w"])
+        # The per-equipment power publications carry the telemetry's floats.
+        for ei in range(len(powers)):
+            pub = fed.publications[f"equipment_{ei}/power_w"]
+            assert pub.published[-1] == powers[ei], (
+                f"equipment_{ei}/power_w is the telemetry's own float, on bits"
+            )
+            assert pub._info == "units=W"

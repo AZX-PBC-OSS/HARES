@@ -79,15 +79,15 @@ pub struct EnvironmentCapture {
     /// observation. Downstream tooling can use this to flag mismatches between
     /// file content and explicit header declarations.
     pub wf_allows_leap_years: bool,
-    /// PV generation from `ElectricalSummary.pv_generation_kw` (may carry forecast
+    /// PV generation from `ElectricalSummary.pv_generation_w` (may carry forecast
     /// values in forecast-driven modes).
-    pub pv_generation_kw: f64,
-    /// Actual PV generation from `ElectricalSummary.actual_pv_kw` (observed).
-    pub pv_actual_kw: f64,
-    /// Net grid power from `ElectricalSummary.net_grid_kw` (positive = importing).
-    pub net_grid_kw: f64,
-    /// Non-dispatchable load from `ElectricalSummary.base_load_kw`.
-    pub base_load_kw: f64,
+    pub pv_generation_w: f64,
+    /// Actual PV generation from `ElectricalSummary.actual_pv_w` (observed).
+    pub pv_actual_w: f64,
+    /// Net grid power from `ElectricalSummary.net_grid_w` (positive = importing).
+    pub net_grid_w: f64,
+    /// Non-dispatchable load from `ElectricalSummary.base_load_w`.
+    pub base_load_w: f64,
     /// Size of `latest_env.equipment_core` at observation time.
     /// Non-zero after at least one timestep has completed; zero on the first
     /// step or if the checkpoint restore did not populate equipment state.
@@ -130,9 +130,9 @@ pub struct EquipmentObservation {
 pub struct EquipmentContribution {
     /// The heat this equipment added to each zone, every path included.
     pub thermal: Vec<(ZoneId, ZoneHeat)>,
-    pub electrical_load_kw: f64,
-    pub electrical_gen_kw: f64,
-    pub electrical_reactive_kvar: f64,
+    pub electrical_load_w: f64,
+    pub electrical_gen_w: f64,
+    pub electrical_reactive_var: f64,
     pub fuel_consumption_w: Vec<(FuelType, f64)>,
     pub fluid: Vec<FluidContributionCapture>,
 }
@@ -153,9 +153,9 @@ pub struct FluidContributionCapture {
 pub struct PortsCapture {
     /// Each zone's accumulated heat, every path included.
     pub thermal: Vec<(ZoneId, ZoneHeat)>,
-    pub electrical_load_kw: f64,
-    pub electrical_gen_kw: f64,
-    pub electrical_reactive_kvar: f64,
+    pub electrical_load_w: f64,
+    pub electrical_gen_w: f64,
+    pub electrical_reactive_var: f64,
     pub fuel_consumption_w: Vec<(FuelType, f64)>,
     pub fluid: Vec<FluidPortCapture>,
 }
@@ -185,13 +185,13 @@ pub struct SolverCapture {
     pub envelope_gains: EnvelopeComponentGains,
     /// ZIP load scale applied by the electrical solver: `Z·V² + I·V + P`.
     pub zip_load_scale: f64,
-    /// Raw `load_power_w` from port accumulator (before ZIP adjustment).
-    pub port_load_raw_kw: f64,
-    /// `load_power_w * zip_load_scale` (ZIP-adjusted port load).
-    pub port_load_adjusted_kw: f64,
+    /// Raw `load_power_w` from port accumulator (before ZIP adjustment), in W.
+    pub port_load_raw_w: f64,
+    /// `load_power_w * zip_load_scale` (ZIP-adjusted port load), in W.
+    pub port_load_adjusted_w: f64,
     /// Corrected electrical balance residual after applying ZIP scaling
-    /// to both solver and port sides: `|net_active_kw() + port_net|`.
-    pub residual_kw: f64,
+    /// to both solver and port sides: `|net_active_w() + port_net|`, in W.
+    pub residual_w: f64,
 }
 
 /// Final zone state after thermal + humidity updates are applied.

@@ -1775,9 +1775,9 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
     assert_eq!(
         pool_pump
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64()),
-        Some(2700.0)
+        Some(2700.0 * 3.6e6)
     );
     // Schedule extension should be parsed
     assert_eq!(
@@ -1813,9 +1813,9 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
     assert_eq!(
         pool_heater
             .parameters
-            .get("annual_gas_therms")
+            .get("annual_gas_j")
             .and_then(|v| v.as_f64()),
-        Some(500.0)
+        Some(500.0 * 105505600.0)
     );
     assert_eq!(
         pool_heater
@@ -1836,9 +1836,9 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
     assert_eq!(
         spa_pump
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64()),
-        Some(1000.0)
+        Some(1000.0 * 3.6e6)
     );
 
     // Spa heater: 1300 kWh/year from <HotTubs>/<HotTub>/<Heater>/<Load>
@@ -1854,9 +1854,9 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
     assert_eq!(
         spa_heater
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64()),
-        Some(1300.0)
+        Some(1300.0 * 3.6e6)
     );
 }
 
@@ -2709,9 +2709,9 @@ fn every_xsd_boolean_site_uses_the_xs_boolean_reader() {
                         .find(|s| s.name == "Cooking Range")
                         .expect("cooking range spec expected")
                         .parameters
-                        .get("annual_electric_kwh")
+                        .get("annual_electric_j")
                         .and_then(serde_json::Value::as_f64)
-                        .expect("annual kwh expected")
+                        .expect("annual energy expected")
                 };
                 // Induction burners carry a 0.91 burner efficiency factor
                 // against 1.0 for a standard range, so the annual kWh differ.

@@ -61,7 +61,7 @@ Heat distribution (`gain_fractions.rs`), per watt of electric plus fuel input:
 
 ### Port Interactions
 
-- **Electrical**: `active_power_kw` (schedule x load_fraction x ZIP), `reactive_power_kvar`
+- **Electrical**: the scheduled power in W (schedule x load_fraction x ZIP), the reactive in VAR; the telemetry keys keep their kW/kvar reporting spellings with W/VAR values
 - **Fuel**: optional gas consumption
 - **Thermal**: sensible + latent to assigned zone
 

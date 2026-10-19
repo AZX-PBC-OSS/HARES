@@ -670,7 +670,7 @@ pub(crate) fn step_result_to_py_dict(
         "timestamp",
         naive_chrono_to_py_datetime(py, step.timestamp)?,
     )?;
-    out.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
+    out.set_item("net_electric_power_w", step.net_electric_power_w)?;
     out.set_item("hvac_heating_w", step.hvac_heating_w)?;
     out.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
     out.set_item("gas_power_w", step.gas_power_w)?;
@@ -2114,22 +2114,22 @@ impl PyDwelling {
     ///         ``Some``, the provided shape is used directly and inference
     ///         is skipped. When ``None`` (default), roof shape is inferred
     ///         from building metadata.
-    #[pyo3(signature = (target_kw, min_kw=2.0, max_kw=14.0, diffuse_fraction=None, *,
-        panel_watts=None, panel_area_m2=None, system_losses=None,
-        inverter_kw_ac=None, max_dc_ac_ratio=None, main_panel_ampacity=None,
-        main_breaker_ampacity=None, roof_shape=None))]
+    #[pyo3(signature = (*, target_w, min_w=2000.0, max_w=14000.0,
+        diffuse_fraction=None, panel_watts=None, panel_area_m2=None,
+        system_losses=None, inverter_ac_w=None, max_dc_ac_ratio=None,
+        main_panel_ampacity=None, main_breaker_ampacity=None, roof_shape=None))]
     // PyO3 maps this keyword signature 1:1 to the Python API.
     #[allow(clippy::too_many_arguments)]
     pub fn estimate_pv_capacity(
         &self,
-        target_kw: f64,
-        min_kw: f64,
-        max_kw: f64,
+        target_w: f64,
+        min_w: f64,
+        max_w: f64,
         diffuse_fraction: Option<f64>,
         panel_watts: Option<u32>,
         panel_area_m2: Option<f64>,
         system_losses: Option<f64>,
-        inverter_kw_ac: Option<f64>,
+        inverter_ac_w: Option<f64>,
         max_dc_ac_ratio: Option<f64>,
         main_panel_ampacity: Option<u32>,
         main_breaker_ampacity: Option<u32>,
@@ -2158,9 +2158,9 @@ impl PyDwelling {
             &dwelling.roof_info,
             roof_shape,
             crate::py_pv_sizing::PvSizingTargets {
-                target_kw,
-                min_kw,
-                max_kw,
+                target_w,
+                min_w,
+                max_w,
             },
             crate::py_pv_sizing::PvRoofSiting {
                 wall_azimuths: &dwelling.wall_azimuths,
@@ -2172,7 +2172,7 @@ impl PyDwelling {
                 system_losses,
                 panel_watts,
                 panel_area_m2,
-                inverter_kw_ac,
+                inverter_ac_w,
                 max_dc_ac_ratio,
                 main_panel_ampacity,
                 main_breaker_ampacity,
@@ -2240,9 +2240,11 @@ impl PyDwelling {
             period_name: evaluator.current_period_name().to_string(),
             current_rate_usd_per_kwh: evaluator.current_price(),
             export_rate_usd_per_kwh: evaluator.current_export_price(),
-            cumulative_import_kwh: billing.cumulative_import_kwh(),
-            cumulative_export_kwh: billing.cumulative_export_kwh(),
-            peak_demand_kw: billing.peak_demand_kw(),
+            // The live billing fields are SI (J, W); the rates are tariff
+            // data and keep their per-kWh units.
+            cumulative_import_j: billing.cumulative_import_j(),
+            cumulative_export_j: billing.cumulative_export_j(),
+            peak_demand_w: billing.peak_demand_w(),
             cumulative_energy_cost_usd: billing.cumulative_energy_cost_usd(),
         }))
     }
@@ -2316,8 +2318,8 @@ impl PyDwelling {
         // Islanded-imbalance accounting: residual load the island sources
         // could not cover / surplus generation the island could not absorb.
         // Both 0.0 during normal (grid-connected) operation.
-        dict.set_item("island_unserved_kw", dwelling.island_unserved_kw())?;
-        dict.set_item("island_excess_kw", dwelling.island_excess_kw())?;
+        dict.set_item("island_unserved_w", dwelling.island_unserved_w())?;
+        dict.set_item("island_excess_w", dwelling.island_excess_w())?;
         dict.set_item(
             "current_time",
             naive_chrono_to_py_datetime(py, env.current_time.naive_local())?,
@@ -2914,9 +2916,9 @@ fn snapshot_to_py(
                     })
                     .collect::<Vec<_>>(),
             )?;
-            pd.set_item("electrical_load_kw", ports.electrical_load_kw)?;
-            pd.set_item("electrical_gen_kw", ports.electrical_gen_kw)?;
-            pd.set_item("electrical_reactive_kvar", ports.electrical_reactive_kvar)?;
+            pd.set_item("electrical_load_w", ports.electrical_load_w)?;
+            pd.set_item("electrical_gen_w", ports.electrical_gen_w)?;
+            pd.set_item("electrical_reactive_var", ports.electrical_reactive_var)?;
             pd.set_item(
                 "fuel_consumption_w",
                 ports

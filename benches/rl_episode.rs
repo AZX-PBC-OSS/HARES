@@ -33,7 +33,7 @@ fn alloc_snapshot() -> u64 {
 const NARROW_FIELDS: &[&str] = &[
     "outdoor_temp",
     "zone_temp[Indoor]",
-    "total_power_kw",
+    "total_power_w",
     "equipment_power[Electric Furnace]",
     "setpoint_heat[Indoor]",
 ];
@@ -42,7 +42,7 @@ fn wide_fields() -> Vec<&'static str> {
     let base: &[&str] = &[
         "outdoor_temp",
         "outdoor_humidity_ratio",
-        "total_power_kw",
+        "total_power_w",
         "reactive_power_kvar",
         "zone_temp[Indoor]",
         "setpoint_heat[Indoor]",

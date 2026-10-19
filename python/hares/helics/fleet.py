@@ -5,16 +5,16 @@ Expected HELICS publication units
 
 All publication keys and their expected physical units:
 
-``{prefix}{fed_name}/aggregate_power_kw``
+``{prefix}{fed_name}/aggregate_power_w``
     Aggregate active power across all dwellings in kilowatts (kW).
 
-``{prefix}{fed_name}/aggregate_reactive_kvar``
+``{prefix}{fed_name}/aggregate_reactive_var``
     Aggregate reactive power across all dwellings in kilovolt-amperes reactive (kvar).
 
-``{prefix}{fed_name}/dwelling_{index}/total_power_kw``
+``{prefix}{fed_name}/dwelling_{index}/total_power_w``
     Per-dwelling active power in kilowatts (kW).
 
-``{prefix}{fed_name}/dwelling_{index}/reactive_power_kvar``
+``{prefix}{fed_name}/dwelling_{index}/reactive_power_var``
     Per-dwelling reactive power in kilovolt-amperes reactive (kvar).
 
 ``{prefix}{fed_name}/aggregate_zone_temp_c``
@@ -26,7 +26,7 @@ All publication keys and their expected physical units:
 ``{prefix}{fed_name}/dwelling_{index}/zone_{zone_index}/temp_air_c``
     Per-dwelling zone indoor air temperature in degrees Celsius (degC).
 
-``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/power_kw``
+``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/power_w``
     Per-dwelling, per-equipment active power in kilowatts (kW).
 
 ``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/soc_pct``
@@ -191,13 +191,13 @@ class HELICSFleet:
                 must be registered. After entering execution mode, any missing
                 required key is logged as an error.
         """
-        aggregate_power_name = "aggregate_power_kw"
-        aggregate_reactive_name = "aggregate_reactive_kvar"
+        aggregate_power_name = "aggregate_power_w"
+        aggregate_reactive_name = "aggregate_reactive_var"
         self._pub_aggregate_power = self._fed.register_publication(aggregate_power_name, "double")
         self._pub_aggregate_reactive = self._fed.register_publication(aggregate_reactive_name, "double")
 
-        set_publication_info(self._pub_aggregate_power, "units=kW")
-        set_publication_info(self._pub_aggregate_reactive, "units=kvar")
+        set_publication_info(self._pub_aggregate_power, "units=W")
+        set_publication_info(self._pub_aggregate_reactive, "units=VAR")
 
         self._pub_dwelling_power = []
         self._pub_dwelling_reactive = []
@@ -208,14 +208,14 @@ class HELICSFleet:
 
         # Per-dwelling power and reactive (existing)
         for dwelling_index in range(self._n_dwellings):
-            power_name = f"dwelling_{dwelling_index}/total_power_kw"
-            reactive_name = f"dwelling_{dwelling_index}/reactive_power_kvar"
+            power_name = f"dwelling_{dwelling_index}/total_power_w"
+            reactive_name = f"dwelling_{dwelling_index}/reactive_power_var"
             pub_power = self._fed.register_publication(power_name, "double")
             pub_reactive = self._fed.register_publication(reactive_name, "double")
             self._pub_dwelling_power.append(pub_power)
             self._pub_dwelling_reactive.append(pub_reactive)
-            set_publication_info(pub_power, "units=kW")
-            set_publication_info(pub_reactive, "units=kvar")
+            set_publication_info(pub_power, "units=W")
+            set_publication_info(pub_reactive, "units=VAR")
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_name}"))
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{reactive_name}"))
 
@@ -259,12 +259,12 @@ class HELICSFleet:
             dw_soc_pubs: list[HelicsPublicationLike] = []
             dw_mode_pubs: list[HelicsPublicationLike] = []
             for ei in range(equip_count):
-                p_key = f"dwelling_{dwelling_index}/equipment_{ei}/power_kw"
+                p_key = f"dwelling_{dwelling_index}/equipment_{ei}/power_w"
                 s_key = f"dwelling_{dwelling_index}/equipment_{ei}/soc_pct"
                 m_key = f"dwelling_{dwelling_index}/equipment_{ei}/operating_mode"
 
                 pub_p = self._fed.register_publication(p_key, "double")
-                set_publication_info(pub_p, "units=kW")
+                set_publication_info(pub_p, "units=W")
                 dw_power_pubs.append(pub_p)
                 configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{p_key}"))
 
@@ -630,8 +630,8 @@ class HELICSFleet:
             )
 
     def _publish_results(self) -> None:
-        aggregate_power_kw = 0.0
-        aggregate_reactive_kvar = 0.0
+        aggregate_power_w = 0.0
+        aggregate_reactive_var = 0.0
         total_zone_temp = 0.0
         total_zone_count = 0
         total_soc = 0.0
@@ -639,17 +639,17 @@ class HELICSFleet:
 
         for dwelling_index in range(self._n_dwellings):
             telemetry = self._fleet.telemetry(dwelling_index)
-            power_kw = float(telemetry.total_power_kw)
-            reactive_kvar = float(telemetry.reactive_power_kvar)
+            power_w = float(telemetry.total_power_w)
+            reactive_var = float(telemetry.reactive_power_var)
 
-            aggregate_power_kw += power_kw
-            aggregate_reactive_kvar += reactive_kvar
+            aggregate_power_w += power_w
+            aggregate_reactive_var += reactive_var
 
             # Per-dwelling power (existing)
             if dwelling_index < len(self._pub_dwelling_power):
-                self._pub_dwelling_power[dwelling_index].publish(power_kw)
+                self._pub_dwelling_power[dwelling_index].publish(power_w)
             if dwelling_index < len(self._pub_dwelling_reactive):
-                self._pub_dwelling_reactive[dwelling_index].publish(reactive_kvar)
+                self._pub_dwelling_reactive[dwelling_index].publish(reactive_var)
 
             # Per-dwelling zone temperatures
             if dwelling_index < len(self._pub_dwelling_zone_temp):
@@ -664,7 +664,7 @@ class HELICSFleet:
 
             # Per-dwelling equipment power, SOC, mode
             equipdata = telemetry.equipment()
-            powers: list[float] = list(equipdata.get("power_kw", []))
+            powers: list[float] = list(equipdata.get("power_w", []))
             socs: list[float] = list(equipdata.get("soc", []))
             modes: list[float] = list(equipdata.get("modes", []))
 
@@ -686,8 +686,8 @@ class HELICSFleet:
 
         if self._pub_aggregate_power is None or self._pub_aggregate_reactive is None:
             raise RuntimeError("Publications are not registered; call register_publications() first")
-        self._pub_aggregate_power.publish(aggregate_power_kw)
-        self._pub_aggregate_reactive.publish(aggregate_reactive_kvar)
+        self._pub_aggregate_power.publish(aggregate_power_w)
+        self._pub_aggregate_reactive.publish(aggregate_reactive_var)
 
         _published_count = (
             2  # aggregate power + reactive

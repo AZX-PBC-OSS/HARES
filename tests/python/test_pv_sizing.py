@@ -97,7 +97,7 @@ class TestPvCandidates:
 
     def test_candidates_have_capacity(self, dwelling_summer_24h):
         for c in dwelling_summer_24h.pv_candidates():
-            assert c.max_capacity_kw > 0
+            assert c.max_capacity_w > 0
             assert c.max_panels > 0
 
     def test_candidates_sorted_by_score(self, dwelling_summer_24h):
@@ -136,43 +136,43 @@ class TestPvCandidates:
 
 class TestPvSizing:
     def test_sizing_returns_result(self, dwelling_summer_24h):
-        result = dwelling_summer_24h.estimate_pv_capacity(6.0)
-        assert result.capacity_kw > 0
+        result = dwelling_summer_24h.estimate_pv_capacity(target_w=6000.0)
+        assert result.capacity_w > 0
 
     def test_sizing_respects_target(self, dwelling_summer_24h):
-        result = dwelling_summer_24h.estimate_pv_capacity(4.0)
-        # Should be close to 4 kW (rounded up to next panel).
-        assert 3.5 <= result.capacity_kw <= 5.0
+        result = dwelling_summer_24h.estimate_pv_capacity(target_w=4000.0)
+        # Should be close to 4000 W (rounded up to next panel).
+        assert 3500.0 <= result.capacity_w <= 5000.0
 
     def test_sizing_clamps_to_roof(self, dwelling_summer_24h):
-        result = dwelling_summer_24h.estimate_pv_capacity(20.0)
-        assert result.capacity_kw <= result.max_roof_capacity_kw + 0.1
+        result = dwelling_summer_24h.estimate_pv_capacity(target_w=20000.0)
+        assert result.capacity_w <= result.max_roof_capacity_w + 100.0
 
     def test_sizing_errors_below_minimum(self, dwelling_summer_24h):
         with pytest.raises(ValueError, match="below minimum"):
-            dwelling_summer_24h.estimate_pv_capacity(0.5, min_kw=100.0)
+            dwelling_summer_24h.estimate_pv_capacity(target_w=500.0, min_w=100000.0)
 
     def test_sizing_panel_count(self, dwelling_summer_24h):
-        result = dwelling_summer_24h.estimate_pv_capacity(6.0)
-        # 440 W panels: 6 kW ≈ 14 panels.
-        expected_panels = round(result.capacity_kw * 1000 / result.panel_watts)
+        result = dwelling_summer_24h.estimate_pv_capacity(target_w=6000.0)
+        # 440 W panels: 6000 W ≈ 14 panels.
+        expected_panels = round(result.capacity_w / result.panel_watts)
         assert result.num_panels == expected_panels
 
     def test_sizing_azimuth_matches_candidate(self, dwelling_summer_24h):
-        result = dwelling_summer_24h.estimate_pv_capacity(6.0)
+        result = dwelling_summer_24h.estimate_pv_capacity(target_w=6000.0)
         candidates = dwelling_summer_24h.pv_candidates()
         assert abs(result.array_azimuth_deg - candidates[0].azimuth_deg) < 1.0
 
     def test_repr_contains_panels(self, dwelling_summer_24h):
-        result = dwelling_summer_24h.estimate_pv_capacity(6.0)
+        result = dwelling_summer_24h.estimate_pv_capacity(target_w=6000.0)
         r = repr(result)
         assert "PvSizingResult" in r
         assert "panels=" in r
 
     def test_custom_panel_watts_changes_capacity(self, dwelling_summer_24h):
-        default = dwelling_summer_24h.estimate_pv_capacity(6.0)
+        default = dwelling_summer_24h.estimate_pv_capacity(target_w=6000.0)
         custom = dwelling_summer_24h.estimate_pv_capacity(
-            6.0, panel_watts=300, panel_area_m2=1.6
+            target_w=6000.0, panel_watts=300, panel_area_m2=1.6
         )
         assert default.panel_watts != custom.panel_watts
         assert default.panel_watts == 440
@@ -206,7 +206,7 @@ class TestPvPowerProduction:
         dw = self._make_pv_dwelling("2019-07-15T00:00:00Z")
         dw.initialize()
         result = dw.step()
-        assert "net_electric_power_kw" in result
+        assert "net_electric_power_w" in result
 
     @pytest.mark.slow
     def test_summer_midday_produces_negative_net_power(self):
@@ -218,7 +218,7 @@ class TestPvPowerProduction:
         powers = []
         for _ in range(96):
             step = dw.step()
-            powers.append(step["net_electric_power_kw"])
+            powers.append(step["net_electric_power_w"])
 
         # Steps 40-56 correspond roughly to 10:00-14:00 (peak solar in MDT).
         midday_powers = powers[40:56]
@@ -239,7 +239,7 @@ class TestPvPowerProduction:
         night_powers = []
         for _ in range(16):
             step = dw.step()
-            night_powers.append(step["net_electric_power_kw"])
+            night_powers.append(step["net_electric_power_w"])
 
         for p in night_powers:
             assert p >= -0.01, f"Expected non-negative power at night, got {p:.4f} kW"
@@ -249,11 +249,11 @@ class TestPvPowerProduction:
         """Winter PV production should be lower than summer."""
         dw_summer = self._make_pv_dwelling("2019-07-15T00:00:00Z")
         dw_summer.initialize()
-        summer_powers = [dw_summer.step()["net_electric_power_kw"] for _ in range(96)]
+        summer_powers = [dw_summer.step()["net_electric_power_w"] for _ in range(96)]
 
         dw_winter = self._make_pv_dwelling("2019-01-15T00:00:00Z")
         dw_winter.initialize()
-        winter_powers = [dw_winter.step()["net_electric_power_kw"] for _ in range(96)]
+        winter_powers = [dw_winter.step()["net_electric_power_w"] for _ in range(96)]
 
         # Summer should have more negative power (more PV export).
         assert min(summer_powers) < min(winter_powers), (
@@ -269,7 +269,7 @@ class TestPvPowerProduction:
         dw = Dwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, config=SimulationConfig(start_time="2019-07-15T00:00:00Z", duration=86400, time_res=900))
         dw.initialize()
 
-        powers = [dw.step()["net_electric_power_kw"] for _ in range(96)]
+        powers = [dw.step()["net_electric_power_w"] for _ in range(96)]
         min_power = min(powers)
         assert min_power >= -0.01, (
             f"Expected non-negative net power without PV, got {min_power:.4f} kW"
@@ -318,7 +318,7 @@ class TestStandaloneComputeUsableArea:
             [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
         )
         assert result.usable_m2 > 0
-        assert result.max_capacity_kw > 0
+        assert result.max_capacity_w > 0
         assert result.max_panels > 0
         assert result.best_plane_idx == 0
 
@@ -340,7 +340,7 @@ class TestStandaloneComputeUsableArea:
             panel_watts=300,
             panel_area_m2=1.6,
         )
-        assert default.max_capacity_kw != custom.max_capacity_kw
+        assert default.max_capacity_w != custom.max_capacity_w
 
 
 class TestStandaloneEnumeratePvCandidates:
@@ -352,7 +352,7 @@ class TestStandaloneEnumeratePvCandidates:
             [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
         )
         assert len(candidates) == 1
-        assert candidates[0].max_capacity_kw > 0
+        assert candidates[0].max_capacity_w > 0
         assert candidates[0].roof_shape in (
             hares.RoofShape.Gable,
             hares.RoofShape.Hip,
@@ -377,8 +377,8 @@ class TestStandaloneSizePvSystem:
         usable = hares.compute_usable_area(
             [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
         )
-        result = hares.size_pv_system(usable, target_kw=6.0)
-        assert result.capacity_kw > 0
+        result = hares.size_pv_system(usable, target_w=6000.0)
+        assert result.capacity_w > 0
         assert result.num_panels > 0
         assert result.collector_area_m2 > 0
 
@@ -388,18 +388,18 @@ class TestStandaloneSizePvSystem:
             [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
         )
         with pytest.raises(ValueError):
-            hares.size_pv_system(usable, target_kw=10.0, min_kw=10.0)
+            hares.size_pv_system(usable, target_w=10000.0, min_w=10000.0)
 
     def test_inverter_clamps_capacity(self):
         plane = hares.RoofPlane(area_m2=100.0, tilt_deg=26.0, azimuth_deg=180.0)
         usable = hares.compute_usable_area(
             [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
         )
-        no_inv = hares.size_pv_system(usable, target_kw=8.0)
+        no_inv = hares.size_pv_system(usable, target_w=8000.0)
         with_inv = hares.size_pv_system(
-            usable, target_kw=8.0, inverter_kw_ac=5.0, max_dc_ac_ratio=1.2
+            usable, target_w=8000.0, inverter_ac_w=5000.0, max_dc_ac_ratio=1.2
         )
-        assert with_inv.capacity_kw <= no_inv.capacity_kw
+        assert with_inv.capacity_w <= no_inv.capacity_w
 
     def test_nec_100a_panel_clamps_to_backfeed_limit(self):
         """100 A main panel → ~4.8 kW AC backfeed limit → system clamped."""
@@ -408,16 +408,16 @@ class TestStandaloneSizePvSystem:
             [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
         )
         # Without electrical limit, target 10 kW is achievable.
-        no_limit = hares.size_pv_system(usable, target_kw=10.0)
+        no_limit = hares.size_pv_system(usable, target_w=10000.0)
         # With 100 A panel, backfeed = 100 × 1.2 − 100 = 20 A → 4.8 kW AC.
-        limited = hares.size_pv_system(usable, target_kw=10.0, main_panel_ampacity=100)
-        assert limited.capacity_kw < no_limit.capacity_kw, (
-            f"100 A panel ({limited.capacity_kw:.2f} kW) must be less than "
-            f"unconstrained ({no_limit.capacity_kw:.2f} kW)"
+        limited = hares.size_pv_system(usable, target_w=10000.0, main_panel_ampacity=100)
+        assert limited.capacity_w < no_limit.capacity_w, (
+            f"100 A panel ({limited.capacity_w:.2f} W) must be less than "
+            f"unconstrained ({no_limit.capacity_w:.2f} W)"
         )
         # ~4.8 kW AC → ~5.6 kW DC at 14% losses, 1.0 DC:AC ratio.
-        assert limited.capacity_kw <= 6.0, (
-            f"100 A panel must limit to ≤ 6 kW DC, got {limited.capacity_kw:.2f}"
+        assert limited.capacity_w <= 6000.0, (
+            f"100 A panel must limit to ≤ 6000 W DC, got {limited.capacity_w:.2f}"
         )
 
     def test_nec_200a_panel_allows_larger_system(self):
@@ -426,11 +426,11 @@ class TestStandaloneSizePvSystem:
         usable = hares.compute_usable_area(
             [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
         )
-        result_100a = hares.size_pv_system(usable, target_kw=10.0, main_panel_ampacity=100)
-        result_200a = hares.size_pv_system(usable, target_kw=10.0, main_panel_ampacity=200)
-        assert result_200a.capacity_kw > result_100a.capacity_kw, (
-            f"200 A panel ({result_200a.capacity_kw:.2f} kW) should allow more "
-            f"than 100 A panel ({result_100a.capacity_kw:.2f} kW)"
+        result_100a = hares.size_pv_system(usable, target_w=10000.0, main_panel_ampacity=100)
+        result_200a = hares.size_pv_system(usable, target_w=10000.0, main_panel_ampacity=200)
+        assert result_200a.capacity_w > result_100a.capacity_w, (
+            f"200 A panel ({result_200a.capacity_w:.2f} W) should allow more "
+            f"than 100 A panel ({result_100a.capacity_w:.2f} W)"
         )
 
     def test_nec_result_exposes_electrical_constraint_fields(self):
@@ -441,10 +441,10 @@ class TestStandaloneSizePvSystem:
             [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
         )
         result = hares.size_pv_system(
-            usable, target_kw=10.0, main_panel_ampacity=100
+            usable, target_w=10000.0, main_panel_ampacity=100
         )
         assert result.max_backfeed_amps == 20.0
-        assert result.max_ac_kw == 4.8
+        assert result.max_ac_w == 4800.0
         assert result.electrical_constraint_binding is True
 
     def test_no_ampacity_fields_are_none(self):
@@ -454,9 +454,9 @@ class TestStandaloneSizePvSystem:
         usable = hares.compute_usable_area(
             [plane], roof_shape=hares.RoofShape.Gable, latitude=40.0
         )
-        result = hares.size_pv_system(usable, target_kw=10.0)
+        result = hares.size_pv_system(usable, target_w=10000.0)
         assert result.max_backfeed_amps is None
-        assert result.max_ac_kw is None
+        assert result.max_ac_w is None
         assert result.electrical_constraint_binding is False
 
 
@@ -464,22 +464,22 @@ class TestRequiredMainPanelAmpacity:
     """required_main_panel_ampacity — reverse NEC 120% service sizing."""
 
     def test_4_8kw_needs_100a(self):
-        assert hares.required_main_panel_ampacity(4.8) == 100
+        assert hares.required_main_panel_ampacity(target_ac_w=4800.0) == 100
 
     def test_9_6kw_needs_200a(self):
-        assert hares.required_main_panel_ampacity(9.6) == 200
+        assert hares.required_main_panel_ampacity(target_ac_w=9600.0) == 200
 
     def test_5kw_needs_125a(self):
-        assert hares.required_main_panel_ampacity(5.0) == 125
+        assert hares.required_main_panel_ampacity(target_ac_w=5000.0) == 125
 
     def test_explicit_breaker(self):
-        assert hares.required_main_panel_ampacity(10.0, main_breaker_amps=150) == 200
+        assert hares.required_main_panel_ampacity(target_ac_w=10000.0, main_breaker_amps=150) == 200
 
     def test_rounds_up_to_nearest_standard(self):
-        # 4.81 kW → 20.04 A backfeed → busbar ≥ 100.2 → 125
-        assert hares.required_main_panel_ampacity(4.81) == 125
-        # 9.61 kW → 40.04 A → busbar ≥ 200.2 → 225
-        assert hares.required_main_panel_ampacity(9.61) == 225
+        # 4810 W → 20.04 A backfeed → busbar ≥ 100.2 → 125
+        assert hares.required_main_panel_ampacity(target_ac_w=4810.0) == 125
+        # 9610 W → 40.04 A → busbar ≥ 200.2 → 225
+        assert hares.required_main_panel_ampacity(target_ac_w=9610.0) == 225
 
     def test_saturates_at_400(self):
-        assert hares.required_main_panel_ampacity(100.0) == 400
+        assert hares.required_main_panel_ampacity(target_ac_w=100000.0) == 400

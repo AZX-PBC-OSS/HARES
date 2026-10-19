@@ -18,10 +18,10 @@ The EV charger models Level 1 and Level 2 residential charging with stochastic d
 ### Power Tapering
 
 - **PyBaMM LUT**: optional 4D curve (soc, temp, c_rate, soh → power_fraction). A configured LUT's temperature axis **is** the temperature-dependent capability — a measured curve already contains the manufacturer's low-temperature derate — so the linear BMS ramp below is *not* multiplied on top of it (one physical effect, applied once)
-- **LUT c-rate divisor**: the charge power over the degradation-adjusted rating (`rated × SOH`) — the shared `pack_electrical` rule, the same convention the stationary Battery's `capacity_kwh_nominal` follows (OCHRE `Battery.py`, degradation-adjusted nominal). Temperature enters the lookup only through the LUT's own axes, never through the divisor — a temperature-derated divisor would apply the reversible derate twice (≈1.3× c-rate inflation at 0 °C)
+- **LUT c-rate divisor**: the charge power over the degradation-adjusted rating (`rated × SOH`) — the shared `pack_electrical` rule, the same convention the stationary Battery's nominal capacity follows (OCHRE `Battery.py`, degradation-adjusted nominal). The c-rate is per hour (uom's frequency unit). Temperature enters the lookup only through the LUT's own axes, never through the divisor — a temperature-derated divisor would apply the reversible derate twice (≈1.3× c-rate inflation at 0 °C)
 - **Temperature derating** (no LUT): linear ramp from 0% (below `min_charge_temp_c` = 0 °C, the Li-plating cutoff — Battery University BU-410) to 100% (above `full_power_temp_c` = 10 °C)
 - **Plating cutoff**: charge power is zero at/below `min_charge_temp_c` unconditionally — including with a LUT, whose measurement regime normally starts above the cutoff; a curve cannot grant permission the BMS physics denies
-- **Taper limit**: prevents SOC overshoot: `taper_kw = (soc_limit - soc) * capacity / dt / efficiency` on the charge leg
+- **Taper limit**: prevents SOC overshoot: the taper power `(soc_limit - soc) * capacity / dt / efficiency` (W) on the charge leg
 - **Supply cap & priority**: the charger's AC input (charge leg + heater AC-equivalent) is bounded by `min(rating, power_limit)`; below the plating cutoff the heater takes the bound, above it charging draws first and the heater takes the remainder
 - **DR**: the demand-response fraction is a multiplier on the allocated total (a commanded zero zeroes the port)
 
@@ -29,7 +29,7 @@ The EV charger models Level 1 and Level 2 residential charging with stochastic d
 
 Aligned with the stationary Battery's architecture (one shared pack-electrical home for the terminal-voltage solve and I²R):
 
-- **Thermal mass**: capacity-derived — `capacity_kwh × 6.4 kg/kWh × 1000 J/(kg·K)` ≈ 480 kJ/K for 75 kWh (Tesla Model 3 LR pack mass; Li-ion cell specific heat at the 800–1100 J/(kg·K) calorimetry band's midpoint) → day-scale relaxation (τ = C/UA ≈ 8.5 h)
+- **Thermal mass**: capacity-derived — the pack's kWh capacity × 6.4 kg/kWh × 1000 J/(kg·K) ≈ 480 kJ/K for 75 kWh (Tesla Model 3 LR pack mass; Li-ion cell specific heat at the 800–1100 J/(kg·K) calorimetry band's midpoint) → day-scale relaxation (τ = C/UA ≈ 8.5 h)
 - **UA**: area-scaled from the Battery's enclosed-pack 5 W/K (`5.0 × (capacity/13.5)^(2/3)`; 15.7 W/K at 75 kWh)
 - **Pack heating**: I²R through the cell resistance only (96S topology, 5 mΩ cells default, `n_series`/`n_parallel`/`cell_resistance_ohm` configurable). The AC→DC conversion loss dissipates in the charger, never the cells
 - **Initialization**: explicit `battery_temp_c` config, else outdoor ambient (the Battery's cascade; the EV has no zone)
@@ -137,7 +137,7 @@ Both uses key on the **inverter leg** — the charge/discharge conversion power 
 
 **Default runs are bit-identical**: with `power_factor=1.0` (default), `compute_reactive_kvar` returns 0.0 — pre-existing simulations produce identical real power, energy, and thermal results.
 
-The EV declares `REACTIVE` core capability and `REACTIVE_SETPOINT | POWER_FACTOR_SETPOINT` control capabilities. `CoreOutput.flows.reactive_power_kvar` is `Some(q)` with signed Q matching the port.
+The EV declares `REACTIVE` core capability and `REACTIVE_SETPOINT | POWER_FACTOR_SETPOINT` control capabilities. `CoreOutput.flows.reactive_power_var` is `Some(q)` (VAR) with signed Q matching the port.
 
 For background on why and how other equipment handles reactive power, see [power-factor.md](./power-factor.md).
 

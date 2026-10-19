@@ -58,9 +58,9 @@ def test_gas_furnace_electric_power_is_low():
 
     for _ in dw.timesteps():
         r = dw.step()
-        # Gas furnace fan + background loads should stay under 5 kW
-        assert r["net_electric_power_kw"] < 5.0, \
-            f"Gas furnace electric draw {r['net_electric_power_kw']} kW unreasonably high"
+        # Gas furnace fan + background loads should stay under 5000 W
+        assert r["net_electric_power_w"] < 5000.0, \
+            f"Gas furnace electric draw {r['net_electric_power_w']} W unreasonably high"
         # Gas heating should be active (it's a January morning in Denver)
         assert r["gas_power_w"] >= 0
 
@@ -76,8 +76,8 @@ def test_heat_pump_increases_electric_consumption_vs_gas_furnace():
     bp_hp.add_equipment(ASHPCooler("ASHP Cooler", capacity_w=10000, seer=18.0))
     hp_steps = _collect_step_powers(bp_hp)
 
-    gas_elec_avg = sum(s["net_electric_power_kw"] for s in gas_steps) / len(gas_steps)
-    hp_elec_avg = sum(s["net_electric_power_kw"] for s in hp_steps) / len(hp_steps)
+    gas_elec_avg = sum(s["net_electric_power_w"] for s in gas_steps) / len(gas_steps)
+    hp_elec_avg = sum(s["net_electric_power_w"] for s in hp_steps) / len(hp_steps)
 
     # Heat pump should draw more electric power than gas furnace (both have cooling)
     assert hp_elec_avg > gas_elec_avg, \
@@ -112,12 +112,12 @@ def test_swap_wh_to_hpwh_does_not_panic():
     steps = []
     for _ in dw.timesteps():
         r = dw.step()
-        assert abs(r["net_electric_power_kw"]) < 1e9
-        assert r["net_electric_power_kw"] >= 0
+        assert abs(r["net_electric_power_w"]) < 1e9
+        assert r["net_electric_power_w"] >= 0
         steps.append(r)
 
     # HPWH must draw some electric power (it actually runs)
-    any_elec = any(s["net_electric_power_kw"] > 0.0 for s in steps)
+    any_elec = any(s["net_electric_power_w"] > 0.0 for s in steps)
     assert any_elec, "HPWH produced no electric load — equipment may not be running"
 
     # No gas equipment remains — gas power should drop to background only
@@ -126,9 +126,9 @@ def test_swap_wh_to_hpwh_does_not_panic():
         f"HPWH should not consume gas, but saw gas use: {gas_powers}"
 
     # Residential HPWH electric power should be well under 15 kW
-    max_elec = max(s["net_electric_power_kw"] for s in steps)
-    assert max_elec < 15.0, \
-        f"HPWH electric power {max_elec:.1f} kW unreasonably high for residential unit"
+    max_elec = max(s["net_electric_power_w"] for s in steps)
+    assert max_elec < 15000.0, \
+        f"HPWH electric power {max_elec:.1f} W unreasonably high for residential unit"
 
 
 def test_swap_wh_to_electric_resistance_does_not_panic():
@@ -153,12 +153,12 @@ def test_swap_wh_to_electric_resistance_does_not_panic():
     steps = []
     for _ in dw.timesteps():
         r = dw.step()
-        assert abs(r["net_electric_power_kw"]) < 1e9
-        assert r["net_electric_power_kw"] >= 0
+        assert abs(r["net_electric_power_w"]) < 1e9
+        assert r["net_electric_power_w"] >= 0
         steps.append(r)
 
     # Electric resistance WH must draw some power (it actually runs)
-    any_elec = any(s["net_electric_power_kw"] > 0.0 for s in steps)
+    any_elec = any(s["net_electric_power_w"] > 0.0 for s in steps)
     assert any_elec, "ERWH produced no electric load — equipment may not be running"
 
     # No gas equipment remains — gas power should drop to background only
@@ -167,12 +167,12 @@ def test_swap_wh_to_electric_resistance_does_not_panic():
         f"ERWH should not consume gas, but saw gas use: {gas_powers}"
 
     # Electric resistance is less efficient than HPWH — it should draw substantial power
-    # (> 1 kW when actively heating a 4500W element)
-    max_elec = max(s["net_electric_power_kw"] for s in steps)
-    assert max_elec > 1.0, \
-        f"ERWH electric power {max_elec:.1f} kW too low for a 4500W resistance element"
-    assert max_elec < 15.0, \
-        f"ERWH electric power {max_elec:.1f} kW unreasonably high for residential unit"
+    # (> 1000 W when actively heating a 4500W element)
+    max_elec = max(s["net_electric_power_w"] for s in steps)
+    assert max_elec > 1000.0, \
+        f"ERWH electric power {max_elec:.1f} W too low for a 4500W resistance element"
+    assert max_elec < 15000.0, \
+        f"ERWH electric power {max_elec:.1f} W unreasonably high for residential unit"
 
 
 def test_autosized_heat_pump_produces_reasonable_electric_load():
@@ -195,7 +195,7 @@ def test_autosized_heat_pump_produces_reasonable_electric_load():
     powers = []
     for _ in dw.timesteps():
         r = dw.step()
-        p = r["net_electric_power_kw"]
+        p = r["net_electric_power_w"]
         assert abs(p) < 1e9, f"Power unreasonably large: {p}"
         powers.append(p)
 
@@ -226,12 +226,12 @@ def test_full_swap_gas_to_electric_does_not_panic():
     for _ in dw.timesteps():
         r = dw.step()
         assert r is not None
-        assert abs(r["net_electric_power_kw"]) < 1e9
-        assert r["net_electric_power_kw"] >= 0
+        assert abs(r["net_electric_power_w"]) < 1e9
+        assert r["net_electric_power_w"] >= 0
         steps.append(r)
 
     # After full electrification, all electric equipment must draw some power
-    any_elec = any(s["net_electric_power_kw"] > 0.0 for s in steps)
+    any_elec = any(s["net_electric_power_w"] > 0.0 for s in steps)
     assert any_elec, "Fully electrified dwelling produced no electric load"
 
     # No gas equipment remains — gas power should drop to near zero
@@ -327,8 +327,8 @@ def test_gas_wh_vs_electric_wh_energy_comparison():
     elec_steps = _collect_step_powers(bp_elec)
 
     # Electric WH should produce higher peak electric draw than gas WH
-    gas_max_elec = max(s["net_electric_power_kw"] for s in gas_steps)
-    elec_max_elec = max(s["net_electric_power_kw"] for s in elec_steps)
+    gas_max_elec = max(s["net_electric_power_w"] for s in gas_steps)
+    elec_max_elec = max(s["net_electric_power_w"] for s in elec_steps)
     assert elec_max_elec > gas_max_elec, \
         f"ERWH peak electric {elec_max_elec:.3f} kW not greater than gas WH peak {gas_max_elec:.3f} kW"
 
@@ -339,5 +339,5 @@ def test_gas_wh_vs_electric_wh_energy_comparison():
         f"Gas WH gas avg {gas_avg:.0f} W not greater than ERWH dwelling gas avg {elec_gas_avg:.0f} W"
 
     # Both dwellings should stay within reasonable bounds
-    assert gas_max_elec < 15.0, f"Gas WH peak electric {gas_max_elec:.1f} kW unreasonably high"
-    assert elec_max_elec < 15.0, f"ERWH peak electric {elec_max_elec:.1f} kW unreasonably high"
+    assert gas_max_elec < 15000.0, f"Gas WH peak electric {gas_max_elec:.1f} W unreasonably high"
+    assert elec_max_elec < 15000.0, f"ERWH peak electric {elec_max_elec:.1f} W unreasonably high"

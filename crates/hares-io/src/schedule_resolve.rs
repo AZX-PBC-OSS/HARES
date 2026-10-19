@@ -2,7 +2,7 @@
 //!
 //! Mirrors OCHRE's `SCHEDULE_NAMES` mapping and `convert_power_column` logic:
 //! normalized schedule fractions are scaled to kW using
-//! `max_kw = annual_kwh / 8760 / mean(fraction)`.
+//! `max_w = annual_kwh / 8760 / mean(fraction)`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use hares_equipment::{
     ConfigPayload, ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig,
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
-use hares_physics::constants::HOURS_PER_YEAR;
+use hares_physics::constants::SECONDS_PER_YEAR;
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     BoundaryPolicy, FuelType, HaresError, ScheduleSourceConfig, Warning, normalize_ascii,
@@ -647,7 +647,7 @@ fn parse_csv_line(line: &str) -> Vec<String> {
 /// Compute the annual mean of a schedule profile analytically.
 ///
 /// This must be used instead of averaging the (potentially short) simulation
-/// window, because `max_kw = annual_mean_kw / annual_mean_fraction` requires
+/// window, because `max_w = annual_mean_kw / annual_mean_fraction` requires
 /// the full-year mean regardless of simulation duration.
 ///
 /// Monthly multipliers are weighted by days-per-month (non-leap year) to
@@ -1743,25 +1743,25 @@ fn inject_power_schedule(
         // pre-period schedules), the column's shape from the zeroed one.
         let mean_fraction: f64 = column_mean(pre_period_columns, col_idx, &fraction_series);
 
-        let max_kw = resolve_max_kw(
+        let max_w = resolve_max_w(
             spec,
             mean_fraction,
             &format!("the schedule column '{col_name}'"),
         )?;
 
-        let kw_series: Vec<f64> = fraction_series.iter().map(|f| f * max_kw).collect();
+        let w_series: Vec<f64> = fraction_series.iter().map(|f| f * max_w).collect();
         let derived_col_idx = schedule
             .append_derived_column(
                 &format!(
-                    "power_schedule_kw_{}",
+                    "power_schedule_w_{}",
                     normalize_schedule_col_name(spec.name.as_str())
                 ),
-                kw_series,
+                w_series,
                 ColumnAggregation::Mean,
             )
             .map_err(|err| {
                 let msg = format!(
-                    "failed to append derived kW column for {}: {err}",
+                    "failed to append derived power column for {}: {err}",
                     spec.name
                 );
                 tracing::error!(equipment = %spec.name, error = %err, "{msg}");
@@ -1775,18 +1775,18 @@ fn inject_power_schedule(
                 "schedule_resolve: no CSV column '{}' for '{}'; using HPXML profile fractions",
                 col_name, mapping.equipment_name
             );
-            let max_kw = resolve_max_kw(
+            let max_w = resolve_max_w(
                 spec,
                 annual_mean_fraction(&profile),
                 "the HPXML schedule fractions on the spec",
             )?;
-            inject_compact_profile_power(spec, &profile, max_kw);
+            inject_compact_profile_power(spec, &profile, max_w);
         } else if let Some(profile) = profiles.find(mapping.equipment_name) {
             warn!(
                 "schedule_resolve: no CSV column '{}' for '{}'; using default profile",
                 col_name, mapping.equipment_name
             );
-            let max_kw = resolve_max_kw(
+            let max_w = resolve_max_w(
                 spec,
                 annual_mean_fraction(profile),
                 &format!(
@@ -1794,7 +1794,7 @@ fn inject_power_schedule(
                     mapping.equipment_name
                 ),
             )?;
-            inject_compact_profile_power(spec, profile, max_kw);
+            inject_compact_profile_power(spec, profile, max_w);
         } else {
             return Err(HaresError::Io(format!(
                 "equipment '{}' has no schedule source: no '{}' column in the \
@@ -1995,36 +1995,38 @@ fn resolve_hpxml_profile(spec: &EquipmentSpec) -> Option<DefaultScheduleProfile>
 
 /// Derive peak power from annual energy. For gas appliances, the total includes
 /// both electric parasitic and gas combustion energy (EA-004 F1 fix).
-fn determine_max_kw(spec: &EquipmentSpec, mean_fraction: f64) -> Option<f64> {
+fn determine_max_w(spec: &EquipmentSpec, mean_fraction: f64) -> Option<f64> {
     if let Some(max_w) = spec
         .parameters
         .get("max_electric_power_w")
         .and_then(|v| v.as_f64())
     {
-        return Some(max_w / 1000.0);
+        return Some(max_w);
     }
 
-    let annual_electric_kwh = spec
+    // The raw keys are J (and J for the gas path, the HARES therm's own
+    // conversion); the derived mean power is W: the annual energy over the
+    // year's seconds, divided once.
+    let annual_electric_j = spec
         .parameters
-        .get("annual_electric_kwh")
+        .get("annual_electric_j")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
 
     // Gas appliances (dryers, cooking ranges) have combustion energy in addition
     // to electric parasitic.
-    let annual_gas_kwh = hares_physics::units::energy_therms_to_kwh(
-        spec.parameters
-            .get("annual_gas_therms")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
-    );
+    let annual_gas_j = spec
+        .parameters
+        .get("annual_gas_j")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
 
-    let annual_kwh = annual_electric_kwh + annual_gas_kwh;
-    if annual_kwh <= 0.0 || mean_fraction <= 0.0 {
+    let annual_j = annual_electric_j + annual_gas_j;
+    if annual_j <= 0.0 || mean_fraction <= 0.0 {
         return None;
     }
 
-    Some((annual_kwh / HOURS_PER_YEAR) / mean_fraction)
+    Some((annual_j / SECONDS_PER_YEAR) / mean_fraction)
 }
 
 /// Determine an equipment's peak power from its schedule source, or fail
@@ -2035,16 +2037,16 @@ fn determine_max_kw(spec: &EquipmentSpec, mean_fraction: f64) -> Option<f64> {
 /// energy is never drawn), and a spec that declares its annual energy as
 /// zero (there is no energy to scale). An equipment whose schedule does
 /// run it and which declares neither a rated power (`max_electric_power_w`)
-/// nor annual energy (`annual_electric_kwh`, `annual_gas_therms`) has no
+/// nor annual energy (`annual_electric_j`, `annual_gas_j`) has no
 /// determinable power: the returned error names the equipment and the
 /// missing field.
-fn resolve_max_kw(
+fn resolve_max_w(
     spec: &EquipmentSpec,
     mean_fraction: f64,
     source: &str,
 ) -> Result<f64, HaresError> {
-    match determine_max_kw(spec, mean_fraction) {
-        Some(max_kw) => Ok(max_kw),
+    match determine_max_w(spec, mean_fraction) {
+        Some(max_w) => Ok(max_w),
         None if mean_fraction <= 0.0 || spec_declares_a_power_field(spec) => Ok(0.0),
         None => Err(undeterminable_schedule_power_error(spec, source)),
     }
@@ -2054,19 +2056,19 @@ fn resolve_max_kw(
 /// declared zero is a determined power, an absent one is not.
 fn spec_declares_a_power_field(spec: &EquipmentSpec) -> bool {
     spec.parameters.contains_key("max_electric_power_w")
-        || spec.parameters.contains_key("annual_electric_kwh")
-        || spec.parameters.contains_key("annual_gas_therms")
+        || spec.parameters.contains_key("annual_electric_j")
+        || spec.parameters.contains_key("annual_gas_j")
 }
 
 /// Build the resolve error for an equipment whose schedule power cannot be
 /// determined: the spec carries neither a rated power (`max_electric_power_w`)
-/// nor annual energy (`annual_electric_kwh`, `annual_gas_therms`). Names the
+/// nor annual energy (`annual_electric_j`, `annual_gas_j`). Names the
 /// equipment and the missing field.
 fn undeterminable_schedule_power_error(spec: &EquipmentSpec, source: &str) -> HaresError {
     let msg = format!(
         "equipment '{}' has a schedule source ({source}) but no \
          determinable power: the spec carries no 'max_electric_power_w', \
-         no 'annual_electric_kwh' and no 'annual_gas_therms'",
+         no 'annual_electric_j' and no 'annual_gas_j'",
         spec.name
     );
     tracing::error!(equipment = %spec.name, "{msg}");
@@ -2103,21 +2105,14 @@ fn inject_event_schedule(
             Value::from(col_idx as u64),
         );
 
-        // Compute kW time series from fractions × max_kw for deterministic event extraction.
+        // Compute kW time series from fractions × max_w for deterministic event extraction.
         let mean_fraction: f64 =
             fraction_series.iter().copied().sum::<f64>() / fraction_series.len() as f64;
-        if let Some(max_kw) = determine_max_kw(spec, mean_fraction) {
-            // One conversion per value at the write: the series enters in
-            // W (SI); the load converts back to its kW working value once
-            // at its read.
+        if let Some(max_w) = determine_max_w(spec, mean_fraction) {
+            // The series values are fractions x the W maximum: W (SI).
             let w_series: Vec<Value> = fraction_series
                 .iter()
-                .map(|f| {
-                    Value::from(
-                        uom::si::f64::Power::new::<uom::si::power::kilowatt>(f * max_kw)
-                            .get::<uom::si::power::watt>(),
-                    )
-                })
+                .map(|f| Value::from(f * max_w))
                 .collect();
             spec.parameters
                 .insert("event_power_w_series".to_string(), Value::Array(w_series));
@@ -2145,7 +2140,7 @@ fn inject_event_schedule(
 ///
 /// The power is the spec's declared `power_w`; a Ventilation Fan's rated
 /// power is its declared fan power (`fan_power_w`, or the supply/exhaust
-/// pair); a spec that declares neither resolves through [`resolve_max_kw`],
+/// pair); a spec that declares neither resolves through [`resolve_max_w`],
 /// so a spec with no determinable power is a resolve error naming the
 /// equipment and the missing field, never a silent 0 kW constant.
 fn inject_constant_power_schedule(
@@ -2168,12 +2163,12 @@ fn inject_constant_power_schedule(
         .get("power_w")
         .and_then(|v| v.as_f64())
         .or_else(|| fan_rated_power_w(spec));
-    let power_kw = match power_w {
-        Some(power_w) => power_w / 1000.0,
-        None => resolve_max_kw(spec, 1.0, "the constant-power schedule source")?,
+    let power_w = match power_w {
+        Some(power_w) => power_w,
+        None => resolve_max_w(spec, 1.0, "the constant-power schedule source")?,
     };
 
-    inject_compact_constant_power(spec, power_kw);
+    inject_compact_constant_power(spec, power_w);
     Ok(())
 }
 
@@ -2207,19 +2202,15 @@ fn inject_compact_column_power(spec: &mut EquipmentSpec, col_idx: usize) {
 fn inject_compact_profile_power(
     spec: &mut EquipmentSpec,
     profile: &DefaultScheduleProfile,
-    max_kw: f64,
+    max_w: f64,
 ) {
     spec.parameters.insert(
         "power_schedule_source".to_string(),
         Value::from("daily_profile"),
     );
-    spec.parameters.insert(
-        "power_profile_max_w".to_string(),
-        Value::from(
-            uom::si::f64::Power::new::<uom::si::power::kilowatt>(max_kw)
-                .get::<uom::si::power::watt>(),
-        ),
-    );
+    // The derived max is W (SI) already.
+    spec.parameters
+        .insert("power_profile_max_w".to_string(), Value::from(max_w));
     spec.parameters.insert(
         "power_profile_weekday".to_string(),
         Value::Array(
@@ -2252,17 +2243,12 @@ fn inject_compact_profile_power(
     );
 }
 
-fn inject_compact_constant_power(spec: &mut EquipmentSpec, constant_kw: f64) {
+fn inject_compact_constant_power(spec: &mut EquipmentSpec, constant_w: f64) {
     spec.parameters
         .insert("power_schedule_source".to_string(), Value::from("constant"));
-    // One conversion at the write: the raw key enters in W (SI).
-    spec.parameters.insert(
-        "power_constant_w".to_string(),
-        Value::from(
-            uom::si::f64::Power::new::<uom::si::power::kilowatt>(constant_kw)
-                .get::<uom::si::power::watt>(),
-        ),
-    );
+    // The raw key is W (SI).
+    spec.parameters
+        .insert("power_constant_w".to_string(), Value::from(constant_w));
 }
 
 fn normalize_schedule_col_name(name: &str) -> String {
@@ -2323,7 +2309,10 @@ fn ensure_specs_for_csv_columns(
             continue;
         };
         let mut params = Map::new();
-        params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+        params.insert(
+            "annual_electric_j".to_string(),
+            Value::from(annual_kwh * 3.6e6),
+        );
         specs.push(build_spec(
             mapping.equipment_name.to_string(),
             FuelType::Electric,
@@ -2469,7 +2458,7 @@ pub(crate) fn schedule_column_schemas() -> (
 mod tests {
     use std::collections::HashMap;
 
-    use super::{determine_max_kw, inject_schedule_into_specs};
+    use super::{determine_max_w, inject_schedule_into_specs};
     use crate::defaults::DefaultsStore;
     use crate::{EquipmentSpec, ScheduleTimeSeries};
     use chrono::{DateTime, Duration};
@@ -2629,7 +2618,10 @@ mod tests {
 
     fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
         let mut parameters = Map::new();
-        parameters.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+        parameters.insert(
+            "annual_electric_j".to_string(),
+            Value::from(annual_kwh * 3.6e6),
+        );
         EquipmentSpec {
             instance_name: None,
             name: name.to_string(),
@@ -2653,7 +2645,7 @@ mod tests {
     ) -> EquipmentSpec {
         let mut parameters = Map::new();
         if let Some(kwh) = annual_kwh {
-            parameters.insert("annual_electric_kwh".to_string(), Value::from(kwh));
+            parameters.insert("annual_electric_j".to_string(), Value::from(kwh * 3.6e6));
         }
         if let Some(max_w) = max_power_w {
             parameters.insert("max_electric_power_w".to_string(), Value::from(max_w));
@@ -2820,8 +2812,8 @@ mod tests {
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!(
-            (peak - 0.5).abs() < 1e-9,
-            "expected peak 0.5 kW, got {peak}"
+            (peak - 500.0).abs() < 1e-9,
+            "expected peak 500 W, got {peak}"
         );
 
         assert_eq!(
@@ -2861,7 +2853,10 @@ mod tests {
 
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        assert!((peak - 0.5).abs() < 1e-9, "max power should win precedence");
+        assert!(
+            (peak - 500.0).abs() < 1e-9,
+            "max power should win precedence"
+        );
     }
 
     /// A Ventilation Fan spec with no power input fails the resolve with the
@@ -2871,7 +2866,7 @@ mod tests {
     fn constant_power_schedule_without_a_power_is_a_resolve_error() {
         let mut schedule = make_schedule(24);
         let mut spec = make_spec("Ventilation Fan", 0.0);
-        spec.parameters.remove("annual_electric_kwh");
+        spec.parameters.remove("annual_electric_j");
         let mut specs = vec![spec];
         let err = inject_schedule_into_specs(
             &mut specs,
@@ -2933,7 +2928,7 @@ mod tests {
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
 
         let mean_fraction = (0.2 + 1.0 + 0.4) / 3.0;
-        let expected_peak = (1200.0 / 8760.0) / mean_fraction;
+        let expected_peak = (1200.0 / 8760.0) / mean_fraction * 1000.0;
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!(
             (peak - expected_peak).abs() < 1e-9,
@@ -3013,7 +3008,7 @@ mod tests {
             "the error must name the equipment, got: {message}"
         );
         assert!(
-            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            message.contains("max_electric_power_w") && message.contains("annual_electric_j"),
             "the error must name the missing fields, got: {message}"
         );
         assert!(
@@ -3052,7 +3047,7 @@ mod tests {
             "the error must name the equipment, got: {message}"
         );
         assert!(
-            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            message.contains("max_electric_power_w") && message.contains("annual_electric_j"),
             "the error must name the missing fields, got: {message}"
         );
         assert!(
@@ -3080,7 +3075,7 @@ mod tests {
             "the error must name the equipment, got: {message}"
         );
         assert!(
-            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            message.contains("max_electric_power_w") && message.contains("annual_electric_j"),
             "the error must name the missing fields, got: {message}"
         );
         assert!(
@@ -3132,12 +3127,12 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("an all-zero HPXML profile resolves to a determined 0 kW");
-        let max_kw = specs[0]
+        let max_w = specs[0]
             .parameters
             .get("power_profile_max_w")
             .and_then(Value::as_f64)
             .expect("power_profile_max_w must be present");
-        assert_eq!(max_kw, 0.0);
+        assert_eq!(max_w, 0.0);
     }
 
     #[test]
@@ -3148,7 +3143,7 @@ mod tests {
         let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
         let mut spec = make_spec_with_power("Indoor Lighting", None, None);
         spec.parameters
-            .insert("annual_electric_kwh".to_string(), Value::from(0.0));
+            .insert("annual_electric_j".to_string(), Value::from(0.0));
         let mut specs = vec![spec];
         inject_schedule_into_specs(
             &mut specs,
@@ -4055,11 +4050,11 @@ mod tests {
     }
 
     // =======================================================================
-    // Quantitative: determine_max_kw with both electric and gas annual energy
+    // Quantitative: determine_max_w with both electric and gas annual energy
     // =======================================================================
 
     #[test]
-    fn determine_max_kw_electric_plus_gas_therms() {
+    fn determine_max_w_electric_plus_gas_therms() {
         let annual_electric_kwh = 44.0;
         let annual_gas_therms = 153.0;
         let fractions = [0.2, 1.0, 0.4];
@@ -4067,12 +4062,17 @@ mod tests {
 
         let mut parameters = Map::new();
         parameters.insert(
-            "annual_electric_kwh".to_string(),
-            Value::from(annual_electric_kwh),
+            "annual_electric_j".to_string(),
+            Value::from(annual_electric_kwh * 3.6e6),
         );
         parameters.insert(
-            "annual_gas_therms".to_string(),
-            Value::from(annual_gas_therms),
+            "annual_gas_j".to_string(),
+            Value::from(
+                uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(
+                    annual_gas_therms,
+                )
+                .get::<uom::si::energy::joule>(),
+            ),
         );
         let spec = EquipmentSpec {
             instance_name: None,
@@ -4089,16 +4089,20 @@ mod tests {
             cooling_setpoint_source: None,
         };
 
-        let result = determine_max_kw(&spec, mean_fraction);
-        assert!(result.is_some(), "determine_max_kw must return Some");
+        let result = determine_max_w(&spec, mean_fraction);
+        assert!(result.is_some(), "determine_max_w must return Some");
 
-        let annual_gas_kwh = hares_physics::units::energy_therms_to_kwh(annual_gas_therms);
-        let expected = (annual_electric_kwh + annual_gas_kwh) / 8760.0 / mean_fraction;
+        let annual_gas_j = annual_gas_therms
+            * uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(1.0)
+                .get::<uom::si::energy::joule>();
+        let expected_w = (annual_electric_kwh * 3.6e6 + annual_gas_j)
+            / hares_physics::constants::SECONDS_PER_YEAR
+            / mean_fraction;
         let actual = result.unwrap();
 
         assert!(
-            (actual - expected).abs() < 1e-9,
-            "expected {expected:.6}, got {actual:.6}"
+            (actual - expected_w).abs() < 1e-6,
+            "expected {expected_w:.6}, got {actual:.6}"
         );
     }
 
@@ -5030,7 +5034,10 @@ mod tests {
     /// fixtures carry.
     fn melts_spec_with_residual_energy(annual_kwh: f64) -> EquipmentSpec {
         let mut params = Map::new();
-        params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+        params.insert(
+            "annual_electric_j".to_string(),
+            Value::from(annual_kwh * 3.6e6),
+        );
         params.insert("sensible_gain_fraction".to_string(), Value::from(0.855));
         params.insert("latent_gain_fraction".to_string(), Value::from(0.045));
         EquipmentSpec {
@@ -5071,14 +5078,14 @@ mod tests {
         assert_eq!(specs[0].name, "Microwave");
         assert_eq!(specs[0].fuel_type, FuelType::Electric);
 
-        let annual_kwh = specs[0]
+        let annual_j = specs[0]
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(Value::as_f64)
-            .expect("annual_electric_kwh must be set");
+            .expect("annual_electric_j must be set");
         assert!(
-            (annual_kwh - 100.0).abs() < 1e-12,
-            "default annual kWh should be 100"
+            (annual_j - 100.0 * 3.6e6).abs() < 1e-6,
+            "default annual energy should be 100 kWh in joules"
         );
 
         let schedule_col = specs[0]
@@ -5171,14 +5178,14 @@ mod tests {
             .iter()
             .find(|s| s.name == "MELs")
             .expect("the residual MELs spec stays");
-        let annual_kwh = mels
+        let annual_j = mels
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(Value::as_f64)
-            .expect("annual_electric_kwh must be set");
+            .expect("annual_electric_j must be set");
         assert!(
-            (annual_kwh - 1119.0 * 2.42).abs() < 1e-9,
-            "the residual's declared energy is untouched: {annual_kwh}"
+            (annual_j - 1119.0 * 2.42 * 3.6e6).abs() < 1e-3,
+            "the residual's declared energy is untouched: {annual_j}"
         );
         assert!(
             warnings.iter().any(|w| w.source.as_ref() == "schedule"

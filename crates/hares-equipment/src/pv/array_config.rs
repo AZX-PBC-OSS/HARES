@@ -97,7 +97,7 @@ impl ModuleType {
 pub struct PvArray {
     pub tilt_deg: f64,
     pub azimuth_deg: f64,
-    pub capacity_kw: f64,
+    pub capacity_w: f64,
     pub noct_c: f64,
     pub module_type: ModuleType,
     pub array_type: ArrayType,
@@ -113,7 +113,7 @@ impl PvArray {
     /// Enforces:
     /// - `tilt_deg ∈ [0, 180]`, finite, not NaN
     /// - `azimuth_deg ∈ [0, 360)`, finite, not NaN
-    /// - `capacity_kw > 0`, finite, not NaN
+    /// - `capacity_w > 0`, finite, not NaN
     /// - `noct_c` finite and positive (> 0)
     pub fn validate(&self) -> Result<(), HaresError> {
         if !self.tilt_deg.is_finite() || !(0.0..=180.0).contains(&self.tilt_deg) {
@@ -128,10 +128,10 @@ impl PvArray {
                 self.azimuth_deg
             )));
         }
-        if !self.capacity_kw.is_finite() || self.capacity_kw <= 0.0 {
+        if !self.capacity_w.is_finite() || self.capacity_w <= 0.0 {
             return Err(HaresError::Equipment(format!(
-                "PvArray capacity_kw must be finite and > 0, got {}",
-                self.capacity_kw
+                "PvArray capacity_w must be finite and > 0, got {}",
+                self.capacity_w
             )));
         }
         if !self.noct_c.is_finite() || self.noct_c <= 0.0 {
@@ -406,7 +406,7 @@ mod tests {
         PvArray {
             tilt_deg: 30.0,
             azimuth_deg: 180.0,
-            capacity_kw: 5.0,
+            capacity_w: 5.0,
             noct_c: 47.0,
             module_type: ModuleType::Standard,
             array_type: ArrayType::OpenRack,
@@ -455,14 +455,14 @@ mod tests {
     #[test]
     fn pv_array_validate_rejects_zero_capacity() {
         let mut array = valid_array();
-        array.capacity_kw = 0.0;
+        array.capacity_w = 0.0;
         assert!(array.validate().is_err());
     }
 
     #[test]
     fn pv_array_validate_rejects_negative_capacity() {
         let mut array = valid_array();
-        array.capacity_kw = -5.0;
+        array.capacity_w = -5.0;
         assert!(array.validate().is_err());
     }
 
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn pv_array_validate_rejects_capacity_nan() {
         let mut array = valid_array();
-        array.capacity_kw = f64::NAN;
+        array.capacity_w = f64::NAN;
         assert!(array.validate().is_err());
     }
 

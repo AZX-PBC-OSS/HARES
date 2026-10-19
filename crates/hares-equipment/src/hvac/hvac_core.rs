@@ -414,7 +414,7 @@ pub struct HvacConfig {
     /// Zone thermal capacitance [kWh/K] for the equivalent battery model.
     /// Populated at init from `EquipmentConfig.zone_capacitance_j_per_k`;
     /// 0.0 means EBM is disabled (no telemetry output).
-    pub zone_capacitance_kwh_per_k: f64,
+    pub zone_capacitance_j_per_k: f64,
 }
 
 /// Runtime state updated every simulation timestep.
@@ -559,7 +559,7 @@ impl HvacEquipment {
                     was_clamped: AtomicBool::new(false),
                     clamp_count: AtomicU64::new(0),
                 },
-                zone_capacitance_kwh_per_k: 0.0,
+                zone_capacitance_j_per_k: 0.0,
             },
             thermostat_fsm: ThermostatFsm::new(ThermalSetpoints {
                 heating_c: 20.0,
@@ -970,11 +970,8 @@ impl HvacEquipment {
         // max_enabled_speed is valid before any DR signal is applied.
         self.set_disabled_speeds(&[]);
 
-        // One conversion at construction: the injected value enters in
-        // J/K (SI); the HVAC core still works in kWh/K.
-        self.config.zone_capacitance_kwh_per_k =
-            uom::si::f64::Energy::new::<uom::si::energy::joule>(config.zone_capacitance_j_per_k)
-                .get::<uom::si::energy::kilowatt_hour>();
+        // The injected value is J/K (SI); the core holds it directly.
+        self.config.zone_capacitance_j_per_k = config.zone_capacitance_j_per_k;
 
         Ok(())
     }

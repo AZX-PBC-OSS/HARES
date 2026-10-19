@@ -83,7 +83,14 @@ use serde::{Deserialize, Serialize};
 /// (the runtime collision the init's static deadband check cannot see),
 /// the count's equipment-side counter in `EquipmentHealthCounts` beside
 /// it. Checkpoints written by v18 builds are rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 19;
+///
+/// v20: the run state is SI (B-14's run-state commit): the billing
+/// state's cumulative energies and peaks, the metrics calculator's
+/// accumulators, the equipment run states and the electrical summary
+/// hold J, W and VAR, and the checkpoint sections carrying them carry
+/// the SI names. Checkpoints written by v19 builds are rejected by the
+/// version gate.
+pub const CHECKPOINT_VERSION: u32 = 20;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -433,12 +440,12 @@ mod tests {
                     battery_kw_slot: None,
                 },
                 accumulators: hares_io::MetricsAccumulatorsSnapshot {
-                    total_electric_energy_kwh: 14.829_037_328_432_975,
-                    total_gas_energy_therms: 3.25,
-                    total_consumption_kwh: 15.1,
-                    total_pv_generation_kwh_abs: 2.5,
-                    peak_import_kw: 4.25,
-                    peak_export_kw: 1.75,
+                    total_electric_energy_j: 14.829_037_328_432_975,
+                    total_gas_energy_j: 3.25,
+                    total_consumption_j: 15.1,
+                    total_pv_generation_j_abs: 2.5,
+                    peak_import_w: 4.25,
+                    peak_export_w: 1.75,
                     energy_by_end_use: BTreeMap::from([("HVAC".to_string(), 9.875)]),
                     peak_by_end_use: BTreeMap::from([
                         ("HVAC".to_string(), Some(4.25)),
@@ -450,25 +457,25 @@ mod tests {
                         buffer: vec![1.0, 2.0, 3.0, 4.0],
                         head: 2,
                         count: 4,
-                        peak_15min_kw: 3.5,
-                        peak_30min_kw: 3.75,
-                        peak_60min_kw: 4.0,
+                        peak_15min_w: 3.5,
+                        peak_30min_w: 3.75,
+                        peak_60min_w: 4.0,
                     },
-                    envelope_window_solar_wh: 1.5,
-                    envelope_opaque_conduction_wh: 2.5,
-                    envelope_window_conduction_wh: 3.5,
-                    envelope_internal_mass_wh: 4.5,
-                    envelope_interior_lwr_wh: 5.5,
-                    envelope_infiltration_wh: 6.5,
-                    envelope_ventilation_wh: 7.5,
-                    envelope_hvac_heating_wh: 8.5,
-                    envelope_hvac_cooling_wh: 9.5,
-                    envelope_internal_gains_wh: 10.5,
-                    envelope_duct_loss_wh: 11.5,
-                    hvac_heating_electric_wh: 12.5,
-                    hvac_cooling_electric_wh: 13.5,
-                    battery_energy_in_kwh: 14.5,
-                    battery_energy_out_kwh: 15.5,
+                    envelope_window_solar_j: 1.5,
+                    envelope_opaque_conduction_j: 2.5,
+                    envelope_window_conduction_j: 3.5,
+                    envelope_internal_mass_j: 4.5,
+                    envelope_interior_lwr_j: 5.5,
+                    envelope_infiltration_j: 6.5,
+                    envelope_ventilation_j: 7.5,
+                    envelope_hvac_heating_j: 8.5,
+                    envelope_hvac_cooling_j: 9.5,
+                    envelope_internal_gains_j: 10.5,
+                    envelope_duct_loss_j: 11.5,
+                    hvac_heating_electric_j: 12.5,
+                    hvac_cooling_electric_j: 13.5,
+                    battery_energy_in_j: 14.5,
+                    battery_energy_out_j: 15.5,
                     total_row_count: 96,
                     setpoint_missing_row_count: 3,
                     nan_step_count: 1,
@@ -537,9 +544,9 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 19;
+    const PINNED_VERSION: u32 = 20;
     const PINNED_SCHEMA_SHA256: &str =
-        "aff064cfac915a29ddef48afedca0e77fc5060932c2ee60f8d4cfb9b44d23ce0";
+        "0dc3a17a1baa28d060169ef00e09ecc4eb16e0fef9b6cf981cf79c01bca23195";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the
@@ -752,12 +759,12 @@ mod tests {
             // Pre-v7 shape: (name, blob) tuples, no schema_version.
             "actor_states": [["OldActor", [1, 2, 3]]],
             "prior_electrical_summary": {
-                "pv_generation_kw": 0.0,
-                "base_load_kw": 0.0,
-                "net_grid_kw": 0.0,
-                "battery_power_kw": 0.0,
-                "ev_power_kw": 0.0,
-                "actual_pv_kw": 0.0,
+                "pv_generation_w": 0.0,
+                "base_load_w": 0.0,
+                "net_grid_w": 0.0,
+                "battery_power_w": 0.0,
+                "ev_power_w": 0.0,
+                "actual_pv_w": 0.0,
             },
         });
         let json_bytes = serde_json::to_vec(&body).expect("serialize test fixture");
@@ -914,12 +921,12 @@ mod tests {
     #[test]
     fn prior_electrical_summary_round_trip() {
         let summary = ElectricalSummary {
-            pv_generation_kw: 5.0,
-            base_load_kw: 2.5,
-            net_grid_kw: 1.0,
-            battery_power_kw: 1.5,
-            ev_power_kw: 3.0,
-            actual_pv_kw: 4.5,
+            pv_generation_w: 5000.0,
+            base_load_w: 2500.0,
+            net_grid_w: 1000.0,
+            battery_power_w: 1500.0,
+            ev_power_w: 3000.0,
+            actual_pv_w: 4500.0,
         };
         let cp = DwellingCheckpoint {
             format_version: CHECKPOINT_VERSION,

@@ -41,15 +41,15 @@ pub enum ActorSeed {
     Battery {
         bms_mode: BmsMode,
         grid_export_rule: GridExportRule,
-        max_charge_kw: f64,
-        max_discharge_kw: f64,
+        max_charge_w: f64,
+        max_discharge_w: f64,
         min_dwell_steps: usize,
     },
     Ev {
         strategy: ChargingStrategy,
         plug_in_policy: PlugInPolicy,
-        capacity_kwh: f64,
-        max_charge_kw: f64,
+        capacity_j: f64,
+        max_charge_w: f64,
         fuel_economy_kwh_per_mi: f64,
     },
 }
@@ -152,11 +152,11 @@ pub(crate) fn linear_temp_derate(temp_c: f64, temp_min: f64, temp_max: f64) -> f
 
 /// How an equipment's expected mean real power can be determined for
 /// premise-level ZIP aggregation. See
-/// [`Equipment::expected_mean_power_kw`].
+/// [`Equipment::expected_mean_power_w`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ExpectedMeanPower {
-    /// Known expected mean draw (kW) from the equipment's own configuration.
-    Kw(f64),
+    /// Known expected mean draw (W, SI) from the equipment's own configuration.
+    W(f64),
     /// The draw follows a column of the dwelling's schedule data (index
     /// into the loaded schedule's columns); the mean must be computed from
     /// that column by the caller.
@@ -421,7 +421,7 @@ pub trait Equipment: Send + Sync {
     ///   reactive-only ZIP synthesized from the *current* effective power
     ///   factor (config baseline, later mutated by `PowerFactorSetpoint`),
     ///   mirroring exactly how their baseline Q is computed. A pending
-    ///   `q_setpoint_kvar` absolute override is runtime control state, not
+    ///   `q_setpoint_var` absolute override is runtime control state, not
     ///   part of the ZIP model, and is not reflected here.
     /// - **`None`** (the default): the equipment has no electrical ZIP
     ///   concept (e.g. generator with Q ≡ 0 by design, protocol bridge,
@@ -478,7 +478,7 @@ pub trait Equipment: Send + Sync {
     ///
     /// This is a pure inspection surface for aggregation; it never
     /// influences stepping.
-    fn expected_mean_power_kw(&self) -> Option<ExpectedMeanPower> {
+    fn expected_mean_power_w(&self) -> Option<ExpectedMeanPower> {
         None
     }
 
@@ -756,7 +756,11 @@ mod tests {
                 active_power_kw, ..
             } = signal
             {
-                self.state_value = *active_power_kw;
+                // The signal carries kW until the control-layer commit; the
+                // recorded value is W (SI), converted once here.
+                self.state_value =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*active_power_kw)
+                        .get::<uom::si::power::watt>();
                 self.telemetry.insert("x", self.state_value);
             }
             Ok(())
@@ -1088,8 +1092,8 @@ mod tests {
     fn equipment_core_output_default_returns_empty() {
         let eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
         let out = eq.core_output();
-        assert!(out.flows.electric_kw.is_none());
-        assert!(out.flows.reactive_power_kvar.is_none());
+        assert!(out.flows.electric_w.is_none());
+        assert!(out.flows.reactive_power_var.is_none());
         assert!(out.flows.fuel_w.is_none());
         assert!(out.state.operating_mode.is_none());
         assert!(out.state.soc.is_none());
@@ -1101,8 +1105,8 @@ mod tests {
         let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
         eq.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.5)),
-                reactive_power_kvar: Some(0.2),
+                electric_w: Some(ElectricPower::Consumption(1.5)),
+                reactive_power_var: Some(0.2),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -1118,7 +1122,7 @@ mod tests {
         };
         let out = eq.core_output();
         assert!(
-            matches!(out.flows.electric_kw, Some(ElectricPower::Consumption(kw)) if (kw - 1.5).abs() < 1e-10)
+            matches!(out.flows.electric_w, Some(ElectricPower::Consumption(kw)) if (kw - 1.5).abs() < 1e-10)
         );
         assert_eq!(out.state.operating_mode, Some(OperatingMode::Charging));
     }

@@ -4,7 +4,7 @@
 //!
 //! PV uses ONE signed bus reactive power `Q` on every channel (port,
 //! [`CoreOutput`], telemetry): **positive = inductive/absorbing vars,
-//! negative = supplying vars**, matching [`CoreFlows::reactive_power_kvar`]
+//! negative = supplying vars**, matching [`CoreFlows::reactive_power_var`]
 //! and the house total. A generating PV at pf < 1 *supplies* vars, so its
 //! baseline bus Q is negative (`-|P_gen| · tan(acos(pf))`). A commanded
 //! [`ControlSignal::ReactiveSetpoint`] passes through as-commanded (positive
@@ -27,7 +27,6 @@ use std::path::Path;
 use std::time::Duration;
 
 use chrono::Datelike;
-use hares_physics::units::power_kw_to_w;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -148,17 +147,17 @@ fn compute_direct_power(
     );
     let gamma = array.module_type.gamma_per_c();
     let temp_derate = (1.0 + gamma * (cell_temp_c - DEFAULT_T_REF_C)).max(0.0);
-    let mut dc_power_kw =
-        array.capacity_kw * (irradiance_w_m2 / IRRADIANCE_AT_STC_W_M2) * temp_derate;
-    dc_power_kw *= 1.0 - system_losses_fraction;
-    let ac_power_kw = (dc_power_kw * inverter_efficiency).max(0.0);
-    (dc_power_kw, ac_power_kw)
+    let mut dc_power_w =
+        array.capacity_w * (irradiance_w_m2 / IRRADIANCE_AT_STC_W_M2) * temp_derate;
+    dc_power_w *= 1.0 - system_losses_fraction;
+    let ac_power_w = (dc_power_w * inverter_efficiency).max(0.0);
+    (dc_power_w, ac_power_w)
 }
 
 #[derive(Clone, Debug)]
 struct ArrayStepOutput {
-    dc_power_kw: f64,
-    ac_power_kw: f64,
+    dc_power_w: f64,
+    ac_power_w: f64,
     irradiance_w_m2: f64,
     cell_temp_c: f64,
     interp_method: Option<InterpolationMethod>,
@@ -170,20 +169,20 @@ struct ArrayStepOutput {
 
 #[derive(Serialize, Deserialize)]
 struct PvCheckpoint {
-    power_limit_kw: Option<f64>,
+    power_limit_w: Option<f64>,
     curtailment_fraction: f64,
     /// Reactive-power override [kVAR]. `None` = no override (baseline
     /// power-factor path); `Some(0.0)` is a commanded zero and forces Q = 0.
-    q_setpoint_kvar: Option<f64>,
+    q_setpoint_var: Option<f64>,
     inverter_priority: InverterPriority,
     power_factor: f64,
     soiling_config: Option<soiling::SoilingConfig>,
     soiling_state: Option<soiling::SoilingState>,
     shading_model: shading::ShadingModel,
-    /// v3: whether an explicit Q override is active (distinct from `q_setpoint_kvar == Some(0.0)`).
+    /// v3: whether an explicit Q override is active (distinct from `q_setpoint_var == Some(0.0)`).
     q_setpoint_active: bool,
     /// v4: source of the active Q override (0 = none, 1 = ReactiveSetpoint,
-    /// 3 = PowerSetpoint.reactive_power_kvar). Must be persisted alongside
+    /// 3 = PowerSetpoint.reactive_power_var). Must be persisted alongside
     /// `q_setpoint_active`: it is a derived field that drives `q_source`
     /// telemetry and the ReactiveSetpoint invariant, so restoring
     /// `q_setpoint_active` without it would leave a stale live value after a
@@ -204,7 +203,7 @@ pub struct PV {
     capacity_w: f64,
     inverter_efficiency: f64,
     /// AC output cap imposed by physical inverter size (DC/AC ratio scenarios).
-    inverter_capacity_kw: Option<f64>,
+    inverter_capacity_w: Option<f64>,
     power_factor: f64,
     system_losses_fraction: f64,
     /// Effective system loss fraction after soiling-component reconciliation.
@@ -214,17 +213,17 @@ pub struct PV {
     /// subtracted from this value to prevent double-counting. Set in
     /// `init_typed()`.
     effective_system_losses_fraction: f64,
-    power_limit_kw: Option<f64>,
+    power_limit_w: Option<f64>,
     curtailment_fraction: f64,
     inverter_priority: InverterPriority,
     inverter_min_pf: Option<f64>,
     /// Reactive-power override (from ReactiveSetpoint or
-    /// PowerSetpoint.reactive_power_kvar) [kVAR]. `None` = no override, fall
+    /// PowerSetpoint.reactive_power_var) [kVAR]. `None` = no override, fall
     /// through to the displacement power-factor baseline; `Some(0.0)` is a
     /// *commanded zero* that forces Q = 0 even over a pf < 1 baseline.
-    q_setpoint_kvar: Option<f64>,
+    q_setpoint_var: Option<f64>,
     /// `true` when an explicit reactive-power override is active (set by
-    /// ReactiveSetpoint or PowerSetpoint.reactive_power_kvar). Cleared by
+    /// ReactiveSetpoint or PowerSetpoint.reactive_power_var). Cleared by
     /// PowerFactorSetpoint. Provides mutual-exclusivity between explicit Q
     /// commands and the PF baseline that `Option<f64>` alone cannot express
     /// (both `None` and `Some(0.0)` are valid Q values, but a caller may
@@ -232,7 +231,7 @@ pub struct PV {
     /// inspecting the kvar magnitude).
     q_setpoint_active: bool,
     /// Source of the most recent explicit Q command: 0 = none,
-    /// 1 = ReactiveSetpoint, 3 = PowerSetpoint.reactive_power_kvar.
+    /// 1 = ReactiveSetpoint, 3 = PowerSetpoint.reactive_power_var.
     /// Used to populate the `q_source` telemetry field.
     q_setpoint_source: u8,
     /// ZIP carrier for the inverter power-factor used to derive the baseline
@@ -244,7 +243,7 @@ pub struct PV {
     /// on init and whenever a [`ControlSignal::PowerFactorSetpoint`] arrives.
     zip_pf: ZipLoad,
     luts_by_surface: HashMap<u32, PvLut>,
-    last_ac_power_kw: f64,
+    last_ac_power_w: f64,
     soiling_config: Option<soiling::SoilingConfig>,
     soiling_state: Option<soiling::SoilingState>,
     shading_model: shading::ShadingModel,
@@ -321,20 +320,20 @@ impl PV {
             surface_resolution_deg: DEFAULT_SURFACE_RESOLUTION_DEG,
             capacity_w: 0.0,
             inverter_efficiency: DEFAULT_INVERTER_EFFICIENCY,
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: DEFAULT_POWER_FACTOR,
             system_losses_fraction: DEFAULT_SYSTEM_LOSSES_FRACTION,
             effective_system_losses_fraction: DEFAULT_SYSTEM_LOSSES_FRACTION,
-            power_limit_kw: None,
+            power_limit_w: None,
             curtailment_fraction: 0.0,
             inverter_priority: InverterPriority::Var,
             inverter_min_pf: Some(0.8),
-            q_setpoint_kvar: None,
+            q_setpoint_var: None,
             q_setpoint_active: false,
             q_setpoint_source: 0,
             zip_pf: ZipLoad::constant_power(),
             luts_by_surface: HashMap::new(),
-            last_ac_power_kw: 0.0,
+            last_ac_power_w: 0.0,
             soiling_config: None,
             soiling_state: None,
             shading_model,
@@ -372,7 +371,7 @@ impl PV {
     /// **Numeric equivalence note:** for the current scalar-only SAM LUT
     /// metadata format (`sam_inv_eff` and `sam_losses` are single `f64`
     /// scalars in `PvLut`, parsed from PySAM `SystemDesign.inv_eff / 100.0`),
-    /// this structural reordering produces `dc_power_kw` and `ac_power_kw`
+    /// this structural reordering produces `dc_power_w` and `ac_power_w`
     /// numerically identical to the pre-fix AC-side multiplication
     /// (commutative under real-number arithmetic). The DC-side structure
     /// only changes results when the LUT format gains a genuine part-load
@@ -406,7 +405,7 @@ impl PV {
             let ghi = env.weather.ghi_w_m2.max(0.0);
             let dni = env.weather.dni_w_m2.max(0.0);
             let dhi = env.weather.dhi_w_m2.max(0.0);
-            let (raw_lut_ac_kw, interp_method) = lut.interpolate(
+            let (raw_lut_ac_w, interp_method) = lut.interpolate(
                 solar_zenith_deg,
                 solar_azimuth_deg,
                 ghi,
@@ -414,7 +413,7 @@ impl PV {
                 dhi,
                 ambient_temp_c,
             );
-            let raw_lut_ac_kw = raw_lut_ac_kw.max(0.0);
+            let raw_lut_ac_w = raw_lut_ac_w.max(0.0);
 
             let cell_temp_c = cell_temperature_noct_wind(
                 ambient_temp_c,
@@ -431,7 +430,7 @@ impl PV {
             // producing the AC output stored in the LUT. Recover the true DC
             // power from the *raw* LUT AC (no soiling/shading), then apply
             // soiling at the DC level before re-converting through HARES'
-            // inverter model. This ensures dc_power_kw reflects true DC-side
+            // inverter model. This ensures dc_power_w reflects true DC-side
             // derating rather than a post-inverter back-calculation.
             //
             // For the current scalar-only LUT metadata format (sam_inv_eff
@@ -449,25 +448,25 @@ impl PV {
             // (cmod_pvwattsv5.cpp:53-54). The Python adapter divides by
             // 100 so the Rust consumer receives fraction form (0.96, 0.14).
             let dc_no_losses = if sam_inv_eff > 0.0 && sam_inv_eff <= 1.0 {
-                raw_lut_ac_kw / sam_inv_eff / (1.0 - sam_losses).max(1e-9)
+                raw_lut_ac_w / sam_inv_eff / (1.0 - sam_losses).max(1e-9)
             } else {
-                raw_lut_ac_kw / self.inverter_efficiency.max(1e-9)
+                raw_lut_ac_w / self.inverter_efficiency.max(1e-9)
             };
 
             // T-0422: Apply soiling and shading as DC-side derating.
             let dc_soiled = dc_no_losses * soiling_ratio * shading_factor;
 
-            let (dc_power_kw, ac_power_kw) = if sam_inv_eff > 0.0 && sam_inv_eff <= 1.0 {
-                let dc_power_kw = dc_soiled * (1.0 - self.effective_system_losses_fraction);
-                let ac_power_kw = dc_power_kw * self.inverter_efficiency;
-                (dc_power_kw, ac_power_kw.max(0.0))
+            let (dc_power_w, ac_power_w) = if sam_inv_eff > 0.0 && sam_inv_eff <= 1.0 {
+                let dc_power_w = dc_soiled * (1.0 - self.effective_system_losses_fraction);
+                let ac_power_w = dc_power_w * self.inverter_efficiency;
+                (dc_power_w, ac_power_w.max(0.0))
             } else {
                 // Legacy LUT without SAM metadata — apply soiling at DC
                 // level under the commutativity assumption. Results may be
                 // biased by ~4-18% due to double-applied inverter efficiency
                 // and missing internal system losses in the legacy LUT.
-                let ac_power_kw = dc_soiled * self.inverter_efficiency;
-                (dc_soiled, ac_power_kw)
+                let ac_power_w = dc_soiled * self.inverter_efficiency;
+                (dc_soiled, ac_power_w)
             };
 
             // Observer capture: record LUT vs direct AC power ratio.
@@ -482,21 +481,21 @@ impl PV {
                     self.inverter_efficiency,
                 );
                 let ratio = if ac_direct > 0.0 {
-                    ac_power_kw / ac_direct
+                    ac_power_w / ac_direct
                 } else {
                     f64::NAN
                 };
                 tracing::debug!(
                     pv_lut_vs_direct_ac_diff_ratio = ratio,
-                    lut_ac_kw = ac_power_kw,
-                    direct_ac_kw = ac_direct,
+                    lut_ac_w = ac_power_w,
+                    direct_ac_w = ac_direct,
                     soiling_lut_path_corrected = sam_inv_eff > 0.0 && sam_inv_eff <= 1.0,
                     soiling_ratio = soiling_ratio,
                     "PV LUT vs direct comparison",
                 );
             }
 
-            // T-0422: dc_power_kw is already computed from dc_no_losses *
+            // T-0422: dc_power_w is already computed from dc_no_losses *
             // soiling_ratio * shading_factor * (1 - effective_system_losses_fraction)
             // at lines 415-428. For the current scalar-only LUT metadata format
             // this is algebraically equivalent to the pre-fix AC-side
@@ -504,7 +503,7 @@ impl PV {
             // constructible that can distinguish DC-side from AC-side soiling
             // placement (see T-0422 Known Limitations). The invariant check
             // previously inserted here was removed because it was vacuous:
-            // dc_power_kw ≤ dc_no_losses * soiling_ratio by construction
+            // dc_power_w ≤ dc_no_losses * soiling_ratio by construction
             // regardless of which side of the inverter division soiling was
             // applied on, due to shading_factor ∈ [0,1] and losses ∈ [0,1]
             // (algebraic identity, not a check of soiling placement).
@@ -516,8 +515,8 @@ impl PV {
             // comparable with the non-LUT path (where irradiance already
             // includes soiling).
             return ArrayStepOutput {
-                dc_power_kw,
-                ac_power_kw,
+                dc_power_w,
+                ac_power_w,
                 irradiance_w_m2,
                 cell_temp_c,
                 interp_method: Some(interp_method),
@@ -538,14 +537,14 @@ impl PV {
         let gamma = array.module_type.gamma_per_c();
         let temp_derate = (1.0 + gamma * (cell_temp_c - DEFAULT_T_REF_C)).max(0.0);
         let dc_before_losses =
-            array.capacity_kw * (irradiance_w_m2 / IRRADIANCE_AT_STC_W_M2) * temp_derate;
-        let mut dc_power_kw = dc_before_losses;
-        dc_power_kw *= 1.0 - self.effective_system_losses_fraction;
-        let ac_power_kw = (dc_power_kw * self.inverter_efficiency).max(0.0);
+            array.capacity_w * (irradiance_w_m2 / IRRADIANCE_AT_STC_W_M2) * temp_derate;
+        let mut dc_power_w = dc_before_losses;
+        dc_power_w *= 1.0 - self.effective_system_losses_fraction;
+        let ac_power_w = (dc_power_w * self.inverter_efficiency).max(0.0);
 
         ArrayStepOutput {
-            dc_power_kw,
-            ac_power_kw,
+            dc_power_w,
+            ac_power_w,
             irradiance_w_m2,
             cell_temp_c,
             interp_method: None,
@@ -557,11 +556,11 @@ impl PV {
     }
 
     fn total_dc_capacity(&self) -> f64 {
-        self.arrays.iter().map(|a| a.capacity_kw).sum()
+        self.arrays.iter().map(|a| a.capacity_w).sum()
     }
 
-    fn apply_inverter_limits(&self, p_kw: f64, q_kvar: f64) -> (f64, f64) {
-        let inv_cap = match self.inverter_capacity_kw {
+    fn apply_inverter_limits(&self, p_w: f64, q_var: f64) -> (f64, f64) {
+        let inv_cap = match self.inverter_capacity_w {
             Some(cap) => cap,
             None => {
                 // When inverter capacity is not configured, default to total
@@ -571,29 +570,29 @@ impl PV {
                 // that bypass init.
                 let cap = self.total_dc_capacity();
                 if cap <= 0.0 {
-                    return (p_kw, q_kvar);
+                    return (p_w, q_var);
                 }
                 cap
             }
         };
 
-        let s = (p_kw * p_kw + q_kvar * q_kvar).sqrt();
+        let s = (p_w * p_w + q_var * q_var).sqrt();
         if s <= inv_cap {
-            return (p_kw, q_kvar);
+            return (p_w, q_var);
         }
 
         match self.inverter_priority {
             InverterPriority::Watt => {
-                let p_out = p_kw.min(inv_cap);
+                let p_out = p_w.min(inv_cap);
                 let q_max = (inv_cap * inv_cap - p_out * p_out).max(0.0).sqrt();
-                let mut q_out = q_kvar.clamp(-q_max, q_max);
+                let mut q_out = q_var.clamp(-q_max, q_max);
                 if let Some(min_pf) = self.inverter_min_pf {
                     q_out = enforce_min_pf(p_out, q_out, min_pf);
                 }
                 (p_out, q_out)
             }
             InverterPriority::Var => {
-                let mut q_abs = q_kvar.abs();
+                let mut q_abs = q_var.abs();
                 if let Some(min_pf) = self.inverter_min_pf {
                     // OCHRE: max_q_capacity = min_pf_factor * min_pf * inverter_capacity
                     // where min_pf_factor = tan(acos(min_pf)) / min_pf
@@ -603,25 +602,25 @@ impl PV {
                     // simplifies to: max_q_pf = tan(acos(min_pf)) * |p| / min_pf... no
                     // Actually from OCHRE: max_q_pf = self.inverter_min_pf_factor * -p
                     // where min_pf_factor = tan(acos(min_pf)) (the ratio Q/P at min PF)
-                    let max_q_pf = min_pf.acos().tan() * p_kw;
+                    let max_q_pf = min_pf.acos().tan() * p_w;
                     q_abs = q_abs.min(max_q_cap).min(max_q_pf);
                 } else {
                     q_abs = q_abs.min(inv_cap);
                 }
                 // Preserve the sign of the signed bus_q passed in (positive =
                 // absorbing, negative = supplying). The previous code derived
-                // the sign from `self.q_setpoint_kvar`, which broke under the
+                // the sign from `self.q_setpoint_var`, which broke under the
                 // unified §3.14 convention: baseline generation has
                 // q_setpoint = 0 but bus_q < 0 (supplying), so the old test
                 // `q_setpoint >= 0` flipped the sign back to absorbing.
-                let q_out = if q_kvar >= 0.0 { q_abs } else { -q_abs };
+                let q_out = if q_var >= 0.0 { q_abs } else { -q_abs };
                 let p_max = (inv_cap * inv_cap - q_out * q_out).max(0.0).sqrt();
-                let p_out = p_kw.min(p_max);
+                let p_out = p_w.min(p_max);
                 (p_out, q_out)
             }
             InverterPriority::Cpf => {
                 let scale = inv_cap / s;
-                (p_kw * scale, q_kvar * scale)
+                (p_w * scale, q_var * scale)
             }
         }
     }
@@ -692,11 +691,7 @@ impl PV {
                 let array = PvArray {
                     tilt_deg: orientation.tilt_deg,
                     azimuth_deg: orientation.azimuth_deg,
-                    // One conversion per array at construction: the config
-                    // enters in W (SI), the module still computes in kW
-                    // until the run-state commit.
-                    capacity_kw: uom::si::f64::Power::new::<uom::si::power::watt>(spec.capacity_w)
-                        .get::<uom::si::power::kilowatt>(),
+                    capacity_w: spec.capacity_w,
                     noct_c: spec.noct_c.unwrap_or(array_type.noct_c()),
                     module_type,
                     array_type,
@@ -714,9 +709,7 @@ impl PV {
             .unwrap_or(DEFAULT_INVERTER_EFFICIENCY)
             .clamp(0.0, 1.0);
 
-        self.inverter_capacity_kw = c.inverter_capacity_w.map(|w| {
-            uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
-        });
+        self.inverter_capacity_w = c.inverter_capacity_w;
         // PvConfig::validate() (called above) rejects any configured
         // power_factor that is non-finite or outside (0, 1], matching
         // battery/EV config validation — a misconfigured pf fails at init
@@ -815,19 +808,19 @@ impl PV {
         // Resolve inverter capacity default.
         // OCHRE PV.py:122 defaults inverter_capacity to capacity (1:1 DC/AC
         // ratio). HARES follows this to avoid unrealistic zero-clipping
-        // behaviour when the user omits inverter_capacity_kw. NREL SAM
+        // behaviour when the user omits inverter_capacity_w. NREL SAM
         // documentation notes typical residential DC-to-AC ratios of 1.0–1.5;
         // EnergyPlus PVWatts v8 default is 1.1 (PVWatts.cc:88).
         let total_dc = self.total_dc_capacity();
-        if self.inverter_capacity_kw.is_none() {
-            self.inverter_capacity_kw = Some(total_dc);
+        if self.inverter_capacity_w.is_none() {
+            self.inverter_capacity_w = Some(total_dc);
         }
-        let inv_cap = self.inverter_capacity_kw.unwrap_or(total_dc);
+        let inv_cap = self.inverter_capacity_w.unwrap_or(total_dc);
         let dc_ac_ratio = total_dc / inv_cap;
 
         tracing::info!(
-            total_dc_kw = total_dc,
-            inverter_capacity_kw = inv_cap,
+            total_dc_w = total_dc,
+            inverter_capacity_w = inv_cap,
             dc_ac_ratio = format_args!("{dc_ac_ratio:.2}"),
             "PV DC/AC ratio",
         );
@@ -846,14 +839,14 @@ impl PV {
         // Observer capture: record array breakdown and inverter sizing.
         #[cfg(feature = "observe")]
         {
-            let per_array_capacity: Vec<f64> = self.arrays.iter().map(|a| a.capacity_kw).collect();
+            let per_array_capacity: Vec<f64> = self.arrays.iter().map(|a| a.capacity_w).collect();
             let total_capacity: f64 = per_array_capacity.iter().sum();
             tracing::debug!(
                 array_count = self.arrays.len(),
-                total_capacity_kw = total_capacity,
+                total_capacity_w = total_capacity,
                 ?per_array_capacity,
                 dc_ac_ratio = dc_ac_ratio,
-                inverter_capacity_kw = inv_cap,
+                inverter_capacity_w = inv_cap,
                 "PV initialised",
             );
         }
@@ -998,7 +991,7 @@ impl Equipment for PV {
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
-        if self.last_ac_power_kw > 0.0 {
+        if self.last_ac_power_w > 0.0 {
             OperatingMode::Standby
         } else {
             OperatingMode::Off
@@ -1052,11 +1045,11 @@ impl Equipment for PV {
             });
         }
 
-        let mut total_dc_power_kw = 0.0;
-        let mut total_ac_power_kw = 0.0;
+        let mut total_dc_power_w = 0.0;
+        let mut total_ac_power_w = 0.0;
         let mut total_irradiance_weighted = 0.0;
         let mut total_cell_temp_weighted = 0.0;
-        let mut total_capacity_kw = 0.0;
+        let mut total_capacity_w = 0.0;
         let mut lut_nn_fallback = false;
         #[cfg(feature = "observe")]
         let (mut any_lut_path, mut total_dc_before_losses) = (false, 0.0);
@@ -1090,24 +1083,24 @@ impl Equipment for PV {
                 }
                 total_dc_before_losses += output.dc_power_kw_before_losses;
             }
-            total_dc_power_kw += output.dc_power_kw;
-            total_ac_power_kw += output.ac_power_kw;
-            total_irradiance_weighted += output.irradiance_w_m2 * array.capacity_kw;
-            total_cell_temp_weighted += output.cell_temp_c * array.capacity_kw;
-            total_capacity_kw += array.capacity_kw;
+            total_dc_power_w += output.dc_power_w;
+            total_ac_power_w += output.ac_power_w;
+            total_irradiance_weighted += output.irradiance_w_m2 * array.capacity_w;
+            total_cell_temp_weighted += output.cell_temp_c * array.capacity_w;
+            total_capacity_w += array.capacity_w;
         }
 
         // Apply operator curtailment fraction.
         if self.curtailment_fraction > 0.0 {
-            total_ac_power_kw *= 1.0 - self.curtailment_fraction;
+            total_ac_power_w *= 1.0 - self.curtailment_fraction;
         }
 
         // Apply operator curtailment limit (control signal).
-        let unclipped_ac_kw = total_ac_power_kw;
-        if let Some(limit_kw) = self.power_limit_kw {
-            total_ac_power_kw = total_ac_power_kw.min(limit_kw.max(0.0));
+        let unclipped_ac_w = total_ac_power_w;
+        if let Some(limit_w) = self.power_limit_w {
+            total_ac_power_w = total_ac_power_w.min(limit_w.max(0.0));
         }
-        let curtailment_kw = (unclipped_ac_kw - total_ac_power_kw).max(0.0);
+        let curtailment_w = (unclipped_ac_w - total_ac_power_w).max(0.0);
 
         // IEEE 1547 anti-islanding: on a de-energized bus (utility outage
         // with no backup source) the grid-following inverter trips — no AC
@@ -1118,16 +1111,16 @@ impl Equipment for PV {
         // either way. See docs/outage-behavior.md.
         let inverter_online = env.grid.bus_energized();
         if !inverter_online {
-            total_ac_power_kw = 0.0;
-            total_dc_power_kw = 0.0;
+            total_ac_power_w = 0.0;
+            total_dc_power_w = 0.0;
         }
 
         // Compute ONE signed bus reactive power [kVAR] used identically for
         // the port push, CoreOutput, and telemetry (§3.14 sign convention:
         // positive = inductive/absorbing vars, negative = supplying vars).
         //
-        // Control precedence (plan §1): (1) a nonzero `q_setpoint_kvar`
-        //     (from ReactiveSetpoint or PowerSetpoint.reactive_power_kvar)
+        // Control precedence (plan §1): (1) a nonzero `q_setpoint_var`
+        //     (from ReactiveSetpoint or PowerSetpoint.reactive_power_var)
         //     is an absolute override, passed through as-commanded — positive
         //     = absorbing, negative = supplying; (2) else the displacement
         //     power factor (baseline `PvConfig.power_factor` or the latest
@@ -1138,15 +1131,15 @@ impl Equipment for PV {
         // override; only `None` falls through to the power-factor baseline.
         // A tripped inverter (de-energized bus) produces no vars regardless
         // of any commanded setpoint.
-        let (bus_q_kvar, q_source) = if !inverter_online {
+        let (bus_q_var, q_source) = if !inverter_online {
             (0.0, 0.0_f64)
         } else {
-            match self.q_setpoint_kvar {
+            match self.q_setpoint_var {
                 Some(q) => (q, self.q_setpoint_source as f64),
-                // `total_ac_power_kw` is the positive generation magnitude; the
+                // `total_ac_power_w` is the positive generation magnitude; the
                 // negative sign encodes "supplying vars to the bus."
                 None => {
-                    let q_pf = -total_ac_power_kw * self.zip_pf.tan_phi();
+                    let q_pf = -total_ac_power_w * self.zip_pf.tan_phi();
                     let source = if self.power_factor < 1.0 {
                         2.0_f64
                     } else {
@@ -1160,26 +1153,26 @@ impl Equipment for PV {
         // Apply smart inverter limits (handles clipping and priority). The
         // function receives the signed bus_q and returns a magnitude-clamped
         // signed q that respects the inverter's apparent-power rating.
-        let (final_p_kw, final_q_kvar) = self.apply_inverter_limits(total_ac_power_kw, bus_q_kvar);
-        let inverter_clipping_kw = (total_ac_power_kw - final_p_kw).max(0.0);
+        let (final_p_w, final_q_var) = self.apply_inverter_limits(total_ac_power_w, bus_q_var);
+        let inverter_clipping_w = (total_ac_power_w - final_p_w).max(0.0);
 
         // T-0424 invariant: if an explicit ReactiveSetpoint { kvar: 0.0 }
         // was applied (q_setpoint_active && q_setpoint_source == 1 for
-        // ReactiveSetpoint), then reactive_power_kvar must be 0.0 and no PF
+        // ReactiveSetpoint), then reactive_power_var must be 0.0 and no PF
         // override may have occurred. This guards against the original bug
-        // where q_setpoint_kvar = 0.0 was indistinguishable from "unset".
+        // where q_setpoint_var = 0.0 was indistinguishable from "unset".
         // Debug-build control-logic check.
         #[cfg(debug_assertions)]
         {
             // q_setpoint_source == 1 is ReactiveSetpoint.
             if self.q_setpoint_active
                 && self.q_setpoint_source == 1
-                && self.q_setpoint_kvar == Some(0.0)
-                && (final_q_kvar - 0.0_f64).abs() >= 1e-12
+                && self.q_setpoint_var == Some(0.0)
+                && (final_q_var - 0.0_f64).abs() >= 1e-12
             {
                 return Err(HaresError::InvariantViolation {
                     check_name: "pv_reactive_setpoint_zero_q".to_string(),
-                    value: final_q_kvar,
+                    value: final_q_var,
                     tolerance: 1e-12,
                 });
             }
@@ -1187,10 +1180,10 @@ impl Equipment for PV {
 
         // Observer capture: record per-timestep inverter clipping events.
         #[cfg(feature = "observe")]
-        if inverter_clipping_kw > 0.0 {
+        if inverter_clipping_w > 0.0 {
             tracing::debug!(
-                clipped_kw = inverter_clipping_kw,
-                ac_power_kw = final_p_kw,
+                clipped_w = inverter_clipping_w,
+                ac_power_w = final_p_w,
                 "PV inverter clipping",
             );
         }
@@ -1209,7 +1202,7 @@ impl Equipment for PV {
                 soiling_ratio = soiling_ratio,
                 static_soiling_component_removed = self.soiling_config.is_some(),
                 dc_power_kw_before_losses = total_dc_before_losses,
-                total_dc_power_kw = total_dc_power_kw,
+                total_dc_power_w = total_dc_power_w,
                 "PV step completed",
             );
         }
@@ -1221,33 +1214,33 @@ impl Equipment for PV {
         // debug-build `validate_port_core_electrical_consistency` check
         // requires these three channels to agree exactly.
         ports.accumulate(&PortContribution::Electrical {
-            active_power_w: power_kw_to_w(-final_p_kw),
-            reactive_power_kvar: final_q_kvar,
+            active_power_w: (-final_p_w),
+            reactive_power_var: final_q_var,
         })?;
 
-        let mean_irradiance_w_m2 = if total_capacity_kw > 0.0 {
-            total_irradiance_weighted / total_capacity_kw
+        let mean_irradiance_w_m2 = if total_capacity_w > 0.0 {
+            total_irradiance_weighted / total_capacity_w
         } else {
             0.0
         };
-        let mean_cell_temp_c = if total_capacity_kw > 0.0 {
-            total_cell_temp_weighted / total_capacity_kw
+        let mean_cell_temp_c = if total_capacity_w > 0.0 {
+            total_cell_temp_weighted / total_capacity_w
         } else {
             env.weather.outdoor_temp_c
         };
 
-        self.last_ac_power_kw = final_p_kw;
-        self.telemetry.set(tk::DC_POWER_KW, total_dc_power_kw);
-        self.telemetry.set(tk::AC_POWER_KW, final_p_kw);
-        self.telemetry.set(tk::REACTIVE_POWER_KVAR, final_q_kvar);
+        self.last_ac_power_w = final_p_w;
+        self.telemetry.set(tk::DC_POWER_KW, total_dc_power_w);
+        self.telemetry.set(tk::AC_POWER_KW, final_p_w);
+        self.telemetry.set(tk::REACTIVE_POWER_KVAR, final_q_var);
         self.telemetry.set(tk::CELL_TEMP_C, mean_cell_temp_c);
         self.telemetry
             .set(tk::IRRADIANCE_W_M2, mean_irradiance_w_m2);
         self.telemetry
             .set(tk::INVERTER_EFFICIENCY, self.inverter_efficiency);
-        self.telemetry.set(tk::CURTAILMENT_KW, curtailment_kw);
+        self.telemetry.set(tk::CURTAILMENT_KW, curtailment_w);
         self.telemetry
-            .set(tk::INVERTER_CLIPPING_KW, inverter_clipping_kw);
+            .set(tk::INVERTER_CLIPPING_KW, inverter_clipping_w);
         self.telemetry.set(tk::SOILING_RATIO, soiling_ratio);
         self.telemetry.set(tk::SHADING_FACTOR, shading_factor);
         self.telemetry.set(tk::Q_SOURCE, q_source);
@@ -1262,8 +1255,8 @@ impl Equipment for PV {
         }
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Generation(final_p_kw.max(0.0))),
-                reactive_power_kvar: Some(final_q_kvar),
+                electric_w: Some(ElectricPower::Generation(final_p_w.max(0.0))),
+                reactive_power_var: Some(final_q_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -1311,9 +1304,9 @@ impl Equipment for PV {
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &PvCheckpoint {
-                power_limit_kw: self.power_limit_kw,
+                power_limit_w: self.power_limit_w,
                 curtailment_fraction: self.curtailment_fraction,
-                q_setpoint_kvar: self.q_setpoint_kvar,
+                q_setpoint_var: self.q_setpoint_var,
                 inverter_priority: self.inverter_priority,
                 power_factor: self.power_factor,
                 soiling_config: self.soiling_config.clone(),
@@ -1334,9 +1327,9 @@ impl Equipment for PV {
             "PV",
             self.descriptor().id,
         )?;
-        self.power_limit_kw = decoded.power_limit_kw;
+        self.power_limit_w = decoded.power_limit_w;
         self.curtailment_fraction = decoded.curtailment_fraction;
-        self.q_setpoint_kvar = decoded.q_setpoint_kvar;
+        self.q_setpoint_var = decoded.q_setpoint_var;
         self.inverter_priority = decoded.inverter_priority;
         self.power_factor = decoded.power_factor;
         // Re-derive the cached ZIP from the restored power factor. Without
@@ -1376,8 +1369,8 @@ impl Equipment for PV {
                 // restore contract is that a checkpoint restores a state
                 // `validate_core_contract` accepts. The next step
                 // recomputes generation from live irradiance.
-                electric_kw: Some(ElectricPower::Generation(0.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Generation(0.0)),
+                reactive_power_var: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -1397,12 +1390,17 @@ impl Equipment for PV {
     fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
         match signal {
             ControlSignal::PowerLimit { max_power_kw, .. } => {
-                if !max_power_kw.is_finite() {
+                // The signal carries kW until the control-layer commit; the
+                // working value is W (SI), converted once here.
+                let max_power_w =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
+                        .get::<uom::si::power::watt>();
+                if !max_power_w.is_finite() {
                     return Err(HaresError::Control(
-                        "PV PowerLimit max_power_kw must be finite".to_string(),
+                        "PV PowerLimit max_power_w must be finite".to_string(),
                     ));
                 }
-                self.power_limit_kw = Some((*max_power_kw).max(0.0));
+                self.power_limit_w = Some((max_power_w).max(0.0));
                 Ok(())
             }
             ControlSignal::PowerSetpoint {
@@ -1410,6 +1408,16 @@ impl Equipment for PV {
                 reactive_power_kvar,
                 ..
             } => {
+                // The signal carries kW and kVAR until the control-layer
+                // commit; the working values are W and VAR (SI), converted
+                // once here.
+                let active_power_w =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*active_power_kw)
+                        .get::<uom::si::power::watt>();
+                let reactive_power_var = reactive_power_kvar.map(|q| {
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(q)
+                        .get::<uom::si::power::watt>()
+                });
                 if !active_power_kw.is_finite() {
                     return Err(HaresError::Control(
                         "PV PowerSetpoint active_power_kw must be finite".to_string(),
@@ -1417,16 +1425,16 @@ impl Equipment for PV {
                 }
                 // OCHRE semantics: p_set_point = max(max_generation, p_set) where
                 // max_generation is negative (generation convention). In HARES'
-                // positive-generation convention, active_power_kw is an upper bound
-                // on AC output -- store it in power_limit_kw.
-                self.power_limit_kw = Some(active_power_kw.max(0.0));
-                if let Some(q) = reactive_power_kvar {
+                // positive-generation convention, active_power_w is an upper bound
+                // on AC output -- store it in power_limit_w.
+                self.power_limit_w = Some(active_power_w.max(0.0));
+                if let Some(q) = reactive_power_var {
                     if !q.is_finite() {
                         return Err(HaresError::Control(
-                            "PV PowerSetpoint reactive_power_kvar must be finite".to_string(),
+                            "PV PowerSetpoint reactive_power_var must be finite".to_string(),
                         ));
                     }
-                    self.q_setpoint_kvar = Some(*q);
+                    self.q_setpoint_var = Some(q);
                     self.q_setpoint_active = true;
                     self.q_setpoint_source = 3; // power_setpoint
                 }
@@ -1442,12 +1450,17 @@ impl Equipment for PV {
                 Ok(())
             }
             ControlSignal::ReactiveSetpoint { kvar } => {
+                // The signal carries kVAR until the control-layer commit; the
+                // working value is VAR (SI), converted once here.
                 if !kvar.is_finite() {
                     return Err(HaresError::Control(
                         "PV ReactiveSetpoint kvar must be finite".to_string(),
                     ));
                 }
-                self.q_setpoint_kvar = Some(*kvar);
+                self.q_setpoint_var = Some(
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*kvar)
+                        .get::<uom::si::power::watt>(),
+                );
                 self.q_setpoint_active = true;
                 self.q_setpoint_source = 1; // reactive_setpoint
                 Ok(())
@@ -1473,7 +1486,7 @@ impl Equipment for PV {
                 // rest of HARES.
                 self.power_factor = *power_factor;
                 self.zip_pf = ZipLoad::reactive_only(0.0, 0.0, 1.0, *power_factor);
-                self.q_setpoint_kvar = None;
+                self.q_setpoint_var = None;
                 self.q_setpoint_active = false;
                 self.q_setpoint_source = 0;
                 Ok(())
@@ -1516,7 +1529,7 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             "Signed bus reactive power (positive = inductive/absorbing, \
                 negative = supplying). Baseline: -|P|·tan(acos(pf)) at the configured \
                 displacement power factor; override: commanded ReactiveSetpoint /
-                PowerSetpoint.reactive_power_kvar, passed through as-commanded.",
+                PowerSetpoint.reactive_power_var, passed through as-commanded.",
         ),
         TelemetryField::temp_c(
             tk::CELL_TEMP_C,
@@ -1697,7 +1710,8 @@ mod tests {
     }
 
     fn approx_eq(a: f64, b: f64) {
-        assert!((a - b).abs() < 1e-9, "left={a}, right={b}");
+        // W-world comparisons: 1e-6 absolute is the kW-era 1e-9.
+        assert!((a - b).abs() < 1e-6, "left={a}, right={b}");
     }
 
     fn temp_lut_path(prefix: &str, ext: &str) -> (tempfile::TempDir, PathBuf) {
@@ -1903,7 +1917,7 @@ mod tests {
         pv.step(&env_outage, Duration::from_secs(60), &mut ports)
             .unwrap();
         assert_eq!(ports.electrical.generation_power_w, 0.0);
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(ports.electrical.reactive_power_var, 0.0);
         assert_eq!(pv.telemetry().get(tk::AC_POWER_KW), Some(0.0));
         assert_eq!(pv.telemetry().get(tk::DC_POWER_KW), Some(0.0));
         assert_eq!(
@@ -1959,7 +1973,7 @@ mod tests {
 
         let dc = pv.telemetry().get(tk::DC_POWER_KW).unwrap_or(0.0);
         let expected_fraction = 1.0 + DEFAULT_GAMMA_PER_C * 40.0;
-        approx_eq(dc, 5.0 * expected_fraction);
+        approx_eq(dc, 5000.0 * expected_fraction);
     }
 
     #[test]
@@ -2022,10 +2036,8 @@ mod tests {
         pv.init(&cfg, &env).unwrap();
 
         assert_eq!(pv.arrays.len(), 2);
-        // One conversion per array at construction: the W configs' kW
-        // working values.
-        assert_eq!(pv.arrays[0].capacity_kw, 3.0);
-        assert_eq!(pv.arrays[1].capacity_kw, 2.0);
+        assert_eq!(pv.arrays[0].capacity_w, 3000.0);
+        assert_eq!(pv.arrays[1].capacity_w, 2000.0);
         assert_eq!(pv.arrays[0].surface_id, Some(sid0));
         assert_eq!(pv.arrays[1].surface_id, Some(sid1));
 
@@ -2035,7 +2047,7 @@ mod tests {
         assert!(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0) > 0.0);
         approx_eq(
             ports.electrical.generation_power_w,
-            -pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0) * 1000.0,
+            -pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0),
         );
     }
 
@@ -2103,7 +2115,7 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0), 1.5);
+        approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0), 1500.0);
         assert!(pv.telemetry().get(tk::CURTAILMENT_KW).unwrap_or(0.0) > 0.0);
         approx_eq(ports.electrical.generation_power_w, -1500.0);
     }
@@ -2282,9 +2294,7 @@ mod tests {
         pv.init(&cfg, &env).unwrap();
         assert_eq!(pv.arrays.len(), 1);
         assert_eq!(pv.arrays[0].module_type, ModuleType::ThinFilm);
-        // One conversion at construction: 4200 W enters, the kW working
-        // value is 4.2.
-        assert_eq!(pv.arrays[0].capacity_kw, 4.2);
+        assert_eq!(pv.arrays[0].capacity_w, 4200.0);
     }
 
     #[test]
@@ -2400,12 +2410,12 @@ mod tests {
     // --- Regression tests for code-review fixes ---
 
     /// When DC output exceeds the inverter AC rating, output must be clamped to
-    /// the inverter capacity and the difference tracked as `inverter_clipping_kw`.
+    /// the inverter capacity and the difference tracked as `inverter_clipping_w`.
     #[test]
     fn inverter_clipping_limits_ac_output() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         // 5 kW DC array at STC, 96% efficient inverter would give ~4.8 kW AC.
-        // Set inverter_capacity_kw = 3.0 to force clipping.
+        // Set inverter_capacity_w = 3.0 to force clipping.
         let mut cfg = base_pv_typed_config();
         cfg.equipment_id = Some(1);
         cfg.inverter_capacity_w = Some(3000.0);
@@ -2429,15 +2439,15 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
-        let clipping_kw = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
+        let ac_w = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
+        let clipping_w = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
 
         // AC output must be clamped at inverter rating.
-        approx_eq(ac_kw, 3.0);
+        approx_eq(ac_w, 3000.0);
         // Clipping must be positive (actual DC-derived AC minus the cap).
         assert!(
-            clipping_kw > 0.0,
-            "expected inverter_clipping_kw > 0, got {clipping_kw}"
+            clipping_w > 0.0,
+            "expected inverter_clipping_w > 0, got {clipping_w}"
         );
         // Port contribution must reflect clamped value.
         approx_eq(ports.electrical.generation_power_w, -3000.0);
@@ -2473,32 +2483,32 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
-        let q_kvar = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0);
+        let ac_w = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
+        let q_var = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0);
         let co_q = pv
             .core_output()
             .flows
-            .reactive_power_kvar
+            .reactive_power_var
             .expect("PV REACTIVE cap => CoreOutput Q must be Some");
 
         // Generating PV at pf<1 supplies vars → bus Q is negative.
         assert!(
-            q_kvar < 0.0,
-            "expected negative reactive_power_kvar (supplying), got {q_kvar}"
+            q_var < 0.0,
+            "expected negative reactive_power_var (supplying), got {q_var}"
         );
-        let expected_q = -ac_kw * (0.9_f64.acos().tan());
+        let expected_q = -ac_w * (0.9_f64.acos().tan());
         assert!(
-            (q_kvar - expected_q).abs() < 1e-9,
-            "expected q={expected_q}, got {q_kvar}"
+            (q_var - expected_q).abs() < 1e-6,
+            "expected q={expected_q}, got {q_var}"
         );
         // Unified convention: telemetry, CoreOutput, and port reactive delta
         // must all carry the same signed value.
-        approx_eq(q_kvar, co_q);
-        approx_eq(ports.electrical.reactive_power_kvar, q_kvar);
+        approx_eq(q_var, co_q);
+        approx_eq(ports.electrical.reactive_power_var, q_var);
         // Active power: port generation is negative; CoreOutput is Generation(+|P|).
-        approx_eq(ports.electrical.generation_power_w, -ac_kw * 1000.0);
+        approx_eq(ports.electrical.generation_power_w, -ac_w);
         assert!(matches!(
-            pv.core_output().flows.electric_kw,
+            pv.core_output().flows.electric_w,
             Some(ElectricPower::Generation(_))
         ));
     }
@@ -2542,8 +2552,8 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         approx_eq(pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap(), 0.0);
-        approx_eq(pv.core_output().flows.reactive_power_kvar.unwrap(), 0.0);
-        approx_eq(ports.electrical.reactive_power_kvar, 0.0);
+        approx_eq(pv.core_output().flows.reactive_power_var.unwrap(), 0.0);
+        approx_eq(ports.electrical.reactive_power_var, 0.0);
     }
 
     /// T-0424: A PV with power_factor=0.95 must produce Q=0.0 when
@@ -2577,7 +2587,7 @@ mod tests {
     }
 
     /// T-0424: A PV with power_factor=0.95 and no explicit Q setpoint must
-    /// derive Q from PF (non-zero). Default q_setpoint_kvar=None falls
+    /// derive Q from PF (non-zero). Default q_setpoint_var=None falls
     /// through to the PF baseline path.
     #[test]
     fn pf_fallback_when_no_q_setpoint() {
@@ -2646,7 +2656,7 @@ mod tests {
         );
     }
 
-    /// T-0424: PowerSetpoint with reactive_power_kvar=Some(0.0) must force Q=0
+    /// T-0424: PowerSetpoint with reactive_power_var=Some(0.0) must force Q=0
     /// even when the PF baseline would otherwise produce non-zero Q.
     #[test]
     fn power_setpoint_with_q_zero() {
@@ -2667,7 +2677,7 @@ mod tests {
         );
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
-        // PowerSetpoint with active_power_kw=3.0 and reactive_power_kvar=Some(0.0)
+        // PowerSetpoint with active_power_w=3.0 and reactive_power_var=Some(0.0)
         // should force Q to zero.
         pv.apply_control(&ControlSignal::PowerSetpoint {
             active_power_kw: 3.0000,
@@ -2771,8 +2781,8 @@ mod tests {
 
         // Verify exact values against PVWatts v8 gammas.
         // Standard: gamma = -0.0047, ThinFilm: gamma = -0.0020, delta_T = 40°C.
-        approx_eq(dc_standard, 5.0 * (1.0 + (-0.0047_f64) * 40.0));
-        approx_eq(dc_thinfilm, 5.0 * (1.0 + (-0.0020_f64) * 40.0));
+        approx_eq(dc_standard, 5000.0 * (1.0 + (-0.0047_f64) * 40.0));
+        approx_eq(dc_thinfilm, 5000.0 * (1.0 + (-0.0020_f64) * 40.0));
     }
 
     /// Raw configs are not supported for PV; typed config is required.
@@ -2825,7 +2835,7 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports)
             .expect("step pv csv lut");
-        approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0), 2.75);
+        approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0), 2750.0);
     }
 
     #[test]
@@ -2845,7 +2855,7 @@ mod tests {
         env.weather.solar_altitude_deg = 60.0;
         env.weather.solar_azimuth_deg = 180.0;
         let (_dir, path) = temp_lut_path("pv_lut", "parquet");
-        write_pv_lut_parquet(&path, 3.10);
+        write_pv_lut_parquet(&path, 3.10); // the column is the adapter's kW
 
         let mut typed = base_pv_typed_config();
         typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
@@ -2856,7 +2866,7 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports)
             .expect("step pv parquet lut");
-        approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0), 3.10);
+        approx_eq(pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0), 3100.0);
     }
 
     // --- System losses fraction tests ---
@@ -3135,16 +3145,13 @@ mod tests {
 
     // --- Inverter model tests ---
 
-    fn make_inverter_pv(inv_cap_kw: f64) -> (PV, EnvironmentState) {
+    fn make_inverter_pv(inv_cap_w: f64) -> (PV, EnvironmentState) {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
         let mut typed = base_pv_typed_config();
         typed.equipment_id = Some(30);
         typed.inverter_efficiency = Some(1.0);
         typed.system_losses_fraction = Some(0.0);
-        typed.inverter_capacity_w = Some(
-            uom::si::f64::Power::new::<uom::si::power::kilowatt>(inv_cap_kw)
-                .get::<uom::si::power::watt>(),
-        );
+        typed.inverter_capacity_w = Some(inv_cap_w);
         typed.power_factor = Some(1.0);
         let cfg = EquipmentConfig::from_typed("PV".to_string(), "PV".to_string(), typed).unwrap();
         let env = env_with_surfaces_full(
@@ -3165,18 +3172,18 @@ mod tests {
 
     #[test]
     fn inverter_watt_priority_preserves_p_reduces_q() {
-        let (mut pv, env) = make_inverter_pv(4.0);
+        let (mut pv, env) = make_inverter_pv(4000.0);
         pv.inverter_priority = InverterPriority::Watt;
-        pv.q_setpoint_kvar = Some(3.0);
+        pv.q_setpoint_var = Some(3000.0);
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
         let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let s = (p * p + q * q).sqrt();
         let p_raw = {
-            let (mut pv_unlimited, env_unlimited) = make_inverter_pv(6.0);
+            let (mut pv_unlimited, env_unlimited) = make_inverter_pv(6000.0);
             pv_unlimited.inverter_priority = InverterPriority::Watt;
-            pv_unlimited.q_setpoint_kvar = Some(3.0);
+            pv_unlimited.q_setpoint_var = Some(3000.0);
             let mut ports_unlimited = PortSlots::default();
             pv_unlimited
                 .step(
@@ -3187,51 +3194,54 @@ mod tests {
                 .unwrap();
             pv_unlimited.telemetry().get(tk::AC_POWER_KW).unwrap()
         };
-        let p_expected = p_raw.min(4.0);
+        let p_expected = p_raw.min(4000.0);
         let q_max = (4.0_f64.powi(2) - p_expected.powi(2)).max(0.0).sqrt();
         let q_expected = super::enforce_min_pf(
             p_expected,
-            3.0_f64.clamp(-q_max, q_max),
+            3000.0_f64.clamp(-q_max, q_max),
             pv.inverter_min_pf.unwrap(),
         );
         approx_eq(p, p_expected);
         approx_eq(q, q_expected);
-        assert!(p <= 4.0 + 1e-9);
-        assert!(s <= 4.0 + 1e-9, "S={s} exceeds inverter cap 4.0");
-        assert!(q < 3.0, "Q={q} should be reduced from requested 3.0");
+        assert!(p <= 4000.0 + 1e-6);
+        assert!(s <= 4000.0 + 1e-6, "S={s} exceeds the inverter cap 4000 W");
+        assert!(
+            q < 3000.0,
+            "Q={q} should be reduced from the requested 3000 var"
+        );
     }
 
     #[test]
     fn inverter_var_priority_preserves_q_reduces_p() {
-        let (mut pv, env) = make_inverter_pv(4.0);
+        let (mut pv, env) = make_inverter_pv(4000.0);
         pv.inverter_priority = InverterPriority::Var;
-        pv.q_setpoint_kvar = Some(2.0);
+        pv.q_setpoint_var = Some(2000.0);
         pv.inverter_min_pf = None;
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
         let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let s = (p * p + q * q).sqrt();
-        approx_eq(q, 2.0);
-        let max_p = (4.0_f64.powi(2) - 2.0_f64.powi(2)).sqrt();
+        approx_eq(q, 2000.0);
+        let max_p = (4000.0_f64.powi(2) - 2000.0_f64.powi(2)).sqrt();
         assert!((p - max_p).abs() < 1e-6, "P={p}, expected {max_p}");
-        assert!(s <= 4.0 + 1e-9);
+        assert!(s <= 4000.0 + 1e-6);
     }
 
     #[test]
     fn inverter_cpf_priority_scales_proportionally() {
-        let (mut pv, env) = make_inverter_pv(3.0);
+        let (mut pv, env) = make_inverter_pv(3000.0);
         pv.inverter_priority = InverterPriority::Cpf;
-        pv.q_setpoint_kvar = Some(2.0);
+        pv.q_setpoint_var = Some(2000.0);
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
         let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let s = (p * p + q * q).sqrt();
-        assert!(s <= 3.0 + 1e-9, "S={s} exceeds inverter cap 3.0");
-        let (mut pv_unlimited, env_unlimited) = make_inverter_pv(6.0);
+        assert!(s <= 3000.0 + 1e-6, "S={s} exceeds the inverter cap 3000 W");
+        let (mut pv_unlimited, env_unlimited) = make_inverter_pv(6000.0);
         pv_unlimited.inverter_priority = InverterPriority::Cpf;
-        pv_unlimited.q_setpoint_kvar = Some(2.0);
+        pv_unlimited.q_setpoint_var = Some(2000.0);
         let mut ports_unlimited = PortSlots::default();
         pv_unlimited
             .step(
@@ -3246,7 +3256,7 @@ mod tests {
             .get(tk::REACTIVE_POWER_KVAR)
             .unwrap();
         let s_raw = (p_raw * p_raw + q_raw * q_raw).sqrt();
-        let scale = 3.0 / s_raw;
+        let scale = 3000.0 / s_raw;
         approx_eq(p, p_raw * scale);
         approx_eq(q, q_raw * scale);
         assert!(
@@ -3257,7 +3267,7 @@ mod tests {
 
     #[test]
     fn inverter_under_capacity_no_clipping() {
-        let (mut pv, env) = make_inverter_pv(6.0);
+        let (mut pv, env) = make_inverter_pv(6000.0);
         pv.inverter_priority = InverterPriority::Watt;
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
@@ -3305,14 +3315,14 @@ mod tests {
 
     #[test]
     fn reactive_setpoint_signal_sets_q() {
-        let (mut pv, env) = make_inverter_pv(6.0);
+        let (mut pv, env) = make_inverter_pv(6000.0);
         pv.inverter_min_pf = None;
         pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
             .unwrap();
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
-        approx_eq(q, 1.5);
+        approx_eq(q, 1500.0);
     }
 
     /// PowerFactorSetpoint updates the displacement PF used for the baseline
@@ -3322,13 +3332,13 @@ mod tests {
     /// baseline path.
     #[test]
     fn power_factor_setpoint_signal_computes_q() {
-        let (mut pv, env) = make_inverter_pv(6.0);
+        let (mut pv, env) = make_inverter_pv(6000.0);
         pv.inverter_min_pf = None;
         pv.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.9 })
             .unwrap();
         // PowerFactorSetpoint must clear a prior ReactiveSetpoint so the PF
         // baseline path runs.
-        assert_eq!(pv.q_setpoint_kvar, None);
+        assert_eq!(pv.q_setpoint_var, None);
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
@@ -3340,8 +3350,8 @@ mod tests {
         );
         assert!(q < 0.0, "generating PV at pf<1 must supply vars (Q<0)");
         // Port, CoreOutput, and telemetry agree on the signed value.
-        approx_eq(ports.electrical.reactive_power_kvar, q);
-        approx_eq(pv.core_output().flows.reactive_power_kvar.expect("Some"), q);
+        approx_eq(ports.electrical.reactive_power_var, q);
+        approx_eq(pv.core_output().flows.reactive_power_var.expect("Some"), q);
     }
 
     /// §3.14 sign-pinning: baseline pf<1 generation produces negative bus Q
@@ -3389,34 +3399,34 @@ mod tests {
         pv.step(&env, Duration::from_secs(60), &mut ports)
             .expect("step must succeed");
 
-        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
+        let ac_w = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
         let q_telem = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
         let q_core = pv
             .core_output()
             .flows
-            .reactive_power_kvar
+            .reactive_power_var
             .expect("REACTIVE cap => CoreOutput Q Some");
 
         // Generating PV at pf<1 supplies vars → bus Q is negative.
         assert!(
-            ac_kw > 0.0,
-            "test precondition: PV must be generating, got AC={ac_kw}"
+            ac_w > 0.0,
+            "test precondition: PV must be generating, got AC={ac_w}"
         );
         assert!(
             q_telem < 0.0,
             "baseline pf<1 must supply vars (Q<0), got {q_telem}"
         );
-        let expected_q = -ac_kw * (0.9_f64.acos().tan());
+        let expected_q = -ac_w * (0.9_f64.acos().tan());
         approx_eq(q_telem, expected_q);
 
         // Unified convention: port == CoreOutput == telemetry (signed).
-        approx_eq(ports.electrical.reactive_power_kvar, q_telem);
+        approx_eq(ports.electrical.reactive_power_var, q_telem);
         approx_eq(q_core, q_telem);
 
         // Active power: port generation is negative; CoreOutput is Generation(+).
-        approx_eq(ports.electrical.generation_power_w, -ac_kw * 1000.0);
+        approx_eq(ports.electrical.generation_power_w, -ac_w);
         assert!(matches!(
-            pv.core_output().flows.electric_kw,
+            pv.core_output().flows.electric_w,
             Some(ElectricPower::Generation(_))
         ));
 
@@ -3434,7 +3444,7 @@ mod tests {
     /// as-commanded on every channel, and survives the consistency validator.
     #[test]
     fn pv_reactive_setpoint_positive_passthrough() {
-        let (mut pv, env) = make_inverter_pv(6.0);
+        let (mut pv, env) = make_inverter_pv(6000.0);
         pv.inverter_min_pf = None;
         pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
             .unwrap();
@@ -3447,9 +3457,9 @@ mod tests {
             q > 0.0,
             "positive ReactiveSetpoint must absorb (Q>0), got {q}"
         );
-        approx_eq(q, 1.5);
-        approx_eq(ports.electrical.reactive_power_kvar, q);
-        approx_eq(pv.core_output().flows.reactive_power_kvar.expect("Some"), q);
+        approx_eq(q, 1500.0);
+        approx_eq(ports.electrical.reactive_power_var, q);
+        approx_eq(pv.core_output().flows.reactive_power_var.expect("Some"), q);
         validate_port_core_electrical_consistency(
             pv.descriptor(),
             pv.core_output(),
@@ -3464,7 +3474,7 @@ mod tests {
     /// Var-priority limiter, and survives the consistency validator.
     #[test]
     fn pv_reactive_setpoint_negative_passthrough() {
-        let (mut pv, env) = make_inverter_pv(6.0);
+        let (mut pv, env) = make_inverter_pv(6000.0);
         pv.inverter_min_pf = None;
         pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: -1.5 })
             .unwrap();
@@ -3477,9 +3487,9 @@ mod tests {
             q < 0.0,
             "negative ReactiveSetpoint must supply (Q<0), got {q}"
         );
-        approx_eq(q, -1.5);
-        approx_eq(ports.electrical.reactive_power_kvar, q);
-        approx_eq(pv.core_output().flows.reactive_power_kvar.expect("Some"), q);
+        approx_eq(q, -1500.0);
+        approx_eq(ports.electrical.reactive_power_var, q);
+        approx_eq(pv.core_output().flows.reactive_power_var.expect("Some"), q);
         validate_port_core_electrical_consistency(
             pv.descriptor(),
             pv.core_output(),
@@ -3494,16 +3504,16 @@ mod tests {
     /// generating PV at pf<1).
     #[test]
     fn pv_power_factor_setpoint_zeros_q_setpoint() {
-        let (mut pv, env) = make_inverter_pv(6.0);
+        let (mut pv, env) = make_inverter_pv(6000.0);
         pv.inverter_min_pf = None;
         // First command an absorbing ReactiveSetpoint.
         pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: 1.5 })
             .unwrap();
-        assert_eq!(pv.q_setpoint_kvar, Some(1.5));
+        assert_eq!(pv.q_setpoint_var, Some(1500.0));
         // Then a PowerFactorSetpoint must clear it and re-engage the PF path.
         pv.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.85 })
             .unwrap();
-        assert_eq!(pv.q_setpoint_kvar, None);
+        assert_eq!(pv.q_setpoint_var, None);
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
@@ -3522,8 +3532,8 @@ mod tests {
     /// kVA rating.
     #[test]
     fn pv_inverter_clamps_reactive_both_signs() {
-        for &q_cmd in &[8.0_f64, -8.0_f64] {
-            let (mut pv, env) = make_inverter_pv(4.0);
+        for &q_cmd in &[8000.0_f64, -8000.0_f64] {
+            let (mut pv, env) = make_inverter_pv(4000.0);
             pv.inverter_min_pf = None;
             pv.inverter_priority = InverterPriority::Var;
             pv.apply_control(&ControlSignal::ReactiveSetpoint { kvar: q_cmd })
@@ -3534,22 +3544,22 @@ mod tests {
             let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
             let s = (p * p + q * q).sqrt();
             assert!(
-                s <= 4.0 + 1e-6,
-                "q_cmd={q_cmd}: |S|={s} must respect inverter cap 4.0"
+                s <= 4000.0 + 1e-6,
+                "q_cmd={q_cmd}: |S|={s} must respect the inverter cap 4000 var"
             );
-            // Sign preserved (|q| reduced from 8.0 toward the cap).
+            // Sign preserved (|q| reduced from 8.0 kvar toward the cap).
             assert!(
                 q.signum() == q_cmd.signum(),
                 "q_cmd={q_cmd}: sign must be preserved, got q={q}"
             );
             assert!(
-                q.abs() < 8.0,
-                "q_cmd={q_cmd}: |Q|={0} must be clamped below 8.0",
+                q.abs() < 8000.0,
+                "q_cmd={q_cmd}: |Q|={0} must be clamped below the 8 kvar command",
                 q.abs()
             );
             // Unified convention still holds.
-            approx_eq(ports.electrical.reactive_power_kvar, q);
-            approx_eq(pv.core_output().flows.reactive_power_kvar.expect("Some"), q);
+            approx_eq(ports.electrical.reactive_power_var, q);
+            approx_eq(pv.core_output().flows.reactive_power_var.expect("Some"), q);
         }
     }
 
@@ -3593,9 +3603,9 @@ mod tests {
     #[test]
     fn checkpoint_round_trip_includes_all_fields() {
         let mut pv = PV::new(config_single());
-        pv.power_limit_kw = Some(3.5);
+        pv.power_limit_w = Some(3.5);
         pv.curtailment_fraction = 0.25;
-        pv.q_setpoint_kvar = Some(1.2);
+        pv.q_setpoint_var = Some(1.2);
         pv.inverter_priority = InverterPriority::Cpf;
         pv.power_factor = 0.85;
 
@@ -3603,9 +3613,9 @@ mod tests {
         let mut restored = PV::new(config_single());
         restored.load_state(&state).unwrap();
 
-        assert_eq!(restored.power_limit_kw, Some(3.5));
+        assert_eq!(restored.power_limit_w, Some(3.5));
         approx_eq(restored.curtailment_fraction, 0.25);
-        assert_eq!(restored.q_setpoint_kvar, Some(1.2));
+        assert_eq!(restored.q_setpoint_var, Some(1.2));
         assert_eq!(restored.inverter_priority, InverterPriority::Cpf);
         approx_eq(restored.power_factor, 0.85);
 
@@ -3623,21 +3633,21 @@ mod tests {
             max_soc: None,
         })
         .unwrap();
-        assert_eq!(pv.q_setpoint_kvar, Some(0.75));
+        assert_eq!(pv.q_setpoint_var, Some(750.0));
     }
 
     #[test]
     fn var_priority_respects_absolute_kvar_ceiling() {
-        let (mut pv, env) = make_inverter_pv(4.0);
+        let (mut pv, env) = make_inverter_pv(4000.0);
         pv.inverter_priority = InverterPriority::Var;
         pv.inverter_min_pf = Some(0.8);
-        pv.q_setpoint_kvar = Some(3.0);
+        pv.q_setpoint_var = Some(3000.0);
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let q = pv.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
-        let max_q_cap = 0.8_f64.acos().sin() * 4.0;
+        let max_q_cap = 0.8_f64.acos().sin() * 4000.0;
         assert!(
-            q <= max_q_cap + 1e-9,
+            q <= max_q_cap + 1e-6,
             "Q={q} should not exceed absolute ceiling {max_q_cap}"
         );
         approx_eq(q, max_q_cap);
@@ -3689,7 +3699,7 @@ mod tests {
         approx_eq(ratio, 0.95 / 0.80);
     }
 
-    /// PowerSetpoint with active_power_kw=2.0 must limit AC generation to ≤ 2.0 kW
+    /// PowerSetpoint with active_power_w=2.0 must limit AC generation to ≤ 2.0 kW
     /// even when unconstrained physics would produce ~5 kW.
     #[test]
     fn power_setpoint_active_power_limits_generation() {
@@ -3743,7 +3753,7 @@ mod tests {
         let limited_ac = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
 
         assert!(
-            limited_ac <= 2.0 + 1e-9,
+            limited_ac <= 2000.0 + 1e-6,
             "AC generation must be ≤ 2.0 kW after PowerSetpoint, got {limited_ac}"
         );
         // Port contribution must also respect the limit (negative = generation).
@@ -3872,27 +3882,27 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
-        let dc_kw = pv.telemetry().get(tk::DC_POWER_KW).unwrap_or(0.0);
-        let clipping_kw = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
+        let ac_w = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
+        let dc_w = pv.telemetry().get(tk::DC_POWER_KW).unwrap_or(0.0);
+        let clipping_w = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
 
         // DC must exceed the 4 kW cap (cold boost ensures this).
         assert!(
-            dc_kw > 4.0,
-            "DC power must exceed 4 kW at cold ambient to exercise clipping, got {dc_kw:.3}"
+            dc_w > 4.0,
+            "DC power must exceed 4 kW at cold ambient to exercise clipping, got {dc_w:.3}"
         );
         // AC must be clamped at the 4 kW inverter rating.
-        approx_eq(ac_kw, 4.0);
+        approx_eq(ac_w, 4000.0);
         // Clipping must be positive.
         assert!(
-            clipping_kw > 0.0,
-            "inverter_clipping_kw must be > 0, got {clipping_kw:.3}"
+            clipping_w > 0.0,
+            "inverter_clipping_w must be > 0, got {clipping_w:.3}"
         );
         // Port contribution must reflect the clamped value.
         approx_eq(ports.electrical.generation_power_w, -4000.0);
     }
 
-    /// When `inverter_capacity_kw` is None (the default), the system resolves
+    /// When `inverter_capacity_w` is None (the default), the system resolves
     /// to a 1:1 DC/AC ratio — total DC array capacity becomes the inverter
     /// rating. At cold ambient temperatures where DC power exceeds nameplate
     /// capacity, output must be clipped. This verifies that the default is no
@@ -3904,7 +3914,7 @@ mod tests {
         cfg.equipment_id = Some(1);
         cfg.inverter_efficiency = Some(1.0);
         cfg.system_losses_fraction = Some(0.0);
-        // inverter_capacity_kw stays None — tests the default 1:1 resolving.
+        // inverter_capacity_w stays None — tests the default 1:1 resolving.
         let cfg =
             EquipmentConfig::from_typed("PV default ratio".to_string(), "PV".to_string(), cfg)
                 .unwrap();
@@ -3926,27 +3936,27 @@ mod tests {
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
 
-        // After init, inverter_capacity_kw must be resolved to Some(total_dc).
-        assert!(pv.inverter_capacity_kw.is_some());
-        assert!((pv.inverter_capacity_kw.unwrap() - 5.0).abs() < 1e-9);
+        // After init, inverter_capacity_w must be resolved to Some(total_dc).
+        assert!(pv.inverter_capacity_w.is_some());
+        assert!((pv.inverter_capacity_w.unwrap() - 5000.0).abs() < 1e-6);
 
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
-        let clipping_kw = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
+        let ac_w = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
+        let clipping_w = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
 
         // Default inverter capacity = total DC capacity (5.0 kW).
-        assert!(ac_kw <= 5.0 + 1e-9, "AC {ac_kw} exceeded 5.0 kW cap");
+        assert!(ac_w <= 5000.0 + 1e-6, "AC {ac_w} exceeded the 5.0 kW cap");
         // Clipping must be positive (cold boost pushes DC above 5.0).
         assert!(
-            clipping_kw > 0.0,
-            "inverter_clipping_kw must be > 0, got {clipping_kw:.3}"
+            clipping_w > 0.0,
+            "inverter_clipping_w must be > 0, got {clipping_w:.3}"
         );
         approx_eq(ports.electrical.generation_power_w, -5000.0);
     }
 
-    /// With `inverter_capacity_kw = Some(3.0)` and total DC = 5.0 kW, AC
+    /// With `inverter_capacity_w = Some(3.0)` and total DC = 5.0 kW, AC
     /// output must be capped at the inverter rating. Cold ambient conditions
     /// ensure the unconstrained DC-derived AC well exceeds the 3 kW cap.
     #[test]
@@ -3977,14 +3987,14 @@ mod tests {
         let mut ports = PortSlots::default();
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let ac_kw = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
-        let clipping_kw = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
+        let ac_w = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(0.0);
+        let clipping_w = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap_or(0.0);
 
         // AC must be capped at the 3 kW inverter rating.
-        approx_eq(ac_kw, 3.0);
+        approx_eq(ac_w, 3000.0);
         assert!(
-            clipping_kw > 0.0,
-            "expected clipping with 3kW inverter, got {clipping_kw:.3}"
+            clipping_w > 0.0,
+            "expected clipping with 3kW inverter, got {clipping_w:.3}"
         );
         approx_eq(ports.electrical.generation_power_w, -3000.0);
     }
@@ -4100,8 +4110,8 @@ mod tests {
         // The correction math: AC_corrected = AC_lut / inv_eff / (1-losses) * (1-losses) * inv_eff
         // When SAM and HARES values match, this simplifies to AC_lut.
         let (_dir, path) = temp_lut_path("pv_lut_t0086_match", "parquet");
-        let lut_ac = 3.80;
-        write_pv_lut_parquet_with_meta(&path, lut_ac, 0.96, 0.14);
+        let lut_ac = 3800.0; // W: the writer's column is the adapter's kW (3.80)
+        write_pv_lut_parquet_with_meta(&path, lut_ac / 1000.0, 0.96, 0.14);
 
         let mut typed = base_pv_typed_config();
         typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
@@ -4146,9 +4156,9 @@ mod tests {
     fn lut_metadata_different_values_adjusts_output() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
 
-        let lu_ac = 3.80;
+        let lu_ac = 3800.0; // W: the writer's column is the adapter's kW (3.80)
         let (_dir, path) = temp_lut_path("pv_lut_t0086_diff", "parquet");
-        write_pv_lut_parquet_with_meta(&path, lu_ac, 0.96, 0.14);
+        write_pv_lut_parquet_with_meta(&path, lu_ac / 1000.0, 0.96, 0.14);
 
         let mut typed = base_pv_typed_config();
         typed.sam_lut_path = Some(path.to_string_lossy().into_owned());
@@ -4179,9 +4189,9 @@ mod tests {
             .expect("step pv");
 
         let ac = pv.telemetry().get(tk::AC_POWER_KW).unwrap_or(-1.0);
-        // Correction: dc_true = 3.80 / 0.96 / (1-0.14) = 3.80 / 0.96 / 0.86 = 4.5988
-        // dc_harves = 4.5988 * (1-0.10) = 4.1389
-        // ac_harves = 4.1389 * 0.90 = 3.725
+        // Correction: dc_true = 3800 / 0.96 / (1-0.14) = 4598.8 W
+        // dc_hares = 4598.8 * (1-0.10) = 4138.9 W
+        // ac_hares = 4138.9 * 0.90 = 3725.0 W
         let expected_ac = lu_ac / 0.96 / (1.0 - 0.14) * (1.0 - 0.10) * 0.90;
         approx_eq(ac, expected_ac);
     }
@@ -4224,8 +4234,8 @@ mod tests {
         let dc = pv.telemetry().get(tk::DC_POWER_KW).unwrap_or(-1.0);
 
         // Pre-T-0086 legacy math: AC = LUT AC, DC = AC / inv_eff.
-        approx_eq(ac, 2.75);
-        approx_eq(dc, 2.75 / 0.96);
+        approx_eq(ac, 2750.0);
+        approx_eq(dc, 2750.0 / 0.96);
     }
 
     /// Verify that the LUT metadata fields are correctly read from a
@@ -4258,7 +4268,7 @@ mod tests {
         let array = PvArray {
             tilt_deg: 30.0,
             azimuth_deg: 180.0,
-            capacity_kw: 5.0,
+            capacity_w: 5.0,
             noct_c: DEFAULT_NOCT_C,
             module_type: ModuleType::Standard,
             array_type: ArrayType::OpenRack,
@@ -4550,7 +4560,7 @@ mod tests {
 
     /// When HARES `system_losses_fraction` and `inverter_efficiency` match the
     /// SAM values embedded in the LUT metadata, both the LUT and non-LUT paths
-    /// produce identical `dc_power_kw` for the same array configuration at the
+    /// produce identical `dc_power_w` for the same array configuration at the
     /// same irradiance and temperature conditions.
     ///
     /// The test uses a synthetic Parquet LUT with one entry at STC-equivalent
@@ -4568,7 +4578,7 @@ mod tests {
         //   DC_no_losses = 5.0 * 1.0 * 0.853125 = 4.265625 kW
         //   DC = 4.265625 * (1-0.14) = 3.6684375 kW
         //   AC = 3.6684375 * 0.96 = 3.5217 kW
-        let capacity_kw = 5.0;
+        let capacity_w = 5000.0;
         let sam_losses = 0.14;
         let sam_inv_eff = 0.96;
         let hares_losses = sam_losses;
@@ -4577,14 +4587,15 @@ mod tests {
 
         let t_cell = cell_temperature_noct_wind(ambient_c, 1000.0, DEFAULT_NOCT_C, 1.0);
         let derate = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell - 25.0);
-        let expected_dc_no_losses = capacity_kw * derate; // 4.265625
+        let expected_dc_no_losses = capacity_w * derate; // 4265.625
         let expected_dc = expected_dc_no_losses * (1.0 - hares_losses); // 3.6684375
         let expected_ac = expected_dc * hares_inv_eff;
 
         // LUT AC output at the matching coordinates: set to expected_ac so
         // the LUT correction is identity.
         let (_dir, path) = temp_lut_path("pv_lut_t0107_parity", "parquet");
-        write_pv_lut_parquet_with_meta(&path, expected_ac, sam_inv_eff, sam_losses);
+        // The writer's column is the adapter's kW; the W value converts.
+        write_pv_lut_parquet_with_meta(&path, expected_ac / 1000.0, sam_inv_eff, sam_losses);
 
         // Non-LUT PV: no LUT path, confirms baseline.
         let cfg_no_lut = EquipmentConfig::from_typed(
@@ -4592,8 +4603,7 @@ mod tests {
             "PV".to_string(),
             PvConfig {
                 equipment_id: Some(1),
-                capacity_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
-                    .get::<uom::si::power::watt>(),
+                capacity_w,
                 tilt_deg: Some(30.0),
                 azimuth_deg: Some(180.0),
                 attached_boundary_id: None,
@@ -4629,8 +4639,7 @@ mod tests {
         // LUT PV: same config plus LUT path.
         let mut cfg_lut = base_pv_typed_config();
         cfg_lut.equipment_id = Some(2);
-        cfg_lut.capacity_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
-            .get::<uom::si::power::watt>();
+        cfg_lut.capacity_w = capacity_w;
         cfg_lut.system_losses_fraction = Some(hares_losses);
         cfg_lut.inverter_efficiency = Some(hares_inv_eff);
         cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
@@ -4679,7 +4688,7 @@ mod tests {
     fn lut_non_lut_consistency_with_custom_losses() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
 
-        let capacity_kw = 5.0;
+        let capacity_w = 5000.0;
         let sam_losses = 0.14;
         let sam_inv_eff = 0.96;
         let hares_losses = 0.05; // custom, different from SAM default
@@ -4689,7 +4698,7 @@ mod tests {
         // Non-LUT path: what the direct formula produces with custom losses.
         let t_cell = cell_temperature_noct_wind(ambient_c, 1000.0, DEFAULT_NOCT_C, 1.0);
         let derate = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell - 25.0);
-        let dc_no_losses = capacity_kw * derate;
+        let dc_no_losses = capacity_w * derate;
         let expected_dc = dc_no_losses * (1.0 - hares_losses);
 
         // Compute what the LUT's raw AC would be if SAM uses default losses.
@@ -4702,13 +4711,13 @@ mod tests {
         // This should exactly match the non-LUT path.
 
         let (_dir, path) = temp_lut_path("pv_lut_t0107_custom", "parquet");
-        write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
+        // The writer's column is the adapter's kW; the W value converts.
+        write_pv_lut_parquet_with_meta(&path, ac_lut / 1000.0, sam_inv_eff, sam_losses);
 
         // LUT PV.
         let mut cfg_lut = base_pv_typed_config();
         cfg_lut.equipment_id = Some(2);
-        cfg_lut.capacity_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
-            .get::<uom::si::power::watt>();
+        cfg_lut.capacity_w = capacity_w;
         cfg_lut.system_losses_fraction = Some(hares_losses);
         cfg_lut.inverter_efficiency = Some(hares_inv_eff);
         cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
@@ -4745,7 +4754,7 @@ mod tests {
 
     /// Verify that `dc_power_kw_before_losses` is populated correctly in
     /// both LUT and non-LUT paths. The field is internal to `step_one_array`
-    /// so verification is indirect: final `dc_power_kw` is checked against
+    /// so verification is indirect: final `dc_power_w` is checked against
     /// the expected formula. In the non-LUT path `before_losses` equals
     /// `capacity * POA/STC * temp_derate`; in the LUT path it equals
     /// `ac_lut / sam_inv_eff / (1 - sam_losses)`, the raw DC recovered
@@ -4757,7 +4766,7 @@ mod tests {
 
         let t_cell = cell_temperature_noct_wind(ambient_c, 1000.0, DEFAULT_NOCT_C, 1.0);
         let derate = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell - 25.0);
-        let expected_dc_no_losses = 5.0 * derate;
+        let expected_dc_no_losses = 5000.0 * derate;
         let expected_dc = expected_dc_no_losses * (1.0 - DEFAULT_SYSTEM_LOSSES_FRACTION);
 
         // Non-LUT path: before_losses should equal expected_dc_no_losses,
@@ -4793,7 +4802,8 @@ mod tests {
         let sam_inv_eff = DEFAULT_INVERTER_EFFICIENCY;
         let ac_lut = expected_dc_no_losses * (1.0 - sam_losses) * sam_inv_eff;
         let (_dir, path) = temp_lut_path("pv_lut_before_losses", "parquet");
-        write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
+        // The writer's column is the adapter's kW; the W value converts.
+        write_pv_lut_parquet_with_meta(&path, ac_lut / 1000.0, sam_inv_eff, sam_losses);
 
         let mut cfg_lut = base_pv_typed_config();
         cfg_lut.equipment_id = Some(2);
@@ -4864,7 +4874,7 @@ mod tests {
             .find(|e| e.surface_id == sid)
             .unwrap();
         let out_a = pv_a.step_one_array(&env, irr_a, &pv_a.arrays[0], 1.0, 1.0);
-        let dc_a = out_a.dc_power_kw;
+        let dc_a = out_a.dc_power_w;
 
         // PV B: soiling active, system_losses = 0.14, effective = 0.12
         let cfg_b = config_single();
@@ -4882,7 +4892,7 @@ mod tests {
             .find(|e| e.surface_id == sid)
             .unwrap();
         let out_b = pv_b.step_one_array(&env, irr_b, &pv_b.arrays[0], 0.97, 1.0);
-        let dc_b = out_b.dc_power_kw;
+        let dc_b = out_b.dc_power_w;
 
         // Both should produce DC within a 2% relative tolerance: the layered
         // application (irradiance-level soiling vs DC-level loss) produces a
@@ -5018,23 +5028,24 @@ mod tests {
     #[test]
     fn lut_path_soiling_dc_power_algebraically_consistent() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
-        let capacity_kw = 5.0;
+        let capacity_w = 5000.0;
         let sam_losses = 0.14;
         let sam_inv_eff = 0.96;
 
         // At STC without soiling, compute expected raw DC.
         let t_cell = cell_temperature_noct_wind(25.0, 1000.0, DEFAULT_NOCT_C, 1.0);
         let derate = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell - 25.0);
-        let dc_no_losses_expected = capacity_kw * derate;
+        let dc_no_losses_expected = capacity_w * derate;
         // SAM would produce AC = dc_no_losses * (1 - sam_losses) * sam_inv_eff
         let ac_lut = dc_no_losses_expected * (1.0 - sam_losses) * sam_inv_eff;
 
         let (_dir, path) = temp_lut_path("pv_lut_t0422_soiling_dc", "parquet");
-        write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
+        // The writer's column is the adapter's kW; the W value converts.
+        write_pv_lut_parquet_with_meta(&path, ac_lut / 1000.0, sam_inv_eff, sam_losses);
 
         let mut cfg = base_pv_typed_config();
         cfg.equipment_id = Some(1);
-        cfg.capacity_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
+        cfg.capacity_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_w)
             .get::<uom::si::power::watt>();
         cfg.system_losses_fraction = Some(0.0);
         cfg.inverter_efficiency = Some(1.0);
@@ -5061,7 +5072,7 @@ mod tests {
 
         let mut pv = PV::new(cfg.clone());
         pv.init(&cfg, &env).unwrap();
-        // Override effective losses to 0 so dc_power_kw = dc_soiled directly.
+        // Override effective losses to 0 so dc_power_w = dc_soiled directly.
         pv.effective_system_losses_fraction = 0.0;
 
         let irr = env
@@ -5077,7 +5088,7 @@ mod tests {
         let output = pv.step_one_array(&env, irr, &pv.arrays[0], soil_ratio, shade_factor);
 
         assert!(output.lut_path_active, "must use LUT path");
-        let dc = output.dc_power_kw;
+        let dc = output.dc_power_w;
         let dc_before = output.dc_power_kw_before_losses;
 
         // dc_before_losses should equal dc (losses = 0.0) and reflect soiling.
@@ -5086,25 +5097,25 @@ mod tests {
         // Raw DC from LUT AC (no soiling) * soiling = expected DC.
         // SAM's AC encodes dc_no_losses * (1 - 0.14) * 0.96.
         // T-0086 correction: dc_no_losses = ac_lut / 0.96 / 0.86.
-        // dc_soiled = dc_no_losses * 0.90 * 1.0, dc_power_kw = dc_soiled (losses=0).
+        // dc_soiled = dc_no_losses * 0.90 * 1.0, dc_power_w = dc_soiled (losses=0).
         let dc_no_losses = ac_lut / sam_inv_eff / (1.0 - sam_losses);
         let expected_dc = dc_no_losses * soil_ratio * shade_factor;
         approx_eq(dc, expected_dc);
 
-        // invariant: dc_power_kw reflects DC-side soiling.
+        // invariant: dc_power_w reflects DC-side soiling.
         assert!(
             dc <= dc_no_losses * soil_ratio + 1e-12,
-            "dc_power_kw ({dc:.6}) must be <= dc_no_losses * soiling_ratio ({:.6})",
+            "dc_power_w ({dc:.6}) must be <= dc_no_losses * soiling_ratio ({:.6})",
             dc_no_losses * soil_ratio,
         );
         assert!(
             dc < dc_no_losses,
-            "dc_power_kw ({dc:.6}) must be < un-soiled dc_no_losses ({dc_no_losses:.6})"
+            "dc_power_w ({dc:.6}) must be < un-soiled dc_no_losses ({dc_no_losses:.6})"
         );
 
         // AC output at eff=1.0, losses=0.0: AC = DC = dc_no_losses * soil * shade.
         let expected_ac = expected_dc;
-        approx_eq(output.ac_power_kw, expected_ac);
+        approx_eq(output.ac_power_w, expected_ac);
 
         // Cell temp uses soiling-reduced irradiance — verify it's consistent.
         let irr_no_soiling = 1000.0; // direct=1000, diffuse=0, reflected=0
@@ -5115,7 +5126,7 @@ mod tests {
     }
 
     /// Commutativity-preservation: verifies that LUT and non-LUT (PVWatts)
-    /// paths produce identical `dc_power_kw` and `ac_power_kw` for the same
+    /// paths produce identical `dc_power_w` and `ac_power_w` for the same
     /// irradiance, soiling ratio, and a constant-efficiency inverter (eff =
     /// 1.0, losses = 0.0). The commutativity property ((DC × S) × inv_eff =
     /// (DC × inv_eff) × S for constant inv_eff) is satisfied by both the
@@ -5128,7 +5139,7 @@ mod tests {
     #[test]
     fn lut_and_non_lut_paths_agree_for_constant_efficiency_under_soiling() {
         let sid = surface_id_for_orientation(30.0, 180.0, 5.0).expect("surface id");
-        let capacity_kw = 5.0;
+        let capacity_w = 5000.0;
         let hares_losses = 0.0;
         let hares_inv_eff = 1.0;
         let sam_losses = 0.14;
@@ -5173,8 +5184,8 @@ mod tests {
             .unwrap();
         let out_no_lut =
             pv_no_lut.step_one_array(&env, irr, &pv_no_lut.arrays[0], soil_ratio, shade_factor);
-        let ac_no_lut = out_no_lut.ac_power_kw;
-        let dc_no_lut = out_no_lut.dc_power_kw;
+        let ac_no_lut = out_no_lut.ac_power_w;
+        let dc_no_lut = out_no_lut.dc_power_w;
 
         // --- LUT path ---
         // The LUT AC must encode the same DC as the non-LUT path at the
@@ -5188,15 +5199,15 @@ mod tests {
         let t_cell_soiled =
             cell_temperature_noct_wind(ambient_c, 1000.0 * soil_ratio, DEFAULT_NOCT_C, 1.0);
         let derate_soiled = 1.0 + DEFAULT_GAMMA_PER_C * (t_cell_soiled - 25.0);
-        let target_dc_no_losses = capacity_kw * (1000.0 / 1000.0) * derate_soiled;
+        let target_dc_no_losses = capacity_w * (1000.0 / 1000.0) * derate_soiled;
         let ac_lut = target_dc_no_losses * (1.0 - sam_losses) * sam_inv_eff;
         let (_dir, path) = temp_lut_path("pv_lut_t0422_parity", "parquet");
-        write_pv_lut_parquet_with_meta(&path, ac_lut, sam_inv_eff, sam_losses);
+        // The writer's column is the adapter's kW; the W value converts.
+        write_pv_lut_parquet_with_meta(&path, ac_lut / 1000.0, sam_inv_eff, sam_losses);
 
         let mut cfg_lut = base_pv_typed_config();
         cfg_lut.equipment_id = Some(2);
-        cfg_lut.capacity_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
-            .get::<uom::si::power::watt>();
+        cfg_lut.capacity_w = capacity_w;
         cfg_lut.system_losses_fraction = Some(hares_losses);
         cfg_lut.inverter_efficiency = Some(hares_inv_eff);
         cfg_lut.sam_lut_path = Some(path.to_string_lossy().into_owned());
@@ -5239,8 +5250,8 @@ mod tests {
             soil_ratio,
             shade_factor,
         );
-        let ac_lut_path = out_lut.ac_power_kw;
-        let dc_lut_path = out_lut.dc_power_kw;
+        let ac_lut_path = out_lut.ac_power_w;
+        let dc_lut_path = out_lut.dc_power_w;
 
         assert!(out_lut.lut_path_active, "must use LUT path");
 
@@ -5269,12 +5280,12 @@ mod tests {
 
         let sam_inv_eff = 0.97;
         let sam_losses = 0.14;
-        let lut_ac = 3.0;
+        let lut_ac = 3000.0; // W: the writer's column is the adapter's kW (3.0)
         let hares_inv_eff = 0.97;
         let hares_losses = 0.14;
 
         let (_dir, path) = temp_lut_path("pv_lut_t0556_nondefault", "parquet");
-        write_pv_lut_parquet_with_meta(&path, lut_ac, sam_inv_eff, sam_losses);
+        write_pv_lut_parquet_with_meta(&path, lut_ac / 1000.0, sam_inv_eff, sam_losses);
 
         let mut typed = base_pv_typed_config();
         typed.equipment_id = Some(55);
@@ -5362,5 +5373,11 @@ mod tests {
             dc > ac,
             "DC ({dc}) must be > AC ({ac}) when inverter_efficiency < 1.0"
         );
+    }
+
+    #[test]
+    fn dbg_inv() {
+        let _r = make_inverter_pv(4000.0);
+        eprintln!("DBG ok");
     }
 }

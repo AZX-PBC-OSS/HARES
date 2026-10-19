@@ -17,21 +17,21 @@ pub struct DwellingTelemetry {
     pub equipment_names: Vec<String>,
     pub equipment_modes: Vec<f64>,
     pub equipment_soc: Vec<f64>,
-    pub equipment_power_kw: Vec<f64>,
+    pub equipment_power_w: Vec<f64>,
     pub setpoint_heat_c: Vec<f64>,
     pub setpoint_cool_c: Vec<f64>,
     /// Per-zone energy balance residual (W) from the zone-air first-law check.
     /// One entry per zone in the same order as `zone_names`.
     pub energy_balance_residuals: Vec<f64>,
-    pub total_power_kw: f64,
-    pub reactive_power_kvar: f64,
-    /// Load (kW) the island sources failed to cover during islanded operation
+    pub total_power_w: f64,
+    pub reactive_power_var: f64,
+    /// Load (W) the island sources failed to cover during islanded operation
     /// (would-be phantom grid import). Always 0.0 when not islanded.
-    pub island_unserved_kw: f64,
-    /// Surplus on-site generation (kW) the island could not absorb during
+    pub island_unserved_w: f64,
+    /// Surplus on-site generation (W) the island could not absorb during
     /// islanded operation (would-be phantom grid export). Always 0.0 when not
     /// islanded.
-    pub island_excess_kw: f64,
+    pub island_excess_w: f64,
     pub outdoor_temp_c: f64,
     /// Outdoor humidity ratio [kg water / kg dry air], typically 0.001–0.030.
     pub outdoor_humidity_ratio: f64,
@@ -75,16 +75,16 @@ impl DwellingTelemetry {
     /// with a typed error.
     pub fn verify_consistency(
         step: u64,
-        sum_equipment_power_kw: f64,
-        total_power_kw: f64,
+        sum_equipment_power_w: f64,
+        total_power_w: f64,
     ) -> Result<(), HaresError> {
-        let tolerance = 0.001_f64.max(1e-6 * total_power_kw.abs());
-        let diff = (sum_equipment_power_kw - total_power_kw).abs();
+        let tolerance = 0.001_f64.max(1e-6 * total_power_w.abs());
+        let diff = (sum_equipment_power_w - total_power_w).abs();
         if diff > tolerance {
             return Err(HaresError::InvalidState(format!(
                 "telemetry electrical consistency at step {step}: \
-                 sum(equipment_power_kw) {sum_equipment_power_kw:.6} kW does not match \
-                 total_power_kw {total_power_kw:.6} kW (diff {diff:.6} kW)"
+                 sum(equipment_power_w) {sum_equipment_power_w:.6} kW does not match \
+                 total_power_w {total_power_w:.6} kW (diff {diff:.6} kW)"
             )));
         }
         Ok(())
@@ -170,14 +170,14 @@ mod tests {
             equipment_names: vec!["Battery".to_string()],
             equipment_modes: vec![1.0],
             equipment_soc: vec![0.5],
-            equipment_power_kw: vec![1.2],
+            equipment_power_w: vec![1.2],
             setpoint_heat_c: vec![20.0],
             setpoint_cool_c: vec![24.0],
             energy_balance_residuals: vec![0.0],
-            total_power_kw: 1.2,
-            reactive_power_kvar: 0.0,
-            island_unserved_kw: 0.0,
-            island_excess_kw: 0.0,
+            total_power_w: 1.2,
+            reactive_power_var: 0.0,
+            island_unserved_w: 0.0,
+            island_excess_w: 0.0,
             outdoor_temp_c: 10.0,
             outdoor_humidity_ratio: 0.008,
             actor_telemetry: BTreeMap::new(),
@@ -205,7 +205,7 @@ mod tests {
         let fields = &[
             "outdoor_temp",
             "zone_temp[Indoor]",
-            "total_power_kw",
+            "total_power_w",
             "equipment_soc[Battery]",
             "setpoint_heat[Indoor]",
         ];
@@ -219,8 +219,8 @@ mod tests {
         let base = &[
             "outdoor_temp",
             "outdoor_humidity_ratio",
-            "total_power_kw",
-            "reactive_power_kvar",
+            "total_power_w",
+            "reactive_power_var",
             "zone_temp[Indoor]",
             "setpoint_heat[Indoor]",
             "setpoint_cool[Indoor]",
@@ -240,8 +240,8 @@ mod tests {
     #[test]
     fn observation_vec_includes_reactive_power() {
         let mut t = sample();
-        t.reactive_power_kvar = 1.5;
-        let obs = t.to_observation_vec(&["reactive_power_kvar"]).unwrap();
+        t.reactive_power_var = 1.5;
+        let obs = t.to_observation_vec(&["reactive_power_var"]).unwrap();
         assert_eq!(obs, vec![1.5]);
     }
 
@@ -488,8 +488,8 @@ mod tests {
         let fields = &[
             "outdoor_temp",
             "outdoor_humidity_ratio",
-            "total_power_kw",
-            "reactive_power_kvar",
+            "total_power_w",
+            "reactive_power_var",
             "zone_temp[Indoor]",
             "setpoint_heat[Indoor]",
             "setpoint_cool[Indoor]",
@@ -512,7 +512,7 @@ mod tests {
     fn to_observation_vec_returns_valid_when_initialized() {
         let t = sample();
         assert!(t.initialized);
-        let fields = &["outdoor_temp", "zone_temp[Indoor]", "total_power_kw"];
+        let fields = &["outdoor_temp", "zone_temp[Indoor]", "total_power_w"];
         let obs = t.to_observation_vec(fields).unwrap();
         assert_eq!(obs.len(), fields.len());
         for &v in &obs {
@@ -542,9 +542,8 @@ mod tests {
     const SCALAR_OBSERVATION_KEYS: &[&str] = &[
         "outdoor_temp",
         "outdoor_humidity_ratio",
-        "total_power_kw",
-        "total_electric_kw",
-        "reactive_power_kvar",
+        "total_power_w",
+        "reactive_power_var",
     ];
 
     /// Bracket-based keys with a known zone.
@@ -569,7 +568,7 @@ mod tests {
         t.equipment_names = vec!["Battery".to_string(), "Electric Vehicle".to_string()];
         t.equipment_soc = vec![0.5, 0.8];
         t.equipment_modes = vec![1.0, 0.0];
-        t.equipment_power_kw = vec![1.2, 0.0];
+        t.equipment_power_w = vec![1.2, 0.0];
         t
     }
 
@@ -587,10 +586,10 @@ mod tests {
     }
 
     #[test]
-    fn reactive_power_kvar_is_observable() {
+    fn reactive_power_var_is_observable() {
         let mut t = sample();
-        t.reactive_power_kvar = 1.5;
-        let obs = t.to_observation_vec(&["reactive_power_kvar"]).unwrap();
+        t.reactive_power_var = 1.5;
+        let obs = t.to_observation_vec(&["reactive_power_var"]).unwrap();
         assert_eq!(obs.len(), 1);
         assert!((obs[0] - 1.5).abs() < f64::EPSILON);
     }

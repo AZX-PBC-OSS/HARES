@@ -15,7 +15,7 @@ mod tests {
     const NARROW_FIELDS: &[&str] = &[
         "outdoor_temp",
         "zone_temp[Indoor]",
-        "total_power_kw",
+        "total_power_w",
         "equipment_power[Electric Furnace]",
         "setpoint_heat[Indoor]",
     ];

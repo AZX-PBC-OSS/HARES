@@ -92,7 +92,7 @@ def test_explicit_capacity_heating():
     for _ in range(5):
         result = dw.step()
         assert result is not None
-        power = result["net_electric_power_kw"]
+        power = result["net_electric_power_w"]
         assert abs(power) < 1e9
 
 
@@ -108,7 +108,7 @@ def test_autosize_heating():
     for _ in range(5):
         result = dw.step()
         assert result is not None
-        power = result["net_electric_power_kw"]
+        power = result["net_electric_power_w"]
         assert abs(power) < 1e9
 
 

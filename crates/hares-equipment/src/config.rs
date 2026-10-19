@@ -841,7 +841,7 @@ pub(crate) const ZIP_SUM_TOLERANCE: f64 = 1e-9;
 /// structurally inapplicable, because typed equipment computes its real
 /// electric power through its own physics and must keep it bit-identical
 /// at all voltages; only the reactive side of the ZIP model is used, via
-/// [`hares_types::zip::ZipLoad::reactive_kvar`] on the already-computed
+/// [`hares_types::zip::ZipLoad::reactive_var`] on the already-computed
 /// power (`Q = P · tan(acos(pf)) · (zq·V² + iq·V + pq)`).
 ///
 /// Errors when a coefficient-sum invariant is violated (e.g. a bad `"zip"`
@@ -1608,11 +1608,11 @@ mod tests {
         for (label, v0) in arms {
             let zip = ZipLoad { v0: *v0, ..base };
             if let Ok(()) = super::validate_zip_sums(&zip, "eq") {
-                let (real_kw, reactive_kvar) = zip.apply(1.0, 1.0);
+                let (real_w, reactive_var) = zip.apply(1.0, 1.0);
                 assert!(
-                    real_kw.is_finite() && reactive_kvar.is_finite(),
+                    real_w.is_finite() && reactive_var.is_finite(),
                     "{label}: validation accepted v0 = {v0}, but apply at nominal \
-                     voltage produces (P = {real_kw}, Q = {reactive_kvar}) — a \
+                     voltage produces (P = {real_w}, Q = {reactive_var}) — a \
                      validated ZIP must produce finite power at nominal voltage"
                 );
             }
@@ -1652,12 +1652,12 @@ mod tests {
         };
         if let Ok(()) = super::validate_zip_sums(&zip, "eq") {
             for voltage_pu in [0.95, 1.0, 1.05] {
-                let (real_kw, reactive_kvar) = zip.apply(1.0, voltage_pu);
+                let (real_w, reactive_var) = zip.apply(1.0, voltage_pu);
                 assert!(
-                    real_kw.is_finite() && reactive_kvar.is_finite(),
+                    real_w.is_finite() && reactive_var.is_finite(),
                     "validation accepted zp = {zp}, ip = {ip} (sums cancel to 1 at \
-                     nominal), but apply at {voltage_pu} pu produces (P = {real_kw}, \
-                     Q = {reactive_kvar}) — a validated ZIP must produce finite \
+                     nominal), but apply at {voltage_pu} pu produces (P = {real_w}, \
+                     Q = {reactive_var}) — a validated ZIP must produce finite \
                      power across the service voltage band, not just at nominal",
                     zp = zip.zp,
                     ip = zip.ip,

@@ -17,22 +17,22 @@ SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 
 def assert_core_output_semantics(co):
-    if co.electric_kw is not None:
-        assert isinstance(co.electric_kw, (int, float))
-        assert math.isfinite(co.electric_kw)
+    if co.electric_w is not None:
+        assert isinstance(co.electric_w, (int, float))
+        assert math.isfinite(co.electric_w)
         assert co.electric_convention in {"consumption", "generation", "bidirectional"}
         if co.electric_convention == "consumption":
-            assert co.electric_kw >= 0.0
+            assert co.electric_w >= 0.0
         elif co.electric_convention == "generation":
-            assert co.electric_kw <= 0.0
+            assert co.electric_w <= 0.0
         else:
             assert co.electric_convention == "bidirectional"
     else:
         assert co.electric_convention is None
 
-    if co.reactive_power_kvar is not None:
-        assert isinstance(co.reactive_power_kvar, (int, float))
-        assert math.isfinite(co.reactive_power_kvar)
+    if co.reactive_power_var is not None:
+        assert isinstance(co.reactive_power_var, (int, float))
+        assert math.isfinite(co.reactive_power_var)
 
     if co.fuel_w is not None:
         assert isinstance(co.fuel_w, (int, float))
@@ -54,7 +54,7 @@ def assert_core_output_semantics(co):
 def assert_core_output_matches_telemetry(dw):
     equipment_diag = dw.telemetry().equipment()
     names = equipment_diag["names"]
-    power_kw = equipment_diag["power_kw"]
+    power_w = equipment_diag["power_w"]
     soc = equipment_diag["soc"]
     by_name = {name: idx for idx, name in enumerate(names)}
 
@@ -68,10 +68,10 @@ def assert_core_output_matches_telemetry(dw):
 
         assert_core_output_semantics(co)
 
-        if co.electric_kw is None:
-            assert power_kw[idx] == 0.0
+        if co.electric_w is None:
+            assert power_w[idx] == 0.0
         else:
-            assert math.isclose(co.electric_kw, power_kw[idx], rel_tol=0.0, abs_tol=1e-9)
+            assert math.isclose(co.electric_w, power_w[idx], rel_tol=0.0, abs_tol=1e-9)
 
         if co.soc is None:
             assert soc[idx] == 0.0
@@ -92,13 +92,13 @@ class TestStep:
         assert isinstance(result["timestamp"], datetime), "timestamp should be a datetime"
         assert result["timestamp"].year == 2019, "timestamp year should be 2019"
 
-        net_electric_power_kw_keys = [
+        net_electric_power_w_keys = [
             k for k in result.keys() if "net_electric_power" in k
         ]
-        assert len(net_electric_power_kw_keys) > 0, (
-            "should have net_electric_power_kw key"
+        assert len(net_electric_power_w_keys) > 0, (
+            "should have net_electric_power_w key"
         )
-        for key in net_electric_power_kw_keys:
+        for key in net_electric_power_w_keys:
             value = result[key]
             assert isinstance(value, (int, float)), f"{key} should be a number"
             assert math.isfinite(value), f"{key} must be finite, got {value}"

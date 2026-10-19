@@ -229,13 +229,13 @@ fn assert_core_output_contract(desc: &EquipmentDescriptor, co: &CoreOutput) {
 
     let caps = desc.core_capabilities;
     assert_eq!(
-        co.flows.electric_kw.is_some(),
+        co.flows.electric_w.is_some(),
         caps.contains(CoreCapabilities::ELECTRIC),
         "electric core output presence must match capabilities for '{}'",
         desc.name
     );
     assert_eq!(
-        co.flows.reactive_power_kvar.is_some(),
+        co.flows.reactive_power_var.is_some(),
         caps.contains(CoreCapabilities::REACTIVE),
         "reactive core output presence must match capabilities for '{}'",
         desc.name
@@ -577,7 +577,7 @@ fn scheduled_load_grid_outage_keeps_reactive_core_output_present_when_configured
     let co = eq.core_output();
     assert_core_output_contract(eq.descriptor(), co);
     assert_eq!(
-        co.flows.reactive_power_kvar,
+        co.flows.reactive_power_var,
         Some(0.0),
         "reactive core output must remain present and zeroed when configured"
     );
@@ -1554,12 +1554,12 @@ fn all_registered_equipment_core_output_matches_capabilities_and_ports() {
         if desc.core_capabilities.contains(CoreCapabilities::ELECTRIC) {
             let core_kw = co
                 .flows
-                .electric_kw
+                .electric_w
                 .expect("validated electric capability must have core electric output")
-                .net_consumption_kw();
+                .net_consumption_w();
             let port_w = ports.electrical.net_active_w();
             assert!(
-                (core_kw - port_w / 1_000.0).abs() < 0.001,
+                (core_kw - port_w).abs() < 1.0,
                 "core_output vs electrical ports mismatch for '{class}': core={core_kw}, ports={port_w}"
             );
         }
@@ -1666,11 +1666,11 @@ fn pv_capacitive_reactive_output_is_negative_in_core_output() {
     let q = eq
         .core_output()
         .flows
-        .reactive_power_kvar
+        .reactive_power_var
         .expect("pv declares reactive capability");
     assert!(
         q < 0.0,
-        "capacitive setpoint must produce negative core reactive_power_kvar; got {q}"
+        "capacitive setpoint must produce negative core reactive_power_var; got {q}"
     );
 }
 
@@ -1744,11 +1744,11 @@ fn gshp_heater_pump_power_in_telemetry_and_ports() {
         .get(tk::PUMP_POWER_KW)
         .expect("PUMP_POWER_KW must be present in telemetry");
     assert!(
-        (0.04..=0.12).contains(&pump_telemetry),
-        "GSHP heater pump power in telemetry must be 0.04–0.12 kW for typical ~60 m borehole; got {pump_telemetry:.4}"
+        (40.0..=120.0).contains(&pump_telemetry),
+        "GSHP heater pump power in telemetry must be 40–120 W for a typical ~60 m borehole; got {pump_telemetry:.4}"
     );
     assert!(
-        ports.electrical.load_power_w >= pump_telemetry * 1_000.0,
+        ports.electrical.load_power_w >= pump_telemetry,
         "electrical port load ({:.1} W) must be at least the pump contribution ({:.1} W)",
         ports.electrical.load_power_w,
         pump_telemetry * 1_000.0
@@ -1817,14 +1817,14 @@ fn gshp_cooler_pump_power_in_telemetry_and_ports() {
         .get(tk::PUMP_POWER_KW)
         .expect("PUMP_POWER_KW must be present in telemetry");
     assert!(
-        (0.04..=0.12).contains(&pump_telemetry),
-        "GSHP cooler pump power in telemetry must be 0.04–0.12 kW for typical ~60 m borehole; got {pump_telemetry:.4}"
+        (40.0..=120.0).contains(&pump_telemetry),
+        "GSHP cooler pump power in telemetry must be 40–120 W for a typical ~60 m borehole; got {pump_telemetry:.4}"
     );
     assert!(
-        ports.electrical.load_power_w >= pump_telemetry * 1_000.0,
+        ports.electrical.load_power_w >= pump_telemetry,
         "electrical port load ({:.1} W) must be at least the pump contribution ({:.1} W)",
         ports.electrical.load_power_w,
-        pump_telemetry * 1_000.0
+        pump_telemetry
     );
 }
 

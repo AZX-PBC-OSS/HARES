@@ -67,7 +67,7 @@ class _CommonKwargs(TypedDict):
 
 def _battery_kw(name, equipment_list):
     idx = equipment_list["names"].index(name)
-    return equipment_list["power_kw"][idx]
+    return equipment_list["power_w"][idx]
 
 
 def _equipment_telemetry(dw, name):
@@ -149,9 +149,9 @@ class TestBatteryPowerFactorCharging:
 
         co = _equipment_core_output(dw, "Bat")
         tel = _equipment_telemetry(dw, "Bat")
-        assert co.reactive_power_kvar is not None
+        assert co.reactive_power_var is not None
         assert math.isclose(
-            co.reactive_power_kvar, tel["reactive_power_kvar"], rel_tol=0, abs_tol=1e-12
+            co.reactive_power_var, tel["reactive_power_kvar"], rel_tol=0, abs_tol=1e-12
         ), "CoreOutput Q and telemetry Q must agree"
 
 
@@ -189,8 +189,8 @@ class TestBatteryReactiveSetpoint:
 
         tel = _equipment_telemetry(dw, "Bat")
         q = tel["reactive_power_kvar"]
-        assert math.isclose(q, 1.5, rel_tol=1e-6), (
-            f"ReactiveSetpoint(1.5) should override baseline pf, got Q={q}"
+        assert math.isclose(q, 1500.0, rel_tol=1e-6), (
+            f"ReactiveSetpoint(1.5 kvar) should override baseline pf, got Q={q} var"
         )
 
     def test_power_factor_setpoint_reflected_in_telemetry(self):
@@ -251,8 +251,8 @@ class TestBatteryReactiveSetpoint:
 
         tel = _equipment_telemetry(dw, "Bat")
         q = tel["reactive_power_kvar"]
-        assert math.isclose(q, 0.75, rel_tol=1e-6), (
-            f"PowerSetpoint(reactive=0.75) should set Q=0.75, got Q={q}"
+        assert math.isclose(q, 750.0, rel_tol=1e-6), (
+            f"PowerSetpoint(reactive=0.75 kvar) should set Q=750 var, got Q={q}"
         )
 
 
@@ -314,9 +314,9 @@ class TestEvPowerFactorCharging:
 
         co = _equipment_core_output(dw, "TestEV")
         tel = _equipment_telemetry(dw, "TestEV")
-        assert co.reactive_power_kvar is not None
+        assert co.reactive_power_var is not None
         assert math.isclose(
-            co.reactive_power_kvar, tel["reactive_power_kvar"], rel_tol=0, abs_tol=1e-12
+            co.reactive_power_var, tel["reactive_power_kvar"], rel_tol=0, abs_tol=1e-12
         ), "CoreOutput Q and telemetry Q must agree"
 
 
@@ -351,8 +351,8 @@ class TestEvReactiveSetpoint:
 
         tel = _equipment_telemetry(dw, "TestEV")
         q = tel["reactive_power_kvar"]
-        assert math.isclose(q, 1.5, rel_tol=1e-6), (
-            f"ReactiveSetpoint(1.5) should override baseline pf, got Q={q}"
+        assert math.isclose(q, 1500.0, rel_tol=1e-6), (
+            f"ReactiveSetpoint(1.5 kvar) should override baseline pf, got Q={q} var"
         )
 
     def test_power_factor_setpoint_reflected_in_telemetry(self):
@@ -383,8 +383,8 @@ class TestEvReactiveSetpoint:
 
         tel = _equipment_telemetry(dw, "TestEV")
         q = tel["reactive_power_kvar"]
-        assert math.isclose(q, 0.75, rel_tol=1e-6), (
-            f"PowerSetpoint(reactive=0.75) should set Q=0.75, got Q={q}"
+        assert math.isclose(q, 750.0, rel_tol=1e-6), (
+            f"PowerSetpoint(reactive=0.75 kvar) should set Q=750 var, got Q={q}"
         )
 
     def test_real_power_unchanged_by_reactive_setpoint(self):
@@ -406,8 +406,8 @@ class TestEvReactiveSetpoint:
         assert math.isclose(p_after, p_before, rel_tol=1e-6), (
             f"Real power changed after ReactiveSetpoint: {p_before} → {p_after}"
         )
-        assert math.isclose(q_after, 0.5, rel_tol=1e-6), (
-            f"ReactiveSetpoint(0.5) should give Q=0.5, got Q={q_after}"
+        assert math.isclose(q_after, 500.0, rel_tol=1e-6), (
+            f"ReactiveSetpoint(0.5 kvar) should give Q=500 var, got Q={q_after}"
         )
 
 
@@ -432,14 +432,14 @@ class TestDefaultEvZeroQ:
 
         co = _equipment_core_output(dw, "TestEV")
         tel = _equipment_telemetry(dw, "TestEV")
-        assert co.reactive_power_kvar is not None, (
+        assert co.reactive_power_var is not None, (
             "EV with REACTIVE cap must set reactive_power_kvar to Some"
         )
-        assert abs(co.reactive_power_kvar) < 1e-9, (
-            f"Default pf=1.0 should give Q≈0, got {co.reactive_power_kvar}"
+        assert abs(co.reactive_power_var) < 1e-9, (
+            f"Default pf=1.0 should give Q≈0, got {co.reactive_power_var}"
         )
         assert abs(tel["reactive_power_kvar"]) < 1e-9, (
-            f"Telemetry Q should be ≈0 for default EV, got {tel['reactive_power_kvar']}"
+            f"Telemetry Q should be ≈0 for default EV, got {tel['reactive_power_var']}"
         )
         assert tel["active_power_kw"] > 0, "Real power should be >0 with power setpoint"
 
@@ -522,15 +522,15 @@ class TestZipPfOverride:
         co_base = _equipment_core_output(dw_base, "Air Conditioner")
         co_ov = _equipment_core_output(dw_ov, "Air Conditioner")
 
-        p_base = co_base.electric_kw
-        p_ov = co_ov.electric_kw
+        p_base = co_base.electric_w
+        p_ov = co_ov.electric_w
         assert p_base is not None and p_ov is not None
         assert p_base == p_ov, (
             f"Real power must be bit-identical (Rule R1), got {p_base} vs {p_ov}"
         )
 
-        q_base = co_base.reactive_power_kvar
-        q_ov = co_ov.reactive_power_kvar
+        q_base = co_base.reactive_power_var
+        q_ov = co_ov.reactive_power_var
         assert q_base is not None and q_ov is not None
         assert q_base != q_ov, (
             f"Q must change with pf override, got baseline={q_base} override={q_ov}"
@@ -539,8 +539,8 @@ class TestZipPfOverride:
         # Per-component model: Q = comp*tan(acos(pf_comp)) + fan*tan(acos(0.87)).
         # The override changes only the compressor arm.
         tel = _equipment_telemetry(dw_base, "Air Conditioner")
-        fan_kw = tel.get("fan_kw", 0.0)
-        fan_q = fan_kw * math.tan(math.acos(0.87))
+        fan_w = tel.get("fan_kw", 0.0)
+        fan_q = fan_w * math.tan(math.acos(0.87))
         expected_q_base = compressor_kw * math.tan(math.acos(0.96)) + fan_q
         expected_q_ov = compressor_kw * math.tan(math.acos(0.9)) + fan_q
         assert math.isclose(q_base, expected_q_base, rel_tol=1e-6), (
@@ -638,11 +638,11 @@ class TestDefaultBatteryZeroQ:
 
         co = _equipment_core_output(dw, "Bat")
         tel = _equipment_telemetry(dw, "Bat")
-        assert co.reactive_power_kvar is not None, (
+        assert co.reactive_power_var is not None, (
             "Battery with REACTIVE cap must set reactive_power_kvar to Some"
         )
-        assert abs(co.reactive_power_kvar) < 1e-9, (
-            f"Default pf=1.0 should give Q≈0, got {co.reactive_power_kvar}"
+        assert abs(co.reactive_power_var) < 1e-9, (
+            f"Default pf=1.0 should give Q≈0, got {co.reactive_power_var}"
         )
         assert abs(tel["reactive_power_kvar"]) < 1e-9
 

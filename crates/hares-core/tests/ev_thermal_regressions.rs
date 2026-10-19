@@ -288,7 +288,7 @@ fn battery_heater_warms_pack_while_cold_derate_blocks_charging() {
     for _ in 0..16 {
         // 4 h of preconditioning at 1.5 kW.
         step_900s(&mut ev, &mut env);
-        billed_kwh += ev.telemetry().get("active_power_kw").unwrap_or(0.0) * STEP_HOURS;
+        billed_kwh += ev.telemetry().get("active_power_kw").unwrap_or(0.0) * STEP_HOURS / 1000.0;
     }
     let end_c = ev
         .telemetry()
@@ -550,19 +550,19 @@ fn l1_cold_night_still_accepts_charge_energy() {
     // is measured through the pack's SOC — the charging-isolating
     // observable — and the port peak through the AC input.
     let soc_start = ev.telemetry().get("soc").unwrap_or(f64::NAN);
-    let mut port_peak_kw = 0.0_f64;
+    let mut port_peak_w = 0.0_f64;
     for _ in 0..32 {
         step_900s(&mut ev, &mut env);
-        let port_kw = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
-        port_peak_kw = port_peak_kw.max(port_kw);
+        let port_w = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
+        port_peak_w = port_peak_w.max(port_w);
     }
     let soc_end = ev.telemetry().get("soc").unwrap_or(f64::NAN);
     let stored_kwh = (soc_end - soc_start) * 75.0;
 
     assert!(
-        port_peak_kw <= 1.8 + 1e-9,
+        port_peak_w <= 1800.0 + 1e-9,
         "the L1 circuit rating bounds the whole draw (charger + heater \
-         AC-equivalent), peaked at {port_peak_kw} kW"
+         AC-equivalent), peaked at {port_peak_w} W"
     );
     assert!(
         stored_kwh >= 4.0,

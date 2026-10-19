@@ -621,7 +621,8 @@ fn gas_furnace_typed_config_uses_afue_during_init() {
         .expect("step");
 
     let fuel_w = ports.fuel.get(FuelType::Gas);
-    let fan_w = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0) * 1_000.0;
+    // The fan telemetry holds W (SI) now; the parent's kW × 1000 is gone.
+    let fan_w = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
     let gross_capacity_w = ports.thermal[0].sensible_gain_w - fan_w;
     let observed_afue = gross_capacity_w / fuel_w;
     assert!(

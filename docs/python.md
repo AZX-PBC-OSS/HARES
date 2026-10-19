@@ -470,6 +470,29 @@ Maturin builds against the Python in the active virtualenv. Verify with
   `fleet_mixed_offset`, `fleet_same_offset_300s`, `resstock_2025_fleet`
   (identical), and the new `der_pv_battery_900s` and
   `der_pv_battery_ev_900s` captured first on the unfixed engine.
+- The run state is SI (`net_electric_power_w` in the step dict, the
+  telemetry getters `total_power_w` / `reactive_power_var` and the
+  equipment `power_w` dict, the tariff's `step(net_power_w=...)` and its
+  telemetry `cumulative_import_j` / `peak_demand_w`, the HELICS
+  publications `total_power_w` / `reactive_power_var` /
+  `equipment_{i}/power_w` / `pv_generation_w` with `units=W` / `units=VAR`,
+  the gym's `total_power_w` observation and its ±100 000 W bounds, the
+  reward context `total_power_w`, and the `size_pv_system` /
+  `required_main_panel_ampacity` / `estimate_pv_capacity` surfaces taking
+  and returning W keyword-only). The gas therms/hour columns and the
+  billing's total import moved one therm-factor relative
+  (1.3969e-7): HARES's therm and `btu_it_per_hour` are 100 000 ×
+  `uom`'s rounded `btu_it` (105 505 600 J), 14.738 J per therm larger
+  than OpenStudio-HPXML v1.12.0's, kept for bitwise neutrality; adopting
+  the exact OpenStudio-HPXML constant is a numeric change of its own
+  commit. Every other moved column moved in its last bits (the x1000/1000
+  and J/kWh conversion pairs, ≤ 6.3e-15 scaled). The goldens re-captured:
+  all eleven (`consumer_shape_900s`, `der_pv_battery_900s`,
+  `der_pv_battery_ev_900s`, `fleet_mixed_offset`, `fleet_same_offset_300s`,
+  `full_year_900s_dst`, `full_year_hourly`, `leap_year_february_900s`,
+  `month_boundary_billing_3600s`, `resstock_2025_fleet`,
+  `weather_wrap_900s`), captured twice byte-identical; the per-column
+  movement recorded in `02-measurement.md` M-6.
 
 Every number a commit moves is recorded here: what moved, why, and the
 golden fixtures re-captured.

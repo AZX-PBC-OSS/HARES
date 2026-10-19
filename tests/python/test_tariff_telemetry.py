@@ -126,9 +126,9 @@ def test_tariff_telemetry_available_after_tariff_set():
     assert isinstance(t.period_name, str)
     assert isinstance(t.current_rate_usd_per_kwh, float)
     assert isinstance(t.export_rate_usd_per_kwh, float)
-    assert isinstance(t.cumulative_import_kwh, float)
-    assert isinstance(t.cumulative_export_kwh, float)
-    assert isinstance(t.peak_demand_kw, float)
+    assert isinstance(t.cumulative_import_j, float)
+    assert isinstance(t.cumulative_export_j, float)
+    assert isinstance(t.peak_demand_w, float)
     assert isinstance(t.cumulative_energy_cost_usd, float)
 
 
@@ -157,9 +157,9 @@ def test_tariff_telemetry_to_dict():
         "period_name",
         "current_rate_usd_per_kwh",
         "export_rate_usd_per_kwh",
-        "cumulative_import_kwh",
-        "cumulative_export_kwh",
-        "peak_demand_kw",
+        "cumulative_import_j",
+        "cumulative_export_j",
+        "peak_demand_w",
         "cumulative_energy_cost_usd",
     }
     assert set(d.keys()) == expected_keys

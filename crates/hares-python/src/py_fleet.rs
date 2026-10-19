@@ -618,7 +618,7 @@ impl PySteppableFleet {
             Mutex(String),
             Fleet(hares_fleet::FleetError),
         }
-        let (step_results, bldg_ids, reactive_power_kvar) = py
+        let (step_results, bldg_ids, reactive_power_var) = py
             .detach(|| {
                 let mut fleet = self.fleet.lock().map_err(|e| {
                     StepOutcome::Mutex(format!(
@@ -630,10 +630,10 @@ impl PySteppableFleet {
                 // The building ids come from an infallible iterator over
                 // the homes; every home in the fleet has one.
                 let bldg_ids = fleet.bldg_ids();
-                let reactive_power_kvar = (0..fleet.len())
-                    .map(|idx| fleet.telemetry(idx).map(|t| t.reactive_power_kvar))
+                let reactive_power_var = (0..fleet.len())
+                    .map(|idx| fleet.telemetry(idx).map(|t| t.reactive_power_var))
                     .collect::<Vec<_>>();
-                Ok::<_, StepOutcome>((step_results, bldg_ids, reactive_power_kvar))
+                Ok::<_, StepOutcome>((step_results, bldg_ids, reactive_power_var))
             })
             .map_err(|outcome| match outcome {
                 StepOutcome::Mutex(message) => {
@@ -649,8 +649,8 @@ impl PySteppableFleet {
         for (idx, entry) in step_results.into_iter().enumerate() {
             let item = PyDict::new(py);
             let outcome = match entry {
-                Ok(step) => match &reactive_power_kvar[idx] {
-                    Ok(reactive_power_kvar) => Ok((step, *reactive_power_kvar)),
+                Ok(step) => match &reactive_power_var[idx] {
+                    Ok(reactive_power_var) => Ok((step, *reactive_power_var)),
                     Err(err) => Err(err.to_string()),
                 },
                 Err(err) => Err(err.to_string()),
@@ -662,11 +662,11 @@ impl PySteppableFleet {
                         "timestamp",
                         naive_chrono_to_py_datetime(py, step.timestamp)?,
                     )?;
-                    result.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
+                    result.set_item("net_electric_power_w", step.net_electric_power_w)?;
                     result.set_item("hvac_heating_w", step.hvac_heating_w)?;
                     result.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
                     result.set_item("gas_power_w", step.gas_power_w)?;
-                    result.set_item("reactive_power_kvar", reactive)?;
+                    result.set_item("reactive_power_var", reactive)?;
                     for (zone_id, temp_c) in &step.zone_temperatures_c {
                         let key = if zone_id.0 == 0 {
                             "Temperature - Indoor (C)".to_string()

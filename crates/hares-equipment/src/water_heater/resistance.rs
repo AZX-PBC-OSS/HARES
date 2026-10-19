@@ -4,7 +4,6 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use chrono::Timelike;
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
@@ -63,8 +62,8 @@ struct ResistanceWhState {
     upper_element_power_w: f64,
     lower_element_power_w: f64,
     max_combined_power_w: Option<f64>,
-    electric_kw: f64,
-    reactive_power_kvar: f64,
+    electric_w: f64,
+    reactive_power_var: f64,
     draw_flow_rate_kg_s: f64,
     // --- Demand response state ---
     dr_level: DRLevel,
@@ -105,7 +104,7 @@ pub struct ResistanceWH {
     /// The wet appliances' untempered draw [kg/s], from its schedule column.
     appliance_draw_source: Option<ScheduleSource>,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
-    /// real power stays bit-identical; Q comes from `ZipLoad::reactive_kvar`.
+    /// real power stays bit-identical; Q comes from `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
     // --- Setpoint ramp rate ---
     target_setpoint_c: f64,
@@ -714,13 +713,13 @@ impl Equipment for ResistanceWH {
         // Rule R1: Q from the already-computed real power (never through the
         // real-power ZIP polynomial). pf = 1.0 (resistive element) yields
         // exactly 0.0 kVAR.
-        let reactive_power_kvar = self
+        let reactive_power_var = self
             .zip
-            .reactive_kvar(power_w_to_kw(electric_power_w), env.grid.bus_voltage_pu());
+            .reactive_var(electric_power_w, env.grid.bus_voltage_pu());
         if electric_power_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: electric_power_w,
-                reactive_power_kvar,
+                reactive_power_var,
             })?;
         }
 
@@ -757,13 +756,11 @@ impl Equipment for ResistanceWH {
         self.telemetry.set(tk::TANK_AVG_TEMP_C, avg_temp_c);
         self.telemetry.set(tk::UPPER_ELEMENT_POWER_W, upper_power_w);
         self.telemetry.set(tk::LOWER_ELEMENT_POWER_W, lower_power_w);
-        self.telemetry
-            .set(tk::ELECTRIC_KW, power_w_to_kw(electric_power_w));
-        self.telemetry
-            .set(tk::ELEMENT_KW, power_w_to_kw(electric_power_w));
+        self.telemetry.set(tk::ELECTRIC_KW, electric_power_w);
+        self.telemetry.set(tk::ELEMENT_KW, electric_power_w);
         self.telemetry.set(tk::ELECTRIC_POWER_W, electric_power_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
         self.telemetry.set(tk::OUTLET_TEMP_C, draw.outlet_temp_c);
@@ -780,10 +777,8 @@ impl Equipment for ResistanceWH {
         self.tank.update_node_telemetry(&mut self.telemetry);
         let core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(
-                    power_w_to_kw(electric_power_w).max(0.0),
-                )),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption((electric_power_w).max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -838,8 +833,8 @@ impl Equipment for ResistanceWH {
                 upper_element_power_w: self.telemetry.get(tk::UPPER_ELEMENT_POWER_W).unwrap_or(0.0),
                 lower_element_power_w: self.telemetry.get(tk::LOWER_ELEMENT_POWER_W).unwrap_or(0.0),
                 max_combined_power_w: self.max_combined_power_w,
-                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
-                reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
+                electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                reactive_power_var: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
                 dr_level: self.dr_level,
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
@@ -879,12 +874,12 @@ impl Equipment for ResistanceWH {
             .insert(tk::UPPER_ELEMENT_POWER_W, decoded.upper_element_power_w);
         self.telemetry
             .insert(tk::LOWER_ELEMENT_POWER_W, decoded.lower_element_power_w);
-        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
-        self.telemetry.insert(tk::ELEMENT_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
+        self.telemetry.insert(tk::ELEMENT_KW, decoded.electric_w);
         self.telemetry
-            .insert(tk::ELECTRIC_POWER_W, power_kw_to_w(decoded.electric_kw));
+            .insert(tk::ELECTRIC_POWER_W, decoded.electric_w);
         self.telemetry
-            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_kvar);
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_var);
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -898,15 +893,15 @@ impl Equipment for ResistanceWH {
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal (the pair the step
         // published was guard-valid, and the checkpoint carries both
-        // faces): the flows from the checkpointed `electric_kw`/
-        // `reactive_power_kvar`, the mode re-derived by the step's own
+        // faces): the flows from the checkpointed `electric_w`/
+        // `reactive_power_var`, the mode re-derived by the step's own
         // rule (`update_control`'s element dispatch → `resolve_idle` on
         // the restored flow). `CoreOutput::default()` (all fields `None`)
         // violates the capability-presence rules for every field the
         // descriptor declares (ELECTRIC/REACTIVE/HAS_MODE) — the restore
         // contract is that a checkpoint restores a state the workspace's
         // own `validate_core_contract` accepts.
-        let has_nonzero_flow = decoded.electric_kw > 0.0;
+        let has_nonzero_flow = decoded.electric_w > 0.0;
         let restored_mode = if decoded.upper_element_on || decoded.lower_element_on {
             OperatingMode::Heating
         } else {
@@ -915,8 +910,8 @@ impl Equipment for ResistanceWH {
         .resolve_idle(has_nonzero_flow, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
-                reactive_power_kvar: Some(decoded.reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(decoded.electric_w.max(0.0))),
+                reactive_power_var: Some(decoded.reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -969,10 +964,15 @@ impl Equipment for ResistanceWH {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
             ControlSignal::PowerLimit { max_power_kw, .. } => {
+                // The signal carries kW until the control-layer commit; the
+                // working value is W (SI), converted once here.
+                let max_power_w =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
+                        .get::<uom::si::power::watt>();
                 // Clamp element power to respect the limit by reducing ctrl_load_fraction.
                 let total_w = self.upper_element_power_w + self.lower_element_power_w;
                 if total_w > 0.0 {
-                    let max_fraction = (power_kw_to_w(*max_power_kw) / total_w).clamp(0.0, 1.0);
+                    let max_fraction = ((max_power_w) / total_w).clamp(0.0, 1.0);
                     self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
                 }
             }
@@ -1375,8 +1375,8 @@ mod tests {
             ports.electrical.load_power_w > 0.0,
             "cold tank must draw element power"
         );
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
-        assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
+        assert_eq!(ports.electrical.reactive_power_var, 0.0);
+        assert_eq!(eq.core_output().flows.reactive_power_var, Some(0.0));
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
         hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
@@ -1652,7 +1652,7 @@ mod tests {
     /// save_state/load_state exactly (bit-for-bit), mirroring the persistence
     /// of ELECTRIC_KW and other per-step telemetry.
     #[test]
-    fn state_round_trip_preserves_reactive_power_kvar() {
+    fn state_round_trip_preserves_reactive_power_var() {
         let mut eq = ResistanceWH::new(config());
         eq.init(&config(), &env(21.0)).unwrap();
 
@@ -2162,22 +2162,22 @@ mod tests {
         eq.step(&env(21.0), Duration::from_secs(60), &mut p)
             .unwrap();
 
-        let electric_kw = eq
+        let electric_w = eq
             .telemetry()
             .get(tk::ELECTRIC_KW)
             .expect("ELECTRIC_KW must be present");
-        let element_kw = eq
+        let element_w = eq
             .telemetry()
             .get(tk::ELEMENT_KW)
             .expect("ELEMENT_KW must be present");
 
         assert!(
-            electric_kw > 0.0,
+            electric_w > 0.0,
             "WH must be heating for this test to be meaningful"
         );
         assert!(
-            (element_kw - electric_kw).abs() < 1e-9,
-            "element_kw {element_kw:.6} must equal electric_kw {electric_kw:.6}"
+            (element_w - electric_w).abs() < 1e-9,
+            "element_w {element_w:.6} must equal electric_w {electric_w:.6}"
         );
     }
 
@@ -2894,7 +2894,7 @@ mod element_priority_tests {
     /// REACTIVE | HAS_MODE`. `validate_core_contract`'s presence rules
     /// (`equipment.rs`: a declared capability with a `None` field is a
     /// hard error — `missing state.operating_mode`, `missing
-    /// flows.electric_kw`, `missing flows.reactive_power_kvar`) therefore
+    /// flows.electric_w`, `missing flows.reactive_power_var`) therefore
     /// reject the restored output. A checkpoint must restore a state the
     /// workspace's own contract validation accepts (the contract the EV
     /// var-support and Battery mid-charge restore fixes established);

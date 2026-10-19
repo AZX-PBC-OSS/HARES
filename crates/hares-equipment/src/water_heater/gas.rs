@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use chrono::Timelike;
 use hares_physics::constants::{UEF_TO_EF_GAS_INTERCEPT, UEF_TO_EF_GAS_SLOPE};
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
@@ -85,7 +84,7 @@ struct GasWhState {
     fuel_input_w: f64,
     flue_loss_w: f64,
     fan_electric_w: f64,
-    reactive_power_kvar: f64,
+    reactive_power_var: f64,
     draw_flow_rate_kg_s: f64,
     pilot_fraction_to_tank: f64,
     // --- Demand response state ---
@@ -146,7 +145,7 @@ pub struct GasWH {
     // --- ZIP voltage model ---
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`)
     /// for the draft-inducer fan motor: real power stays bit-identical; Q
-    /// comes from `ZipLoad::reactive_kvar`.
+    /// comes from `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
     // --- TMV tempered draw ---
     fixture_delivery_temp_c: f64,
@@ -716,13 +715,13 @@ impl Equipment for GasWH {
         };
         // Rule R1: Q from the already-computed fan power (never through the
         // real-power ZIP polynomial); fan motor pf 0.87 by class default.
-        let fan_reactive_kvar = self
+        let fan_reactive_var = self
             .zip
-            .reactive_kvar(power_w_to_kw(fan_electric_w), env.grid.bus_voltage_pu());
+            .reactive_var(fan_electric_w, env.grid.bus_voltage_pu());
         if fan_electric_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: fan_electric_w,
-                reactive_power_kvar: fan_reactive_kvar,
+                reactive_power_var: fan_reactive_var,
             })?;
         }
 
@@ -764,16 +763,14 @@ impl Equipment for GasWH {
             .set(tk::PILOT_HEAT_TO_WATER_W, pilot_heat_to_water_w);
         self.telemetry
             .set(tk::PILOT_HEAT_TO_AMBIENT_W, pilot_heat_to_ambient_w);
-        self.telemetry
-            .set(tk::PILOT_KW, power_w_to_kw(self.pilot_power_w));
-        self.telemetry
-            .set(tk::FUEL_INPUT_KW, power_w_to_kw(fuel_input_w));
+        self.telemetry.set(tk::PILOT_KW, self.pilot_power_w);
+        self.telemetry.set(tk::FUEL_INPUT_KW, fuel_input_w);
         self.telemetry.set(tk::FLUE_LOSS_W, flue_loss_w);
         self.telemetry
             .set(tk::SKIN_LOSS_W, skin_loss_to_surroundings_w);
         self.telemetry.set(tk::FAN_ELECTRIC_W, fan_electric_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, fan_reactive_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, fan_reactive_var);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
         self.telemetry.set(tk::OUTLET_TEMP_C, draw.outlet_temp_c);
@@ -790,10 +787,8 @@ impl Equipment for GasWH {
         self.tank.update_node_telemetry(&mut self.telemetry);
         let core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(
-                    power_w_to_kw(fan_electric_w).max(0.0),
-                )),
-                reactive_power_kvar: Some(fan_reactive_kvar),
+                electric_w: Some(ElectricPower::Consumption((fan_electric_w).max(0.0))),
+                reactive_power_var: Some(fan_reactive_var),
                 fuel_w: Some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: fuel_input_w.max(0.0),
@@ -850,7 +845,7 @@ impl Equipment for GasWH {
                 fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
                 flue_loss_w: self.telemetry.get(tk::FLUE_LOSS_W).unwrap_or(0.0),
                 fan_electric_w: self.telemetry.get(tk::FAN_ELECTRIC_W).unwrap_or(0.0),
-                reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
+                reactive_power_var: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
                 dr_level: self.dr_level,
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
@@ -890,15 +885,14 @@ impl Equipment for GasWH {
             .insert(tk::PILOT_POWER_W, decoded.pilot_power_w);
         self.telemetry
             .insert(tk::FUEL_INPUT_W, decoded.fuel_input_w);
+        self.telemetry.insert(tk::PILOT_KW, decoded.pilot_power_w);
         self.telemetry
-            .insert(tk::PILOT_KW, power_w_to_kw(decoded.pilot_power_w));
-        self.telemetry
-            .insert(tk::FUEL_INPUT_KW, power_w_to_kw(decoded.fuel_input_w));
+            .insert(tk::FUEL_INPUT_KW, decoded.fuel_input_w);
         self.telemetry.insert(tk::FLUE_LOSS_W, decoded.flue_loss_w);
         self.telemetry
             .insert(tk::FAN_ELECTRIC_W, decoded.fan_electric_w);
         self.telemetry
-            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_kvar);
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_var);
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -909,7 +903,7 @@ impl Equipment for GasWH {
         self.telemetry.insert(tk::PILOT_HEAT_TO_AMBIENT_W, 0.0);
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal: the flows from the
-        // checkpointed `fan_electric_w`/`reactive_power_kvar`/
+        // checkpointed `fan_electric_w`/`reactive_power_var`/
         // `fuel_input_w`, the mode re-derived by the step's own rule
         // (burner dispatch → `resolve_idle` on the restored nonzero
         // flow). `CoreOutput::default()` (all fields `None`) violates the
@@ -925,10 +919,10 @@ impl Equipment for GasWH {
         .resolve_idle(has_nonzero_flow, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(
-                    power_w_to_kw(decoded.fan_electric_w).max(0.0),
+                electric_w: Some(ElectricPower::Consumption(
+                    (decoded.fan_electric_w).max(0.0),
                 )),
-                reactive_power_kvar: Some(decoded.reactive_power_kvar),
+                reactive_power_var: Some(decoded.reactive_power_var),
                 fuel_w: Some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: decoded.fuel_input_w.max(0.0),
@@ -979,8 +973,12 @@ impl Equipment for GasWH {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
             ControlSignal::PowerLimit { max_power_kw, .. } if self.burner_input_w > 0.0 => {
-                let max_fraction =
-                    (power_kw_to_w(*max_power_kw) / self.burner_input_w).clamp(0.0, 1.0);
+                // The signal carries kW until the control-layer commit; the
+                // working value is W (SI), converted once here.
+                let max_power_w =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
+                        .get::<uom::si::power::watt>();
+                let max_fraction = (max_power_w / self.burner_input_w).clamp(0.0, 1.0);
                 self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
             }
             ControlSignal::DemandResponse { level, duration_s } => {
@@ -1381,10 +1379,10 @@ mod tests {
             "Rule R1: real side must be constant power"
         );
         // Q/P = tan(acos(0.87)) at nominal voltage (reactive base sums to 1).
-        let p_kw = 0.05;
-        let q = eq.zip.reactive_kvar(p_kw, 1.0);
+        let p_w = 0.05;
+        let q = eq.zip.reactive_var(p_w, 1.0);
         assert!(
-            (q - p_kw * 0.87_f64.acos().tan()).abs() < 1e-9,
+            (q - p_w * 0.87_f64.acos().tan()).abs() < 1e-9,
             "draft fan Q/P must match tan(acos(0.87)), got {q}"
         );
 
@@ -1393,11 +1391,11 @@ mod tests {
         let co_q = eq
             .core_output()
             .flows
-            .reactive_power_kvar
+            .reactive_power_var
             .expect("REACTIVE declared ⇒ CoreOutput Q must be Some");
         assert_eq!(
             co_q.to_bits(),
-            ports.electrical.reactive_power_kvar.to_bits()
+            ports.electrical.reactive_power_var.to_bits()
         );
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(co_q));
         hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
@@ -1436,11 +1434,11 @@ mod tests {
         assert_eq!(eq_fan.telemetry().get(tk::FAN_ELECTRIC_W), Some(fan_w));
         assert_eq!(p_fan.electrical.load_power_w, fan_w);
         // Q = P·tan(acos(0.87)) at nominal voltage (fan-motor class row).
-        let expected_q = (fan_w / 1000.0) * 0.87_f64.acos().tan();
+        let expected_q = fan_w * 0.87_f64.acos().tan();
         assert!(
-            (p_fan.electrical.reactive_power_kvar - expected_q).abs() < 1e-12,
+            (p_fan.electrical.reactive_power_var - expected_q).abs() < 1e-9,
             "fan reactive power must follow pf 0.87, got {}",
-            p_fan.electrical.reactive_power_kvar
+            p_fan.electrical.reactive_power_var
         );
 
         // The fan is a vented parasitic: no effect on tank heat or fuel.
@@ -1483,7 +1481,7 @@ mod tests {
         assert!(p.fuel.get(hares_types::FuelType::Gas) > 0.0);
         assert_eq!(eq.telemetry().get(tk::FAN_ELECTRIC_W), Some(0.0));
         assert_eq!(p.electrical.load_power_w, 0.0);
-        assert_eq!(p.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(p.electrical.reactive_power_var, 0.0);
 
         // Restoration: the fan draw returns with the firing burner.
         env.grid.voltage_pu = 1.0;
@@ -1671,7 +1669,7 @@ mod tests {
     /// save_state/load_state exactly (bit-for-bit), mirroring the persistence
     /// of ELECTRIC_KW and other per-step telemetry.
     #[test]
-    fn state_round_trip_preserves_reactive_power_kvar() {
+    fn state_round_trip_preserves_reactive_power_var() {
         let mut eq = GasWH::new(config());
         eq.init(&config(), &env(21.0)).unwrap();
 
@@ -1987,15 +1985,13 @@ mod tests {
         let mut p = ports();
         eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
 
-        let fuel_input_w = eq
-            .telemetry()
+        eq.telemetry()
             .get(tk::FUEL_INPUT_W)
             .expect("FUEL_INPUT_W must be present");
-        let pilot_kw = eq
-            .telemetry()
+        eq.telemetry()
             .get(tk::PILOT_KW)
             .expect("PILOT_KW must be present");
-        let fuel_input_kw = eq
+        let fuel_input_w = eq
             .telemetry()
             .get(tk::FUEL_INPUT_KW)
             .expect("FUEL_INPUT_KW must be present");
@@ -2005,22 +2001,20 @@ mod tests {
             "burner must be firing for this test to be meaningful"
         );
         assert!(
-            (fuel_input_kw - fuel_input_w / 1_000.0).abs() < 1e-9,
-            "fuel_input_kw {fuel_input_kw:.6} must equal fuel_input_w/1000 {:.6}",
-            fuel_input_w / 1_000.0
+            fuel_input_w > 0.0,
+            "the fuel input sub-meter must be nonzero; got {fuel_input_w}"
         );
         let pilot_w = eq
             .telemetry()
             .get(tk::PILOT_POWER_W)
             .expect("PILOT_POWER_W must be present");
         assert!(
-            (pilot_kw - pilot_w / 1_000.0).abs() < 1e-9,
-            "pilot_kw {pilot_kw:.6} must equal pilot_power_w/1000 {:.6}",
-            pilot_w / 1_000.0
+            pilot_w > 0.0,
+            "the pilot sub-meter must be nonzero; got {pilot_w}"
         );
         assert!(
-            pilot_kw <= fuel_input_kw,
-            "pilot_kw {pilot_kw:.6} must not exceed fuel_input_kw {fuel_input_kw:.6}"
+            pilot_w <= fuel_input_w,
+            "pilot_w {pilot_w:.6} must not exceed fuel_input_w {fuel_input_w:.6}"
         );
     }
 

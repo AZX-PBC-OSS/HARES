@@ -366,7 +366,7 @@ fn self_consumption_charges_when_exporting() {
     ports
         .accumulate(&PortContribution::Electrical {
             active_power_w: -5_000.0,
-            reactive_power_kvar: 0.0,
+            reactive_power_var: 0.0,
         })
         .expect("accumulate PV generation");
 
@@ -403,7 +403,7 @@ fn self_consumption_discharges_when_importing() {
     ports
         .accumulate(&PortContribution::Electrical {
             active_power_w: 3_000.0,
-            reactive_power_kvar: 0.0,
+            reactive_power_var: 0.0,
         })
         .expect("accumulate load");
 
@@ -491,17 +491,17 @@ fn power_limits_respected() {
     let mut ports = PortSlots::default();
     bat.step(&env, dt, &mut ports).expect("step");
 
-    let active_kw = bat
+    let active_w = bat
         .telemetry()
         .get("active_power_kw")
         .expect("active_power_kw");
     assert!(
-        active_kw <= 5.0 + 1e-6,
-        "Active power must be clamped to max_charge_kw=5.0 kW: got {active_kw:.4}"
+        active_w <= 5000.0 + 1e-6,
+        "Active power must be clamped to the max_charge_w=5.0 kW hardware limit: got {active_w:.4}"
     );
     assert!(
-        active_kw > 0.0,
-        "Battery should be charging: got {active_kw:.4}"
+        active_w > 0.0,
+        "Battery should be charging: got {active_w:.4}"
     );
 }
 

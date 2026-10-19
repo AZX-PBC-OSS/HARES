@@ -76,7 +76,7 @@ fn step_n(dwelling: &mut Dwelling, n: usize) -> Vec<f64> {
             dwelling
                 .step()
                 .expect("the run must step without an error")
-                .net_electric_power_kw
+                .net_electric_power_w
         })
         .collect()
 }
@@ -200,7 +200,7 @@ fn dehumidifier_invalid_override_value_fails_the_build() {
 
 #[test]
 fn blueprint_added_pv_applies_the_spec_bag_override() {
-    fn pv_generation_kw(bag_capacity_kw: f64) -> f64 {
+    fn pv_generation_w(bag_capacity_kw: f64) -> f64 {
         let mut blueprint = hares_core::dwelling::DwellingBlueprintBuilder::from_config(config(
             &fixture("base.xml"),
             None,
@@ -263,14 +263,14 @@ fn blueprint_added_pv_applies_the_spec_bag_override() {
             .iter()
             .find(|eq| eq.descriptor().name == "PV")
             .expect("the assembled dwelling must contain the added PV");
-        match &pv.core_output().flows.electric_kw {
+        match &pv.core_output().flows.electric_w {
             Some(hares_types::ElectricPower::Generation(kw)) => *kw,
             other => panic!("a midday PV step must publish a generation flow, got {other:?}"),
         }
     }
 
-    let mirrored = pv_generation_kw(5.0);
-    let overridden = pv_generation_kw(9.0);
+    let mirrored = pv_generation_w(5.0);
+    let overridden = pv_generation_w(9.0);
 
     assert!(
         overridden > mirrored,

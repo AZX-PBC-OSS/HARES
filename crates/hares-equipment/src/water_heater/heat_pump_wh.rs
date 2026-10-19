@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use chrono::Timelike;
 use hares_physics::biquadratic::BiquadraticCurve;
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
@@ -63,8 +62,8 @@ struct HpwhState {
     tank_avg_temp_c: f64,
     cop: f64,
     cap_mult: f64,
-    electric_kw: f64,
-    reactive_power_kvar: f64,
+    electric_w: f64,
+    reactive_power_var: f64,
     compressor_power_w: f64,
     backup_element_power_w: f64,
     zone_heat_extraction_w: f64,
@@ -191,7 +190,7 @@ pub struct HeatPumpWH {
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// blended pf 0.97 (OCHRE lab value) applied to the total electric draw
     /// (compressor + backup element + fan/parasitic). Real power stays
-    /// bit-identical; Q comes from `ZipLoad::reactive_kvar`.
+    /// bit-identical; Q comes from `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
     // --- Demand response state ---
     dr_setpoint_offset_c: f64,
@@ -1081,14 +1080,14 @@ impl Equipment for HeatPumpWH {
         // real-power ZIP polynomial). Blended pf 0.97 on the total draw —
         // OCHRE lab values are whole-unit; per-component PFs are a future
         // refinement hook.
-        let reactive_power_kvar = self
+        let reactive_power_var = self
             .zip
-            .reactive_kvar(power_w_to_kw(electric_power_w), env.grid.bus_voltage_pu());
+            .reactive_var(electric_power_w, env.grid.bus_voltage_pu());
 
-        if electric_power_w > 0.0 || reactive_power_kvar != 0.0 {
+        if electric_power_w > 0.0 || reactive_power_var != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: electric_power_w,
-                reactive_power_kvar,
+                reactive_power_var,
             })?;
         }
 
@@ -1193,14 +1192,11 @@ impl Equipment for HeatPumpWH {
         }
         self.telemetry.set(tk::COP, cop);
         self.telemetry.set(tk::CAP_MULT, cap_mult);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_power_w);
         self.telemetry
-            .set(tk::ELECTRIC_KW, power_w_to_kw(electric_power_w));
-        self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
-        self.telemetry
-            .set(tk::COMPRESSOR_KW, power_w_to_kw(compressor_power_w));
-        self.telemetry
-            .set(tk::ELEMENT_KW, power_w_to_kw(backup_power_w));
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
+        self.telemetry.set(tk::COMPRESSOR_KW, compressor_power_w);
+        self.telemetry.set(tk::ELEMENT_KW, backup_power_w);
         self.telemetry
             .set(tk::COMPRESSOR_POWER_W, compressor_power_w);
         self.telemetry
@@ -1224,10 +1220,8 @@ impl Equipment for HeatPumpWH {
         self.tank.update_node_telemetry(&mut self.telemetry);
         let core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(
-                    power_w_to_kw(electric_power_w).max(0.0),
-                )),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption((electric_power_w).max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -1282,8 +1276,8 @@ impl Equipment for HeatPumpWH {
                 tank_avg_temp_c: self.telemetry.get(tk::TANK_AVG_TEMP_C).unwrap_or(0.0),
                 cop: self.telemetry.get(tk::COP).unwrap_or(0.0),
                 cap_mult: self.telemetry.get(tk::CAP_MULT).unwrap_or(1.0),
-                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
-                reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
+                electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                reactive_power_var: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 compressor_power_w: self.telemetry.get(tk::COMPRESSOR_POWER_W).unwrap_or(0.0),
                 backup_element_power_w: self
                     .telemetry
@@ -1340,15 +1334,13 @@ impl Equipment for HeatPumpWH {
             .insert(tk::TANK_AVG_TEMP_C, decoded.tank_avg_temp_c);
         self.telemetry.insert(tk::COP, decoded.cop);
         self.telemetry.insert(tk::CAP_MULT, decoded.cap_mult);
-        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
         self.telemetry
-            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_kvar);
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_var);
         self.telemetry
-            .insert(tk::COMPRESSOR_KW, power_w_to_kw(decoded.compressor_power_w));
-        self.telemetry.insert(
-            tk::ELEMENT_KW,
-            power_w_to_kw(decoded.backup_element_power_w),
-        );
+            .insert(tk::COMPRESSOR_KW, decoded.compressor_power_w);
+        self.telemetry
+            .insert(tk::ELEMENT_KW, decoded.backup_element_power_w);
         self.telemetry
             .insert(tk::COMPRESSOR_POWER_W, decoded.compressor_power_w);
         self.telemetry
@@ -1375,7 +1367,7 @@ impl Equipment for HeatPumpWH {
         // pure function of the persisted `(compressor_on, backup_on)`
         // dispatch that `update_control` returns, resolved against the
         // persisted flow (`resolve_idle`, as the step does); the flows are
-        // the checkpointed `electric_kw`/`reactive_power_kvar`. The pair
+        // the checkpointed `electric_w`/`reactive_power_var`. The pair
         // the step published was guard-valid, and the checkpoint carries
         // both faces. `CoreOutput::default()` (all fields `None`) violates
         // the capability-presence rules for every declared capability
@@ -1387,11 +1379,11 @@ impl Equipment for HeatPumpWH {
             (false, true) => OperatingMode::BackupElement,
             (false, false) => OperatingMode::Off,
         }
-        .resolve_idle(decoded.electric_kw > 0.0, None);
+        .resolve_idle(decoded.electric_w > 0.0, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
-                reactive_power_kvar: Some(decoded.reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(decoded.electric_w.max(0.0))),
+                reactive_power_var: Some(decoded.reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -1456,9 +1448,14 @@ impl Equipment for HeatPumpWH {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
             ControlSignal::PowerLimit { max_power_kw, .. } => {
+                // The signal carries kW until the control-layer commit; the
+                // working value is W (SI), converted once here.
+                let max_power_w =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
+                        .get::<uom::si::power::watt>();
                 let rated_w = self.compressor_power_w + self.backup_element_power_w;
                 if rated_w > 0.0 {
-                    let max_fraction = (power_kw_to_w(*max_power_kw) / rated_w).clamp(0.0, 1.0);
+                    let max_fraction = ((max_power_w) / rated_w).clamp(0.0, 1.0);
                     self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
                 }
             }
@@ -2252,18 +2249,18 @@ mod tests {
         let mut ports = ports();
         // Tank starts at 40°C with setpoint 52°C: compressor runs in step().
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
-        let p_kw = ports.electrical.load_power_w / 1000.0;
-        assert!(p_kw > 0.0, "cold tank must run the compressor");
-        let q = ports.electrical.reactive_power_kvar;
-        let expected = p_kw * 0.97_f64.acos().tan();
+        let p_w = ports.electrical.load_power_w;
+        assert!(p_w > 0.0, "cold tank must run the compressor");
+        let q = ports.electrical.reactive_power_var;
+        let expected = p_w * 0.97_f64.acos().tan();
         assert!(
-            (q - expected).abs() < 1e-9,
+            (q - expected).abs() < 1e-6,
             "Q/P must equal tan(acos(0.97)): q={q}, expected={expected}"
         );
         assert_eq!(
             eq.core_output()
                 .flows
-                .reactive_power_kvar
+                .reactive_power_var
                 .expect("Some")
                 .to_bits(),
             q.to_bits(),
@@ -2307,7 +2304,7 @@ mod tests {
     }
 
     #[test]
-    fn state_round_trip_preserves_reactive_power_kvar() {
+    fn state_round_trip_preserves_reactive_power_var() {
         let mut eq = HeatPumpWH::new(config());
         eq.init(&config(), &env(21.0)).unwrap();
 
@@ -2382,10 +2379,10 @@ mod tests {
                 "step {i} (v={v}): ELECTRIC_KW telemetry diverged"
             );
             assert_eq!(
-                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"
             );
-            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+            if ports_pf.electrical.reactive_power_var != 0.0 {
                 any_reactive = true;
             }
             env.current_time += ChronoDuration::minutes(1);
@@ -2429,7 +2426,7 @@ mod tests {
                 p_outage.electrical.load_power_w, 0.0,
                 "step {step}: no electric draw during outage (incl. parasitic)"
             );
-            assert_eq!(p_outage.electrical.reactive_power_kvar, 0.0);
+            assert_eq!(p_outage.electrical.reactive_power_var, 0.0);
             for (a, b) in hp_outage
                 .tank
                 .node_temps()
@@ -2851,15 +2848,15 @@ mod tests {
             "COP must be near zero for all-zero curve, got {cop}"
         );
 
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(f64::NAN);
+        let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(f64::NAN);
         assert!(
-            electric_kw.is_finite(),
-            "ELECTRIC_KW must be finite (not NaN/Inf), got {electric_kw}"
+            electric_w.is_finite(),
+            "ELECTRIC_KW must be finite (not NaN/Inf), got {electric_w}"
         );
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(f64::NAN);
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(f64::NAN);
         assert!(
-            compressor_kw.is_finite(),
-            "COMPRESSOR_KW must be finite (not NaN/Inf), got {compressor_kw}"
+            compressor_w.is_finite(),
+            "COMPRESSOR_KW must be finite (not NaN/Inf), got {compressor_w}"
         );
     }
 
@@ -4218,19 +4215,19 @@ mod dr_tests {
             "backup_on must be false during GridEmergency"
         );
         // Compressor and backup element must contribute zero power.
-        let comp_kw = eq.telemetry().get(tk::COMPRESSOR_POWER_W).unwrap_or(1.0) / 1_000.0;
-        let backup_kw = eq
+        let comp_w = eq.telemetry().get(tk::COMPRESSOR_POWER_W).unwrap_or(1.0) / 1_000.0;
+        let backup_w = eq
             .telemetry()
             .get(tk::BACKUP_ELEMENT_POWER_W)
             .unwrap_or(1.0)
             / 1_000.0;
         assert!(
-            comp_kw < 1e-9,
-            "compressor power must be zero during GridEmergency, got {comp_kw} kW"
+            comp_w < 1e-9,
+            "compressor power must be zero during GridEmergency, got {comp_w} kW"
         );
         assert!(
-            backup_kw < 1e-9,
-            "backup element power must be zero during GridEmergency, got {backup_kw} kW"
+            backup_w < 1e-9,
+            "backup element power must be zero during GridEmergency, got {backup_w} kW"
         );
         // When compressor is off, parasitic standby power (DEFAULT_PARASITIC_POWER_W = 1 W)
         // still draws. Total should be at most that parasitic amount.
@@ -4817,29 +4814,29 @@ mod new_feature_tests {
         eq.step(&env_at(20.0), Duration::from_secs(60), &mut p)
             .unwrap();
 
-        let electric_kw = eq
+        let electric_w = eq
             .telemetry()
             .get(tk::ELECTRIC_KW)
             .expect("ELECTRIC_KW must be present");
-        let compressor_kw = eq
+        let compressor_w = eq
             .telemetry()
             .get(tk::COMPRESSOR_KW)
             .expect("COMPRESSOR_KW must be present");
-        let element_kw = eq
+        let element_w = eq
             .telemetry()
             .get(tk::ELEMENT_KW)
             .expect("ELEMENT_KW must be present");
 
         assert!(
-            electric_kw > 0.0,
+            electric_w > 0.0,
             "HPWH must be drawing power for this test to be meaningful"
         );
-        let sub_sum = compressor_kw + element_kw;
-        let rel_err = (sub_sum - electric_kw).abs() / electric_kw.max(f64::MIN_POSITIVE);
+        let sub_sum = compressor_w + element_w;
+        let rel_err = (sub_sum - electric_w).abs() / electric_w.max(f64::MIN_POSITIVE);
         assert!(
             rel_err < 1e-9,
-            "compressor_kw {compressor_kw:.6} + element_kw {element_kw:.6} = {sub_sum:.6} \
-             must equal electric_kw {electric_kw:.6} (rel_err={rel_err:.2e})"
+            "compressor_w {compressor_w:.6} + element_w {element_w:.6} = {sub_sum:.6} \
+             must equal electric_w {electric_w:.6} (rel_err={rel_err:.2e})"
         );
     }
 

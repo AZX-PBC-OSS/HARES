@@ -68,7 +68,7 @@ def _reward_context(step_data: StepResult, dwelling: PyDwelling) -> RewardContex
         step=step_data,
         telemetry_zone=telemetry.zone(),
         telemetry_equipment=telemetry.equipment(),
-        total_power_kw=float(telemetry.total_power_kw),
+        total_power_w=float(telemetry.total_power_w),
     )
 
 

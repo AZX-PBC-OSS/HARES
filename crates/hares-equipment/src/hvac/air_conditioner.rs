@@ -6,7 +6,6 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_physics::ground::SourceTemperature;
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
@@ -44,7 +43,7 @@ use super::{
 };
 use crate::config::constructor_equipment_id;
 
-const CRANKCASE_HEATER_KW: f64 = 0.05;
+const CRANKCASE_HEATER_W: f64 = 50.0;
 const CRANKCASE_HEATER_THRESHOLD_C: f64 = 12.8;
 
 pub struct AirConditioner {
@@ -68,13 +67,13 @@ pub(super) struct CoolingCore {
     cycle_on_steps: u64,
     cycle_off_steps: u64,
     crankcase_heater_on: bool,
-    crankcase_heater_kw: f64,
+    crankcase_heater_w: f64,
     /// Rated crankcase heater power [kW]; loaded from config, variant-dependent default.
-    pub(super) crankcase_rated_kw: f64,
+    pub(super) crankcase_rated_w: f64,
     /// Outdoor temperature threshold [°C] below which crankcase heater activates.
     pub(super) crankcase_threshold_c: f64,
     /// Optional polynomial coefficients [c0, c1, c2] for temperature-dependent
-    /// crankcase heater capacity: effective_kw = rated_kw * (c0 + c1*T + c2*T^2).
+    /// crankcase heater capacity: effective_w = rated_w * (c0 + c1*T + c2*T^2).
     crankcase_capacity_curve: Option<[f64; 3]>,
     /// Runtime fraction of the cooling coil in the most recent step (PLR value).
     /// Used so the HP system can pass it as companion RTF to the heater side.
@@ -83,7 +82,7 @@ pub(super) struct CoolingCore {
     /// `space_fraction` scaling applied to telemetry. Used by the GSHP cooler
     /// for the borehole heat-rejection balance, which pairs it with the gross
     /// (unscaled) coil sensible/latent values.
-    pub(super) last_compressor_kw: f64,
+    pub(super) last_compressor_w: f64,
     flow_fraction_correction: f64,
     coil_ao_by_stage: Vec<f64>,
     is_room_ac: bool,
@@ -112,7 +111,7 @@ pub(super) struct CoolingCore {
 
     // --- External control signals (sticky) ---
     ctrl_duty_cycle: f64,
-    ctrl_power_limit_kw: f64,
+    ctrl_power_limit_w: f64,
     ctrl_mode_override: Option<OperatingMode>,
 
     // --- Transient signals (reset each step) ---
@@ -127,7 +126,7 @@ pub(super) struct CoolingCore {
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// applies to the compressor component only (class default pf 0.96, or a
     /// user `"zip"` override). Real power stays bit-identical; Q comes from
-    /// `ZipLoad::reactive_kvar` per component (see `hvac::reactive`).
+    /// `ZipLoad::reactive_var` per component (see `hvac::reactive`).
     zip: hares_types::zip::ResolvedZip,
     /// Indoor blower / condenser fan motor component ZIP (pf 0.87), derived
     /// at init via `hvac::reactive::secondary_motor_zip`.
@@ -152,14 +151,14 @@ struct AirConditionerState {
     plf_state: f64,
     last_speed_index: usize,
     last_speed_frac: f64,
-    electric_kw: f64,
+    electric_w: f64,
     sensible_cooling_w: f64,
     latent_cooling_w: f64,
     shr: f64,
     // --- Sticky control signals ---
     ctrl_duty_cycle: f64,
     /// None means unlimited; f64::INFINITY does not serialize cleanly with postcard.
-    ctrl_power_limit_kw: Option<f64>,
+    ctrl_power_limit_w: Option<f64>,
     ctrl_mode_override: Option<OperatingMode>,
     // --- Demand response state ---
     dr_level: DRLevel,
@@ -186,8 +185,8 @@ const AC_CHECKPOINT_VERSION: u32 = 4;
 struct PerformanceResult {
     sensible_cooling_w: f64,
     latent_cooling_w: f64,
-    compressor_kw: f64,
-    fan_kw: f64,
+    compressor_w: f64,
+    fan_w: f64,
     shr: f64,
     /// Supply air dry-bulb temperature [°C] from the coil solver.
     supply_temp_c: f64,
@@ -235,7 +234,7 @@ impl AirConditioner {
     pub(super) fn set_crankcase_defaults_if_unconfigured(
         &mut self,
         config: &EquipmentConfig,
-        rated_kw: f64,
+        rated_w: f64,
         threshold_c: f64,
     ) {
         let crankcase_kw_configured = config
@@ -262,7 +261,7 @@ impl AirConditioner {
             .is_some();
 
         if !crankcase_kw_configured {
-            self.core.crankcase_rated_kw = rated_kw;
+            self.core.crankcase_rated_w = rated_w;
         }
         if !crankcase_threshold_configured {
             self.core.crankcase_threshold_c = threshold_c;
@@ -623,12 +622,12 @@ impl CoolingCore {
             cycle_on_steps: 0,
             cycle_off_steps: 0,
             crankcase_heater_on: false,
-            crankcase_heater_kw: 0.0,
-            crankcase_rated_kw: CRANKCASE_HEATER_KW,
+            crankcase_heater_w: 0.0,
+            crankcase_rated_w: CRANKCASE_HEATER_W,
             crankcase_threshold_c: CRANKCASE_HEATER_THRESHOLD_C,
             crankcase_capacity_curve: None,
             last_cooling_rtf: 0.0,
-            last_compressor_kw: 0.0,
+            last_compressor_w: 0.0,
             flow_fraction_correction: 1.0,
             coil_ao_by_stage: vec![10.0],
             is_room_ac,
@@ -642,7 +641,7 @@ impl CoolingCore {
             use_ideal: false,
             ideal_capacity_w: 0.0,
             ctrl_duty_cycle: 1.0,
-            ctrl_power_limit_kw: f64::INFINITY,
+            ctrl_power_limit_w: f64::INFINITY,
             ctrl_mode_override: None,
             ctrl_load_fraction: 1.0,
             dr_setpoint_offset_c: 0.0,
@@ -909,20 +908,14 @@ impl CoolingCore {
         self.hvac.config.biquadratic_coeffs = load_curve_pair(config, self.is_room_ac)?;
         self.compute_coil_ao(self.rated_shr)?;
 
-        let (crankcase_rated_kw, crankcase_threshold_c, crankcase_capacity_curve) =
+        let (crankcase_rated_w, crankcase_threshold_c, crankcase_capacity_curve) =
             if self.is_room_ac {
                 let cfg = config.require_typed::<RoomAcConfig>("Room AC")?;
                 (
                     // Room ACs have no crankcase heater per OCHRE convention
                     // (MinisplitAHSPCooler class uses 15 W; window/room ACs use 0 W).
-                    // Default to 0.0 kW, not the central-AC default of 0.05 kW.
-                    // One conversion at construction: the config enters in W.
-                    cfg.crankcase_heater_w
-                        .map(|w| {
-                            uom::si::f64::Power::new::<uom::si::power::watt>(w)
-                                .get::<uom::si::power::kilowatt>()
-                        })
-                        .unwrap_or(0.0),
+                    // Default to 0.0 W, not the central-AC default of 50 W.
+                    cfg.crankcase_heater_w.unwrap_or(0.0),
                     cfg.crankcase_heater_threshold_c
                         .unwrap_or(CRANKCASE_HEATER_THRESHOLD_C),
                     cfg.crankcase_capacity_curve_coeffs,
@@ -930,19 +923,13 @@ impl CoolingCore {
             } else {
                 let cfg = config.require_typed::<CentralAirConditionerConfig>("Air Conditioner")?;
                 (
-                    // One conversion at construction: the config enters in W.
-                    cfg.crankcase_heater_w
-                        .map(|w| {
-                            uom::si::f64::Power::new::<uom::si::power::watt>(w)
-                                .get::<uom::si::power::kilowatt>()
-                        })
-                        .unwrap_or(CRANKCASE_HEATER_KW),
+                    cfg.crankcase_heater_w.unwrap_or(CRANKCASE_HEATER_W),
                     cfg.crankcase_heater_threshold_c
                         .unwrap_or(CRANKCASE_HEATER_THRESHOLD_C),
                     cfg.crankcase_capacity_curve_coeffs,
                 )
             };
-        self.crankcase_rated_kw = crankcase_rated_kw;
+        self.crankcase_rated_w = crankcase_rated_w;
         self.crankcase_threshold_c = crankcase_threshold_c;
         self.crankcase_capacity_curve = crankcase_capacity_curve;
 
@@ -961,7 +948,7 @@ impl CoolingCore {
         self.cycle_on_steps = 0;
         self.cycle_off_steps = 0;
         self.crankcase_heater_on = false;
-        self.crankcase_heater_kw = 0.0;
+        self.crankcase_heater_w = 0.0;
         self.last_cooling_rtf = 0.0;
         self.zip = crate::config::resolve_reactive_zip(config)?;
         self.fan_zip =
@@ -1226,18 +1213,18 @@ impl CoolingCore {
         }
         let ebm_window = step_equivalent_battery(&self.hvac, env)?;
         self.crankcase_heater_on = false;
-        self.crankcase_heater_kw = 0.0;
+        self.crankcase_heater_w = 0.0;
 
-        let mut compressor_kw = 0.0;
-        let mut fan_kw = 0.0;
+        let mut compressor_w = 0.0;
+        let mut fan_w = 0.0;
         let mut sensible_cooling_w = 0.0;
         let mut latent_cooling_w = 0.0;
 
         let dt_min = dt.as_secs_f64() / 60.0;
         if self.operating_mode == OperatingMode::Cooling {
             let perf = self.calculate_performance(env, dt_min)?;
-            compressor_kw = perf.compressor_kw;
-            fan_kw = perf.fan_kw;
+            compressor_w = perf.compressor_w;
+            fan_w = perf.fan_w;
             sensible_cooling_w = perf.sensible_cooling_w;
             latent_cooling_w = perf.latent_cooling_w;
             self.hvac.config.shr = perf.shr;
@@ -1252,26 +1239,26 @@ impl CoolingCore {
             self.last_cooling_rtf = (perf.rtf * effective_load).clamp(0.0, 1.0);
 
             // Apply PowerLimit: clamp electric, proportionally reduce thermal.
-            let total_electric_kw = compressor_kw + fan_kw;
-            let (final_electric_kw, thermal_ratio) = if self.ctrl_power_limit_kw.is_finite()
-                && total_electric_kw > self.ctrl_power_limit_kw
+            let total_electric_w = compressor_w + fan_w;
+            let (final_electric_w, thermal_ratio) = if self.ctrl_power_limit_w.is_finite()
+                && total_electric_w > self.ctrl_power_limit_w
             {
-                let ratio = self.ctrl_power_limit_kw / total_electric_kw.max(f64::MIN_POSITIVE);
-                (self.ctrl_power_limit_kw, ratio)
+                let ratio = self.ctrl_power_limit_w / total_electric_w.max(f64::MIN_POSITIVE);
+                (self.ctrl_power_limit_w, ratio)
             } else {
-                (total_electric_kw, 1.0)
+                (total_electric_w, 1.0)
             };
 
-            compressor_kw = (compressor_kw * thermal_ratio * effective_load).max(0.0);
-            fan_kw = (fan_kw * thermal_ratio * effective_load).max(0.0);
-            let _ = final_electric_kw; // used via thermal_ratio above
+            compressor_w = (compressor_w * thermal_ratio * effective_load).max(0.0);
+            fan_w = (fan_w * thermal_ratio * effective_load).max(0.0);
+            let _ = final_electric_w; // used via thermal_ratio above
             sensible_cooling_w *= thermal_ratio * effective_load;
             latent_cooling_w *= thermal_ratio * effective_load;
 
             // Fan waste heat partially offsets cooling capacity delivered to
             // the zone (OCHRE HVAC.py line 543: delivered_heat = heat_gain * shr + fan_power).
             // For cooling: heat_gain is negative, fan_power is positive.
-            let fan_heat_w = power_kw_to_w(fan_kw);
+            let fan_heat_w = fan_w;
             self.hvac.write_zone_thermal_contributions(
                 ports,
                 -sensible_cooling_w + fan_heat_w,
@@ -1321,7 +1308,7 @@ impl CoolingCore {
         // the max of both RTFs determines the off-time fraction.
         // A de-energized bus (grid outage without backup) also removes the
         // crankcase heater's supply — it is a standby load, not a source.
-        let crankcase_kw = if env.grid.bus_energized() {
+        let crankcase_w = if env.grid.bus_energized() {
             self.crankcase_heater_power_internal(
                 env.weather.outdoor_temp_c,
                 self.last_cooling_rtf,
@@ -1330,41 +1317,41 @@ impl CoolingCore {
         } else {
             0.0
         };
-        if crankcase_kw > 0.0 {
+        if crankcase_w > 0.0 {
             self.crankcase_heater_on = true;
-            self.crankcase_heater_kw = crankcase_kw;
+            self.crankcase_heater_w = crankcase_w;
         }
 
-        self.last_compressor_kw = compressor_kw;
+        self.last_compressor_w = compressor_w;
         let sf = self.hvac.config.space_fraction;
-        let electric_kw = (compressor_kw + fan_kw + self.crankcase_heater_kw) * sf;
+        let electric_w = (compressor_w + fan_w + self.crankcase_heater_w) * sf;
         // Rule R1: Q from the already-computed real power, per component
         // (see `hvac::reactive`): compressor at the unit ZIP (pf 0.96),
         // blower/condenser fans at pf 0.87. The crankcase heater is
         // resistive (pf 1.0) and contributes Q ≡ 0.
-        let reactive_power_kvar = self
+        let reactive_power_var = self
             .zip
-            .reactive_kvar(compressor_kw * sf, env.grid.bus_voltage_pu())
+            .reactive_var(compressor_w * sf, env.grid.bus_voltage_pu())
             + self
                 .fan_zip
-                .reactive_kvar(fan_kw * sf, env.grid.bus_voltage_pu());
-        if electric_kw > 0.0 || reactive_power_kvar != 0.0 {
+                .reactive_var(fan_w * sf, env.grid.bus_voltage_pu());
+        if electric_w > 0.0 || reactive_power_var != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(electric_kw),
-                reactive_power_kvar,
+                active_power_w: (electric_w),
+                reactive_power_var,
             })?;
         }
 
         // Telemetry reports delivered (post-DSE) values for the conditioned zone.
         let dse = self.hvac.config.duct_dse.clamp(0.0, 1.0);
-        let fan_heat_w = power_kw_to_w(fan_kw);
+        let fan_heat_w = fan_w;
         // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
         // sensible_cooling_w + latent_cooling_w are pre-DSE (gross) values from compute_performance.
         let gross_cooling_w = sensible_cooling_w + latent_cooling_w;
         let duct_loss_w = gross_cooling_w * (1.0 - dse);
-        self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry
             .set(tk::SENSIBLE_COOLING_W, sensible_cooling_w * dse);
         self.telemetry
@@ -1381,11 +1368,11 @@ impl CoolingCore {
             latent_cooling_w * self.hvac.config.space_fraction,
         );
         self.telemetry.set(tk::FAN_HEAT_W, fan_heat_w);
-        // OCHRE HVAC.py:575: main_power = total_input_kw - fan_kw.
+        // OCHRE HVAC.py:575: main_power = total_input_w - fan_w.
         // For cooling equipment total_input = compressor + fan, so main = compressor.
         self.telemetry.set(
             tk::MAIN_POWER_KW,
-            compressor_kw * self.hvac.config.space_fraction,
+            compressor_w * self.hvac.config.space_fraction,
         );
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         // SHR is written only while the step's sensible cooling is above
@@ -1408,7 +1395,7 @@ impl CoolingCore {
         // cooling side) still delivers real zone cooling and must keep its
         // active mode rather than resolve to Standby, which the thermal-sign
         // contract rejects against a cooling flow.
-        let has_nonzero_flow = electric_kw > 0.0 || delivered_thermal_w != 0.0;
+        let has_nonzero_flow = electric_w > 0.0 || delivered_thermal_w != 0.0;
         self.operating_mode =
             original_mode.resolve_idle(has_nonzero_flow, Some(delivered_thermal_w));
         self.telemetry
@@ -1426,7 +1413,7 @@ impl CoolingCore {
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         // The COP of a step with no compressor input is undefined, not zero:
         // None (the cell null) when the compressor did not run.
-        let compressor_only_w = power_kw_to_w(compressor_kw);
+        let compressor_only_w = compressor_w;
         let total_cooling_w = sensible_cooling_w + latent_cooling_w;
         let cop = if compressor_only_w > 1e-6 {
             Some(
@@ -1452,10 +1439,10 @@ impl CoolingCore {
             .set(tk::RUNTIME_FRACTION, self.last_cooling_rtf.clamp(0.0, 1.0));
         // Sub-metering telemetry is scaled by space_fraction, matching ELECTRIC_KW
         // and MAIN_POWER_KW, so per-component telemetry sums to the unit total.
-        self.telemetry.set(tk::COMPRESSOR_KW, compressor_kw * sf);
-        self.telemetry.set(tk::FAN_KW, fan_kw * sf);
+        self.telemetry.set(tk::COMPRESSOR_KW, compressor_w * sf);
+        self.telemetry.set(tk::FAN_KW, fan_w * sf);
         self.telemetry
-            .set(tk::CRANKCASE_KW, self.crankcase_heater_kw * sf);
+            .set(tk::CRANKCASE_KW, self.crankcase_heater_w * sf);
         self.telemetry
             .set(tk::SUPPLY_TEMP_C, self.hvac.config.supply_air_temp_c);
         self.telemetry
@@ -1530,8 +1517,8 @@ impl CoolingCore {
         };
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(electric_w.max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: Some(delivered_thermal_w),
                 sensible_cooling_w: Some(-post_dse_sensible_w),
@@ -1545,7 +1532,7 @@ impl CoolingCore {
             },
             performance: CorePerformance {
                 cop,
-                main_power_kw: Some(compressor_kw * self.hvac.config.space_fraction),
+                main_power_w: Some(compressor_w * self.hvac.config.space_fraction),
             },
         };
 
@@ -1586,9 +1573,9 @@ impl CoolingCore {
         let effective_rated = match self.crankcase_capacity_curve {
             Some([c0, c1, c2]) => {
                 let t = outdoor_temp_c;
-                self.crankcase_rated_kw * (c0 + c1 * t + c2 * t * t).max(0.0)
+                self.crankcase_rated_w * (c0 + c1 * t + c2 * t * t).max(0.0)
             }
-            None => self.crankcase_rated_kw,
+            None => self.crankcase_rated_w,
         };
         effective_rated * (1.0 - max_rtf.clamp(0.0, 1.0))
     }
@@ -1669,7 +1656,10 @@ impl CoolingCore {
                 );
                 let mfr = flow_m3_s_for_fan * rho;
                 if mfr > 0.0 {
-                    power_w_to_kw(fan_power_w) / (mfr * SPECIFIC_HEAT_DRY_AIR_KJ_KG_K)
+                    // The delta-K the fan's shaft heat adds to the entering
+                    // air: W over (kg/s x J/(kg.K)) — the specific heat in
+                    // kJ carries its 1000 here.
+                    (fan_power_w) / (mfr * SPECIFIC_HEAT_DRY_AIR_KJ_KG_K * 1000.0)
                 } else {
                     0.0
                 }
@@ -1828,6 +1818,10 @@ impl CoolingCore {
         // OCHRE HVAC.py:445-448 -- clip to rated_max * ext_capacity_frac.
         let capacity_ceiling = steady_capacity_w * self.hvac.control.max_capacity_fraction;
         let total_capacity_w = (staged_capacity_w * plr).max(0.0).min(capacity_ceiling);
+        eprintln!(
+            "DBG perf: steady={steady_capacity_w} staged={staged_capacity_w} plr={plr} ceiling={capacity_ceiling} frac={}",
+            self.hvac.control.max_capacity_fraction
+        );
 
         let flow_m3_s = flow_m3_s_for_fan;
 
@@ -1842,7 +1836,7 @@ impl CoolingCore {
             coil_entering_db_c,
             zone.humidity_ratio,
             env.weather.pressure_kpa,
-            power_w_to_kw(total_capacity_w).max(0.0),
+            (total_capacity_w).max(0.0),
             flow_m3_s,
             ao,
         )?;
@@ -1913,14 +1907,14 @@ impl CoolingCore {
         let (sensible_cooling_w, latent_cooling_w) =
             self.hvac.sensible_latent_from_shr(total_capacity_w);
 
-        let compressor_kw = power_w_to_kw((total_capacity_w * stage_eir * eir_ratio).max(0.0));
-        let fan_kw = power_w_to_kw(self.hvac.fan_power_w(flow_m3_s) * plr);
+        let compressor_w = (total_capacity_w * stage_eir * eir_ratio).max(0.0);
+        let fan_w = self.hvac.fan_power_w(flow_m3_s) * plr;
 
         Ok(PerformanceResult {
             sensible_cooling_w,
             latent_cooling_w,
-            compressor_kw,
-            fan_kw,
+            compressor_w,
+            fan_w,
             shr,
             supply_temp_c,
             rtf,
@@ -1963,13 +1957,13 @@ impl CoolingCore {
                 plf_state: self.hvac.runtime.plf_state,
                 last_speed_index: self.hvac.runtime.last_speed_index,
                 last_speed_frac: self.hvac.runtime.last_speed_frac,
-                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
                 sensible_cooling_w: self.telemetry.get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0),
                 latent_cooling_w: self.telemetry.get(tk::LATENT_COOLING_W).unwrap_or(0.0),
                 shr: self.telemetry.get(tk::SHR).unwrap_or(self.hvac.config.shr),
                 ctrl_duty_cycle: self.ctrl_duty_cycle,
-                ctrl_power_limit_kw: if self.ctrl_power_limit_kw.is_finite() {
-                    Some(self.ctrl_power_limit_kw)
+                ctrl_power_limit_w: if self.ctrl_power_limit_w.is_finite() {
+                    Some(self.ctrl_power_limit_w)
                 } else {
                     None
                 },
@@ -2016,7 +2010,7 @@ impl CoolingCore {
         self.hvac.runtime.last_speed_frac = decoded.last_speed_frac;
         self.hvac.config.shr = decoded.shr;
         self.ctrl_duty_cycle = decoded.ctrl_duty_cycle;
-        self.ctrl_power_limit_kw = decoded.ctrl_power_limit_kw.unwrap_or(f64::INFINITY);
+        self.ctrl_power_limit_w = decoded.ctrl_power_limit_w.unwrap_or(f64::INFINITY);
         self.ctrl_mode_override = decoded.ctrl_mode_override;
         self.dr_level = decoded.dr_level;
         self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
@@ -2032,7 +2026,7 @@ impl CoolingCore {
         self.hvac.thermostat_fsm.min_on_time_s = decoded.min_on_time_s;
         self.hvac.thermostat_fsm.min_off_time_s = decoded.min_off_time_s;
 
-        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
         self.telemetry
             .insert(tk::SENSIBLE_COOLING_W, decoded.sensible_cooling_w);
         self.telemetry
@@ -2042,7 +2036,7 @@ impl CoolingCore {
             .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal where the checkpoint
-        // carries the face: electric from `electric_kw`, sensible/latent
+        // carries the face: electric from `electric_w`, sensible/latent
         // cooling from their checkpointed values, mode from the
         // checkpointed `operating_mode` (the pair the step published was
         // guard-valid), speed from the restored `last_speed_index`,
@@ -2064,8 +2058,8 @@ impl CoolingCore {
         };
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(decoded.electric_w.max(0.0))),
+                reactive_power_var: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: Some(-(decoded.sensible_cooling_w + decoded.latent_cooling_w)),
                 sensible_cooling_w: Some(-decoded.sensible_cooling_w),
@@ -2083,7 +2077,7 @@ impl CoolingCore {
                 // while it is active, so the restored output stays one
                 // `validate_core_contract` accepts.
                 cop: decoded.operating_mode.is_active().then_some(0.0),
-                main_power_kw: None,
+                main_power_w: None,
             },
         };
 
@@ -2099,7 +2093,12 @@ impl CoolingCore {
                 self.ctrl_load_fraction = *fraction;
             }
             ControlSignal::PowerLimit { max_power_kw, .. } => {
-                self.ctrl_power_limit_kw = *max_power_kw;
+                // The signal carries kW until the control-layer commit; the
+                // working value is W (SI), converted once here.
+                let max_power_w =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
+                        .get::<uom::si::power::watt>();
+                self.ctrl_power_limit_w = max_power_w;
             }
             ControlSignal::ModeOverride { mode } => {
                 self.ctrl_mode_override = Some(*mode);
@@ -2250,7 +2249,6 @@ mod tests {
         HvacSetpointConfig, RoomAcConfig,
     };
     use hares_physics::constants::BTU_PER_HR_PER_W;
-    use hares_physics::units::power_kw_to_w;
 
     fn env(
         zone_temp_c: f64,
@@ -2818,9 +2816,9 @@ mod tests {
         };
         eq.step(&env_cold, Duration::from_secs(60), &mut ports)
             .unwrap();
-        let crankcase_kw = eq.telemetry().get(tk::CRANKCASE_KW).unwrap_or(0.0);
+        let crankcase_w = eq.telemetry().get(tk::CRANKCASE_KW).unwrap_or(0.0);
         assert!(
-            crankcase_kw > 0.0,
+            crankcase_w > 0.0,
             "crankcase heater should draw below threshold OAT with compressor off"
         );
 
@@ -2918,8 +2916,8 @@ mod tests {
 
         let sens = eq.telemetry().get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0);
         let lat = eq.telemetry().get(tk::LATENT_COOLING_W).unwrap_or(0.0);
-        let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
-        let fan_heat_w = power_kw_to_w(fan_kw);
+        let fan_w = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
+        let fan_heat_w = fan_w;
 
         // Telemetry reports gross cooling (sensible + latent) before fan-heat offset.
         // Port thermal sensible includes fan waste heat: gain = -sensible + fan_heat.
@@ -3109,7 +3107,7 @@ mod tests {
             sens > 0.0,
             "sensible_cooling_w must be positive (magnitude), got {sens}"
         );
-        assert!(elec > 0.0, "electric_kw must be positive, got {elec}");
+        assert!(elec > 0.0, "electric_w must be positive, got {elec}");
         assert!(
             ports.thermal[0].sensible_gain_w < 0.0,
             "thermal port sensible gain must be negative (cooling), got {}",
@@ -3450,14 +3448,14 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
         let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0);
 
         assert_eq!(eq.core.hvac.runtime.last_speed_index, 0);
         assert!((eq.core.hvac.runtime.last_speed_frac - 1.0).abs() < 1e-9);
         assert!(
-            compressor_kw > 0.0,
-            "load_fraction=0.5 with a 4-speed ladder must energize the second stage, got compressor_kw={compressor_kw}"
+            compressor_w > 0.0,
+            "load_fraction=0.5 with a 4-speed ladder must energize the second stage, got compressor_w={compressor_w}"
         );
         assert!(
             (rtf - 1.0).abs() < 1e-9,
@@ -3736,15 +3734,15 @@ mod tests {
         eq.step(&environment, Duration::from_secs(900), &mut ports)
             .unwrap();
 
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
         let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0);
 
         // 5000W = 62.5% of 8000W max -- falls between stage 1 (50%) and stage 2 (75%),
         // so stage 1 is selected (lo index in the interpolation range).
         assert_eq!(eq.core.hvac.runtime.last_speed_index, 1);
         assert!(
-            compressor_kw > 0.0,
-            "IdealCapacity=-5 kW on a 4-speed ladder must energize the second stage, got compressor_kw={compressor_kw}"
+            compressor_w > 0.0,
+            "IdealCapacity=-5 kW on a 4-speed ladder must energize the second stage, got compressor_w={compressor_w}"
         );
         assert!(
             (rtf - 1.0).abs() < 1e-9,
@@ -3768,22 +3766,22 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         let operating_mode = eq.telemetry().get(tk::OPERATING_MODE).unwrap_or(-1.0);
         let core = eq.core_output();
-        let core_electric_kw = match core.flows.electric_kw {
+        let core_electric_w = match core.flows.electric_w {
             Some(super::ElectricPower::Consumption(value)) => value,
             other => panic!("expected electric consumption flow, got {other:?}"),
         };
 
         assert!(
-            (ports.electrical.net_active_w() - power_kw_to_w(electric_kw)).abs() < 1e-3,
-            "electrical port and telemetry must match: ports={} telemetry={electric_kw}",
+            (ports.electrical.net_active_w() - (electric_w)).abs() < 1e-3,
+            "electrical port and telemetry must match: ports={} telemetry={electric_w}",
             ports.electrical.net_active_w()
         );
         assert!(
-            (core_electric_kw - electric_kw).abs() < 1e-9,
-            "CoreOutput electric flow and telemetry must match: core={core_electric_kw} telemetry={electric_kw}"
+            (core_electric_w - electric_w).abs() < 1e-9,
+            "CoreOutput electric flow and telemetry must match: core={core_electric_w} telemetry={electric_w}"
         );
         assert_eq!(core.state.operating_mode, Some(OperatingMode::Cooling));
         assert_eq!(operating_mode, 2.0);
@@ -3826,28 +3824,41 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let p_kw = ports.electrical.load_power_w / 1000.0;
-        assert!(p_kw > 0.0, "cooling call must draw real power");
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).expect("compressor");
-        let fan_kw = eq.telemetry().get(tk::FAN_KW).expect("fan");
-        assert!(compressor_kw > 0.0 && fan_kw > 0.0);
-        let q = ports.electrical.reactive_power_kvar;
+        let p_w = ports.electrical.load_power_w;
+        assert!(p_w > 0.0, "cooling call must draw real power");
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).expect("compressor");
+        let fan_w = eq.telemetry().get(tk::FAN_KW).expect("fan");
+        eprintln!(
+            "DBG p_w={p_w} comp={compressor_w} fan={fan_w} sf={} mode={:?} use_ideal={} ideal_w={}",
+            eq.core.hvac.config.space_fraction,
+            eq.core.operating_mode,
+            eq.core.use_ideal,
+            eq.core.ideal_capacity_w
+        );
+        eprintln!(
+            "DBG eir_by_stage={:?} caps={:?} duty={}",
+            eq.core.hvac.config.eir_by_stage,
+            eq.core.hvac.config.cooling_capacities_w,
+            eq.core.hvac.runtime.duty_cycle
+        );
+        assert!(compressor_w > 0.0 && fan_w > 0.0);
+        let q = ports.electrical.reactive_power_var;
         // Per-component: Q = P_comp·tan(acos(0.96)) + P_fan·tan(acos(0.87)).
         // No crankcase draw while cooling (warm OAT), space_fraction = 1.0.
-        let expected = compressor_kw * 0.96_f64.acos().tan() + fan_kw * 0.87_f64.acos().tan();
+        let expected = compressor_w * 0.96_f64.acos().tan() + fan_w * 0.87_f64.acos().tan();
         assert!(
             (q - expected).abs() < 1e-9,
             "per-component Q must be comp·tan(acos(0.96)) + fan·tan(acos(0.87)): \
              q={q}, expected={expected}"
         );
         assert!(
-            q < p_kw * 0.87_f64.acos().tan(),
+            q < p_w * 0.87_f64.acos().tan(),
             "blend must lie below the all-fan bound"
         );
         assert_eq!(
             eq.core_output()
                 .flows
-                .reactive_power_kvar
+                .reactive_power_var
                 .expect("Some")
                 .to_bits(),
             q.to_bits(),
@@ -3875,12 +3886,9 @@ mod tests {
         };
         eq.step(&off_env, Duration::from_secs(60), &mut off_ports)
             .unwrap();
+        assert_eq!(off_ports.electrical.reactive_power_var, 0.0, "off ⇒ Q == 0");
         assert_eq!(
-            off_ports.electrical.reactive_power_kvar, 0.0,
-            "off ⇒ Q == 0"
-        );
-        assert_eq!(
-            eq.core_output().flows.reactive_power_kvar,
+            eq.core_output().flows.reactive_power_var,
             Some(0.0),
             "off ⇒ CoreOutput Q == Some(0.0)"
         );
@@ -3942,10 +3950,10 @@ mod tests {
                 "step {i} (v={v}): ELECTRIC_KW telemetry diverged"
             );
             assert_eq!(
-                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"
             );
-            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+            if ports_pf.electrical.reactive_power_var != 0.0 {
                 any_reactive = true;
             }
             environment.current_time += ChronoDuration::minutes(1);
@@ -4061,9 +4069,9 @@ mod tests {
             perf.sensible_cooling_w
         );
         assert!(
-            perf.compressor_kw.is_finite() && perf.compressor_kw >= 0.0,
+            perf.compressor_w.is_finite() && perf.compressor_w >= 0.0,
             "compressor power must be finite and non-negative; got {}",
-            perf.compressor_kw
+            perf.compressor_w
         );
         assert!(
             perf.shr > 0.0 && perf.shr <= 1.0,
@@ -4525,10 +4533,10 @@ mod tests {
         );
     }
 
-    /// AC main_power_kw equals compressor_kw (total_input - fan = compressor).
+    /// AC main_power_w equals compressor_w (total_input - fan = compressor).
     /// OCHRE HVAC.py:575.
     #[test]
-    fn ac_main_power_equals_compressor_kw() {
+    fn ac_main_power_equals_compressor_w() {
         let cfg = ac_config();
         let mut eq = AirConditioner::new(cfg.clone());
         let e = env(28.0, 0.009, 19.0, 35.0);
@@ -4542,13 +4550,13 @@ mod tests {
         eq.update_control(&e);
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let main_kw = eq.telemetry().get(tk::MAIN_POWER_KW).unwrap();
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap();
+        let main_w = eq.telemetry().get(tk::MAIN_POWER_KW).unwrap();
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap();
         // Both telemetry values are space_fraction-scaled, so they are equal.
         assert!(
-            (main_kw - compressor_kw).abs() < 1e-9,
-            "AC main_power must equal compressor_kw telemetry (both space_fraction-scaled), \
-             got main={main_kw} compressor={compressor_kw}"
+            (main_w - compressor_w).abs() < 1e-9,
+            "AC main_power must equal compressor_w telemetry (both space_fraction-scaled), \
+             got main={main_w} compressor={compressor_w}"
         );
     }
 
@@ -4558,17 +4566,17 @@ mod tests {
     #[test]
     fn ac_submeter_components_scaled_by_space_fraction_sum_to_total() {
         let sum_matches_total = |eq: &AirConditioner, label: &str| {
-            let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap();
-            let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap();
-            let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap();
-            let crankcase_kw = eq.telemetry().get(tk::CRANKCASE_KW).unwrap();
+            let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap();
+            let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap();
+            let fan_w = eq.telemetry().get(tk::FAN_KW).unwrap();
+            let crankcase_w = eq.telemetry().get(tk::CRANKCASE_KW).unwrap();
             assert!(
-                (compressor_kw + fan_kw + crankcase_kw - electric_kw).abs() < 1e-12,
+                (compressor_w + fan_w + crankcase_w - electric_w).abs() < 1e-12,
                 "{label}: sub-meter components must sum to the unit total: \
-                 compressor={compressor_kw} + fan={fan_kw} + crankcase={crankcase_kw} \
-                 != electric={electric_kw}"
+                 compressor={compressor_w} + fan={fan_w} + crankcase={crankcase_w} \
+                 != electric={electric_w}"
             );
-            electric_kw
+            electric_w
         };
 
         let cfg = ac_config();
@@ -4585,13 +4593,13 @@ mod tests {
         };
         eq.update_control(&e);
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
-        let electric_kw = sum_matches_total(&eq, "cooling");
-        assert!(electric_kw > 0.0, "cooling call must draw power");
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap();
+        let electric_w = sum_matches_total(&eq, "cooling");
+        assert!(electric_w > 0.0, "cooling call must draw power");
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap();
         // Gross compressor power stays unscaled for companion physics
         // (GSHP borehole balance); the telemetry sub-meter is scaled.
         assert!(
-            (compressor_kw - eq.core.last_compressor_kw * 0.6).abs() < 1e-12,
+            (compressor_w - eq.core.last_compressor_w * 0.6).abs() < 1e-12,
             "COMPRESSOR_KW telemetry must be gross * space_fraction"
         );
 
@@ -4606,12 +4614,12 @@ mod tests {
         };
         eq.step(&off_env, Duration::from_secs(60), &mut off_ports)
             .unwrap();
-        let electric_kw = sum_matches_total(&eq, "crankcase standby");
-        let crankcase_kw = eq.telemetry().get(tk::CRANKCASE_KW).unwrap();
+        let electric_w = sum_matches_total(&eq, "crankcase standby");
+        let crankcase_w = eq.telemetry().get(tk::CRANKCASE_KW).unwrap();
         assert!(
-            crankcase_kw > 0.0 && (electric_kw - crankcase_kw).abs() < 1e-12,
+            crankcase_w > 0.0 && (electric_w - crankcase_w).abs() < 1e-12,
             "cold-OAT standby draw must be the crankcase heater alone \
-             (crankcase={crankcase_kw}, electric={electric_kw})"
+             (crankcase={crankcase_w}, electric={electric_w})"
         );
     }
 
@@ -4782,7 +4790,7 @@ mod tests {
         );
     }
 
-    // Regression: RoomAcConfig { crankcase_heater_kw: None } must default to 0 kW,
+    // Regression: RoomAcConfig { crankcase_heater_w: None } must default to 0 kW,
     // not the central-AC default of 0.05 kW. Room ACs have no crankcase heater
     // per OCHRE convention (OCHRE HVAC.py: room/window ACs use 0 W crankcase).
     // OAT at 5 °C — below central-AC threshold (12.8 °C) — distinguishes the two:
@@ -4843,7 +4851,7 @@ mod tests {
         assert_eq!(
             ports.electrical.net_active_w(),
             0.0,
-            "Room AC crankcase_heater_kw=None must default to 0 kW (no crankcase heater); \
+            "Room AC crankcase_heater_w=None must default to 0 kW (no crankcase heater); \
              central-AC default would draw 0.05 kW at 5 °C. Got {}",
             ports.electrical.net_active_w()
         );
@@ -4969,7 +4977,7 @@ mod tests {
         let baseline_hysteresis = eq.core.hvac.thermostat_fsm.thermostat.hysteresis_c;
         let baseline_duty = eq.core.ctrl_duty_cycle;
         let baseline_load = eq.core.ctrl_load_fraction;
-        let baseline_limit = eq.core.ctrl_power_limit_kw;
+        let baseline_limit = eq.core.ctrl_power_limit_w;
         let baseline_mode = eq.core.ctrl_mode_override;
         let baseline_dr = eq.core.dr_level;
         let baseline_ideal = eq.core.ideal_capacity_w;
@@ -4998,7 +5006,7 @@ mod tests {
                 ControlSignal::ThermalSetpointDelta { .. } => true,
                 ControlSignal::DutyCycle { .. } => eq.core.ctrl_duty_cycle != baseline_duty,
                 ControlSignal::LoadFraction { .. } => eq.core.ctrl_load_fraction != baseline_load,
-                ControlSignal::PowerLimit { .. } => eq.core.ctrl_power_limit_kw != baseline_limit,
+                ControlSignal::PowerLimit { .. } => eq.core.ctrl_power_limit_w != baseline_limit,
                 ControlSignal::ModeOverride { .. } => eq.core.ctrl_mode_override != baseline_mode,
                 ControlSignal::DemandResponse { .. } => eq.core.dr_level != baseline_dr,
                 ControlSignal::IdealCapacity { .. } => eq.core.ideal_capacity_w != baseline_ideal,
@@ -5537,7 +5545,7 @@ mod dr_tests {
         }
     }
 
-    /// Run one full control+step cycle. Returns electric_kw.
+    /// Run one full control+step cycle. Returns electric_w.
     fn step_once(eq: &mut AirConditioner, env: &EnvironmentState) -> f64 {
         let mut ports = make_ports();
         eq.update_control(env);
@@ -5786,25 +5794,26 @@ mod dr_tests {
         eq_unlimited.init(&cfg, &environment).unwrap();
         let kw_unlimited = step_once(&mut eq_unlimited, &environment);
 
-        // Set limit well below expected draw.
-        let limit_kw = (kw_unlimited * 0.5).max(0.1);
+        // Set limit well below expected draw. The signal carries kW until
+        // the control-layer commit; the W-intent limit converts once.
+        let limit_w = (kw_unlimited * 0.5).max(0.1);
         let mut eq_limited = AirConditioner::new(cfg.clone());
         eq_limited.init(&cfg, &environment).unwrap();
         eq_limited
             .apply_control(&ControlSignal::PowerLimit {
-                max_power_kw: limit_kw,
+                max_power_kw: limit_w / 1000.0,
                 ramp_rate_kw_per_s: None,
             })
             .unwrap();
         let kw_limited = step_once(&mut eq_limited, &environment);
 
         assert!(
-            kw_unlimited > limit_kw,
+            kw_unlimited > limit_w,
             "unlimited draw must exceed limit for this test to be meaningful"
         );
         assert!(
-            kw_limited <= limit_kw + 1e-9,
-            "PowerLimit must clamp electric draw: limited={kw_limited:.4}, limit={limit_kw:.4}"
+            kw_limited <= limit_w + 1e-9,
+            "PowerLimit must clamp electric draw: limited={kw_limited:.4}, limit={limit_w:.4}"
         );
         assert!(
             kw_limited > 0.0,
@@ -6062,11 +6071,11 @@ mod crankcase_tests {
     #[test]
     fn standalone_ac_crankcase_full_power_when_off_and_cold() {
         let cfg = base_config();
-        let kw = step_ac_off(&cfg, 5.0);
-        // 100 W rated, fully off (RTF=0) -> crankcase = 0.10 kW
+        let w = step_ac_off(&cfg, 5.0);
+        // 100 W rated, fully off (RTF=0) -> crankcase = 100 W
         assert!(
-            (kw - 0.10).abs() < 1e-9,
-            "expected 0.10 kW crankcase, got {kw}"
+            (w - 100.0).abs() < 1e-6,
+            "expected 100 W crankcase, got {w}"
         );
     }
 
@@ -6087,14 +6096,14 @@ mod crankcase_tests {
         };
         eq.update_control(&e);
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
-        let p_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        assert!(p_kw > 0.0, "crankcase heater must draw real power");
+        let p_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        assert!(p_w > 0.0, "crankcase heater must draw real power");
         assert_eq!(
-            ports.electrical.reactive_power_kvar, 0.0,
+            ports.electrical.reactive_power_var, 0.0,
             "resistive crankcase draw must produce zero Q"
         );
         assert_eq!(
-            eq.core_output().flows.reactive_power_kvar,
+            eq.core_output().flows.reactive_power_var,
             Some(0.0),
             "CoreOutput Q must be Some(0.0) on crankcase-only standby"
         );
@@ -6115,9 +6124,9 @@ mod crankcase_tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let e = cold_env(5.0, 20.0);
         eq.init(&cfg, &e).unwrap();
-        // cooling_rtf=0.3, heating_rtf=0.7 -> max=0.7 -> power = 0.10*(1-0.7)=0.03 kW
-        let kw = eq.crankcase_heater_power(5.0, 0.3, Some(0.7));
-        assert!((kw - 0.03).abs() < 1e-9, "expected 0.03 kW, got {kw}");
+        // cooling_rtf=0.3, heating_rtf=0.7 -> max=0.7 -> power = 100*(1-0.7)=30 W
+        let w = eq.crankcase_heater_power(5.0, 0.3, Some(0.7));
+        assert!((w - 30.0).abs() < 1e-6, "expected 30 W, got {w}");
     }
 
     // Test 4: HP cooling mode active (RTF=0.6), heating off -> crankcase = rated * 0.4
@@ -6127,9 +6136,9 @@ mod crankcase_tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let e = cold_env(5.0, 20.0);
         eq.init(&cfg, &e).unwrap();
-        // cooling_rtf=0.6, heating off (0.0) -> max=0.6 -> power = 0.10*(1-0.6)=0.04 kW
-        let kw = eq.crankcase_heater_power(5.0, 0.6, Some(0.0));
-        assert!((kw - 0.04).abs() < 1e-9, "expected 0.04 kW, got {kw}");
+        // cooling_rtf=0.6, heating off (0.0) -> max=0.6 -> power = 100*(1-0.6)=40 W
+        let w = eq.crankcase_heater_power(5.0, 0.6, Some(0.0));
+        assert!((w - 40.0).abs() < 1e-6, "expected 40 W, got {w}");
     }
 
     // Test 5: HP heating mode active (RTF=0.8), cooling off -> crankcase = rated * 0.2
@@ -6139,9 +6148,9 @@ mod crankcase_tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let e = cold_env(5.0, 20.0);
         eq.init(&cfg, &e).unwrap();
-        // cooling_rtf=0.0, heating_rtf=0.8 -> max=0.8 -> power = 0.10*(1-0.8)=0.02 kW
-        let kw = eq.crankcase_heater_power(5.0, 0.0, Some(0.8));
-        assert!((kw - 0.02).abs() < 1e-9, "expected 0.02 kW, got {kw}");
+        // cooling_rtf=0.0, heating_rtf=0.8 -> max=0.8 -> power = 100*(1-0.8)=20 W
+        let w = eq.crankcase_heater_power(5.0, 0.0, Some(0.8));
+        assert!((w - 20.0).abs() < 1e-6, "expected 20 W, got {w}");
     }
 
     // Test 6: Both coils off -> full crankcase power
@@ -6151,8 +6160,8 @@ mod crankcase_tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let e = cold_env(5.0, 20.0);
         eq.init(&cfg, &e).unwrap();
-        let kw = eq.crankcase_heater_power(5.0, 0.0, Some(0.0));
-        assert!((kw - 0.10).abs() < 1e-9, "expected 0.10 kW, got {kw}");
+        let w = eq.crankcase_heater_power(5.0, 0.0, Some(0.0));
+        assert!((w - 100.0).abs() < 1e-6, "expected 100 W, got {w}");
     }
 
     // Test 7: Both coils have RTF -> uses the maximum
@@ -6162,9 +6171,9 @@ mod crankcase_tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let e = cold_env(5.0, 20.0);
         eq.init(&cfg, &e).unwrap();
-        // cooling=0.4, heating=0.9 -> max=0.9 -> power = 0.10*(1-0.9)=0.01 kW
-        let kw = eq.crankcase_heater_power(5.0, 0.4, Some(0.9));
-        assert!((kw - 0.01).abs() < 1e-9, "expected 0.01 kW, got {kw}");
+        // cooling=0.4, heating=0.9 -> max=0.9 -> power = 100*(1-0.9)=10 W
+        let w = eq.crankcase_heater_power(5.0, 0.4, Some(0.9));
+        assert!((w - 10.0).abs() < 1e-6, "expected 10 W, got {w}");
     }
 
     // Test 8: Temperature curve modifies capacity correctly
@@ -6177,11 +6186,11 @@ mod crankcase_tests {
         let mut eq = AirConditioner::new(cfg.clone());
         let e = cold_env(5.0, 20.0);
         eq.init(&cfg, &e).unwrap();
-        // crankcase_heater_power: rated=0.10 * curve(5C)=1.5 * (1-0.0) = 0.15 kW
-        let kw = eq.crankcase_heater_power(5.0, 0.0, None);
+        // crankcase_heater_power: rated=100 W * curve(5C)=1.5 * (1-0.0) = 150 W
+        let w = eq.crankcase_heater_power(5.0, 0.0, None);
         assert!(
-            (kw - 0.15).abs() < 1e-9,
-            "expected 0.15 kW with curve at T=5C, got {kw}"
+            (w - 150.0).abs() < 1e-6,
+            "expected 150 W with curve at T=5C, got {w}"
         );
     }
 
@@ -6200,12 +6209,12 @@ mod crankcase_tests {
         eq.update_control(&e);
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         let port_w = ports.electrical.net_active_w();
         // Crankcase (0.10 kW = 100 W) must appear in both telemetry and port contribution.
         assert!(
-            (electric_kw - 0.10).abs() < 1e-9,
-            "telemetry electric_kw must equal crankcase rated 0.10 kW, got {electric_kw}"
+            (electric_w - 100.0).abs() < 1e-6,
+            "telemetry electric_w must equal the crankcase rated 100 W, got {electric_w}"
         );
         assert!(
             (port_w - 100.0).abs() < 1.0,
@@ -6465,6 +6474,10 @@ mod ideal_capacity_tests {
                 .unwrap_or(0.0)
                 .abs();
         let limit = full_cooling_w * 0.55;
+        eprintln!(
+            "DBG frac3real: capped={capped_cooling_w} full={full_cooling_w} frac={}",
+            eq2.core.hvac.control.max_capacity_fraction
+        );
         assert!(
             capped_cooling_w <= limit,
             "MaxCapacityFraction(0.5) should limit output to ~50%; \

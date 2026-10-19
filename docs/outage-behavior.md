@@ -114,9 +114,9 @@ operation (the bus is at nominal voltage).
     and a discharge clamp would strand them.
   - **Residual imbalance is accounted, not faked**: any remaining net flow at
     the service entrance during islanded operation is reported as
-    `island_unserved_kw` (load the island sources failed to cover — e.g.
+    `island_unserved_w` (load the island sources failed to cover — e.g.
     load beyond `max_discharge_kw`; the would-be phantom import) and
-    `island_excess_kw` (surplus generation the island could not absorb; the
+    `island_excess_w` (surplus generation the island could not absorb; the
     would-be phantom export) on `DwellingTelemetry` and in the Python
     telemetry/env dict. Both are 0.0 during normal grid-connected operation.
     Unserved load above 0.05 kW while islanded emits a rate-limited
@@ -128,10 +128,10 @@ operation (the bus is at nominal voltage).
 ## Observability
 
 - Rust: `EnvironmentState::grid` — `voltage_pu` (utility), `bus_voltage_pu()`,
-  `islanded()`; `DwellingTelemetry` — `island_unserved_kw`,
-  `island_excess_kw`.
+  `islanded()`; `DwellingTelemetry` — `island_unserved_w`,
+  `island_excess_w`.
 - Python (`Dwelling.get_env_dict()`): `grid_voltage_pu`, `grid_bus_voltage_pu`,
-  `grid_islanded`, `island_unserved_kw`, `island_excess_kw`. The same two
+  `grid_islanded`, `island_unserved_w`, `island_excess_w`. The same two
   island fields are also getters on the `Telemetry` object.
 - Python actors (`env["grid"]`): `voltage_pu`, `bus_voltage_pu`, `islanded`.
 

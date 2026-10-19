@@ -439,11 +439,11 @@ def _run_simulation(
                 candidates = dw.pv_candidates()
                 if candidates:
                     best = candidates[0]
-                    pv_obj = PV("PV", capacity_w=best.max_capacity_kw * 1000.0, tilt=best.tilt_deg, azimuth=best.azimuth_deg)
+                    pv_obj = PV("PV", capacity_w=best.max_capacity_w, tilt=best.tilt_deg, azimuth=best.azimuth_deg)
                     dw.add_pv(pv_obj)
                     pv_info = {
                         "enabled": True,
-                        "kw": best.max_capacity_kw,
+                        "w": best.max_capacity_w,
                         "tilt": best.tilt_deg,
                         "azimuth": best.azimuth_deg,
                         "source": "auto",

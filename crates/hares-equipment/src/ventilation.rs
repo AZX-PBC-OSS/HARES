@@ -17,7 +17,6 @@ use hares_physics::air_properties::dry_air_density_kg_m3;
 use hares_physics::constants::{
     CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_0C_J_KG, SEA_LEVEL_PRESSURE_PA,
 };
-use hares_physics::units::power_w_to_kw;
 use hares_types::zip::{ResolvedZip, ZipLoad};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
@@ -318,7 +317,7 @@ pub struct Ventilation {
     telemetry: Telemetry,
     core_output: CoreOutput,
     /// Rule R1 reactive-only ZIP: real power stays bit-identical;
-    /// Q comes from ZipLoad::reactive_kvar. Ventilation fan pf 0.87.
+    /// Q comes from ZipLoad::reactive_var. Ventilation fan pf 0.87.
     zip: ResolvedZip,
 
     ventilation_type: VentilationType,
@@ -670,8 +669,8 @@ impl Equipment for Ventilation {
             self.mode = self.mode.resolve_idle(false, None);
             self.core_output = CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(0.0)),
-                    reactive_power_kvar: Some(0.0),
+                    electric_w: Some(ElectricPower::Consumption(0.0)),
+                    reactive_power_var: Some(0.0),
                     fuel_w: None,
                     thermal_output_w: None,
                     sensible_cooling_w: None,
@@ -737,8 +736,8 @@ impl Equipment for Ventilation {
             self.mode = self.mode.resolve_idle(false, None);
             self.core_output = CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(0.0)),
-                    reactive_power_kvar: Some(0.0),
+                    electric_w: Some(ElectricPower::Consumption(0.0)),
+                    reactive_power_var: Some(0.0),
                     fuel_w: None,
                     thermal_output_w: None,
                     sensible_cooling_w: None,
@@ -827,13 +826,13 @@ impl Equipment for Ventilation {
             m_dot_kg_s * LATENT_HEAT_VAPORISATION_0C_J_KG * eff_l * (w_indoor - w_outdoor);
 
         // Fan electrical power [kW]
-        let fan_kw = power_w_to_kw(effective_fan_power_w);
-        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
+        let fan_w = effective_fan_power_w;
+        let reactive_power_var = self.zip.reactive_var(fan_w, env.grid.bus_voltage_pu());
 
         // Write ports
         ports.accumulate(&PortContribution::Electrical {
             active_power_w: effective_fan_power_w,
-            reactive_power_kvar,
+            reactive_power_var,
         })?;
 
         // Ventilation thermal load is handled by the envelope solver's
@@ -841,9 +840,9 @@ impl Equipment for Ventilation {
         // double-counting. Equipment reports fan power and telemetry only.
 
         // Telemetry
-        self.telemetry.set(tk::ELECTRIC_KW, fan_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, fan_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry.set(tk::FAN_POWER_W, effective_fan_power_w);
         self.telemetry
             .set(tk::VENT_SUPPLY_FAN_POWER_W, effective_supply_fan_power_w);
@@ -899,8 +898,8 @@ impl Equipment for Ventilation {
         self.mode = self.mode.resolve_idle(true, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(fan_w.max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -963,7 +962,7 @@ impl Equipment for Ventilation {
         restore_schedule_source_state(&mut self.schedule_source, &cp.schedule_source_state)?;
         // Reconstruct core_output structure: the per-step fan power depends
         // conditions (outdoor/indoor temp, humidity, schedule fraction) not
-        // stored in the checkpoint, so electric_kw is
+        // stored in the checkpoint, so electric_w is
         // set to Consumption(0.0) — the next step() recalculates the correct
         // value. The mode must be consistent with those zero flows: an `On`
         // checkpoint (running fan, nonzero flow at save) restored verbatim
@@ -978,8 +977,8 @@ impl Equipment for Ventilation {
         self.mode = self.mode.resolve_idle(false, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_var: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -2248,7 +2247,7 @@ mod tests {
         // Normal operation: supply + exhaust both at rated
         hrv.step(&e_normal, Duration::from_secs(300), &mut ports)
             .expect("step normal");
-        let normal_total_kw = ports.electrical.net_active_w();
+        let normal_total_w = ports.electrical.net_active_w();
 
         // Bypass: supply fan power scaled down
         let mut ports_bypass = PortSlots {
@@ -2257,11 +2256,11 @@ mod tests {
         };
         hrv.step(&e_bypass, Duration::from_secs(300), &mut ports_bypass)
             .expect("step bypass");
-        let bypass_total_kw = ports_bypass.electrical.net_active_w();
+        let bypass_total_w = ports_bypass.electrical.net_active_w();
 
         assert!(
-            bypass_total_kw < normal_total_kw,
-            "bypass total power ({bypass_total_kw:.6} kW) should be less than normal ({normal_total_kw:.6} kW)"
+            bypass_total_w < normal_total_w,
+            "bypass total power ({bypass_total_w:.6} kW) should be less than normal ({normal_total_w:.6} kW)"
         );
 
         let bypass_supply_w = hrv
@@ -2347,11 +2346,11 @@ mod tests {
             .step(&e, Duration::from_secs(300), &mut ports_split)
             .expect("step split");
 
-        let combined_kw = ports_combined.electrical.net_active_w();
-        let split_kw = ports_split.electrical.net_active_w();
+        let combined_w = ports_combined.electrical.net_active_w();
+        let split_w = ports_split.electrical.net_active_w();
         assert!(
-            (combined_kw - split_kw).abs() < 0.001,
-            "combined model ({combined_kw:.6} kW) and split model ({split_kw:.6} kW) should match when supply+exhaust sum equals old total"
+            (combined_w - split_w).abs() < 0.001,
+            "combined model ({combined_w:.6} kW) and split model ({split_w:.6} kW) should match when supply+exhaust sum equals old total"
         );
     }
 
@@ -2445,15 +2444,15 @@ mod tests {
         eq.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
 
-        let p_kw = ports.electrical.net_active_w() / 1000.0;
-        let q = ports.electrical.reactive_power_kvar;
-        let expected = p_kw * pf.acos().tan();
+        let p_w = ports.electrical.net_active_w();
+        let q = ports.electrical.reactive_power_var;
+        let expected = p_w * pf.acos().tan();
         assert!(
-            (q - expected).abs() < 1e-9,
+            (q - expected).abs() < 1e-6,
             "Q/P must equal tan(acos({pf})): {q} vs {expected}"
         );
 
-        let co_q = eq.core_output().flows.reactive_power_kvar.expect("Some");
+        let co_q = eq.core_output().flows.reactive_power_var.expect("Some");
         assert_eq!(
             co_q.to_bits(),
             q.to_bits(),
@@ -2485,9 +2484,9 @@ mod tests {
         let mut ports = PortSlots::default();
         eq.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(ports.electrical.reactive_power_var, 0.0);
         assert_eq!(
-            eq.core_output().flows.reactive_power_kvar,
+            eq.core_output().flows.reactive_power_var,
             Some(0.0),
             "off equipment must report Some(0.0)"
         );
@@ -2568,11 +2567,11 @@ mod tests {
                 ports_nopf.electrical.load_power_w.to_bits(),
                 "step {i} (v={v}): real power diverged between pf and no-pf twins"
             );
-            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+            if ports_pf.electrical.reactive_power_var != 0.0 {
                 any_reactive = true;
             }
             assert_eq!(
-                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                ports_nopf.electrical.reactive_power_var, 0.0,
                 "no-pf twin must produce zero Q"
             );
         }
@@ -2622,13 +2621,13 @@ mod tests {
         vent.step(&e, Duration::from_secs(300), &mut ports_vent)
             .expect("step vent");
 
-        let p_vent = ports_vent.electrical.net_active_w() / 1000.0;
-        let q_vent = ports_vent.electrical.reactive_power_kvar;
+        let p_vent = ports_vent.electrical.net_active_w();
+        let q_vent = ports_vent.electrical.reactive_power_var;
 
         let pf = 0.87_f64;
         let expected_q = p_vent * pf.acos().tan();
         assert!(
-            (q_vent - expected_q).abs() < 1e-9,
+            (q_vent - expected_q).abs() < 1e-6,
             "ventilation Q/P must equal tan(acos({pf}))"
         );
     }
@@ -3050,7 +3049,7 @@ mod tests {
         // Core output must report off
         let co = hrv.core_output();
         assert_eq!(
-            co.flows.electric_kw,
+            co.flows.electric_w,
             Some(ElectricPower::Consumption(0.0)),
             "core output must report zero consumption when off"
         );
@@ -3148,7 +3147,7 @@ mod tests {
         assert!(
             hrv.core_output()
                 .flows
-                .electric_kw
+                .electric_w
                 .is_some_and(|p| !p.is_zero()),
             "precondition: the saved state carries nonzero fan flow"
         );

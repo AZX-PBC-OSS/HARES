@@ -6,7 +6,6 @@ use std::time::Duration;
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::biquadratic::cubic;
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
-use hares_physics::units::power_w_to_kw;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -163,7 +162,7 @@ pub struct Dehumidifier {
     max_operating_temp_c: Option<f64>,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// compressor pf 0.96 on the total electric draw. Real power stays
-    /// bit-identical; Q comes from `ZipLoad::reactive_kvar`.
+    /// bit-identical; Q comes from `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
 }
 
@@ -369,7 +368,7 @@ impl Dehumidifier {
         self.telemetry
             .set(tk::ELECTRIC_POWER_W, snapshot.electric_power_w);
         self.telemetry
-            .set(tk::ELECTRIC_KW, power_w_to_kw(snapshot.electric_power_w));
+            .set(tk::ELECTRIC_KW, snapshot.electric_power_w);
         self.telemetry
             .set(tk::LATENT_REMOVAL_W, snapshot.latent_removal_w);
         self.telemetry
@@ -743,14 +742,13 @@ impl Equipment for Dehumidifier {
         // never splits the small internal fan from the compressor, so the
         // single-component whole-unit pf is deliberate (unlike ducted HVAC,
         // which computes Q per component — see `hvac::reactive`).
-        let reactive_power_kvar = self.zip.reactive_kvar(
-            power_w_to_kw(snapshot.electric_power_w),
-            env.grid.bus_voltage_pu(),
-        );
-        if snapshot.electric_power_w > 0.0 || reactive_power_kvar != 0.0 {
+        let reactive_power_var = self
+            .zip
+            .reactive_var(snapshot.electric_power_w, env.grid.bus_voltage_pu());
+        if snapshot.electric_power_w > 0.0 || reactive_power_var != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: snapshot.electric_power_w,
-                reactive_power_kvar,
+                reactive_power_var,
             })?;
         }
         if snapshot.sensible_gain_w != 0.0 || snapshot.latent_removal_w != 0.0 {
@@ -774,10 +772,10 @@ impl Equipment for Dehumidifier {
 
         let water_removed_l = snapshot.water_removal_l_day * dt.as_secs_f64() / SECONDS_PER_DAY;
         self.accumulated_water_removal_l += water_removed_l.max(0.0);
-        let electric_kw = power_w_to_kw(snapshot.electric_power_w).max(0.0);
+        let electric_w = snapshot.electric_power_w.max(0.0);
         self.write_step_telemetry(snapshot);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         let temp_locked_out = match (self.min_operating_temp_c, self.max_operating_temp_c) {
             (Some(min), _) if zone.temperature_c < min => true,
             (_, Some(max)) if zone.temperature_c > max => true,
@@ -790,8 +788,8 @@ impl Equipment for Dehumidifier {
         self.telemetry.set(tk::INLET_AIR_TEMP_C, zone.temperature_c);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_kw)),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(electric_w)),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -887,8 +885,8 @@ impl Equipment for Dehumidifier {
             // contract is that a checkpoint restores a state
             // `validate_core_contract` accepts.
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_var: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -2061,18 +2059,18 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut slots)
             .unwrap();
 
-        let p_kw = slots.electrical.load_power_w / 1000.0;
-        assert!(p_kw > 0.0, "dehumidifier must draw real power when running");
-        let q = slots.electrical.reactive_power_kvar;
-        let expected = p_kw * 0.96_f64.acos().tan();
+        let p_w = slots.electrical.load_power_w;
+        assert!(p_w > 0.0, "dehumidifier must draw real power when running");
+        let q = slots.electrical.reactive_power_var;
+        let expected = p_w * 0.96_f64.acos().tan();
         assert!(
-            (q - expected).abs() < 1e-9,
+            (q - expected).abs() < 1e-6,
             "Q/P must equal tan(acos(0.96)): q={q}, expected={expected}"
         );
         assert_eq!(
             eq.core_output()
                 .flows
-                .reactive_power_kvar
+                .reactive_power_var
                 .expect("Some")
                 .to_bits(),
             q.to_bits(),
@@ -2095,12 +2093,9 @@ mod tests {
         let mut off_ports = ports();
         eq.step(&off_env, Duration::from_secs(60), &mut off_ports)
             .unwrap();
+        assert_eq!(off_ports.electrical.reactive_power_var, 0.0, "off ⇒ Q == 0");
         assert_eq!(
-            off_ports.electrical.reactive_power_kvar, 0.0,
-            "off ⇒ Q == 0"
-        );
-        assert_eq!(
-            eq.core_output().flows.reactive_power_kvar,
+            eq.core_output().flows.reactive_power_var,
             Some(0.0),
             "off ⇒ CoreOutput Q == Some(0.0)"
         );
@@ -2141,10 +2136,10 @@ mod tests {
                 "step {i} (v={v}): real power diverged between pf and no-pf twins"
             );
             assert_eq!(
-                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"
             );
-            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+            if ports_pf.electrical.reactive_power_var != 0.0 {
                 any_reactive = true;
             }
             environment.current_time += ChronoDuration::minutes(1);

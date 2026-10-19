@@ -57,7 +57,7 @@ def _obs_box(env: DwellingGymEnv | VecDwellingGymEnv) -> spaces.Box:
 
 # Gas Furnace is present in the base HPXML; heat_c resolves to ThermalSetpoint.
 _ACTION_CONFIG: dict[str, list[str]] = {"Gas Furnace": ["heat_c"]}
-_OBS_FIELDS = ["total_power_kw", "outdoor_temp"]
+_OBS_FIELDS = ["total_power_w", "outdoor_temp"]
 
 
 def _make_env(episode_length: timedelta = timedelta(minutes=5)) -> DwellingGymEnv:
@@ -65,7 +65,7 @@ def _make_env(episode_length: timedelta = timedelta(minutes=5)) -> DwellingGymEn
         config=_DWELLING_CONFIG,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=episode_length,
     )
 
@@ -95,14 +95,14 @@ def test_gym_reset_restores_snapshot_and_reseeds():
     env = VecDwellingGymEnv(
         dwellings=[dwelling],
         observation_fields=[
-            "total_power_kw",
+            "total_power_w",
             "outdoor_temp",
             "zone_temp[Indoor]",
             "time_sin",
             "time_cos",
         ],
         action_space_config={"ASHP Heater": ["heat_c"]},
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(days=2),
     )
 
@@ -185,7 +185,7 @@ def test_deadband_action_bounds_follow_the_target_thermostat_class():
             "Gas Furnace": ["heat_c", "deadband_c"],
             water_heater: ["setpoint_c", "deadband_c"],
         },
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     space = env.action_space
@@ -227,7 +227,7 @@ def test_a_deadband_action_on_equipment_without_a_band_is_rejected():
             config=_DWELLING_CONFIG,
             observation_fields=_OBS_FIELDS,
             action_space_config={"Gas Furnace": ["heat_c"], no_band: ["setpoint_c", "deadband_c"]},
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
         )
 
@@ -253,7 +253,7 @@ def test_vec_env_bounds_a_deadband_by_each_dwelling_s_target_class():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config={"Gas Furnace": ["heat_c", "deadband_c"]},
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     column = env._action_layout.index(("Gas Furnace", "deadband_c"))
@@ -288,7 +288,7 @@ def test_vec_env_refuses_a_fleet_whose_deadband_bounds_differ():
             dwellings=[_make_dwelling(seed=0), cast(PyDwelling, other_class)],
             observation_fields=_OBS_FIELDS,
             action_space_config={"Gas Furnace": ["heat_c", "deadband_c"]},
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
         )
 
@@ -302,7 +302,7 @@ def test_deadband_action_without_a_setpoint_field_is_rejected():
 
 def test_sorted_action_layout_preserves_equipment_sort_order():
     layout, type_by_equip = sorted_action_layout(
-        {"B": ["reactive_power_kvar", "active_power_kw"], "A": ["active_power_kw"]}
+        {"B": ["reactive_power_var", "active_power_kw"], "A": ["active_power_kw"]}
     )
 
     equipment_names = [eq for eq, _ in layout]
@@ -314,7 +314,7 @@ def test_sorted_action_layout_preserves_equipment_sort_order():
     assert a_fields == ["active_power_kw"]
 
     b_fields = [f for eq, f in layout if eq == "B"]
-    assert b_fields == sorted(["reactive_power_kvar", "active_power_kw"])
+    assert b_fields == sorted(["reactive_power_var", "active_power_kw"])
 
     assert type_by_equip["A"] == "PowerSetpoint"
     assert type_by_equip["B"] == "PowerSetpoint"
@@ -326,7 +326,7 @@ def test_vec_gym_step_batch_shape():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
 
@@ -343,12 +343,12 @@ def test_vec_gym_step_batch_shape():
     assert truncs.shape == (4,)
     assert len(infos) == 4
     for info in infos:
-        assert "obs_total_power_kw_low" in info
-        assert "obs_total_power_kw_high" in info
+        assert "obs_total_power_w_low" in info
+        assert "obs_total_power_w_high" in info
         assert "obs_outdoor_temp_low" in info
         assert "obs_outdoor_temp_high" in info
-        assert np.isfinite(info["obs_total_power_kw_low"])
-        assert np.isfinite(info["obs_total_power_kw_high"])
+        assert np.isfinite(info["obs_total_power_w_low"])
+        assert np.isfinite(info["obs_total_power_w_high"])
 
 
 def test_vec_gym_reset_seed_batch_shape():
@@ -357,7 +357,7 @@ def test_vec_gym_reset_seed_batch_shape():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
 
@@ -387,7 +387,7 @@ def test_vec_gym_random_policy_100_steps():
     from hares._hares import Dwelling as PyDwelling
 
     n_dwel = 2
-    obs_fields = ["total_power_kw", "outdoor_temp"]
+    obs_fields = ["total_power_w", "outdoor_temp"]
     dwellings = [
         PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i))
         for i in range(n_dwel)
@@ -404,12 +404,12 @@ def test_vec_gym_random_policy_100_steps():
         dwellings=dwellings,
         observation_fields=obs_fields,
         action_space_config=action_config,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(seconds=6000),
     )
 
     rng = np.random.default_rng(42)
-    obs_fields = ["total_power_kw", "outdoor_temp"]
+    obs_fields = ["total_power_w", "outdoor_temp"]
     for step_idx in range(100):
         actions = rng.uniform(-1.0, 1.0, size=(n_dwel, 2)).astype(np.float64)
         step_obs, rewards, dones, truncs, infos = env.step(actions)
@@ -482,12 +482,12 @@ def test_rust_and_python_paths_give_identical_rewards(
     dwellings stepped by the extension's batch_step and stepped from Python
     (batch_step forced off) give equal rewards per environment and step,
     exactly, for a reward_fn that reads the zone telemetry and
-    total_power_kw."""
+    total_power_w."""
     import hares.rl.vec_env as vec_env_module
 
     def zone_power_reward(ctx: RewardContext) -> float:
         zone_temps = ctx["telemetry_zone"]["temperature_c"]
-        return ctx["total_power_kw"] - 0.01 * float(zone_temps[0])
+        return ctx["total_power_w"] - 0.01 * float(zone_temps[0])
 
     envs: list[VecDwellingGymEnv] = []
     for _ in range(2):
@@ -554,7 +554,7 @@ def test_both_step_paths_build_the_same_info_shape(monkeypatch: pytest.MonkeyPat
             dwellings=dwellings,
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
         )
         env.reset(seed=7)
@@ -572,7 +572,7 @@ def test_both_step_paths_build_the_same_info_shape(monkeypatch: pytest.MonkeyPat
             f"{sorted(batch_info)} vs {sorted(python_info)}"
         )
         assert "step" in batch_info
-        assert "net_electric_power_kw" in batch_info["step"]
+        assert "net_electric_power_w" in batch_info["step"]
         assert "warning_count" in batch_info
 
 
@@ -588,7 +588,7 @@ def test_a_failed_env_keeps_the_batch_rectangular():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=20),
     )
     env.reset(seed=7)
@@ -627,7 +627,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
     )
 
     n_dwel = 2
-    obs_fields = ["total_power_kw", "outdoor_temp"]
+    obs_fields = ["total_power_w", "outdoor_temp"]
     dwellings = [
         PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i))
         for i in range(n_dwel)
@@ -645,7 +645,7 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
         dwellings=dwellings,
         observation_fields=obs_fields,
         action_space_config=action_config,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(seconds=6000),
     )
 
@@ -682,8 +682,7 @@ def test_observation_field_bounds_all_finite():
         "outdoor_temp_c",
         "outdoor_rh",
         "outdoor_humidity_ratio",
-        "total_power_kw",
-        "total_electric_kw",
+        "total_power_w",
         "zone_temp[Living Room]",
         "zone_temp[Building]",
         "setpoint_heat[Main]",
@@ -763,13 +762,13 @@ def test_field_bounds_overrides_apply():
         config=_DWELLING_CONFIG,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
-        field_bounds_overrides={"total_power_kw": (-200.0, 200.0)},
+        field_bounds_overrides={"total_power_w": (-200.0, 200.0)},
     )
     low = _obs_box(env).low
     high = _obs_box(env).high
-    total_power_idx = _OBS_FIELDS.index("total_power_kw")
+    total_power_idx = _OBS_FIELDS.index("total_power_w")
     assert np.isclose(float(low[total_power_idx]), -200.0), f"override low not applied: {low}"
     assert np.isclose(float(high[total_power_idx]), 200.0), f"override high not applied: {high}"
 
@@ -785,7 +784,7 @@ def test_observation_field_bounds_case_insensitive():
         (" setpoint_cool[Upstairs]", (0.0, 50.0)),
         ("equipment_soc[Battery]", (0.0, 1.0)),
         ("Equipment_Soc[Battery]", (0.0, 1.0)),
-        (" equipment_power[Gas Furnace]", (0.0, 100.0)),
+        (" equipment_power[Gas Furnace]", (0.0, 100000.0)),
     ]
     for field, expected in tests:
         low, high = observation_field_bounds(field)
@@ -810,7 +809,7 @@ def test_vec_gym_observation_space_bounds_finite():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     low = np.asarray(_obs_box(env).low, dtype=np.float64)
@@ -827,19 +826,19 @@ def test_vec_gym_field_bounds_overrides_in_info():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
-        field_bounds_overrides={"total_power_kw": (-200.0, 200.0)},
+        field_bounds_overrides={"total_power_w": (-200.0, 200.0)},
     )
     _, _, _, _, infos = env.step(
         np.full((2, 1), 21.0, dtype=np.float64)
     )
     for info in infos:
         assert np.isclose(
-            float(info["obs_total_power_kw_low"]), -200.0
+            float(info["obs_total_power_w_low"]), -200.0
         ), f"override low not in info: {info}"
         assert np.isclose(
-            float(info["obs_total_power_kw_high"]), 200.0
+            float(info["obs_total_power_w_high"]), 200.0
         ), f"override high not in info: {info}"
 
 
@@ -862,7 +861,7 @@ def test_time_sin_cos_fields_in_observation():
         config=_DWELLING_CONFIG,
         observation_fields=["time_sin", "time_cos"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     env.reset(seed=42)
@@ -877,9 +876,9 @@ def test_time_sin_cos_observation_space_finite():
     """Observation space with time_sin/time_cos has only finite bounds."""
     env = DwellingGymEnv(
         config=_DWELLING_CONFIG,
-        observation_fields=["time_sin", "time_cos", "total_power_kw"],
+        observation_fields=["time_sin", "time_cos", "total_power_w"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     low = np.asarray(_obs_box(env).low, dtype=np.float64)
@@ -929,10 +928,10 @@ def test_telemetry_to_observation_builtin_wins_over_actor_fallback():
     dwelling.step()
     tel = dwelling.telemetry()
 
-    # total_power_kw is a built-in field; actor_telemetry must not override it.
-    obs = telemetry_to_observation(tel, ["total_power_kw"])
+    # total_power_w is a built-in field; actor_telemetry must not override it.
+    obs = telemetry_to_observation(tel, ["total_power_w"])
     assert obs.shape == (1,)
-    assert obs[0] != 0.0, "built-in total_power_kw should not fall through to actor_telemetry"
+    assert obs[0] != 0.0, "built-in total_power_w should not fall through to actor_telemetry"
 
 
 def test_actor_telemetry_fields_in_dwelling_gym_observation():
@@ -961,10 +960,10 @@ def test_actor_telemetry_fields_in_dwelling_gym_observation():
     assert obs[0] == 0.0, f"dr_active should be 0.0 when no DR event, got {obs[0]}"
 
     # Combined: built-in + actor_telemetry fields in the same observation vector
-    obs = telemetry_to_observation(tel, ["total_power_kw", "DRAgent.dr_level", "DRAgent.dr_active"])
+    obs = telemetry_to_observation(tel, ["total_power_w", "DRAgent.dr_level", "DRAgent.dr_active"])
     assert obs.shape == (3,)
     assert np.all(np.isfinite(obs)), f"non-finite observation: {obs}"
-    assert obs[0] != 0.0, "built-in total_power_kw should be non-zero after step"
+    assert obs[0] != 0.0, "built-in total_power_w should be non-zero after step"
     assert obs[1] == 0.0
     assert obs[2] == 0.0
 
@@ -985,7 +984,7 @@ class _MockTelemetryMissingOutdoor:
         return True
 
     @property
-    def total_power_kw(self):
+    def total_power_w(self):
         return 0.0
 
     @property
@@ -997,7 +996,7 @@ class _MockTelemetryMissingOutdoor:
         return {"names": [], "temperature_c": [], "setpoint_heat_c": [], "setpoint_cool_c": []}
 
     def equipment(self):
-        return {"names": [], "modes": [], "soc": [], "power_kw": []}
+        return {"names": [], "modes": [], "soc": [], "power_w": []}
 
     def actors(self):
         return {}
@@ -1023,9 +1022,9 @@ def test_reset_observation_contains_nan_for_uninitialized():
     """After reset(), pre-first-step observation contains NaN for uninitialized fields."""
     env = DwellingGymEnv(
         config=_DWELLING_CONFIG,
-        observation_fields=["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin", "time_cos", "equipment_soc[Gas Furnace]"],
+        observation_fields=["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "time_sin", "time_cos", "equipment_soc[Gas Furnace]"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     obs, info = env.reset(seed=42)
@@ -1045,9 +1044,9 @@ def test_step_observation_all_finite_after_first_step():
     """After the first step(), all observation dimensions must be finite (no lingering NaN)."""
     env = DwellingGymEnv(
         config=_DWELLING_CONFIG,
-        observation_fields=["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin", "time_cos", "equipment_soc[Gas Furnace]"],
+        observation_fields=["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "time_sin", "time_cos", "equipment_soc[Gas Furnace]"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     env.reset(seed=42)
@@ -1070,7 +1069,7 @@ def test_telemetry_to_observation_all_nan_when_uninitialized():
     assert tel.initialized is False, "telemetry should be uninitialized before first step"
 
     obs = telemetry_to_observation(
-        tel, ["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
+        tel, ["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
     )
     assert obs.shape == (4,)
     assert np.all(np.isnan(obs)), f"expected all NaN when uninitialized, got {obs}"
@@ -1085,7 +1084,7 @@ def test_telemetry_to_observation_finite_after_step():
     assert tel.initialized is True, "telemetry should be initialized after step()"
 
     obs = telemetry_to_observation(
-        tel, ["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
+        tel, ["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
     )
     assert obs.shape == (4,)
     assert np.all(np.isfinite(obs)), f"expected all finite after step(), got {obs}"
@@ -1111,9 +1110,9 @@ def test_initial_observation_warning_emitted_once():
 
     env = DwellingGymEnv(
         config=_DWELLING_CONFIG,
-        observation_fields=["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "reactive_power_kvar"],
+        observation_fields=["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "reactive_power_var"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
 
@@ -1145,7 +1144,7 @@ def test_vec_gym_reset_observation_nan_and_mask():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
 
@@ -1190,8 +1189,8 @@ class _FakeTelemetry:
     """
 
     initialized = True
-    total_power_kw = 5.0
-    reactive_power_kvar = 1.5
+    total_power_w = 5.0
+    reactive_power_var = 1.5
 
     def __init__(self):
         import datetime
@@ -1212,7 +1211,7 @@ class _FakeTelemetry:
         return {
             "names": ["Battery", "Gas Furnace", "electric vehicle"],
             "soc": [0.5, 0.0, 0.8],
-            "power_kw": [1.0, 2.0, 0.0],
+            "power_w": [1.0, 2.0, 0.0],
         }
 
     def actors(self):
@@ -1221,7 +1220,7 @@ class _FakeTelemetry:
 
 def test_telemetry_to_observation_reactive_power_kvar_no_keyerror():
     """telemetry_to_observation handles reactive_power_kvar without raising KeyError."""
-    obs = telemetry_to_observation(_FakeTelemetry(), ["reactive_power_kvar"])
+    obs = telemetry_to_observation(_FakeTelemetry(), ["reactive_power_var"])
     assert obs.shape == (1,)
     assert np.isfinite(obs[0])
     assert obs[0] == 1.5
@@ -1231,7 +1230,7 @@ def test_telemetry_to_observation_reactive_power_kvar_in_mixed_fields():
     """reactive_power_kvar coexists with other fields in a single observation vector."""
     obs = telemetry_to_observation(
         _FakeTelemetry(),
-        ["total_power_kw", "reactive_power_kvar", "outdoor_temp"],
+        ["total_power_w", "reactive_power_var", "outdoor_temp"],
     )
     assert obs.shape == (3,)
     assert np.all(np.isfinite(obs))
@@ -1258,9 +1257,8 @@ def test_telemetry_to_observation_all_known_scalar_keys_no_keyerror():
         "outdoor_temp",
         "outdoor_temp_c",
         "outdoor_humidity_ratio",
-        "total_power_kw",
-        "total_electric_kw",
-        "reactive_power_kvar",
+        "total_power_w",
+        "reactive_power_var",
         "battery_soc",
         "ev_soc",
         "time_sin",
@@ -1302,9 +1300,9 @@ def test_unknown_observation_field_fails_at_reset():
     dwellings = [_make_dwelling(seed=0)]
     env = VecDwellingGymEnv(
         dwellings=dwellings,
-        observation_fields=["total_power_kw", "bogus_field"],
+        observation_fields=["total_power_w", "bogus_field"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     with pytest.raises(Exception, match="bogus_field"):
@@ -1312,9 +1310,9 @@ def test_unknown_observation_field_fails_at_reset():
 
     single = DwellingGymEnv(
         config=_DWELLING_CONFIG,
-        observation_fields=["total_power_kw", "bogus_field"],
+        observation_fields=["total_power_w", "bogus_field"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     with pytest.raises(Exception, match="bogus_field"):
@@ -1330,7 +1328,7 @@ def test_batch_step_returns_a_fresh_observation_by_default():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     env.reset(seed=0)
@@ -1367,7 +1365,7 @@ def test_batch_step_copy_false_returns_the_shared_buffer():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
         copy=False,
     )
@@ -1404,7 +1402,7 @@ def test_gym_rejects_mapping_config():
             config=mapping,
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
         )
 
@@ -1427,7 +1425,7 @@ def test_gym_rejects_non_numeric_time_res():
             config=mapping,
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
         )
 
@@ -1440,7 +1438,7 @@ def test_gym_zero_time_res_reaches_validation():
             config=_gym_config(SimulationConfig(start_time="2019-01-01T00:00:00", duration=600, time_res=0)),
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
         )
 
@@ -1470,7 +1468,7 @@ def test_gym_default_writes_no_file(tmp_path: Path):
         ),
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=20),
     )
     cwd = os.getcwd()
@@ -1502,7 +1500,7 @@ def test_gym_zero_master_seed_reaches_the_dwelling():
         ),
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     assert env._dwelling.config().master_seed == 0
@@ -1550,7 +1548,7 @@ def test_gym_accepts_a_none_reward_fn_with_the_batch_default():
     _obs, reward, _terminated, _truncated, info = env.step(
         np.array([21.0], dtype=np.float64)
     )
-    assert reward == -info["step"]["net_electric_power_kw"]
+    assert reward == -info["step"]["net_electric_power_w"] / 1000.0
 
 
 def test_gym_rejects_bare_string_observation_fields():
@@ -1559,12 +1557,12 @@ def test_gym_rejects_bare_string_observation_fields():
     with pytest.raises(TypeError, match="observation_fields.*got str") as caught:
         DwellingGymEnv(
             config=_DWELLING_CONFIG,
-            observation_fields=cast(Any, "total_power_kw"),
+            observation_fields=cast(Any, "total_power_w"),
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
         )
-    assert "total_power_kw" in str(caught.value)
+    assert "total_power_w" in str(caught.value)
 
 
 def test_gym_rejects_a_non_string_observation_field():
@@ -1573,9 +1571,9 @@ def test_gym_rejects_a_non_string_observation_field():
     with pytest.raises(TypeError, match="observation_fields") as caught:
         DwellingGymEnv(
             config=_DWELLING_CONFIG,
-            observation_fields=cast(Any, ["total_power_kw", 3]),
+            observation_fields=cast(Any, ["total_power_w", 3]),
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
         )
     assert "got element 3 of type int" in str(caught.value)
@@ -1618,7 +1616,7 @@ def test_gym_forwards_every_sim_config_field(tmp_path: Path):
         config=_gym_config(sim_config),
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     built = env._dwelling.config()
@@ -1666,7 +1664,7 @@ def test_vec_gym_time_res_s_explicit_30():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=episode_len,
         time_res_s=30.0,
     )
@@ -1685,7 +1683,7 @@ def test_vec_gym_time_res_s_explicit_60_regression():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=episode_len,
         time_res_s=60.0,
     )
@@ -1707,7 +1705,7 @@ def test_vec_gym_time_res_s_none_uses_dwelling_config():
             dwellings=dwellings,
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=episode_len,
             time_res_s=None,
         )
@@ -1746,7 +1744,7 @@ def test_vec_gym_time_res_s_none_fallback_warning():
             dwellings=dwellings,
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=episode_len,
             time_res_s=None,
         )
@@ -1772,7 +1770,7 @@ def test_vec_gym_time_res_s_zero_raises():
             dwellings=dwellings,
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
             time_res_s=0.0,
         )
@@ -1786,7 +1784,7 @@ def test_vec_gym_time_res_s_negative_raises():
             dwellings=dwellings,
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
             time_res_s=-30.0,
         )
@@ -1802,7 +1800,7 @@ def test_vec_gym_rejects_non_positive_episode_length():
                 dwellings=dwellings,
                 observation_fields=_OBS_FIELDS,
                 action_space_config=_ACTION_CONFIG,
-                reward_fn=lambda ctx: -ctx["total_power_kw"],
+                reward_fn=lambda ctx: -ctx["total_power_w"],
                 episode_length=length,
             )
         assert str(length) in str(caught.value)
@@ -1829,12 +1827,12 @@ def test_vec_gym_rejects_bare_string_observation_fields():
     with pytest.raises(TypeError, match="observation_fields.*got str") as caught:
         VecDwellingGymEnv(
             dwellings=dwellings,
-            observation_fields=cast(Any, "total_power_kw"),
+            observation_fields=cast(Any, "total_power_w"),
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
         )
-    assert "total_power_kw" in str(caught.value)
+    assert "total_power_w" in str(caught.value)
 
 
 # ---------------------------------------------------------------------------
@@ -1886,7 +1884,7 @@ def test_gym_env_exposes_the_finished_run_result():
         config=_REPORTED_CONFIG,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     env.reset(seed=0)
@@ -1922,7 +1920,7 @@ def test_vec_gym_exposes_each_dwelling_run_result():
         dwellings=[_make_dwelling_for_reports(seed=i) for i in range(2)],
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     env.reset(seed=0)
@@ -1960,3 +1958,48 @@ def _make_dwelling_for_reports(seed: int = 0) -> PyDwelling:
         defaults=str(HARES_DEFAULTS),
         config=config,
     )
+
+
+def test_gym_observation_bounds_are_in_watts():
+    """The default observation space's `total_power_w` bounds are
+    (-100 000, 100 000), `reactive_power_var`'s the same and each
+    equipment `power_w` (0, 100 000); one episode keeps every observation
+    inside its Box; the built-in reward is minus the step's net power in
+    kW. The home is the der_pv_battery_900s inputs' PV home without the
+    battery: the gym config carries no override surface, and the bounds
+    and the reward need no battery."""
+    from hares import SimulationConfig
+
+    config = GymDwellingConfig(
+        hpxml=str(ROOT / "tests/fixtures/hpxml/ochre_samples/base-pv.xml"),
+        schedule=SCHEDULE,
+        weather=WEATHER,
+        defaults=str(HARES_DEFAULTS),
+        sim_config=SimulationConfig(
+            start_time="2023-06-01T00:00:00-07:00",
+            duration=14400,
+            time_res=900,
+            master_seed=0,
+        ),
+    )
+    fields = ["total_power_w", "outdoor_temp"]
+    env = DwellingGymEnv(
+        config=config,
+        observation_fields=cast(Any, fields),
+        action_space_config={},
+        reward_fn=None,
+        episode_length=timedelta(hours=4),
+    )
+    obs, _ = env.reset(seed=0)
+    for _ in range(10):
+        obs, reward, _term, _trunc, info = env.step(np.zeros(0, dtype=np.float64))
+        for i, field in enumerate(fields):
+            low, high = observation_field_bounds(field)
+            assert low <= obs[i] <= high, f"{field} = {obs[i]} outside ({low}, {high})"
+        # The built-in reward: minus the step's net power in kW, converted
+        # once from the step's watts.
+        assert reward == -info["step"]["net_electric_power_w"] / 1000.0
+    # The bounds are the W-scale ones.
+    assert observation_field_bounds("total_power_w") == (-100_000.0, 100_000.0)
+    assert observation_field_bounds("reactive_power_var") == (-100_000.0, 100_000.0)
+    assert observation_field_bounds("equipment_power[Gas Furnace]") == (0.0, 100_000.0)

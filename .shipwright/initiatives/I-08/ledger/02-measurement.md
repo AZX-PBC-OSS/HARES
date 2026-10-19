@@ -4394,3 +4394,51 @@ entry's State.
 compare-all: 10 default-feature fixtures and the dst fixture, bitwise
 identical, run at the row and again at the final tree. No golden
 re-captured.
+### M-6, 2026-10-18, rows 94g and 94h, the run-state and control-layer SI commits
+
+The record the schedule requires of rows 94g and 94h: B-14's commit 3
+(the run state in SI) against its parent `6a5d9769`, measured before the
+goldens were re-captured. The parent side is the parent commit's
+materialized frames (`frame_golden materialize-all` at `6a5d9769`, the
+ten non-dst goldens plus the dst build's `full_year_900s_dst`); the after
+side is this commit's fresh frames (`frame_golden run <manifest>
+--output-dir`), the same manifests, `master_seed = 0`, warm-up disabled
+as each manifest states. The comparison is per column, the guard's
+metric: the scaled difference `max_t |a_t - b_t| / max_t |a_t|` and the
+scale ratio `max_t |b_t| / max_t |a_t|` (NaN cells excluded; the `Unmet
+HVAC Load (C)` column is NaN on both sides in these windows and carries
+no comparison).
+
+The largest scaled difference per golden (frame products; the
+`month_boundary_billing_3600s` billing product's `total_import_kwh`
+moved 4.759e-16 scaled, ratio 1.000000000):
+
+| Golden | Largest scaled difference | The conversion that explains it |
+|---|---|---|
+| `der_pv_battery_900s` | 1.397e-7 (Total Gas Power and Gas Furnace Gas Power, therms/hour), ratio 0.999999860 | the therm: the parent's `GAS_THERMS_PER_HOUR_TO_W` = 29 307.107 017 222 2 W (NIST-exact 1055.05585262 J per Btu); the commit's therm is 100 000 × `uom`'s rounded `btu_it` = 105 505 600 J = 29 307.1111 W, 14.738 J per therm, 1.3969e-7 relative, the entry's own recorded movement |
+| `der_pv_battery_ev_900s` | 6.324e-15 (the battery end use), ratio 1.000000000 | the x1000//1000 pair and the J/kWh pair, in the last bits; the home has no gas |
+| `leap_year_february_900s` | 7.195e-16, ratio 1.000000000 | the same pairs |
+| `weather_wrap_900s` | 9.811e-16, ratio 1.000000000 | the same pairs |
+| `month_boundary_billing_3600s` | 1.397e-7 (the gas columns), ratio 0.999999860 | the therm, as above |
+| `full_year_hourly` | 1.397e-7 (the gas columns), ratio 0.999999860 | the therm, as above |
+
+Every other moved column of every measured golden moved at or below
+1e-14 scaled with ratio 1.000000000, the last-bit dust of the conversion
+pairs. The pre-fix measurement caught the BMS and EV-driver actor
+columns moving at exactly 1000x (scale ratio 0.001000000: the actors' kW
+working values written into kW-declared slots the row plan converts
+again): fixed in this commit by converting each actor's declared-kW
+telemetry to W once at the row write (`build_actor_column_map` carries
+the declared unit), after which the same columns measure 2.8e-16 to
+4.8e-16 scaled with ratio 1.000000000.
+
+The committed goldens were re-captured twice in this commit, each pair
+byte-identical (`diff -r` clean over the whole `tests/fixtures/golden/`
+tree, twice: the ten non-dst goldens on the default build and
+`full_year_900s_dst` on the dst build), and `frame_golden compare-all`
+is green at the commit in both feature configurations (the 10 default +
+the dst build's own).
+
+`si_census` at this commit: 4616 lines (the parent's 8857), the file at
+`target/si-census.txt`, the four witnesses green. Load average at the
+captures: 1 to 2 (1 min).

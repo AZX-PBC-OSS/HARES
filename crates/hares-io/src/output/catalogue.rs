@@ -974,12 +974,8 @@ pub fn build_catalogue(input: &CatalogueInput) -> Result<Catalogue, CatalogueErr
             push_diagnostics(&mut defs, &mut tags, def)?;
         }
     }
-    push_diagnostics(&mut defs, &mut tags, DIAGNOSTICS_ELECTRICAL_NET_KW.clone())?;
-    push_diagnostics(
-        &mut defs,
-        &mut tags,
-        DIAGNOSTICS_ELECTRICAL_NET_KVAR.clone(),
-    )?;
+    push_diagnostics(&mut defs, &mut tags, DIAGNOSTICS_ELECTRICAL_NET_W.clone())?;
+    push_diagnostics(&mut defs, &mut tags, DIAGNOSTICS_ELECTRICAL_NET_VAR.clone())?;
     for def in [
         DIAGNOSTICS_PORT_RADIANT_W.clone(),
         DIAGNOSTICS_PORT_SHORTWAVE_W.clone(),
@@ -1565,16 +1561,17 @@ static DIAGNOSTICS_OUTDOOR_TEMP_C: VariableDef = diagnostics_variable!(
     Sampling::InstantAtEnd,
     "Outdoor dry-bulb temperature"
 );
-static DIAGNOSTICS_ELECTRICAL_NET_KW: VariableDef = diagnostics_variable!(
-    "electrical_net_kw",
-    Unit::Kilowatt,
+static DIAGNOSTICS_ELECTRICAL_NET_W: VariableDef = diagnostics_variable!(
+    "electrical_net_w",
+    Unit::Watt,
     VariableKind::Power,
     Aggregation::Mean,
     Sampling::IntervalMean,
     "Net electric power from the electrical ports (consumption positive)"
 );
-static DIAGNOSTICS_ELECTRICAL_NET_KVAR: VariableDef = diagnostics_variable!(
-    "electrical_net_kvar",
+static DIAGNOSTICS_ELECTRICAL_NET_VAR: VariableDef = diagnostics_variable!(
+    "electrical_net_var",
+    // Dimensionally W; the enum's reactive spelling is the kVAR one.
     Unit::VoltAmpereReactive,
     VariableKind::Power,
     Aggregation::Mean,

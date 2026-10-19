@@ -70,11 +70,10 @@ use hares_io::{
 };
 
 use hares_physics::constants::{
-    GAS_THERMS_PER_HOUR_TO_W, OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W,
-    OCCUPANT_RADIATIVE_FRACTION, OCCUPANT_SENSIBLE_GAIN_W, SECONDS_PER_HOUR,
+    OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W, OCCUPANT_RADIATIVE_FRACTION,
+    OCCUPANT_SENSIBLE_GAIN_W, SECONDS_PER_HOUR,
 };
 use hares_physics::pv_sizing::RoofInfo;
-use hares_physics::units::power_w_to_kw;
 use hares_tariff::{BillingPeriodSummary, TariffEvaluator};
 #[cfg(test)]
 use hares_types::ElectricPower;
@@ -1000,16 +999,21 @@ fn build_end_use_aggregate_indices(
 }
 
 /// Resolve each actor's telemetry columns against the output column
-/// index: `(key, index)` entry lists, one per actor, in actor order.
+/// index: `(key, index, unit)` entry lists, one per actor, in actor order.
 /// Actors without telemetry get an empty entry list — the positional
 /// `zip` against the actor vector in `record_step` requires a per-actor
 /// entry regardless. Shared by the fresh-schema and frozen-schema roster
 /// plans so the two derivations cannot drift; pre-resolving also keeps the
 /// per-step `format!("actor:{name}:{key}")` out of the hot path.
+///
+/// The declared unit rides the entry: the actors hold their kW working
+/// values until the control-layer commit, so the row write converts the
+/// declared-kW channels' values to W once (the plan's own `from_si` is
+/// the single conversion back).
 fn build_actor_column_map(
     actors: &[&dyn Actor],
     column_index: &HashMap<String, usize>,
-) -> Vec<Vec<(String, usize)>> {
+) -> Vec<Vec<(String, usize, hares_types::Unit)>> {
     actors
         .iter()
         .map(|actor| {
@@ -1021,7 +1025,13 @@ fn build_actor_column_map(
             for key in tel.0.keys() {
                 let col_name = format!("actor:{actor_name}:{key}");
                 if let Some(&idx) = column_index.get(&col_name) {
-                    entries.push((key.clone(), idx));
+                    let unit = actor
+                        .output_variables()
+                        .iter()
+                        .find(|field| field.name.as_ref() == key)
+                        .map(|field| field.unit)
+                        .unwrap_or(hares_types::Unit::None);
+                    entries.push((key.clone(), idx, unit));
                 }
             }
             entries
@@ -1234,7 +1244,7 @@ struct OutputRowBindings {
     /// equipment-vector order.
     end_use_aggregates: Vec<Option<usize>>,
     /// Telemetry key to output column of each actor, in actor order.
-    actors: Vec<Vec<(String, usize)>>,
+    actors: Vec<Vec<(String, usize, hares_types::Unit)>>,
     /// The slots valid every step whose value is the row's zero: the
     /// summed cells whose contributors exist (the duct losses slot when
     /// the dwelling has HVAC equipment; every bound end-use aggregate
@@ -1280,8 +1290,8 @@ struct DiagnosticsBindings {
     timestamp_s: usize,
     outdoor_temp_c: usize,
     zones: Vec<ZoneDiagSlots>,
-    electrical_net_kw: usize,
-    electrical_net_kvar: usize,
+    electrical_net_w: usize,
+    electrical_net_var: usize,
     envelope: DiagEnvelopeSlots,
 }
 
@@ -1328,8 +1338,8 @@ fn build_diagnostics_bindings(schema: &Schema) -> Option<DiagnosticsBindings> {
             "step" => diag.step = slot,
             "timestamp_s" => diag.timestamp_s = slot,
             "outdoor_temp_c" => diag.outdoor_temp_c = slot,
-            "electrical_net_kw" => diag.electrical_net_kw = slot,
-            "electrical_net_kvar" => diag.electrical_net_kvar = slot,
+            "electrical_net_w" => diag.electrical_net_w = slot,
+            "electrical_net_var" => diag.electrical_net_var = slot,
             "port_radiant_w" => diag.envelope.port_radiant_w = slot,
             "port_shortwave_w" => diag.envelope.port_shortwave_w = slot,
             "port_convective_w" => diag.envelope.port_convective_w = slot,
@@ -1492,14 +1502,9 @@ fn write_diagnostics_row(
             thermal.map_or(0.0, |t| t.heat().latent_w),
         );
     }
-    writer.write(
-        diag.electrical_net_kw,
-        power_w_to_kw(ports.electrical.net_active_w()),
-    );
-    writer.write(
-        diag.electrical_net_kvar,
-        ports.electrical.reactive_power_kvar,
-    );
+    // The diagnostics CSV's reporting names convert once from SI here.
+    writer.write(diag.electrical_net_w, ports.electrical.net_active_w());
+    writer.write(diag.electrical_net_var, ports.electrical.reactive_power_var);
     writer.write(diag.envelope.port_radiant_w, gains.port_radiant_w);
     writer.write(diag.envelope.port_shortwave_w, gains.port_shortwave_w);
     writer.write(diag.envelope.port_convective_w, gains.port_convective_w);
@@ -1655,7 +1660,7 @@ pub struct StepResult {
     /// milliseconds). The site's standard-time UTC offset, the output
     /// schema metadata's `hares:utc_offset_s`, recovers the instant.
     pub timestamp: NaiveDateTime,
-    pub net_electric_power_kw: f64,
+    pub net_electric_power_w: f64,
     pub zone_temperatures_c: Vec<(ZoneId, f64)>,
     /// Thermal energy delivered to the zone by HVAC heating equipment (W, positive).
     pub hvac_heating_w: f64,
@@ -2962,13 +2967,13 @@ pub struct Dwelling {
     /// the electrical solver resolves net grid power. While islanded there is
     /// no service connection, so any residual net flow at the "meter" is a
     /// power-balance violation the island sources could not resolve:
-    /// `island_unserved_kw` is the load the island sources failed to cover
+    /// `island_unserved_w` is the load the island sources failed to cover
     /// (would-be phantom import, `net_active_kw().max(0.0)`); 0.0 when not
     /// islanded. See docs/outage-behavior.md.
-    island_unserved_kw: f64,
+    island_unserved_w: f64,
     /// Surplus generation the island could not absorb (would-be phantom
     /// export, `(-net_active_kw()).max(0.0)`); 0.0 when not islanded.
-    island_excess_kw: f64,
+    island_excess_w: f64,
     /// Whether this run has already raised the islanded unserved-load
     /// warning. Per dwelling, so per run: the warning is a scenario signal
     /// whose first occurrence in a run is recorded in the run's warning
@@ -4511,8 +4516,8 @@ fn assemble_from_blueprint_with_seed(
                 .map(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
                 .collect()
         },
-        island_unserved_kw: 0.0,
-        island_excess_kw: 0.0,
+        island_unserved_w: 0.0,
+        island_excess_w: 0.0,
         island_unserved_warned: false,
         observation_warn_once: ObservationWarnOnce::default(),
         reports: config.sim_config.reports.clone(),
@@ -5159,16 +5164,16 @@ impl Dwelling {
     /// Load (kW) the island sources failed to cover during the last islanded
     /// step (would-be phantom grid import). 0.0 when not islanded.
     #[must_use]
-    pub fn island_unserved_kw(&self) -> f64 {
-        self.island_unserved_kw
+    pub fn island_unserved_w(&self) -> f64 {
+        self.island_unserved_w
     }
 
     /// Surplus on-site generation (kW) the island could not absorb during the
     /// last islanded step (would-be phantom grid export). 0.0 when not
     /// islanded.
     #[must_use]
-    pub fn island_excess_kw(&self) -> f64 {
-        self.island_excess_kw
+    pub fn island_excess_w(&self) -> f64 {
+        self.island_excess_w
     }
 
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -5317,17 +5322,17 @@ impl Dwelling {
         let mut equipment_names = Vec::with_capacity(self.equipment.len());
         let mut equipment_modes = Vec::with_capacity(self.equipment.len());
         let mut equipment_soc = Vec::with_capacity(self.equipment.len());
-        let mut equipment_power_kw = Vec::with_capacity(self.equipment.len());
+        let mut equipment_power_w = Vec::with_capacity(self.equipment.len());
 
         for (idx, eq) in self.equipment.iter().enumerate() {
             let co = eq.core_output();
             equipment_names.push(eq.descriptor().name.clone());
             equipment_modes.push(co.state.operating_mode.map_or(0.0, |m| m.as_code()));
             equipment_soc.push(co.state.soc.map_or(0.0, |s| s.get()));
-            equipment_power_kw.push(
+            equipment_power_w.push(
                 self.delivered_output(idx)
-                    .and_then(|delivered| delivered.flows.electric_kw)
-                    .map_or(0.0, |e| e.net_consumption_kw()),
+                    .and_then(|delivered| delivered.flows.electric_w)
+                    .map_or(0.0, |e| e.net_consumption_w()),
             );
 
             if let Some(zone_id) = eq.descriptor().zone
@@ -5423,13 +5428,13 @@ impl Dwelling {
                     });
                 }
             }
-            for (i, &p) in equipment_power_kw.iter().enumerate() {
+            for (i, &p) in equipment_power_w.iter().enumerate() {
                 if !p.is_finite() {
                     let name = equipment_names.get(i).map(|s| s.as_str()).unwrap_or("?");
                     return Err(HaresError::NanDetected {
                         step_index: step,
                         zone_id: None,
-                        value_name: format!("equipment_power_kw for '{name}'"),
+                        value_name: format!("equipment_power_w for '{name}'"),
                     });
                 }
             }
@@ -5443,17 +5448,17 @@ impl Dwelling {
                     });
                 }
             }
-            if !self.electrical_solver.net_active_kw().is_finite() {
+            if !self.electrical_solver.net_active_w().is_finite() {
                 return Err(HaresError::InvariantViolation {
-                    check_name: "telemetry_total_power_kw_finite".to_string(),
-                    value: self.electrical_solver.net_active_kw(),
+                    check_name: "telemetry_total_power_w_finite".to_string(),
+                    value: self.electrical_solver.net_active_w(),
                     tolerance: 0.0,
                 });
             }
-            if !self.electrical_solver.net_reactive_kvar().is_finite() {
+            if !self.electrical_solver.net_reactive_var().is_finite() {
                 return Err(HaresError::InvariantViolation {
-                    check_name: "telemetry_reactive_power_kvar_finite".to_string(),
-                    value: self.electrical_solver.net_reactive_kvar(),
+                    check_name: "telemetry_reactive_power_var_finite".to_string(),
+                    value: self.electrical_solver.net_reactive_var(),
                     tolerance: 0.0,
                 });
             }
@@ -5467,14 +5472,14 @@ impl Dwelling {
             equipment_names,
             equipment_modes,
             equipment_soc,
-            equipment_power_kw,
+            equipment_power_w,
             setpoint_heat_c,
             setpoint_cool_c,
             energy_balance_residuals,
-            total_power_kw: self.electrical_solver.net_active_kw(),
-            reactive_power_kvar: self.electrical_solver.net_reactive_kvar(),
-            island_unserved_kw: self.island_unserved_kw,
-            island_excess_kw: self.island_excess_kw,
+            total_power_w: self.electrical_solver.net_active_w(),
+            reactive_power_var: self.electrical_solver.net_reactive_var(),
+            island_unserved_w: self.island_unserved_w,
+            island_excess_w: self.island_excess_w,
             outdoor_temp_c: self.latest_env.weather.outdoor_temp_c,
             outdoor_humidity_ratio: self.latest_env.weather.outdoor_humidity_ratio,
             actor_telemetry,
@@ -5578,8 +5583,8 @@ impl Dwelling {
         Ok(match &source.kind {
             ObservationKind::OutdoorTemp => self.latest_env.weather.outdoor_temp_c,
             ObservationKind::OutdoorHumidityRatio => self.latest_env.weather.outdoor_humidity_ratio,
-            ObservationKind::TotalPowerKw => self.electrical_solver.net_active_kw(),
-            ObservationKind::ReactivePowerKvar => self.electrical_solver.net_reactive_kvar(),
+            ObservationKind::TotalPowerKw => self.electrical_solver.net_active_w(),
+            ObservationKind::ReactivePowerKvar => self.electrical_solver.net_reactive_var(),
             ObservationKind::ZoneTemperature { id, .. } => self.zone_temperature_c(*id)?,
             ObservationKind::SetpointHeat { id, .. } => {
                 self.zone_setpoint_c(*id, SetpointSide::Heat)?
@@ -5595,8 +5600,8 @@ impl Dwelling {
                 .map_or(0.0, |s| s.get()),
             ObservationKind::EquipmentPower { index } => self
                 .delivered_output(*index)
-                .and_then(|delivered| delivered.flows.electric_kw)
-                .map_or(0.0, |e| e.net_consumption_kw()),
+                .and_then(|delivered| delivered.flows.electric_w)
+                .map_or(0.0, |e| e.net_consumption_w()),
             ObservationKind::TimeSin => self.time_feature(false),
             ObservationKind::TimeCos => self.time_feature(true),
             ObservationKind::ActorDot { actor, channel } => {
@@ -6739,8 +6744,8 @@ impl Dwelling {
         let discarded_thermal_w = discarded_thermal_w(&self.rollback_ports, &self.ports);
         let discarded_electrical_w: f64 =
             self.rollback_ports.electrical.net_active_w() - self.ports.electrical.net_active_w();
-        let discarded_electrical_kvar: f64 = self.rollback_ports.electrical.reactive_power_kvar
-            - self.ports.electrical.reactive_power_kvar;
+        let discarded_electrical_kvar: f64 = self.rollback_ports.electrical.reactive_power_var
+            - self.ports.electrical.reactive_power_var;
         let discarded_fuel_w: f64 = ALL_FUEL_TYPES
             .iter()
             .map(|&ft| self.rollback_ports.fuel.get(ft))
@@ -7386,7 +7391,9 @@ impl Dwelling {
         {
             let time_step_secs = self.latest_env.time_step_secs();
             if time_step_secs >= PV_RE_EVAL_MIN_STEP_SECS {
-                let pv_kw = -power_w_to_kw(self.ports.electrical.generation_power_w);
+                // The actors' pv_kw working value converts once from the
+                // port's W (SI) until the control-layer commit.
+                let pv_kw = -hares_core_units::w_to_kw(self.ports.electrical.generation_power_w);
                 self.actor_dispatch_buf.clear();
                 for actor in &mut self.actors {
                     let emitted_from = self.actor_dispatch_buf.len();
@@ -7777,10 +7784,7 @@ impl Dwelling {
             let port_load_raw_w = self.ports.electrical.load_power_w;
             let port_load_adj_w = port_load_raw_w * zip_scale;
             let port_net_w = port_load_adj_w + self.ports.electrical.generation_power_w;
-            let port_net_kw = power_w_to_kw(port_net_w);
-            let port_load_raw_kw = power_w_to_kw(port_load_raw_w);
-            let port_load_adj_kw = power_w_to_kw(port_load_adj_w);
-            let residual = (self.electrical_solver.net_active_kw() - port_net_kw).abs();
+            let residual = (self.electrical_solver.net_active_w() - port_net_w).abs();
             obs_phases.post_solvers = Some(observer_capture::capture_solvers(
                 &thermal_for_observer,
                 &self.humidity_update_buf,
@@ -7789,9 +7793,9 @@ impl Dwelling {
                 &self.thermal_solver,
                 observer_capture::PortBalance {
                     zip_load_scale: zip_scale,
-                    port_load_raw_kw,
-                    port_load_adjusted_kw: port_load_adj_kw,
-                    residual_kw: residual,
+                    port_load_raw_w,
+                    port_load_adjusted_w: port_load_adj_w,
+                    residual_w: residual,
                 },
             ));
         }
@@ -7876,7 +7880,7 @@ impl Dwelling {
         // the always-on check_step_invariants() so that plain release builds
         // still catch it.
         {
-            let net_kw = self.electrical_solver.net_active_kw();
+            let net_kw = self.electrical_solver.net_active_w();
             if !net_kw.is_finite() {
                 tracing::error!(
                     electrical_net_kw = net_kw,
@@ -7888,7 +7892,7 @@ impl Dwelling {
                     tolerance: 0.0,
                 });
             }
-            let net_kvar = self.electrical_solver.net_reactive_kvar();
+            let net_kvar = self.electrical_solver.net_reactive_var();
             if !net_kvar.is_finite() {
                 tracing::error!(
                     electrical_net_kvar = net_kvar,
@@ -7910,9 +7914,9 @@ impl Dwelling {
             // not absorb (would-be phantom export). Both are 0.0 during
             // normal (grid-connected) operation. See docs/outage-behavior.md.
             if self.latest_env.grid.islanded() {
-                self.island_unserved_kw = net_kw.max(0.0);
-                self.island_excess_kw = (-net_kw).max(0.0);
-                if self.island_unserved_kw > ISLAND_UNSERVED_WARN_THRESHOLD_KW {
+                self.island_unserved_w = net_kw.max(0.0);
+                self.island_excess_w = (-net_kw).max(0.0);
+                if self.island_unserved_w > ISLAND_UNSERVED_WARN_THRESHOLD_KW {
                     // Per-run warn-once: the first occurrence records the
                     // scenario warning in the run's warning log (every
                     // build) and logs at warn level; unserved load recurs
@@ -7924,7 +7928,7 @@ impl Dwelling {
                         self.island_unserved_warned = true;
                         tracing::warn!(
                             step = self.clock.current_step(),
-                            island_unserved_kw = self.island_unserved_kw,
+                            island_unserved_w = self.island_unserved_w,
                             "islanded operation: on-site sources are not covering the load \
                              (unserved load; subsequent occurrences logged at debug level)"
                         );
@@ -7934,20 +7938,20 @@ impl Dwelling {
                                 "islanded operation: on-site sources are not covering the load \
                                  (unserved load {} kW; subsequent occurrences logged at debug \
                                  level)",
-                                self.island_unserved_kw
+                                self.island_unserved_w
                             ),
                         );
                     } else {
                         tracing::debug!(
                             step = self.clock.current_step(),
-                            island_unserved_kw = self.island_unserved_kw,
+                            island_unserved_w = self.island_unserved_w,
                             "islanded operation: unserved load"
                         );
                     }
                 }
             } else {
-                self.island_unserved_kw = 0.0;
-                self.island_excess_kw = 0.0;
+                self.island_unserved_w = 0.0;
+                self.island_excess_w = 0.0;
             }
         }
 
@@ -8162,7 +8166,7 @@ impl Dwelling {
 
         let step_result = StepResult {
             timestamp: self.latest_env.current_time.naive_local(),
-            net_electric_power_kw: self.electrical_solver.net_active_kw(),
+            net_electric_power_w: self.electrical_solver.net_active_w(),
             zone_temperatures_c: self.roster.zone_temp_scratch.clone(),
             hvac_heating_w,
             hvac_cooling_w,
@@ -8207,7 +8211,7 @@ impl Dwelling {
 
         // Post-solver: accumulate billing state from metered power.
         if let Some(ref mut evaluator) = self.tariff_evaluator {
-            let net_kw = self.electrical_solver.net_active_kw();
+            let net_kw = self.electrical_solver.net_active_w();
             let dt_secs = self.latest_env.time_step_secs();
             let tz = evaluator.simulation_start().timezone();
             // The evaluator's contract: step() receives the step's end
@@ -8222,49 +8226,49 @@ impl Dwelling {
             }
         }
 
-        // Capture electrical summary for next step's EnvironmentState.
-        let mut battery_kw = 0.0;
-        let mut ev_kw = 0.0;
-        let mut pv_kw = 0.0;
+        // Capture electrical summary for next step's EnvironmentState. The
+        // summary is W (SI); the actors' pv_kw working value converts once
+        // from it until the control-layer commit.
+        let mut battery_w = 0.0;
+        let mut ev_w = 0.0;
+        let mut pv_w = 0.0;
         for (idx, eq) in self.equipment.iter().enumerate() {
             let end_use = &eq.descriptor().end_use;
             let Some(co) = self.delivered_output(idx) else {
                 continue;
             };
             if *end_use == EndUse::BATTERY {
-                battery_kw += co.flows.electric_kw.map_or(0.0, |e| e.signed_kw());
+                battery_w += co.flows.electric_w.map_or(0.0, |e| e.signed_w());
             } else if *end_use == EndUse::EV {
-                ev_kw += co.flows.electric_kw.map_or(0.0, |e| e.signed_kw());
+                ev_w += co.flows.electric_w.map_or(0.0, |e| e.signed_w());
             } else if *end_use == EndUse::PV {
-                pv_kw += co.flows.electric_kw.map_or(0.0, |e| e.signed_kw());
+                pv_w += co.flows.electric_w.map_or(0.0, |e| e.signed_w());
             }
         }
-        let net_grid = self.electrical_solver.net_active_kw();
+        let net_grid = self.electrical_solver.net_active_w();
         // The electrical summary observation is checked once here, where it
         // is built (the consumers' per-decide PV re-checks were deleted):
         // non-finite is covered by the solver's unconditional screens above,
         // and a negative PV observation (PV equipment drawing power) is an
         // invariant violation.
-        if !(-pv_kw).is_finite() || (-pv_kw) < 0.0 {
+        if !(-pv_w).is_finite() || (-pv_w) < 0.0 {
             return Err(HaresError::InvariantViolation {
                 check_name: "electrical_summary_pv_observation".to_string(),
-                value: -pv_kw,
+                value: -pv_w,
                 tolerance: 0.0,
             });
         }
         self.prior_electrical_summary = ElectricalSummary {
-            pv_generation_kw: -pv_kw,
-            actual_pv_kw: -pv_kw,
+            pv_generation_w: -pv_w,
+            actual_pv_w: -pv_w,
             // Charge-only subtraction for battery and EV alike: discharge
             // power lands in generation_power_w, never in load_power_w, so
             // subtracting a negative (discharging) value here would inflate
             // the non-dispatchable base load.
-            base_load_kw: power_w_to_kw(self.ports.electrical.load_power_w)
-                - battery_kw.max(0.0)
-                - ev_kw.max(0.0),
-            net_grid_kw: net_grid,
-            battery_power_kw: battery_kw,
-            ev_power_kw: ev_kw,
+            base_load_w: self.ports.electrical.load_power_w - battery_w.max(0.0) - ev_w.max(0.0),
+            net_grid_w: net_grid,
+            battery_power_w: battery_w,
+            ev_power_w: ev_w,
         };
 
         // Update previous-step state for interest filtering on the next step.
@@ -8286,10 +8290,10 @@ impl Dwelling {
         // sums (over the wiring pre-resolved at assembly). Both sides see
         // only what each equipment delivered this step.
         {
-            let total = self.electrical_solver.net_active_kw();
+            let total = self.electrical_solver.net_active_w();
             let sum_equip: f64 = (0..self.equipment.len())
                 .filter_map(|idx| self.delivered_output(idx))
-                .map(|co| co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw()))
+                .map(|co| co.flows.electric_w.map_or(0.0, |e| e.net_consumption_w()))
                 .sum();
             DwellingTelemetry::verify_consistency(self.clock.current_step(), sum_equip, total)?;
             self.verify_per_zone_thermal_consistency(self.clock.current_step())?;
@@ -8379,14 +8383,16 @@ impl Dwelling {
         let dwelling_columns = &self.roster.bindings.dwelling;
 
         if let Some(idx) = dwelling_columns.total_electric {
-            writer.write(idx, step.net_electric_power_kw);
+            writer.write(idx, step.net_electric_power_w);
         }
         if let Some(idx) = dwelling_columns.total_gas {
+            // The value is W (SI); the column's declared therms/hour unit
+            // converts once in the writer.
             let gas_w = self.ports.fuel.get(hares_types::FuelType::Gas);
-            writer.write(idx, gas_w / GAS_THERMS_PER_HOUR_TO_W);
+            writer.write(idx, gas_w);
         }
         if let Some(idx) = dwelling_columns.total_reactive {
-            writer.write(idx, self.electrical_solver.net_reactive_kvar());
+            writer.write(idx, self.electrical_solver.net_reactive_var());
         }
 
         // Per-equipment columns via the frozen plan's producer bindings. The
@@ -8470,14 +8476,11 @@ impl Dwelling {
                 // the declared one's absence the contract's wiring defect).
                 writer.write(
                     idx,
-                    co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw()),
+                    co.flows.electric_w.map_or(0.0, |e| e.net_consumption_w()),
                 );
             }
             if let Some(idx) = cols.gas_power {
-                writer.write(
-                    idx,
-                    co.flows.fuel_w.map_or(0.0, |f| f.consumption_w) / GAS_THERMS_PER_HOUR_TO_W,
-                );
+                writer.write(idx, co.flows.fuel_w.map_or(0.0, |f| f.consumption_w));
             }
             if let Some(idx) = cols.capacity {
                 // Capacity column is always a positive magnitude (OCHRE HVAC.py:598:
@@ -8499,10 +8502,10 @@ impl Dwelling {
                 writer.write_opt(idx, co.performance.cop);
             }
             if let Some(idx) = cols.reactive_power {
-                let q = co.flows.reactive_power_kvar.unwrap_or(0.0);
+                let q = co.flows.reactive_power_var.unwrap_or(0.0);
                 writer.write(idx, q);
                 if let Some(pf_idx) = cols.power_factor {
-                    let p = co.flows.electric_kw.map_or(0.0, |e| e.signed_kw());
+                    let p = co.flows.electric_w.map_or(0.0, |e| e.signed_w());
                     let s = (p * p + q * q).sqrt();
                     // Zero apparent power has no power factor: the ratio is
                     // undefined, the cell null (today it carried the 1.0
@@ -8511,12 +8514,14 @@ impl Dwelling {
                 }
             }
             if let Some(idx) = cols.energy_kwh {
-                let dt_hours = self.latest_env.time_step_secs() / SECONDS_PER_HOUR;
+                let dt_s = self.latest_env.time_step_secs();
                 // Not nullable: the step's energy is zero when the
-                // equipment drew nothing.
+                // equipment drew nothing. The value is the step's J (SI);
+                // the column's declared kWh unit converts once in the
+                // writer.
                 writer.write(
                     idx,
-                    co.flows.electric_kw.map_or(0.0, |e| e.net_consumption_kw()) * dt_hours,
+                    co.flows.electric_w.map_or(0.0, |e| e.net_consumption_w()) * dt_s,
                 );
             }
             if let Some(idx) = cols.er_power {
@@ -8550,7 +8555,7 @@ impl Dwelling {
                 );
             }
             if let Some(idx) = cols.main_power {
-                writer.write(idx, co.performance.main_power_kw.unwrap_or(0.0));
+                writer.write(idx, co.performance.main_power_w.unwrap_or(0.0));
             }
             if let Some(idx) = cols.runtime_fraction {
                 writer.write(
@@ -8607,8 +8612,8 @@ impl Dwelling {
                     self.equipment[eq_idx]
                         .core_output()
                         .flows
-                        .electric_kw
-                        .map_or(0.0, |e| e.net_consumption_kw()),
+                        .electric_w
+                        .map_or(0.0, |e| e.net_consumption_w()),
                 );
             }
         }
@@ -8619,9 +8624,16 @@ impl Dwelling {
         // leaves its cell unwritten, null.
         for (actor, pre_resolved) in self.actors.iter().zip(&self.roster.bindings.actors) {
             if let Some(tel) = actor.telemetry() {
-                for (key, column_idx) in pre_resolved {
+                for (key, column_idx, unit) in pre_resolved {
                     if let Some(value) = tel.get(key) {
-                        writer.write(*column_idx, value);
+                        // The actors hold their kW working values until the
+                        // control-layer commit; the row slot wants the SI
+                        // value (W) its unit declares, converted once here.
+                        let si_value = match unit {
+                            hares_types::Unit::Kilowatt => value * 1000.0,
+                            _ => value,
+                        };
+                        writer.write(*column_idx, si_value);
                     }
                 }
             }
@@ -8950,20 +8962,20 @@ impl Dwelling {
         // (Non-finiteness of net_kw/net_kvar is already enforced unconditionally
         // by the electrical_net_finite block earlier in run_timestep, so no
         // redundant NaN screen here.)
-        let net_kw = self.electrical_solver.net_active_kw();
+        let net_w = self.electrical_solver.net_active_w();
         let scale = self
             .electrical_solver
             .effective_load_scale(&self.latest_env.grid);
-        let port_net = power_w_to_kw(self.ports.electrical.load_power_w) * scale
-            + power_w_to_kw(self.ports.electrical.generation_power_w);
-        checker.check_electrical(net_kw, &[-port_net])?;
+        let port_net =
+            self.ports.electrical.load_power_w * scale + self.ports.electrical.generation_power_w;
+        checker.check_electrical(net_w, &[-port_net])?;
 
         // Reactive balance: solver net reactive must match port accumulation.
         // The solver passes slot Q through directly (no voltage scaling), so
         // the comparison is a simple difference against the port-side signed
         // reactive sum.
-        let net_kvar = self.electrical_solver.net_reactive_kvar();
-        checker.check_reactive(net_kvar, self.ports.electrical.reactive_power_kvar)?;
+        let net_kvar = self.electrical_solver.net_reactive_var();
+        checker.check_reactive(net_kvar, self.ports.electrical.reactive_power_var)?;
 
         // Fuel accumulator must not contain electric contributions: electric
         // power routes through ElectricalAccumulator, never through the fuel
@@ -9370,8 +9382,11 @@ pub(crate) fn build_actors_from_seeds(
             ActorSeed::Battery {
                 mut bms_mode,
                 grid_export_rule,
-                max_charge_kw,
-                max_discharge_kw,
+                // The seeds hold W (SI) since the run-state commit; the
+                // actors' kW parameters convert once here until the
+                // control-layer commit.
+                max_charge_w,
+                max_discharge_w,
                 min_dwell_steps,
             } => {
                 let actor_name = format!("BatteryManagementActor:{name}");
@@ -9404,8 +9419,8 @@ pub(crate) fn build_actors_from_seeds(
                     BmsParams {
                         bms_mode,
                         grid_export_rule,
-                        max_charge_kw,
-                        max_discharge_kw,
+                        max_charge_kw: hares_core_units::w_to_kw(max_charge_w),
+                        max_discharge_kw: hares_core_units::w_to_kw(max_discharge_w),
                         price_schedule: price_schedule.clone(),
                         steps_per_day,
                         min_dwell_steps,
@@ -9423,8 +9438,8 @@ pub(crate) fn build_actors_from_seeds(
             ActorSeed::Ev {
                 mut strategy,
                 plug_in_policy,
-                capacity_kwh,
-                max_charge_kw,
+                capacity_j,
+                max_charge_w,
                 fuel_economy_kwh_per_mi,
             } => {
                 let actor_name = format!("EvDriver:{name}");
@@ -9486,8 +9501,8 @@ pub(crate) fn build_actors_from_seeds(
                         arrival_time: None,
                         event_day_ratio: 0.8,
                         fuel_economy_kwh_per_mi,
-                        capacity_kwh,
-                        max_charge_kw,
+                        capacity_kwh: hares_core_units::j_to_kwh(capacity_j),
+                        max_charge_kw: hares_core_units::w_to_kw(max_charge_w),
                         average_speed_mph: 30.0,
                         range_anxiety_miles: 20.0,
                         away_charge_fraction: 0.0,
@@ -10347,13 +10362,13 @@ fn cfg_gated_helper() {
         descriptor: EquipmentDescriptor,
         telemetry: Telemetry,
         active_power_kw: f64,
-        reactive_power_kvar: f64,
+        reactive_power_var: f64,
         ports: Vec<PortDeclaration>,
         core_output: CoreOutput,
     }
 
     impl TestReactiveEquipment {
-        fn new(name: &str, active_power_kw: f64, reactive_power_kvar: f64) -> Self {
+        fn new(name: &str, active_power_kw: f64, reactive_power_var: f64) -> Self {
             Self {
                 descriptor: EquipmentDescriptor {
                     id: EquipmentId(2),
@@ -10367,13 +10382,13 @@ fn cfg_gated_helper() {
                     core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::REACTIVE,
                     telemetry_fields: vec![
                         TelemetryField::power_kw("active_power_kw", "active electrical power"),
-                        TelemetryField::ratio("reactive_power_kvar", "reactive electrical power"),
+                        TelemetryField::ratio("reactive_power_var", "reactive electrical power"),
                     ],
                     zone_type: None,
                 },
                 telemetry: Telemetry::with_capacity(2),
                 active_power_kw,
-                reactive_power_kvar,
+                reactive_power_var,
                 ports: vec![PortDeclaration::electrical()],
                 core_output: CoreOutput::default(),
             }
@@ -10412,7 +10427,7 @@ fn cfg_gated_helper() {
             self.telemetry
                 .insert("active_power_kw", self.active_power_kw);
             self.telemetry
-                .insert("reactive_power_kvar", self.reactive_power_kvar);
+                .insert("reactive_power_var", self.reactive_power_var);
             Ok(())
         }
 
@@ -10428,14 +10443,14 @@ fn cfg_gated_helper() {
         ) -> std::result::Result<(), hares_types::HaresError> {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: self.active_power_kw * 1000.0,
-                reactive_power_kvar: self.reactive_power_kvar,
+                reactive_power_var: self.reactive_power_var,
             })?;
             // Keep CoreOutput consistent with the port contribution above
             // (validate_port_core_electrical_consistency is unconditional).
-            self.core_output.flows.electric_kw = Some(hares_types::ElectricPower::consumption(
-                self.active_power_kw,
+            self.core_output.flows.electric_w = Some(hares_types::ElectricPower::consumption(
+                self.active_power_kw * 1000.0,
             )?);
-            self.core_output.flows.reactive_power_kvar = Some(self.reactive_power_kvar);
+            self.core_output.flows.reactive_power_var = Some(self.reactive_power_var);
             Ok(())
         }
 
@@ -10562,10 +10577,9 @@ fn cfg_gated_helper() {
             }
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: 0.0000,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })?;
-            self.core_output.flows.electric_kw =
-                Some(hares_types::ElectricPower::consumption(0.0)?);
+            self.core_output.flows.electric_w = Some(hares_types::ElectricPower::consumption(0.0)?);
             Ok(())
         }
 
@@ -10706,7 +10720,7 @@ fn cfg_gated_helper() {
     impl UnderReportingEquipment {
         fn new(name: &str, true_power_kw: f64, reported_power_kw: f64) -> Self {
             let mut co = CoreOutput::default();
-            co.flows.electric_kw =
+            co.flows.electric_w =
                 Some(hares_types::ElectricPower::consumption(reported_power_kw).unwrap());
             Self {
                 descriptor: EquipmentDescriptor {
@@ -10780,7 +10794,7 @@ fn cfg_gated_helper() {
         ) -> std::result::Result<(), hares_types::HaresError> {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: self.true_power_kw * 1000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })?;
             Ok(())
         }
@@ -10814,7 +10828,7 @@ fn cfg_gated_helper() {
 
     /// Test equipment reproducing the water-heater bug class: the port
     /// receives a nonzero reactive contribution while `CoreOutput` reports
-    /// `flows.reactive_power_kvar = None`. Active power is consistent, so
+    /// `flows.reactive_power_var = None`. Active power is consistent, so
     /// only the reactive check of
     /// `validate_port_core_electrical_consistency` fires.
     #[cfg(test)]
@@ -10831,8 +10845,8 @@ fn cfg_gated_helper() {
     impl ReactiveDivergentEquipment {
         fn new(name: &str, active_power_kw: f64, silent_reactive_kvar: f64) -> Self {
             let mut co = CoreOutput::default();
-            co.flows.electric_kw =
-                Some(hares_types::ElectricPower::consumption(active_power_kw).unwrap());
+            co.flows.electric_w =
+                Some(hares_types::ElectricPower::consumption(active_power_kw * 1000.0).unwrap());
             Self {
                 descriptor: EquipmentDescriptor {
                     id: EquipmentId(98),
@@ -10901,7 +10915,7 @@ fn cfg_gated_helper() {
         ) -> std::result::Result<(), hares_types::HaresError> {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: self.active_power_kw * 1000.0,
-                reactive_power_kvar: self.silent_reactive_kvar,
+                reactive_power_var: self.silent_reactive_kvar,
             })?;
             Ok(())
         }
@@ -11018,10 +11032,10 @@ fn cfg_gated_helper() {
                 .operating_mode
                 .is_some_and(|m| m.is_active())
             {
-                self.core_output.flows.electric_kw = Some(ElectricPower::Consumption(0.001));
+                self.core_output.flows.electric_w = Some(ElectricPower::Consumption(1.0));
                 ports.accumulate(&PortContribution::Electrical {
                     active_power_w: 1.0000,
-                    reactive_power_kvar: 0.0,
+                    reactive_power_var: 0.0,
                 })?;
             }
             Ok(())
@@ -11072,7 +11086,7 @@ fn cfg_gated_helper() {
         fn new(name: &str, deposited_thermal_w: f64, reported_thermal_w: f64) -> Self {
             let mut co = CoreOutput::default();
             co.flows.thermal_output_w = Some(reported_thermal_w);
-            co.flows.electric_kw = Some(hares_types::ElectricPower::consumption(0.0).unwrap());
+            co.flows.electric_w = Some(hares_types::ElectricPower::consumption(0.0).unwrap());
             Self {
                 descriptor: EquipmentDescriptor {
                     id: EquipmentId(100),
@@ -11199,7 +11213,7 @@ fn cfg_gated_helper() {
         fn new(name: &str, thermal_w: f64) -> Self {
             let mut co = CoreOutput::default();
             co.flows.thermal_output_w = Some(thermal_w);
-            co.flows.electric_kw = Some(hares_types::ElectricPower::consumption(0.0).unwrap());
+            co.flows.electric_w = Some(hares_types::ElectricPower::consumption(0.0).unwrap());
             Self {
                 descriptor: EquipmentDescriptor {
                     id: EquipmentId(200),
@@ -11321,7 +11335,7 @@ fn cfg_gated_helper() {
         fn new(name: &str, sensible_w: f64, latent_w: f64, reported_thermal_w: f64) -> Self {
             let mut co = CoreOutput::default();
             co.flows.thermal_output_w = Some(reported_thermal_w);
-            co.flows.electric_kw = Some(hares_types::ElectricPower::consumption(0.0).unwrap());
+            co.flows.electric_w = Some(hares_types::ElectricPower::consumption(0.0).unwrap());
             Self {
                 descriptor: EquipmentDescriptor {
                     id: EquipmentId(201),
@@ -11452,7 +11466,7 @@ fn cfg_gated_helper() {
         dwelling.run_timestep(false).expect("dwelling step");
         let telemetry = dwelling.telemetry().unwrap();
 
-        assert!((telemetry.reactive_power_kvar - 0.75).abs() < 1e-9);
+        assert!((telemetry.reactive_power_var - 0.75).abs() < 1e-9);
     }
 
     /// Regression: an EV actively discharging (V2L, negative `ev_power_kw`)
@@ -11559,17 +11573,17 @@ fn cfg_gated_helper() {
 
         let summary = &dwelling.prior_electrical_summary;
         assert!(
-            summary.ev_power_kw < 0.0,
-            "EV must be actively discharging, got ev_power_kw = {}",
-            summary.ev_power_kw
+            summary.ev_power_w < 0.0,
+            "EV must be actively discharging, got ev_power_w = {}",
+            summary.ev_power_w
         );
         assert!(
-            (summary.base_load_kw - 1.5).abs() < 1e-9,
-            "base_load_kw must equal the 1.5 kW non-dispatchable load; signed \
-             EV subtraction would have added the discharge (ev_power_kw = {}), \
+            (summary.base_load_w - 1500.0).abs() < 1e-6,
+            "base_load_w must equal the 1.5 kW non-dispatchable load in W; \
+             signed EV subtraction would have added the discharge (ev_power_w = {}), \
              got {}",
-            summary.ev_power_kw,
-            summary.base_load_kw
+            summary.ev_power_w,
+            summary.base_load_w
         );
     }
 
@@ -11764,7 +11778,7 @@ fn cfg_gated_helper() {
     }
 
     /// The water-heater bug class: equipment deposits reactive power at the
-    /// electrical port while reporting `flows.reactive_power_kvar = None` in
+    /// electrical port while reporting `flows.reactive_power_var = None` in
     /// `CoreOutput`. The port/core consistency validator must fail the step.
     #[test]
     #[cfg(test)]
@@ -11786,7 +11800,7 @@ fn cfg_gated_helper() {
         let msg = err.to_string();
         assert!(
             msg.contains("port/core electrical consistency violation")
-                && msg.contains("flows.reactive_power_kvar is None")
+                && msg.contains("flows.reactive_power_var is None")
                 && msg.contains("SilentReactive"),
             "step error must identify the silent reactive contribution, got: {msg}"
         );
@@ -14147,8 +14161,8 @@ occupancy = 1.0
                     surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 min_dwell_steps: 0,
             }),
         ));
@@ -14174,8 +14188,8 @@ occupancy = 1.0
                     target_soc: 0.9,
                 },
                 plug_in_policy: hares_types::PlugInPolicy::Always,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.6,
+                capacity_j: 60.0 * 3.6e6,
+                max_charge_w: 7600.0,
                 fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
@@ -14235,8 +14249,8 @@ occupancy = 1.0
             Some(ActorSeed::Ev {
                 strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
                 plug_in_policy: hares_types::PlugInPolicy::Always,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.6,
+                capacity_j: 60.0 * 3.6e6,
+                max_charge_w: 7600.0,
                 fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
@@ -14263,8 +14277,8 @@ occupancy = 1.0
             Some(ActorSeed::Ev {
                 strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
                 plug_in_policy: hares_types::PlugInPolicy::Always,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.6,
+                capacity_j: 60.0 * 3.6e6,
+                max_charge_w: 7600.0,
                 fuel_economy_kwh_per_mi: 0.28,
             })
         };
@@ -14297,8 +14311,8 @@ occupancy = 1.0
                     min_duration_steps: None,
                 },
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 min_dwell_steps: 0,
             }),
         ));
@@ -14321,8 +14335,8 @@ occupancy = 1.0
                     charge_buffer_hours: 2.0,
                 },
                 plug_in_policy: hares_types::PlugInPolicy::Always,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.6,
+                capacity_j: 60.0 * 3.6e6,
+                max_charge_w: 7600.0,
                 fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
@@ -14345,8 +14359,8 @@ occupancy = 1.0
                     surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 min_dwell_steps: 0,
             }),
         ));
@@ -14376,8 +14390,8 @@ occupancy = 1.0
                     surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 min_dwell_steps: 0,
             }),
         ));
@@ -14407,8 +14421,8 @@ occupancy = 1.0
                     surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: hares_types::GridExportRule::Unrestricted,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 min_dwell_steps: 0,
             }),
         ));
@@ -14422,8 +14436,8 @@ occupancy = 1.0
                     soc_deadband: 0.0,
                 },
                 grid_export_rule: hares_types::GridExportRule::Disabled,
-                max_charge_kw: 3.0,
-                max_discharge_kw: 3.0,
+                max_charge_w: 3000.0,
+                max_discharge_w: 3000.0,
                 min_dwell_steps: 0,
             }),
         ));
@@ -14445,8 +14459,8 @@ occupancy = 1.0
                     target_soc: 0.9,
                 },
                 plug_in_policy: hares_types::PlugInPolicy::Always,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.6,
+                capacity_j: 60.0 * 3.6e6,
+                max_charge_w: 7600.0,
                 fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
@@ -14458,8 +14472,8 @@ occupancy = 1.0
                     target_soc: 0.8,
                 },
                 plug_in_policy: hares_types::PlugInPolicy::Always,
-                capacity_kwh: 75.0,
-                max_charge_kw: 11.5,
+                capacity_j: 75.0 * 3.6e6,
+                max_charge_w: 11_500.0,
                 fuel_economy_kwh_per_mi: 0.325,
             }),
         ));
@@ -14481,8 +14495,8 @@ occupancy = 1.0
                     price_threshold: 0.15,
                 },
                 plug_in_policy: hares_types::PlugInPolicy::Always,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.6,
+                capacity_j: 60.0 * 3.6e6,
+                max_charge_w: 7600.0,
                 fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
@@ -14499,8 +14513,8 @@ occupancy = 1.0
             Some(ActorSeed::Ev {
                 strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
                 plug_in_policy: hares_types::PlugInPolicy::Always,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.6,
+                capacity_j: 60.0 * 3.6e6,
+                max_charge_w: 7600.0,
                 fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
@@ -14509,8 +14523,8 @@ occupancy = 1.0
             Some(ActorSeed::Ev {
                 strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
                 plug_in_policy: hares_types::PlugInPolicy::Always,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.6,
+                capacity_j: 60.0 * 3.6e6,
+                max_charge_w: 7600.0,
                 fuel_economy_kwh_per_mi: 0.28,
             }),
         ));
@@ -16582,7 +16596,7 @@ occupancy = 0.0
             // rollback path.
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: 500.0000,
-                reactive_power_kvar: 0.1,
+                reactive_power_var: 0.1,
             })?;
             ports.accumulate(&PortContribution::Thermal {
                 zone: ZoneId(1),
@@ -16698,13 +16712,12 @@ occupancy = 0.0
         ) -> std::result::Result<(), hares_types::HaresError> {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: self.power_w,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })?;
             // Keep CoreOutput consistent with the port contribution above
             // (validate_port_core_electrical_consistency is unconditional).
-            self.core_output.flows.electric_kw = Some(hares_types::ElectricPower::consumption(
-                self.power_w / 1000.0,
-            )?);
+            self.core_output.flows.electric_w =
+                Some(hares_types::ElectricPower::consumption(self.power_w)?);
             Ok(())
         }
 
@@ -17043,7 +17056,7 @@ occupancy = 0.0
                     "Minisplit pan/crankcase heater power",
                 ));
             self.core_output.state.speed_index = Some(0);
-            let compressor_kw = self.power_w / 1000.0;
+            let compressor_w = self.power_w;
             self.ports.push(PortDeclaration::thermal(ZoneId(1)));
             self.heats_zone = true;
             self.writes_telemetry(&[
@@ -17053,7 +17066,7 @@ occupancy = 0.0
                 (tk::MIN_ON_TIME_S, 300.0),
                 (tk::MIN_OFF_TIME_S, 240.0),
                 (tk::SUPPLY_AIR_TEMP_C, 38.0),
-                (tk::COMPRESSOR_KW, compressor_kw),
+                (tk::COMPRESSOR_KW, compressor_w),
             ])
         }
 
@@ -17109,7 +17122,7 @@ occupancy = 0.0
         fn book(&self, ports: &mut PortSlots) -> std::result::Result<(), HaresError> {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: self.power_w,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })?;
             if self.heats_zone {
                 ports.accumulate(&PortContribution::Thermal {
@@ -17172,14 +17185,10 @@ occupancy = 0.0
             if !self.outcomes.pop_front().unwrap_or(false) {
                 return Err(HaresError::Equipment("simulated step failure".to_string()));
             }
-            self.core_output.flows.electric_kw = if self.generation {
-                Some(hares_types::ElectricPower::generation(
-                    -self.power_w / 1000.0,
-                )?)
+            self.core_output.flows.electric_w = if self.generation {
+                Some(hares_types::ElectricPower::generation(-self.power_w)?)
             } else {
-                Some(hares_types::ElectricPower::consumption(
-                    self.power_w / 1000.0,
-                )?)
+                Some(hares_types::ElectricPower::consumption(self.power_w)?)
             };
             if self.heats_zone {
                 self.core_output.flows.thermal_output_w = Some(self.power_w);
@@ -17363,7 +17372,7 @@ occupancy = 0.0
                 FlakyPortEquipment::new("PV", 200.0, &[true])
                     .with_id(1005)
                     .pv()
-                    .writes_telemetry(&[(tk::IRRADIANCE_W_M2, 640.0), (tk::DC_POWER_KW, 0.2)]),
+                    .writes_telemetry(&[(tk::IRRADIANCE_W_M2, 640.0), (tk::DC_POWER_KW, 200.0)]),
             ))
             .expect("register the PV");
         dwelling.step().expect("the equipment succeeds");
@@ -17559,15 +17568,15 @@ occupancy = 0.0
             .expect("the equipment succeeds");
         let committed = dwelling.reported_core_output(0);
         assert_eq!(
-            committed.flows.electric_kw.map(|e| e.net_consumption_kw()),
-            Some(0.5)
+            committed.flows.electric_w.map(|e| e.net_consumption_w()),
+            Some(500.0)
         );
         dwelling
             .run_timestep(false)
             .expect("one failure is within the default budget");
         let reported = dwelling.reported_core_output(0);
         assert_eq!(
-            reported.flows.electric_kw.map(|e| e.net_consumption_kw()),
+            reported.flows.electric_w.map(|e| e.net_consumption_w()),
             Some(0.0)
         );
         assert_eq!(reported.state, committed.state);
@@ -17629,13 +17638,13 @@ occupancy = 0.0
             .run_timestep(false)
             .expect("one failure is within the default budget");
         assert_eq!(
-            dwelling.reported_core_output(0).flows.electric_kw,
+            dwelling.reported_core_output(0).flows.electric_w,
             Some(hares_types::ElectricPower::Consumption(0.0))
         );
         dwelling.load_checkpoint(start).expect("load");
         assert_eq!(
-            dwelling.reported_core_output(0).flows.electric_kw,
-            Some(hares_types::ElectricPower::Consumption(0.3)),
+            dwelling.reported_core_output(0).flows.electric_w,
+            Some(hares_types::ElectricPower::Consumption(300.0)),
             "the restored equipment reports its output"
         );
     }
@@ -18310,13 +18319,13 @@ destination = "memory"
         let mut dwelling =
             dwelling_with(FlakyPortEquipment::new("FlakyBattery", 500.0, &[true]).battery());
         dwelling.run_timestep(false).expect("the battery succeeds");
-        assert_eq!(dwelling.prior_electrical_summary.battery_power_kw, 0.5);
-        assert_eq!(dwelling.telemetry().unwrap().equipment_power_kw, vec![0.5]);
+        assert_eq!(dwelling.prior_electrical_summary.battery_power_w, 500.0);
+        assert_eq!(dwelling.telemetry().unwrap().equipment_power_w, vec![500.0]);
         dwelling
             .run_timestep(false)
             .expect("one failure is tolerated");
-        assert_eq!(dwelling.prior_electrical_summary.battery_power_kw, 0.0);
-        assert_eq!(dwelling.telemetry().unwrap().equipment_power_kw, vec![0.0]);
+        assert_eq!(dwelling.prior_electrical_summary.battery_power_w, 0.0);
+        assert_eq!(dwelling.telemetry().unwrap().equipment_power_w, vec![0.0]);
     }
 
     // ── Run-health counters and always-on invariant enforcement ──
@@ -19080,8 +19089,8 @@ destination = "memory"
                 surplus_deadband_w: 0.0,
             },
             grid_export_rule: hares_types::GridExportRule::Unrestricted,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             min_dwell_steps: 0,
         }
     }
@@ -19090,8 +19099,8 @@ destination = "memory"
         ActorSeed::Ev {
             strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
             plug_in_policy: hares_types::PlugInPolicy::Always,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.6,
+            capacity_j: 60.0 * 3.6e6,
+            max_charge_w: 7600.0,
             fuel_economy_kwh_per_mi: 0.28,
         }
     }
@@ -19253,9 +19262,9 @@ destination = "memory"
             .1
     }
 
-    fn net_power_kw(dwelling: &mut Dwelling, steps: usize) -> Vec<f64> {
+    fn net_power_w(dwelling: &mut Dwelling, steps: usize) -> Vec<f64> {
         (0..steps)
-            .map(|_| dwelling.step().expect("step").net_electric_power_kw)
+            .map(|_| dwelling.step().expect("step").net_electric_power_w)
             .collect()
     }
 
@@ -19412,7 +19421,7 @@ destination = "memory"
             .expect("attach the tariff");
         // Past the January close (step 744): one summary exists, and the
         // open February period holds accruals.
-        net_power_kw(&mut dwelling, 800);
+        net_power_w(&mut dwelling, 800);
         assert!(
             !dwelling.billing_summaries().is_empty(),
             "the January close produced a summary"
@@ -19466,7 +19475,7 @@ destination = "memory"
         add_driven_ev(&mut continuous, "EV1");
         let ev1 = continuous.remove_equipment("EV1").expect("remove EV1");
         continuous.add_equipment(ev1).expect("add EV1 back");
-        net_power_kw(&mut continuous, 4);
+        net_power_w(&mut continuous, 4);
         let checkpoint = continuous.save_checkpoint().expect("checkpoint");
 
         let mut resumed = bestest_dwelling();
@@ -19483,8 +19492,8 @@ destination = "memory"
             driver_stream(&resumed, "EV2"),
             driver_stream(&resumed, "EV1")
         );
-        let resumed_power = net_power_kw(&mut resumed, 96);
-        let continuous_power = net_power_kw(&mut continuous, 96);
+        let resumed_power = net_power_w(&mut resumed, 96);
+        let continuous_power = net_power_w(&mut continuous, 96);
         let first_difference = resumed_power
             .iter()
             .zip(&continuous_power)
@@ -19501,7 +19510,7 @@ destination = "memory"
     #[test]
     fn a_restored_dwelling_reports_the_environment_of_its_last_step() {
         let mut continuous = bestest_dwelling();
-        net_power_kw(&mut continuous, 4);
+        net_power_w(&mut continuous, 4);
         let checkpoint = continuous.save_checkpoint().expect("checkpoint");
 
         let mut resumed = bestest_dwelling();
@@ -19557,8 +19566,8 @@ destination = "memory"
             if charging(&with_tariff) {
                 break;
             }
-            net_power_kw(&mut with_tariff, 1);
-            net_power_kw(&mut without, 1);
+            net_power_w(&mut with_tariff, 1);
+            net_power_w(&mut without, 1);
         }
         assert!(
             charging(&with_tariff),
@@ -19577,8 +19586,8 @@ destination = "memory"
             "between the rebuild and the next step the driver reports its carried state"
         );
         assert_eq!(
-            net_power_kw(&mut with_tariff, 96),
-            net_power_kw(&mut without, 96)
+            net_power_w(&mut with_tariff, 96),
+            net_power_w(&mut without, 96)
         );
     }
 
@@ -19647,7 +19656,7 @@ destination = "memory"
                 .expect("attach the tariff");
             let battery = tou_battery(&dwelling.latest_env);
             dwelling.add_equipment(battery).expect("add the battery");
-            net_power_kw(dwelling, 40);
+            net_power_w(dwelling, 40);
         }
 
         reattached
@@ -19660,8 +19669,8 @@ destination = "memory"
             actor_telemetry(&continuous, bms)
         );
         assert_eq!(
-            net_power_kw(&mut reattached, 96),
-            net_power_kw(&mut continuous, 96)
+            net_power_w(&mut reattached, 96),
+            net_power_w(&mut continuous, 96)
         );
         assert_eq!(
             actor_telemetry(&reattached, bms),
@@ -19869,7 +19878,7 @@ latent_gain_fraction = 0.08
 
         // Step 300 is Jan 13 12:00, inside the January period.
         const ATTACH_STEP: usize = 300;
-        net_power_kw(&mut attached_mid_run, ATTACH_STEP);
+        net_power_w(&mut attached_mid_run, ATTACH_STEP);
         assert!(
             attached_mid_run.billing_summaries().is_empty(),
             "no bill exists before the attach"
@@ -19882,8 +19891,8 @@ latent_gain_fraction = 0.08
         // Run both dwellings past the February and March closes (the
         // first step whose end reaches a period end closes it).
         const TOTAL_STEPS: usize = 2300;
-        net_power_kw(&mut attached_mid_run, TOTAL_STEPS - ATTACH_STEP);
-        net_power_kw(&mut from_start, TOTAL_STEPS);
+        net_power_w(&mut attached_mid_run, TOTAL_STEPS - ATTACH_STEP);
+        net_power_w(&mut from_start, TOTAL_STEPS);
 
         let from_start_bills = from_start.billing_summaries();
         let mid_run_bills = attached_mid_run.billing_summaries();
@@ -19946,17 +19955,17 @@ latent_gain_fraction = 0.08
         // 744, so the 745th fold is the boundary step. The first 744
         // powers are January's own steps.
         const BOUNDARY_STEP: usize = 744;
-        let powers = net_power_kw(&mut from_start, BOUNDARY_STEP + 1);
+        let powers = net_power_w(&mut from_start, BOUNDARY_STEP + 1);
 
         let mut at_boundary = bestest_dwelling();
-        net_power_kw(&mut at_boundary, BOUNDARY_STEP);
+        net_power_w(&mut at_boundary, BOUNDARY_STEP);
         at_boundary
             .set_tariff(flat_tariff(), tz)
             .expect("attach exactly at the boundary");
 
         // Past the February close (step 1415) on both runs.
-        net_power_kw(&mut from_start, 1500 - BOUNDARY_STEP - 1);
-        net_power_kw(&mut at_boundary, 1500 - BOUNDARY_STEP);
+        net_power_w(&mut from_start, 1500 - BOUNDARY_STEP - 1);
+        net_power_w(&mut at_boundary, 1500 - BOUNDARY_STEP);
 
         let from_start_bills = from_start.billing_summaries();
         let at_boundary_bills = at_boundary.billing_summaries();
@@ -19980,10 +19989,11 @@ latent_gain_fraction = 0.08
         // step's net electric power in kW times one hour), in step order.
         let from_start_january = summary_starting_at(from_start_bills, january_start)
             .expect("the from-start run closed January");
-        let mut january_sum = 0.0f64;
+        let mut january_import_j = 0.0f64;
         for power in &powers[..BOUNDARY_STEP] {
-            january_sum += power.max(0.0) * 3600.0 / 3600.0;
+            january_import_j += power.max(0.0) * 3600.0;
         }
+        let january_sum = hares_core_units::j_to_kwh(january_import_j);
         assert_eq!(
             from_start_january.total_import_kwh.to_bits(),
             january_sum.to_bits(),
@@ -20029,8 +20039,8 @@ latent_gain_fraction = 0.08
         twin.set_tariff(flat_tariff(), tz)
             .expect("attach the outgoing tariff");
         const SWITCH_STEP: usize = 300;
-        net_power_kw(&mut replaced, SWITCH_STEP);
-        net_power_kw(&mut twin, SWITCH_STEP);
+        net_power_w(&mut replaced, SWITCH_STEP);
+        net_power_w(&mut twin, SWITCH_STEP);
         let accruals = twin
             .tariff_evaluator()
             .expect("the twin carries the tariff")
@@ -20067,7 +20077,7 @@ latent_gain_fraction = 0.08
         // The replacement opens the period containing the switch step: its
         // first bill, at the February boundary, is prorated from the
         // switch, and it carries the replacement's accruals.
-        net_power_kw(&mut replaced, 500);
+        net_power_w(&mut replaced, 500);
         let bills = replaced.billing_summaries();
         assert_eq!(bills.len(), 2, "the replacement closed the February period");
         let replacement_bill = &bills[1];
@@ -20114,7 +20124,7 @@ latent_gain_fraction = 0.08
         // Past the January close (the first step whose start reaches
         // February 1), in the middle of the February period.
         const CHECKPOINT_AT: usize = 800;
-        net_power_kw(&mut continuous, CHECKPOINT_AT);
+        net_power_w(&mut continuous, CHECKPOINT_AT);
         let checkpoint = continuous.save_checkpoint().expect("checkpoint");
         assert!(
             checkpoint.tariff_state.is_some(),
@@ -20139,8 +20149,8 @@ latent_gain_fraction = 0.08
         for (i, (a, b)) in continuous_tail.iter().zip(resumed_tail.iter()).enumerate() {
             assert_eq!(a.timestamp, b.timestamp, "step {i} timestamp");
             assert_eq!(
-                a.net_electric_power_kw.to_bits(),
-                b.net_electric_power_kw.to_bits(),
+                a.net_electric_power_w.to_bits(),
+                b.net_electric_power_w.to_bits(),
                 "step {i} net power"
             );
             assert_eq!(
@@ -20199,7 +20209,7 @@ latent_gain_fraction = 0.08
         // accruals, the window's push count off a re-sum boundary, and the
         // ring head on the window's second slot (the push count is odd).
         const CHECKPOINT_AT: usize = 3051;
-        net_power_kw(&mut continuous, CHECKPOINT_AT);
+        net_power_w(&mut continuous, CHECKPOINT_AT);
         assert_eq!(
             continuous.billing_summaries().len(),
             1,
@@ -20229,8 +20239,8 @@ latent_gain_fraction = 0.08
             let continuous_step = continuous.step().expect("step");
             let resumed_step = resumed.step().expect("step");
             assert_eq!(
-                continuous_step.net_electric_power_kw.to_bits(),
-                resumed_step.net_electric_power_kw.to_bits(),
+                continuous_step.net_electric_power_w.to_bits(),
+                resumed_step.net_electric_power_w.to_bits(),
                 "step {i} net power"
             );
         }
@@ -20278,7 +20288,7 @@ latent_gain_fraction = 0.08
         continuous
             .set_tariff(flat_tariff(), tz)
             .expect("attach the tariff");
-        net_power_kw(&mut continuous, REPLACEMENT_SWITCH_STEP);
+        net_power_w(&mut continuous, REPLACEMENT_SWITCH_STEP);
         continuous
             .set_tariff(expensive.clone(), tz)
             .expect("replace the tariff");
@@ -20287,7 +20297,7 @@ latent_gain_fraction = 0.08
         checkpointed
             .set_tariff(flat_tariff(), tz)
             .expect("attach the tariff");
-        net_power_kw(&mut checkpointed, REPLACEMENT_SWITCH_STEP);
+        net_power_w(&mut checkpointed, REPLACEMENT_SWITCH_STEP);
         let checkpoint = checkpointed.save_checkpoint().expect("checkpoint");
         let mut resumed = bestest_dwelling();
         resumed.load_checkpoint(checkpoint).expect("restore");
@@ -20308,8 +20318,8 @@ latent_gain_fraction = 0.08
         let (mut continuous, mut resumed) = replacement_across_a_resume();
 
         // Past the February close (step 1416).
-        net_power_kw(&mut continuous, 1200);
-        net_power_kw(&mut resumed, 1200);
+        net_power_w(&mut continuous, 1200);
+        net_power_w(&mut resumed, 1200);
 
         let continuous_bills = continuous.billing_summaries();
         let resumed_bills = resumed.billing_summaries();
@@ -20360,8 +20370,8 @@ latent_gain_fraction = 0.08
         // The replacement's period opens at the switch step: its first
         // bill, at the February boundary (step 744), is prorated from the
         // switch, and the tail stops before the March close.
-        net_power_kw(&mut continuous, 500);
-        net_power_kw(&mut resumed, 500);
+        net_power_w(&mut continuous, 500);
+        net_power_w(&mut resumed, 500);
         let continuous_bills = continuous.billing_summaries();
         let resumed_bills = resumed.billing_summaries();
         assert_eq!(
@@ -20394,7 +20404,7 @@ latent_gain_fraction = 0.08
         add_driven_ev(&mut continuous, "EV1");
         let ev1 = continuous.remove_equipment("EV1").expect("remove EV1");
         continuous.add_equipment(ev1).expect("add EV1 back");
-        net_power_kw(&mut continuous, 4);
+        net_power_w(&mut continuous, 4);
         let mut checkpoint = continuous.save_checkpoint().expect("checkpoint");
         checkpoint.next_ev_driver_stream = 1;
 
@@ -20447,8 +20457,8 @@ latent_gain_fraction = 0.08
             driver_stream(&re_added, "EV1")
         );
         assert_eq!(
-            net_power_kw(&mut replaced, 48),
-            net_power_kw(&mut re_added, 48)
+            net_power_w(&mut replaced, 48),
+            net_power_w(&mut re_added, 48)
         );
         assert_eq!(
             actor_telemetry(&replaced, "EvDriver:EV1"),
@@ -20463,7 +20473,7 @@ latent_gain_fraction = 0.08
     fn an_identical_ev_replaced_mid_run_keeps_its_driver() {
         let mut dwelling = bestest_dwelling();
         add_driven_ev(&mut dwelling, "EV1");
-        net_power_kw(&mut dwelling, 30);
+        net_power_w(&mut dwelling, 30);
         let stream = driver_stream(&dwelling, "EV1");
         let telemetry = actor_telemetry(&dwelling, "EvDriver:EV1");
 
@@ -22426,10 +22436,10 @@ occupancy = 1.0
                 "step {i}: timestamps must match"
             );
             assert!(
-                (step_a.net_electric_power_kw - step_b.net_electric_power_kw).abs() < f64::EPSILON,
-                "step {i}: net_electric_power_kw mismatch: {} vs {}",
-                step_a.net_electric_power_kw,
-                step_b.net_electric_power_kw,
+                (step_a.net_electric_power_w - step_b.net_electric_power_w).abs() < f64::EPSILON,
+                "step {i}: net_electric_power_w mismatch: {} vs {}",
+                step_a.net_electric_power_w,
+                step_b.net_electric_power_w,
             );
             assert_eq!(
                 step_a.zone_temperatures_c.len(),
@@ -22542,10 +22552,10 @@ latent_gain_fraction = 0.08
                 "step {i}: timestamps must match"
             );
             assert!(
-                (step_a.net_electric_power_kw - step_b.net_electric_power_kw).abs() < f64::EPSILON,
-                "step {i}: net_electric_power_kw mismatch: {} vs {}",
-                step_a.net_electric_power_kw,
-                step_b.net_electric_power_kw,
+                (step_a.net_electric_power_w - step_b.net_electric_power_w).abs() < f64::EPSILON,
+                "step {i}: net_electric_power_w mismatch: {} vs {}",
+                step_a.net_electric_power_w,
+                step_b.net_electric_power_w,
             );
             assert_eq!(
                 step_a.zone_temperatures_c.len(),
@@ -22611,12 +22621,12 @@ latent_gain_fraction = 0.08
         // dwelling, the chance of two different ChaCha8Rng seeds producing
         // identical sequences is astronomically low (≈ 2^-10 < 0.1%).
         let any_differ = results_a.iter().zip(results_b.iter()).any(|(sa, sb)| {
-            (sa.net_electric_power_kw - sb.net_electric_power_kw).abs() > f64::EPSILON
+            (sa.net_electric_power_w - sb.net_electric_power_w).abs() > f64::EPSILON
         });
         assert!(
             any_differ,
             "different master seeds (42 vs 99) must produce different \
-             net_electric_power_kw on at least one timestep; \
+             net_electric_power_w on at least one timestep; \
              if this fails consistently, the stochastic event-load RNG \
              pipeline is likely dead or producing a fixed sequence"
         );
@@ -22705,10 +22715,10 @@ event_probability_schedule = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 
                 "step {i}: timestamps must match"
             );
             assert!(
-                (step_a.net_electric_power_kw - step_b.net_electric_power_kw).abs() < f64::EPSILON,
-                "step {i}: net_electric_power_kw mismatch: {} vs {}",
-                step_a.net_electric_power_kw,
-                step_b.net_electric_power_kw,
+                (step_a.net_electric_power_w - step_b.net_electric_power_w).abs() < f64::EPSILON,
+                "step {i}: net_electric_power_w mismatch: {} vs {}",
+                step_a.net_electric_power_w,
+                step_b.net_electric_power_w,
             );
             for (z, (zt_a, zt_b)) in step_a
                 .zone_temperatures_c
@@ -22829,9 +22839,9 @@ occupancy = 0.0
                 "step {i}: timestamps must match"
             );
             assert!(
-                (ref_step.net_electric_power_kw - res_step.net_electric_power_kw).abs()
+                (ref_step.net_electric_power_w - res_step.net_electric_power_w).abs()
                     < f64::EPSILON,
-                "step {i}: net_electric_power_kw mismatch"
+                "step {i}: net_electric_power_w mismatch"
             );
             assert!(
                 (ref_step.hvac_heating_w - res_step.hvac_heating_w).abs() < f64::EPSILON,
@@ -23119,7 +23129,7 @@ occupancy = 0.0
             .expect("float64 column");
         assert_eq!(
             values.value(0).to_bits(),
-            step.net_electric_power_kw.to_bits(),
+            hares_core_units::w_to_kw(step.net_electric_power_w).to_bits(),
             "the placed value at the named variable's golden index is the \
              step's own value, on bits"
         );
@@ -23207,7 +23217,7 @@ occupancy = 0.0
         assert_eq!(total_electric, 0, "the first value column at level 0");
         assert_eq!(
             placed[total_electric],
-            step.net_electric_power_kw.to_bits(),
+            step.net_electric_power_w.to_bits(),
             "the placed total electric power is the step's own value, on bits"
         );
         let batches: Vec<_> = dwelling
@@ -24122,5 +24132,17 @@ occupancy = 1.0"#,
                 .iter()
                 .any(|f| f.name() == "Total Electric Power (kW)")
         );
+    }
+}
+
+/// The kW working values of SI reads: the actors' kW-era parameters convert
+/// once at the read until the control-layer commit.
+pub(crate) mod hares_core_units {
+    pub(crate) fn w_to_kw(w: f64) -> f64 {
+        uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
+    }
+    pub(crate) fn j_to_kwh(j: f64) -> f64 {
+        uom::si::f64::Energy::new::<uom::si::energy::joule>(j)
+            .get::<uom::si::energy::kilowatt_hour>()
     }
 }

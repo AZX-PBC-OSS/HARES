@@ -533,8 +533,10 @@ impl EvDriverActor {
             DriverPhase::HomePluggedIn => self
                 .equipment_id
                 .and_then(|id| env.equipment_core.get(&id))
-                .and_then(|co| co.flows.electric_kw)
-                .map(|p| p.signed_kw()),
+                .and_then(|co| co.flows.electric_w)
+                // The kW working value converts once at the read until
+                // the control-layer commit.
+                .map(|p| hares_core_units::w_to_kw(p.signed_w())),
             // allowed: away charge power is telemetry-only by design — while
             // AwayPluggedIn the equipment zeroes its residential
             // active_power_kw (the away charger is off-site from the
@@ -1860,7 +1862,9 @@ mod tests {
     ) {
         set_core_soc(actor, env, equipment_name, equipment_id, soc);
         if let Some(co) = env.equipment_core.get_mut(&equipment_id) {
-            co.flows.electric_kw = Some(ElectricPower::Bidirectional(charge_kw));
+            // The core flow is W (SI); the test's kW working value
+            // converts once.
+            co.flows.electric_w = Some(ElectricPower::Bidirectional(charge_kw * 1000.0));
         }
     }
 
@@ -2283,8 +2287,8 @@ mod tests {
                 // charge_kw = 0. Supply the surplus the strategy votes on.
                 if matches!(strategy, ChargingStrategy::SolarSurplus { .. }) {
                     env.electrical = ElectricalSummary {
-                        pv_generation_kw: 3.0,
-                        base_load_kw: 1.0,
+                        pv_generation_w: 3000.0,
+                        base_load_w: 1000.0,
                         ..Default::default()
                     };
                 }
@@ -4158,8 +4162,8 @@ mod tests {
         );
         let mut env = env_at_minute(12 * 60);
         env.electrical = ElectricalSummary {
-            pv_generation_kw: 5.0,
-            base_load_kw: 1.5,
+            pv_generation_w: 5000.0,
+            base_load_w: 1500.0,
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -4187,8 +4191,8 @@ mod tests {
         );
         let mut env = env_at_minute(12 * 60);
         env.electrical = ElectricalSummary {
-            pv_generation_kw: 2.0,
-            base_load_kw: 1.5,
+            pv_generation_w: 2000.0,
+            base_load_w: 1500.0,
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -4277,8 +4281,8 @@ mod tests {
         );
         let mut env = env_at_minute(19 * 60);
         env.electrical = ElectricalSummary {
-            pv_generation_kw: 1.0,
-            base_load_kw: 4.0,
+            pv_generation_w: 1000.0,
+            base_load_w: 4000.0,
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -4319,8 +4323,8 @@ mod tests {
         );
         let mut env = env_at_minute(19 * 60);
         env.electrical = ElectricalSummary {
-            pv_generation_kw: 1.0,
-            base_load_kw: 4.0,
+            pv_generation_w: 1000.0,
+            base_load_w: 4000.0,
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -4363,8 +4367,8 @@ mod tests {
         );
         let mut env = env_at_minute(19 * 60);
         env.electrical = ElectricalSummary {
-            pv_generation_kw: 1.0,
-            base_load_kw: 4.0,
+            pv_generation_w: 1000.0,
+            base_load_w: 4000.0,
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -5174,8 +5178,8 @@ mod tests {
         // Solar has nothing -> should idle.
         let mut env1 = env_at_minute(23 * 60);
         env1.electrical = ElectricalSummary {
-            pv_generation_kw: 0.0,
-            base_load_kw: 1.0,
+            pv_generation_w: 0.0,
+            base_load_w: 1000.0,
             ..Default::default()
         };
         let out1 = plugged_in_step_with_env(&mut actor, &env1);
@@ -5223,8 +5227,8 @@ mod tests {
         // Evening: high load deficit
         let mut env_evening = env_at_minute(19 * 60);
         env_evening.electrical = ElectricalSummary {
-            pv_generation_kw: 0.5,
-            base_load_kw: 4.0,
+            pv_generation_w: 500.0,
+            base_load_w: 4000.0,
             ..Default::default()
         };
         let out_evening = plugged_in_step_with_env(&mut actor, &env_evening);
@@ -5244,8 +5248,8 @@ mod tests {
         actor.estimated_soc = 0.4;
         let mut env_morning = env_at_minute(6 * 60);
         env_morning.electrical = ElectricalSummary {
-            pv_generation_kw: 3.0,
-            base_load_kw: 1.0,
+            pv_generation_w: 3000.0,
+            base_load_w: 1000.0,
             ..Default::default()
         };
         let out_morning = plugged_in_step_with_env(&mut actor, &env_morning);
@@ -5458,8 +5462,8 @@ mod tests {
         // 0 kW PV -> idle
         let mut env0 = env_at_minute(12 * 60);
         env0.electrical = ElectricalSummary {
-            pv_generation_kw: 0.0,
-            base_load_kw: 1.5,
+            pv_generation_w: 0.0,
+            base_load_w: 1500.0,
             ..Default::default()
         };
         let out0 = plugged_in_step_with_env(&mut actor, &env0);
@@ -5474,8 +5478,8 @@ mod tests {
         // 1.0 kW PV, 1.5 kW load -> surplus -0.5 kW (below min 1.4), idle
         let mut env1 = env_at_minute(12 * 60 + 1);
         env1.electrical = ElectricalSummary {
-            pv_generation_kw: 1.0,
-            base_load_kw: 1.5,
+            pv_generation_w: 1000.0,
+            base_load_w: 1500.0,
             ..Default::default()
         };
         let out1 = plugged_in_step_with_env(&mut actor, &env1);
@@ -5490,8 +5494,8 @@ mod tests {
         // 3.0 kW PV, 1.5 kW load -> surplus 1.5 kW (above min 1.4), charge at 1.5 kW
         let mut env2 = env_at_minute(12 * 60 + 2);
         env2.electrical = ElectricalSummary {
-            pv_generation_kw: 3.0,
-            base_load_kw: 1.5,
+            pv_generation_w: 3000.0,
+            base_load_w: 1500.0,
             ..Default::default()
         };
         let out2 = plugged_in_step_with_env(&mut actor, &env2);
@@ -5513,8 +5517,8 @@ mod tests {
         // 5.0 kW PV, 1.5 kW load -> surplus 3.5 kW, charge at 3.5 kW
         let mut env3 = env_at_minute(12 * 60 + 3);
         env3.electrical = ElectricalSummary {
-            pv_generation_kw: 5.0,
-            base_load_kw: 1.5,
+            pv_generation_w: 5000.0,
+            base_load_w: 1500.0,
             ..Default::default()
         };
         let out3 = plugged_in_step_with_env(&mut actor, &env3);
@@ -7413,7 +7417,7 @@ mod tests {
                     .step(&env, std::time::Duration::from_secs(900), &mut ports)
                     .expect("EV step");
                 core = equipment.core_output().clone();
-                let power_kw = core.flows.electric_kw.map(|p| p.signed_kw()).unwrap_or(0.0);
+                let power_kw = core.flows.electric_w.map(|p| p.signed_w()).unwrap_or(0.0) / 1000.0;
                 if power_kw > 0.0 {
                     day_hours[hour] += power_kw * 0.25;
                 }
@@ -7982,8 +7986,8 @@ mod tests {
         while minute < 20 * 60 {
             let mut env = env_at_minute(minute);
             env.electrical = ElectricalSummary {
-                pv_generation_kw: 0.5,
-                base_load_kw: 4.0,
+                pv_generation_w: 500.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             };
             let mut out = Vec::new();
@@ -8279,5 +8283,12 @@ mod tests {
             "one uncoverable trip must count as exactly one cancellation, even when a \
              second step lands inside the departure-minute window"
         );
+    }
+}
+/// The kW working value of an SI read: the driver's kW-era working
+/// values convert once at the read until the control-layer commit.
+pub(crate) mod hares_core_units {
+    pub(crate) fn w_to_kw(w: f64) -> f64 {
+        uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
     }
 }

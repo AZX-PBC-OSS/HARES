@@ -685,7 +685,7 @@ fn air_conditioner_sign_convention_and_shr_split() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_kw = ports.electrical.net_active_w() / 1000.0;
+    let electric_w = ports.electrical.net_active_w() / 1000.0;
 
     // Cooling removes heat → thermal contribution must be negative
     assert!(
@@ -696,21 +696,21 @@ fn air_conditioner_sign_convention_and_shr_split() {
 
     // Compressor draws positive electricity
     assert!(
-        electric_kw > 0.0,
-        "AC must draw positive electricity when cooling; got {electric_kw:.4} kW"
+        electric_w > 0.0,
+        "AC must draw positive electricity when cooling; got {electric_w:.4} kW"
     );
 
     // COP for a cooling unit: coil_cooling / compressor_electric.
     // Port sensible includes fan heat offset, so use telemetry coil output.
     let coil_cooling_w = eq.telemetry().get("sensible_cooling_w").unwrap_or(0.0)
         + eq.telemetry().get("latent_cooling_w").unwrap_or(0.0);
-    let compressor_kw = eq.telemetry().get("compressor_kw").unwrap_or(0.0);
-    let cooling_cop = coil_cooling_w / (compressor_kw * 1_000.0).max(f64::MIN_POSITIVE);
+    let compressor_w = eq.telemetry().get("compressor_kw").unwrap_or(0.0);
+    let cooling_cop = coil_cooling_w / compressor_w.max(f64::MIN_POSITIVE);
     // EER ≥ 10 BTU/(Wh) corresponds to COP ≥ 2.93; SEER 14 minimum corresponds to COP ≈ 4.1.
     assert!(
         cooling_cop > 2.0 && cooling_cop < 8.0,
         "AC cooling COP must be in [2.0, 8.0] at rated conditions; got {cooling_cop:.3} \
-         (coil={coil_cooling_w:.1} W, compressor={compressor_kw:.4} kW)"
+         (coil={coil_cooling_w:.1} W, compressor={compressor_w:.4} W)"
     );
 }
 
@@ -784,15 +784,15 @@ fn ashp_cooler_two_speed_runtime_is_partial_near_setpoint() {
         .telemetry()
         .get("runtime_fraction")
         .expect("runtime_fraction must exist");
-    let electric_kw = eq.telemetry().get("electric_kw").expect("electric_kw");
+    let electric_w = eq.telemetry().get("electric_kw").expect("electric_w");
 
     assert!(
         rtf > 0.0 && rtf < 0.8,
         "two-speed ASHP cooler near setpoint must run at partial runtime, got rtf={rtf:.3}"
     );
     assert!(
-        electric_kw > 0.0,
-        "two-speed ASHP cooler must still draw power under partial runtime; got {electric_kw:.4} kW"
+        electric_w > 0.0,
+        "two-speed ASHP cooler must still draw power under partial runtime; got {electric_w:.4} kW"
     );
 }
 
@@ -808,7 +808,7 @@ fn minisplit_cooling_has_no_first_step_startup_penalty() {
     eq.update_control(&env);
     eq.step(&env, Duration::from_secs(60), &mut ports_first)
         .unwrap();
-    let kw_first = eq.telemetry().get("electric_kw").expect("electric_kw");
+    let kw_first = eq.telemetry().get("electric_kw").expect("electric_w");
     let rtf_first = eq
         .telemetry()
         .get("runtime_fraction")
@@ -818,7 +818,7 @@ fn minisplit_cooling_has_no_first_step_startup_penalty() {
     eq.update_control(&env);
     eq.step(&env, Duration::from_secs(60), &mut ports_second)
         .unwrap();
-    let kw_second = eq.telemetry().get("electric_kw").expect("electric_kw");
+    let kw_second = eq.telemetry().get("electric_kw").expect("electric_w");
     let rtf_second = eq
         .telemetry()
         .get("runtime_fraction")
@@ -856,15 +856,15 @@ fn minisplit_cooling_stage_match_runs_continuously() {
         .telemetry()
         .get("runtime_fraction")
         .expect("runtime_fraction must exist");
-    let electric_kw = eq.telemetry().get("electric_kw").expect("electric_kw");
+    let electric_w = eq.telemetry().get("electric_kw").expect("electric_w");
 
     assert!(
         (rtf - 1.0).abs() < 1e-9,
         "an exact 4-speed mini-split stage match must run continuously, got rtf={rtf:.3}"
     );
     assert!(
-        electric_kw > 0.0,
-        "variable-speed mini-split stage selection must still draw power, got {electric_kw:.4} kW"
+        electric_w > 0.0,
+        "variable-speed mini-split stage selection must still draw power, got {electric_w:.4} kW"
     );
 }
 
@@ -951,7 +951,7 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
     // Average COP must be physically plausible. The discrete model's Defrosting
     // steps have COP = 0 (no thermal output), but average COP over the full cycle
     // should be above 0.5.
-    let cop = avg_thermal_w / (avg_electric_kw * 1_000.0);
+    let cop = avg_thermal_w / avg_electric_kw;
     assert!(
         cop > 0.5,
         "ASHP average COP during defrost at 0°C must be > 0.5; \
@@ -1043,7 +1043,7 @@ fn make_ports_two_zones() -> PortSlots {
 #[derive(Debug, Clone, Copy)]
 struct HvacStepSnapshot {
     mode: OperatingMode,
-    electric_kw: f64,
+    electric_w: f64,
     sensible_w: f64,
     runtime_fraction: f64,
 }
@@ -1057,7 +1057,7 @@ fn hvac_step_snapshot(
     eq.step(env, Duration::from_secs(60), &mut ports).unwrap();
     HvacStepSnapshot {
         mode,
-        electric_kw: ports.electrical.net_active_w() / 1000.0,
+        electric_w: ports.electrical.net_active_w(),
         sensible_w: ports.thermal[0].sensible_gain_w,
         runtime_fraction: eq.telemetry().get("runtime_fraction").unwrap_or(0.0),
     }
@@ -1138,7 +1138,7 @@ fn ashp_heating_at_extreme_cold() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_kw = ports.electrical.net_active_w() / 1000.0;
+    let electric_w = ports.electrical.net_active_w() / 1000.0;
 
     // Either the HP or backup resistance must deliver positive heat
     assert!(
@@ -1146,14 +1146,14 @@ fn ashp_heating_at_extreme_cold() {
         "ASHP (with backup) must deliver positive heat at -20°C; got {thermal_w:.3} W"
     );
     assert!(
-        electric_kw > 0.0,
-        "ASHP (with backup) must draw electricity at -20°C; got {electric_kw:.4} kW"
+        electric_w > 0.0,
+        "ASHP (with backup) must draw electricity at -20°C; got {electric_w:.4} kW"
     );
 
     eprintln!(
-        "[hvac_parity] extreme_cold: thermal={thermal_w:.1} W, electric={electric_kw:.4} kW, \
+        "[hvac_parity] extreme_cold: thermal={thermal_w:.1} W, electric={electric_w:.4} kW, \
          COP={:.3}",
-        thermal_w / (electric_kw * 1_000.0)
+        thermal_w / (electric_w * 1_000.0)
     );
 }
 
@@ -1191,7 +1191,7 @@ fn ac_deadband_no_output_when_zone_below_cooling_setpoint() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_kw = ports.electrical.net_active_w() / 1000.0;
+    let electric_w = ports.electrical.net_active_w() / 1000.0;
 
     assert_ne!(
         mode,
@@ -1203,8 +1203,8 @@ fn ac_deadband_no_output_when_zone_below_cooling_setpoint() {
         "AC must deliver zero thermal output when off; got {thermal_w:.4} W"
     );
     assert!(
-        electric_kw.abs() < 0.001,
-        "AC must draw zero electricity when off; got {electric_kw:.6} kW"
+        electric_w.abs() < 0.001,
+        "AC must draw zero electricity when off; got {electric_w:.6} kW"
     );
 }
 
@@ -1255,7 +1255,7 @@ fn ashp_cop_drops_with_defrost() {
         }
         let avg_thermal_w = total_thermal_w / n_steps as f64;
         let avg_electric_kw = total_electric_kw / n_steps as f64;
-        let cop = avg_thermal_w / (avg_electric_kw * 1_000.0);
+        let cop = avg_thermal_w / avg_electric_kw;
         (cop, avg_thermal_w, avg_electric_kw)
     };
 
@@ -1472,8 +1472,7 @@ fn ac_sensible_plus_latent_equals_total() {
 
     // Fan heat partially offsets cooling at the port level:
     // port_sensible = -(sensible_cooling - fan_heat)
-    let fan_kw = eq.telemetry().get("fan_kw").unwrap_or(0.0);
-    let fan_heat_w = fan_kw * 1000.0;
+    let fan_heat_w = eq.telemetry().get("fan_kw").unwrap_or(0.0);
     let total_port_w = sensible_port_w.abs() + latent_port_w.abs();
 
     // Telemetry reports pre-fan-offset cooling (coil output only).
@@ -1861,10 +1860,10 @@ fn two_speed_ac_setpoint_matrix_transitions_from_high_to_low_stage() {
         low.runtime_fraction
     );
     assert!(
-        low.electric_kw < high.electric_kw,
+        low.electric_w < high.electric_w,
         "falling back to low stage must reduce electric draw: high={} kW low={} kW",
-        high.electric_kw,
-        low.electric_kw
+        high.electric_w,
+        low.electric_w
     );
     assert!(
         low.sensible_w.abs() < high.sensible_w.abs(),
@@ -1911,12 +1910,12 @@ fn two_speed_ac_stage_lockout_holds_low_speed_until_dwell_elapses() {
         );
     }
 
-    let low_stage_kw = snapshots[0].electric_kw;
-    let high_stage_kw = snapshots[5].electric_kw;
+    let low_stage_kw = snapshots[0].electric_w;
+    let high_stage_kw = snapshots[5].electric_w;
     assert!(
         snapshots[..5]
             .iter()
-            .all(|snap| (snap.electric_kw - low_stage_kw).abs() < 1e-9),
+            .all(|snap| (snap.electric_w - low_stage_kw).abs() < 1e-9),
         "electric draw must stay locked to the low stage before the 300 s dwell expires"
     );
     assert!(
@@ -2022,7 +2021,7 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
         OperatingMode::Off,
         "between the ER and HP lockouts neither heat source should be available"
     );
-    assert!(shoulder_step.electric_kw.abs() < 1e-6);
+    assert!(shoulder_step.electric_w.abs() < 1e-6);
     assert!(shoulder_step.sensible_w.abs() < 1e-6);
 
     let mut cold = registry.create("ASHP Heater", cfg.clone()).unwrap();

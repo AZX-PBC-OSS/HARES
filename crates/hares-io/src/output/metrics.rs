@@ -28,9 +28,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use hares_physics::constants::HOURS_PER_YEAR;
-use hares_physics::units::energy_therms_to_kwh;
 use hares_types::EndUse;
+use hares_types::Unit;
+use hares_types::si_units::energy::therm as therm_marker;
 use hares_types::telemetry_keys as tk;
+use uom::si::energy::{joule as joule_marker, kilowatt_hour as kilowatt_hour_marker};
+use uom::si::f64::Energy;
 
 use crate::SimulationConfig;
 use crate::output::catalogue::{Catalogue, time_field, variable_field};
@@ -104,7 +107,8 @@ pub struct TotalEnergyKwh {
 /// Rolling-window peak demand metrics at standard demand intervals.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RollingPeakKw {
-    /// Peak 15-minute average demand (kW).
+    /// Peak 15-minute average demand (kW), converted once from the W
+    /// ring the calculator holds.
     pub peak_15min_kw: f64,
     /// Peak 30-minute average demand (kW).
     pub peak_30min_kw: f64,
@@ -124,9 +128,10 @@ pub struct PeakPowerKw {
 /// Grid interaction demand metrics.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GridInteractionMetrics {
-    /// Maximum grid import (positive draw) over the run.
+    /// Maximum grid import (positive draw) over the run (kW, converted
+    /// once from the W accumulator).
     pub peak_import_kw: f64,
-    /// Maximum grid export (positive feed-in) over the run.
+    /// Maximum grid export (positive feed-in) over the run (kW).
     pub peak_export_kw: f64,
 }
 
@@ -326,9 +331,9 @@ struct RollingPeakBuffer {
     /// Number of steps that fit in a 60-minute window.
     window_60min: usize,
     /// Tracked peak averages.
-    peak_15min_kw: f64,
-    peak_30min_kw: f64,
-    peak_60min_kw: f64,
+    peak_15min_w: f64,
+    peak_30min_w: f64,
+    peak_60min_w: f64,
 }
 
 impl RollingPeakBuffer {
@@ -346,9 +351,9 @@ impl RollingPeakBuffer {
             window_15min,
             window_30min,
             window_60min,
-            peak_15min_kw: 0.0,
-            peak_30min_kw: 0.0,
-            peak_60min_kw: 0.0,
+            peak_15min_w: 0.0,
+            peak_30min_w: 0.0,
+            peak_60min_w: 0.0,
         }
     }
 
@@ -361,14 +366,14 @@ impl RollingPeakBuffer {
         let avg30 = self.window_average(self.window_30min);
         let avg60 = self.window_average(self.window_60min);
 
-        if avg15 > self.peak_15min_kw {
-            self.peak_15min_kw = avg15;
+        if avg15 > self.peak_15min_w {
+            self.peak_15min_w = avg15;
         }
-        if avg30 > self.peak_30min_kw {
-            self.peak_30min_kw = avg30;
+        if avg30 > self.peak_30min_w {
+            self.peak_30min_w = avg30;
         }
-        if avg60 > self.peak_60min_kw {
-            self.peak_60min_kw = avg60;
+        if avg60 > self.peak_60min_w {
+            self.peak_60min_w = avg60;
         }
     }
 
@@ -389,10 +394,12 @@ impl RollingPeakBuffer {
     }
 
     fn finish(&self) -> RollingPeakKw {
+        // The record keeps its kW reporting names, each converted once
+        // from the W ring.
         RollingPeakKw {
-            peak_15min_kw: self.peak_15min_kw.max(0.0),
-            peak_30min_kw: self.peak_30min_kw.max(0.0),
-            peak_60min_kw: self.peak_60min_kw.max(0.0),
+            peak_15min_kw: Unit::Kilowatt.from_si(self.peak_15min_w.max(0.0)),
+            peak_30min_kw: Unit::Kilowatt.from_si(self.peak_30min_w.max(0.0)),
+            peak_60min_kw: Unit::Kilowatt.from_si(self.peak_60min_w.max(0.0)),
         }
     }
 
@@ -403,9 +410,9 @@ impl RollingPeakBuffer {
             buffer: self.buffer.clone(),
             head: self.head,
             count: self.count,
-            peak_15min_kw: self.peak_15min_kw,
-            peak_30min_kw: self.peak_30min_kw,
-            peak_60min_kw: self.peak_60min_kw,
+            peak_15min_w: self.peak_15min_w,
+            peak_30min_w: self.peak_30min_w,
+            peak_60min_w: self.peak_60min_w,
         }
     }
 
@@ -434,9 +441,9 @@ impl RollingPeakBuffer {
         self.buffer.copy_from_slice(&snapshot.buffer);
         self.head = snapshot.head % self.buffer.len().max(1);
         self.count = snapshot.count.min(self.buffer.len());
-        self.peak_15min_kw = snapshot.peak_15min_kw;
-        self.peak_30min_kw = snapshot.peak_30min_kw;
-        self.peak_60min_kw = snapshot.peak_60min_kw;
+        self.peak_15min_w = snapshot.peak_15min_w;
+        self.peak_30min_w = snapshot.peak_30min_w;
+        self.peak_60min_w = snapshot.peak_60min_w;
         Ok(())
     }
 }
@@ -720,32 +727,32 @@ pub enum MetricsDeadbandSnapshot {
 /// fails the run).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricsAccumulatorsSnapshot {
-    pub total_electric_energy_kwh: f64,
-    pub total_gas_energy_therms: f64,
-    pub total_consumption_kwh: f64,
-    pub total_pv_generation_kwh_abs: f64,
-    pub peak_import_kw: f64,
-    pub peak_export_kw: f64,
+    pub total_electric_energy_j: f64,
+    pub total_gas_energy_j: f64,
+    pub total_consumption_j: f64,
+    pub total_pv_generation_j_abs: f64,
+    pub peak_import_w: f64,
+    pub peak_export_w: f64,
     pub energy_by_end_use: BTreeMap<String, f64>,
     pub peak_by_end_use: BTreeMap<String, Option<f64>>,
     pub comfort_step_count: f64,
     pub unmet_step_count: f64,
     pub rolling_peak: MetricsRollingPeakSnapshot,
-    pub envelope_window_solar_wh: f64,
-    pub envelope_opaque_conduction_wh: f64,
-    pub envelope_window_conduction_wh: f64,
-    pub envelope_internal_mass_wh: f64,
-    pub envelope_interior_lwr_wh: f64,
-    pub envelope_infiltration_wh: f64,
-    pub envelope_ventilation_wh: f64,
-    pub envelope_hvac_heating_wh: f64,
-    pub envelope_hvac_cooling_wh: f64,
-    pub envelope_internal_gains_wh: f64,
-    pub envelope_duct_loss_wh: f64,
-    pub hvac_heating_electric_wh: f64,
-    pub hvac_cooling_electric_wh: f64,
-    pub battery_energy_in_kwh: f64,
-    pub battery_energy_out_kwh: f64,
+    pub envelope_window_solar_j: f64,
+    pub envelope_opaque_conduction_j: f64,
+    pub envelope_window_conduction_j: f64,
+    pub envelope_internal_mass_j: f64,
+    pub envelope_interior_lwr_j: f64,
+    pub envelope_infiltration_j: f64,
+    pub envelope_ventilation_j: f64,
+    pub envelope_hvac_heating_j: f64,
+    pub envelope_hvac_cooling_j: f64,
+    pub envelope_internal_gains_j: f64,
+    pub envelope_duct_loss_j: f64,
+    pub hvac_heating_electric_j: f64,
+    pub hvac_cooling_electric_j: f64,
+    pub battery_energy_in_j: f64,
+    pub battery_energy_out_j: f64,
     pub total_row_count: u64,
     pub setpoint_missing_row_count: u64,
     pub nan_step_count: u64,
@@ -759,9 +766,9 @@ pub struct MetricsRollingPeakSnapshot {
     pub buffer: Vec<f64>,
     pub head: usize,
     pub count: usize,
-    pub peak_15min_kw: f64,
-    pub peak_30min_kw: f64,
-    pub peak_60min_kw: f64,
+    pub peak_15min_w: f64,
+    pub peak_30min_w: f64,
+    pub peak_60min_w: f64,
 }
 
 /// The run metrics' checkpoint section: the input plan's resolved slots
@@ -781,40 +788,41 @@ pub struct MetricsSnapshot {
 #[derive(Debug, Clone)]
 pub struct MetricsCalculator {
     timestep_h: f64,
+    timestep_s: f64,
     time_res_secs: u32,
     plan: MetricsInputPlan,
 
-    total_electric_energy_kwh: f64,
-    total_gas_energy_therms: f64,
-    total_consumption_kwh: f64,
-    total_pv_generation_kwh_abs: f64,
-    peak_import_kw: f64,
-    peak_export_kw: f64,
+    total_electric_energy_j: f64,
+    total_gas_energy_j: f64,
+    total_consumption_j: f64,
+    total_pv_generation_j_abs: f64,
+    peak_import_w: f64,
+    peak_export_w: f64,
     energy_by_end_use: BTreeMap<String, f64>,
     peak_by_end_use: BTreeMap<String, f64>,
     comfort_step_count: f64,
     unmet_step_count: f64,
     rolling_peak: RollingPeakBuffer,
 
-    // Envelope component load accumulators [W·h → kWh at finish]
-    envelope_window_solar_wh: f64,
-    envelope_opaque_conduction_wh: f64,
-    envelope_window_conduction_wh: f64,
-    envelope_internal_mass_wh: f64,
-    envelope_interior_lwr_wh: f64,
-    envelope_infiltration_wh: f64,
-    envelope_ventilation_wh: f64,
-    envelope_hvac_heating_wh: f64,
-    envelope_hvac_cooling_wh: f64,
-    envelope_internal_gains_wh: f64,
-    envelope_duct_loss_wh: f64,
+    // Envelope component load accumulators [W -> J over the step]
+    envelope_window_solar_j: f64,
+    envelope_opaque_conduction_j: f64,
+    envelope_window_conduction_j: f64,
+    envelope_internal_mass_j: f64,
+    envelope_interior_lwr_j: f64,
+    envelope_infiltration_j: f64,
+    envelope_ventilation_j: f64,
+    envelope_hvac_heating_j: f64,
+    envelope_hvac_cooling_j: f64,
+    envelope_internal_gains_j: f64,
+    envelope_duct_loss_j: f64,
     has_envelope_columns: bool,
 
     // Efficiency accumulators
-    hvac_heating_electric_wh: f64,
-    hvac_cooling_electric_wh: f64,
-    battery_energy_in_kwh: f64,
-    battery_energy_out_kwh: f64,
+    hvac_heating_electric_j: f64,
+    hvac_cooling_electric_j: f64,
+    battery_energy_in_j: f64,
+    battery_energy_out_j: f64,
 
     // Row counters for partial-setpoint diagnostics
     total_row_count: u64,
@@ -875,6 +883,7 @@ impl MetricsCalculator {
         }
 
         let timestep_h = f64::from(time_res_secs) / 3600.0;
+        let timestep_s = f64::from(time_res_secs);
         let energy_by_end_use = plan
             .end_use_columns
             .iter()
@@ -902,35 +911,36 @@ impl MetricsCalculator {
 
         Ok(Self {
             timestep_h,
+            timestep_s,
             time_res_secs,
             plan,
-            total_electric_energy_kwh: 0.0,
-            total_gas_energy_therms: 0.0,
-            total_consumption_kwh: 0.0,
-            total_pv_generation_kwh_abs: 0.0,
-            peak_import_kw: 0.0,
-            peak_export_kw: 0.0,
+            total_electric_energy_j: 0.0,
+            total_gas_energy_j: 0.0,
+            total_consumption_j: 0.0,
+            total_pv_generation_j_abs: 0.0,
+            peak_import_w: 0.0,
+            peak_export_w: 0.0,
             energy_by_end_use,
             peak_by_end_use,
             comfort_step_count: 0.0,
             unmet_step_count: 0.0,
             rolling_peak,
-            envelope_window_solar_wh: 0.0,
-            envelope_opaque_conduction_wh: 0.0,
-            envelope_window_conduction_wh: 0.0,
-            envelope_internal_mass_wh: 0.0,
-            envelope_interior_lwr_wh: 0.0,
-            envelope_infiltration_wh: 0.0,
-            envelope_ventilation_wh: 0.0,
-            envelope_hvac_heating_wh: 0.0,
-            envelope_hvac_cooling_wh: 0.0,
-            envelope_internal_gains_wh: 0.0,
-            envelope_duct_loss_wh: 0.0,
+            envelope_window_solar_j: 0.0,
+            envelope_opaque_conduction_j: 0.0,
+            envelope_window_conduction_j: 0.0,
+            envelope_internal_mass_j: 0.0,
+            envelope_interior_lwr_j: 0.0,
+            envelope_infiltration_j: 0.0,
+            envelope_ventilation_j: 0.0,
+            envelope_hvac_heating_j: 0.0,
+            envelope_hvac_cooling_j: 0.0,
+            envelope_internal_gains_j: 0.0,
+            envelope_duct_loss_j: 0.0,
             has_envelope_columns,
-            hvac_heating_electric_wh: 0.0,
-            hvac_cooling_electric_wh: 0.0,
-            battery_energy_in_kwh: 0.0,
-            battery_energy_out_kwh: 0.0,
+            hvac_heating_electric_j: 0.0,
+            hvac_cooling_electric_j: 0.0,
+            battery_energy_in_j: 0.0,
+            battery_energy_out_j: 0.0,
             total_row_count: 0,
             setpoint_missing_row_count: 0,
             coverage_year,
@@ -953,12 +963,12 @@ impl MetricsCalculator {
             plan: self.plan.snapshot(),
             time_res_secs: self.time_res_secs,
             accumulators: MetricsAccumulatorsSnapshot {
-                total_electric_energy_kwh: self.total_electric_energy_kwh,
-                total_gas_energy_therms: self.total_gas_energy_therms,
-                total_consumption_kwh: self.total_consumption_kwh,
-                total_pv_generation_kwh_abs: self.total_pv_generation_kwh_abs,
-                peak_import_kw: self.peak_import_kw,
-                peak_export_kw: self.peak_export_kw,
+                total_electric_energy_j: self.total_electric_energy_j,
+                total_gas_energy_j: self.total_gas_energy_j,
+                total_consumption_j: self.total_consumption_j,
+                total_pv_generation_j_abs: self.total_pv_generation_j_abs,
+                peak_import_w: self.peak_import_w,
+                peak_export_w: self.peak_export_w,
                 energy_by_end_use: self.energy_by_end_use.clone(),
                 peak_by_end_use: self
                     .peak_by_end_use
@@ -968,21 +978,21 @@ impl MetricsCalculator {
                 comfort_step_count: self.comfort_step_count,
                 unmet_step_count: self.unmet_step_count,
                 rolling_peak: self.rolling_peak.snapshot(),
-                envelope_window_solar_wh: self.envelope_window_solar_wh,
-                envelope_opaque_conduction_wh: self.envelope_opaque_conduction_wh,
-                envelope_window_conduction_wh: self.envelope_window_conduction_wh,
-                envelope_internal_mass_wh: self.envelope_internal_mass_wh,
-                envelope_interior_lwr_wh: self.envelope_interior_lwr_wh,
-                envelope_infiltration_wh: self.envelope_infiltration_wh,
-                envelope_ventilation_wh: self.envelope_ventilation_wh,
-                envelope_hvac_heating_wh: self.envelope_hvac_heating_wh,
-                envelope_hvac_cooling_wh: self.envelope_hvac_cooling_wh,
-                envelope_internal_gains_wh: self.envelope_internal_gains_wh,
-                envelope_duct_loss_wh: self.envelope_duct_loss_wh,
-                hvac_heating_electric_wh: self.hvac_heating_electric_wh,
-                hvac_cooling_electric_wh: self.hvac_cooling_electric_wh,
-                battery_energy_in_kwh: self.battery_energy_in_kwh,
-                battery_energy_out_kwh: self.battery_energy_out_kwh,
+                envelope_window_solar_j: self.envelope_window_solar_j,
+                envelope_opaque_conduction_j: self.envelope_opaque_conduction_j,
+                envelope_window_conduction_j: self.envelope_window_conduction_j,
+                envelope_internal_mass_j: self.envelope_internal_mass_j,
+                envelope_interior_lwr_j: self.envelope_interior_lwr_j,
+                envelope_infiltration_j: self.envelope_infiltration_j,
+                envelope_ventilation_j: self.envelope_ventilation_j,
+                envelope_hvac_heating_j: self.envelope_hvac_heating_j,
+                envelope_hvac_cooling_j: self.envelope_hvac_cooling_j,
+                envelope_internal_gains_j: self.envelope_internal_gains_j,
+                envelope_duct_loss_j: self.envelope_duct_loss_j,
+                hvac_heating_electric_j: self.hvac_heating_electric_j,
+                hvac_cooling_electric_j: self.hvac_cooling_electric_j,
+                battery_energy_in_j: self.battery_energy_in_j,
+                battery_energy_out_j: self.battery_energy_out_j,
                 total_row_count: self.total_row_count,
                 setpoint_missing_row_count: self.setpoint_missing_row_count,
                 nan_step_count: self.nan_step_count,
@@ -1022,12 +1032,12 @@ impl MetricsCalculator {
         // the checkpoint's state only once the whole section is known to
         // fit.
         self.rolling_peak.restore(restored.rolling_peak.clone())?;
-        self.total_electric_energy_kwh = restored.total_electric_energy_kwh;
-        self.total_gas_energy_therms = restored.total_gas_energy_therms;
-        self.total_consumption_kwh = restored.total_consumption_kwh;
-        self.total_pv_generation_kwh_abs = restored.total_pv_generation_kwh_abs;
-        self.peak_import_kw = restored.peak_import_kw;
-        self.peak_export_kw = restored.peak_export_kw;
+        self.total_electric_energy_j = restored.total_electric_energy_j;
+        self.total_gas_energy_j = restored.total_gas_energy_j;
+        self.total_consumption_j = restored.total_consumption_j;
+        self.total_pv_generation_j_abs = restored.total_pv_generation_j_abs;
+        self.peak_import_w = restored.peak_import_w;
+        self.peak_export_w = restored.peak_export_w;
         self.energy_by_end_use = restored.energy_by_end_use.clone();
         self.peak_by_end_use = restored
             .peak_by_end_use
@@ -1036,21 +1046,21 @@ impl MetricsCalculator {
             .collect();
         self.comfort_step_count = restored.comfort_step_count;
         self.unmet_step_count = restored.unmet_step_count;
-        self.envelope_window_solar_wh = restored.envelope_window_solar_wh;
-        self.envelope_opaque_conduction_wh = restored.envelope_opaque_conduction_wh;
-        self.envelope_window_conduction_wh = restored.envelope_window_conduction_wh;
-        self.envelope_internal_mass_wh = restored.envelope_internal_mass_wh;
-        self.envelope_interior_lwr_wh = restored.envelope_interior_lwr_wh;
-        self.envelope_infiltration_wh = restored.envelope_infiltration_wh;
-        self.envelope_ventilation_wh = restored.envelope_ventilation_wh;
-        self.envelope_hvac_heating_wh = restored.envelope_hvac_heating_wh;
-        self.envelope_hvac_cooling_wh = restored.envelope_hvac_cooling_wh;
-        self.envelope_internal_gains_wh = restored.envelope_internal_gains_wh;
-        self.envelope_duct_loss_wh = restored.envelope_duct_loss_wh;
-        self.hvac_heating_electric_wh = restored.hvac_heating_electric_wh;
-        self.hvac_cooling_electric_wh = restored.hvac_cooling_electric_wh;
-        self.battery_energy_in_kwh = restored.battery_energy_in_kwh;
-        self.battery_energy_out_kwh = restored.battery_energy_out_kwh;
+        self.envelope_window_solar_j = restored.envelope_window_solar_j;
+        self.envelope_opaque_conduction_j = restored.envelope_opaque_conduction_j;
+        self.envelope_window_conduction_j = restored.envelope_window_conduction_j;
+        self.envelope_internal_mass_j = restored.envelope_internal_mass_j;
+        self.envelope_interior_lwr_j = restored.envelope_interior_lwr_j;
+        self.envelope_infiltration_j = restored.envelope_infiltration_j;
+        self.envelope_ventilation_j = restored.envelope_ventilation_j;
+        self.envelope_hvac_heating_j = restored.envelope_hvac_heating_j;
+        self.envelope_hvac_cooling_j = restored.envelope_hvac_cooling_j;
+        self.envelope_internal_gains_j = restored.envelope_internal_gains_j;
+        self.envelope_duct_loss_j = restored.envelope_duct_loss_j;
+        self.hvac_heating_electric_j = restored.hvac_heating_electric_j;
+        self.hvac_cooling_electric_j = restored.hvac_cooling_electric_j;
+        self.battery_energy_in_j = restored.battery_energy_in_j;
+        self.battery_energy_out_j = restored.battery_energy_out_j;
         self.total_row_count = restored.total_row_count;
         self.setpoint_missing_row_count = restored.setpoint_missing_row_count;
         self.nan_step_count = restored.nan_step_count;
@@ -1126,25 +1136,34 @@ impl MetricsCalculator {
     pub fn accumulate_row(&mut self, row: &[f64]) -> Result<(), MetricsError> {
         self.total_row_count += 1;
 
-        // Gross PV generation this step [kW] (PV column is negative when
+        // The row plan's producer slots hold the reporting unit of their
+        // column; each read converts to SI once here (the run feed's
+        // counterpart of the table feed's to_si), and the accumulators
+        // hold J and W.
+        //
+        // Gross PV generation this step (the PV column is negative when
         // generating). Read once per row: it feeds both the gross
         // generation accumulator and the load-behind-the-meter figure.
-        let pv_gen_kw = self
+        let pv_gen_w = self
             .plan
             .pv_power_slot
             .and_then(|slot| value_at_slot(row, slot))
+            .map(|v| Unit::Kilowatt.to_si(v))
             .filter(|pv| *pv < 0.0)
             .map_or(0.0, f64::abs);
 
-        if let Some(total_kw) = self.guarded_power_value(row) {
-            self.total_electric_energy_kwh += total_kw * self.timestep_h;
+        if let Some(total_w) = self
+            .guarded_power_value(row)
+            .map(|v| Unit::Kilowatt.to_si(v))
+        {
+            self.total_electric_energy_j += total_w * self.timestep_s;
             // Gross consumption is the load behind the meter: the net
             // total plus self-consumed PV generation. Without this, an
             // always-exporting PV home reports 0 consumption even while
             // its loads run on self-consumed solar.
-            let load_kw = total_kw + pv_gen_kw;
-            if load_kw > 0.0 {
-                self.total_consumption_kwh += load_kw * self.timestep_h;
+            let load_w = total_w + pv_gen_w;
+            if load_w > 0.0 {
+                self.total_consumption_j += load_w * self.timestep_s;
             }
             // Gross PV generation accumulates on the same row
             // eligibility as net and gross consumption (finite meter
@@ -1153,39 +1172,42 @@ impl MetricsCalculator {
             // the other two skip breaks the documented identity
             // net == gross_consumption − gross_pv and skews
             // renewable_energy_fraction.
-            if pv_gen_kw > 0.0 {
-                self.total_pv_generation_kwh_abs += pv_gen_kw * self.timestep_h;
+            if pv_gen_w > 0.0 {
+                self.total_pv_generation_j_abs += pv_gen_w * self.timestep_s;
             }
         }
 
-        if let Some(gas_therms_per_h) = self
+        if let Some(gas_w) = self
             .plan
             .total_gas_power_slot
             .and_then(|slot| value_at_slot(row, slot))
+            .map(|v| Unit::ThermPerHour.to_si(v))
         {
-            self.total_gas_energy_therms += gas_therms_per_h * self.timestep_h;
+            self.total_gas_energy_j += gas_w * self.timestep_s;
         }
 
-        if let Some(grid_kw) = value_at_slot(row, self.plan.grid_power_slot) {
-            if grid_kw > self.peak_import_kw {
-                self.peak_import_kw = grid_kw;
+        if let Some(grid_w) =
+            value_at_slot(row, self.plan.grid_power_slot).map(|v| Unit::Kilowatt.to_si(v))
+        {
+            if grid_w > self.peak_import_w {
+                self.peak_import_w = grid_w;
             }
-            let export_kw = (-grid_kw).max(0.0);
-            if export_kw > self.peak_export_kw {
-                self.peak_export_kw = export_kw;
+            let export_w = (-grid_w).max(0.0);
+            if export_w > self.peak_export_w {
+                self.peak_export_w = export_w;
             }
-            self.rolling_peak.push(grid_kw);
+            self.rolling_peak.push(grid_w);
         }
 
         for (name, slot) in &self.plan.end_use_columns {
-            if let Some(value_kw) = value_at_slot(row, *slot) {
-                if let Some(sum_kwh) = self.energy_by_end_use.get_mut(name) {
-                    *sum_kwh += value_kw * self.timestep_h;
+            if let Some(value_w) = value_at_slot(row, *slot).map(|v| Unit::Kilowatt.to_si(v)) {
+                if let Some(sum_j) = self.energy_by_end_use.get_mut(name) {
+                    *sum_j += value_w * self.timestep_s;
                 }
-                if let Some(peak_kw) = self.peak_by_end_use.get_mut(name)
-                    && value_kw > *peak_kw
+                if let Some(peak_w) = self.peak_by_end_use.get_mut(name)
+                    && value_w > *peak_w
                 {
-                    *peak_kw = value_kw;
+                    *peak_w = value_w;
                 }
             } else {
                 self.nan_step_count += 1;
@@ -1231,121 +1253,121 @@ impl MetricsCalculator {
             }
         }
 
-        // Envelope component loads [W → Wh via timestep_h].
+        // Envelope component loads [W → J over the step].
         if let Some(slot) = self.plan.window_solar_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_window_solar_wh += v * self.timestep_h;
+            self.envelope_window_solar_j += v * self.timestep_s;
         }
         if let Some(slot) = self.plan.infiltration_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_infiltration_wh += v * self.timestep_h;
+            self.envelope_infiltration_j += v * self.timestep_s;
         }
         if let Some(slot) = self.plan.interior_lwr_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_interior_lwr_wh += v * self.timestep_h;
+            self.envelope_interior_lwr_j += v * self.timestep_s;
         }
         if let Some(slot) = self.plan.internal_gains_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_internal_gains_wh += v * self.timestep_h;
+            self.envelope_internal_gains_j += v * self.timestep_s;
         }
         if let Some(slot) = self.plan.opaque_conduction_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_opaque_conduction_wh += v * self.timestep_h;
+            self.envelope_opaque_conduction_j += v * self.timestep_s;
         }
         if let Some(slot) = self.plan.window_conduction_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_window_conduction_wh += v * self.timestep_h;
+            self.envelope_window_conduction_j += v * self.timestep_s;
         }
         if let Some(slot) = self.plan.internal_mass_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_internal_mass_wh += v * self.timestep_h;
+            self.envelope_internal_mass_j += v * self.timestep_s;
         }
         if let Some(slot) = self.plan.forced_ventilation_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_ventilation_wh += v * self.timestep_h;
+            self.envelope_ventilation_j += v * self.timestep_s;
         }
         if let Some(slot) = self.plan.natural_ventilation_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_ventilation_wh += v * self.timestep_h;
+            self.envelope_ventilation_j += v * self.timestep_s;
         }
         if let Some(slot) = self.plan.duct_loss_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_duct_loss_wh += v * self.timestep_h;
+            self.envelope_duct_loss_j += v * self.timestep_s;
         }
 
         // HVAC thermal delivered accumulation for COP and envelope loads.
         if let Some(slot) = self.plan.hvac_heating_delivered_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_hvac_heating_wh += v * self.timestep_h;
+            self.envelope_hvac_heating_j += v * self.timestep_s;
         }
         if let Some(slot) = self.plan.hvac_cooling_delivered_w_slot
             && let Some(v) = value_at_slot(row, slot)
         {
-            self.envelope_hvac_cooling_wh += v * self.timestep_h;
+            self.envelope_hvac_cooling_j += v * self.timestep_s;
         }
 
         // HVAC electric power accumulation for COP.
         if let Some(slot) = self.plan.hvac_heating_kw_slot
-            && let Some(kw) = value_at_slot(row, slot)
-            && kw > 0.0
+            && let Some(w) = value_at_slot(row, slot).map(|v| Unit::Kilowatt.to_si(v))
+            && w > 0.0
         {
-            self.hvac_heating_electric_wh += kw * 1000.0 * self.timestep_h;
+            self.hvac_heating_electric_j += w * self.timestep_s;
         }
         if let Some(slot) = self.plan.hvac_cooling_kw_slot
-            && let Some(kw) = value_at_slot(row, slot)
-            && kw > 0.0
+            && let Some(w) = value_at_slot(row, slot).map(|v| Unit::Kilowatt.to_si(v))
+            && w > 0.0
         {
-            self.hvac_cooling_electric_wh += kw * 1000.0 * self.timestep_h;
+            self.hvac_cooling_electric_j += w * self.timestep_s;
         }
 
         // Battery energy tracking for round-trip efficiency.
         if let Some(slot) = self.plan.battery_kw_slot
-            && let Some(kw) = value_at_slot(row, slot)
+            && let Some(w) = value_at_slot(row, slot).map(|v| Unit::Kilowatt.to_si(v))
         {
-            if kw > 0.0 {
-                self.battery_energy_in_kwh += kw * self.timestep_h;
-            } else if kw < 0.0 {
-                self.battery_energy_out_kwh += kw.abs() * self.timestep_h;
+            if w > 0.0 {
+                self.battery_energy_in_j += w * self.timestep_s;
+            } else if w < 0.0 {
+                self.battery_energy_out_j += w.abs() * self.timestep_s;
             }
         }
 
         // A NaN in any accumulator means a NaN power value contaminated the
         // totals: a typed error in every build profile.
-        if self.total_electric_energy_kwh.is_nan() {
+        if self.total_electric_energy_j.is_nan() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_electric_energy_kwh".to_string(),
+                "total_electric_energy_j".to_string(),
             ));
         }
-        if self.total_consumption_kwh.is_nan() {
+        if self.total_consumption_j.is_nan() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_consumption_kwh".to_string(),
+                "total_consumption_j".to_string(),
             ));
         }
-        if self.total_gas_energy_therms.is_nan() {
+        if self.total_gas_energy_j.is_nan() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_gas_energy_therms".to_string(),
+                "total_gas_energy_j".to_string(),
             ));
         }
         if self.has_envelope_columns {
-            if self.envelope_hvac_heating_wh.is_nan() {
+            if self.envelope_hvac_heating_j.is_nan() {
                 return Err(MetricsError::NonFiniteAccumulator(
-                    "envelope_hvac_heating_wh".to_string(),
+                    "envelope_hvac_heating_j".to_string(),
                 ));
             }
-            if self.envelope_hvac_cooling_wh.is_nan() {
+            if self.envelope_hvac_cooling_j.is_nan() {
                 return Err(MetricsError::NonFiniteAccumulator(
-                    "envelope_hvac_cooling_wh".to_string(),
+                    "envelope_hvac_cooling_j".to_string(),
                 ));
             }
         }
@@ -1380,13 +1402,13 @@ impl MetricsCalculator {
         }
 
         let renewable_energy_fraction = self.plan.pv_power_slot.map(|_| {
-            if self.total_consumption_kwh <= 0.0 {
+            if self.total_consumption_j <= 0.0 {
                 0.0
             } else {
                 // Fraction of the gross load covered by PV. Not clamped: a
                 // net-positive home legitimately covers more than 100 % of
                 // its load, and clamping would report exactly that as 1.0.
-                self.total_pv_generation_kwh_abs / self.total_consumption_kwh
+                self.total_pv_generation_j_abs / self.total_consumption_j
             }
         });
 
@@ -1445,42 +1467,40 @@ impl MetricsCalculator {
         // Catching NaN/Inf propagation early prevents downstream corruption
         // of visualisation and RL environment observation pipelines: a typed
         // error in every build profile.
-        if self.total_electric_energy_kwh.is_nan() || !self.total_electric_energy_kwh.is_finite() {
+        if self.total_electric_energy_j.is_nan() || !self.total_electric_energy_j.is_finite() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_electric_energy_kwh".to_string(),
+                "total_electric_energy_j".to_string(),
             ));
         }
-        if self.total_consumption_kwh.is_nan() || !self.total_consumption_kwh.is_finite() {
+        if self.total_consumption_j.is_nan() || !self.total_consumption_j.is_finite() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_consumption_kwh".to_string(),
+                "total_consumption_j".to_string(),
             ));
         }
-        if self.total_gas_energy_therms.is_nan() || !self.total_gas_energy_therms.is_finite() {
+        if self.total_gas_energy_j.is_nan() || !self.total_gas_energy_j.is_finite() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_gas_energy_therms".to_string(),
+                "total_gas_energy_j".to_string(),
             ));
         }
-        if self.peak_import_kw.is_nan() || !self.peak_import_kw.is_finite() {
+        if self.peak_import_w.is_nan() || !self.peak_import_w.is_finite() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "peak_import_kw".to_string(),
+                "peak_import_w".to_string(),
             ));
         }
-        if self.peak_export_kw.is_nan() || !self.peak_export_kw.is_finite() {
+        if self.peak_export_w.is_nan() || !self.peak_export_w.is_finite() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "peak_export_kw".to_string(),
+                "peak_export_w".to_string(),
             ));
         }
         if self.has_envelope_columns {
-            if self.envelope_hvac_heating_wh.is_nan() || !self.envelope_hvac_heating_wh.is_finite()
-            {
+            if self.envelope_hvac_heating_j.is_nan() || !self.envelope_hvac_heating_j.is_finite() {
                 return Err(MetricsError::NonFiniteAccumulator(
-                    "envelope_hvac_heating_wh".to_string(),
+                    "envelope_hvac_heating_j".to_string(),
                 ));
             }
-            if self.envelope_hvac_cooling_wh.is_nan() || !self.envelope_hvac_cooling_wh.is_finite()
-            {
+            if self.envelope_hvac_cooling_j.is_nan() || !self.envelope_hvac_cooling_j.is_finite() {
                 return Err(MetricsError::NonFiniteAccumulator(
-                    "envelope_hvac_cooling_wh".to_string(),
+                    "envelope_hvac_cooling_j".to_string(),
                 ));
             }
         }
@@ -1493,20 +1513,24 @@ impl MetricsCalculator {
         } else {
             1.0
         };
-        let total_electric_energy_kwh = self.total_electric_energy_kwh * leap_factor;
-        let total_consumption_kwh = self.total_consumption_kwh * leap_factor;
-        let total_pv_generation_kwh = self.total_pv_generation_kwh_abs * leap_factor;
-        let energy_by_end_use = self
+        let total_electric_energy_j = self.total_electric_energy_j * leap_factor;
+        let total_consumption_j = self.total_consumption_j * leap_factor;
+        let total_pv_generation_j = self.total_pv_generation_j_abs * leap_factor;
+        let energy_by_end_use_j: BTreeMap<String, f64> = self
             .energy_by_end_use
             .into_iter()
             .map(|(k, v)| (k, v * leap_factor))
             .collect();
 
         let gas_energy = self.plan.total_gas_power_slot.map(|_| {
-            let therms = self.total_gas_energy_therms * leap_factor;
+            // The record keeps its therms/kWh reporting units, each
+            // converted once from the calculator's joule total.
+            let gas_j = self.total_gas_energy_j * leap_factor;
+            let therms = Energy::new::<joule_marker>(gas_j).get::<therm_marker>();
+            let kwh = Energy::new::<joule_marker>(gas_j).get::<kilowatt_hour_marker>();
             GasEnergyMetrics {
                 total_therms: therms,
-                total_kwh_equivalent: energy_therms_to_kwh(therms),
+                total_kwh_equivalent: kwh,
             }
         });
 
@@ -1529,10 +1553,21 @@ impl MetricsCalculator {
         Ok(FullSimulationMetrics {
             metrics: SimulationMetrics {
                 total_energy_kwh: TotalEnergyKwh {
-                    net_energy_kwh: total_electric_energy_kwh,
-                    gross_consumption_kwh: total_consumption_kwh,
-                    gross_pv_generation_kwh: total_pv_generation_kwh,
-                    per_end_use: energy_by_end_use,
+                    net_energy_kwh: Energy::new::<joule_marker>(total_electric_energy_j)
+                        .get::<kilowatt_hour_marker>(),
+                    gross_consumption_kwh: Energy::new::<joule_marker>(total_consumption_j)
+                        .get::<kilowatt_hour_marker>(),
+                    gross_pv_generation_kwh: Energy::new::<joule_marker>(total_pv_generation_j)
+                        .get::<kilowatt_hour_marker>(),
+                    per_end_use: energy_by_end_use_j
+                        .into_iter()
+                        .map(|(k, v_j)| {
+                            (
+                                k,
+                                Energy::new::<joule_marker>(v_j).get::<kilowatt_hour_marker>(),
+                            )
+                        })
+                        .collect(),
                     duration_hours: actual_duration_h,
                 },
                 peak_power_kw: PeakPowerKw {
@@ -1551,22 +1586,41 @@ impl MetricsCalculator {
                     .map(|_| self.unmet_step_count * self.timestep_h),
                 renewable_energy_fraction,
                 grid_interaction_metrics: GridInteractionMetrics {
-                    peak_import_kw: self.peak_import_kw.max(0.0),
-                    peak_export_kw: self.peak_export_kw.max(0.0),
+                    peak_import_kw: Unit::Kilowatt.from_si(self.peak_import_w.max(0.0)),
+                    peak_export_kw: Unit::Kilowatt.from_si(self.peak_export_w.max(0.0)),
                 },
                 envelope_loads_kwh: if self.has_envelope_columns {
                     Some(EnvelopeComponentLoadsKwh {
-                        window_solar_kwh: self.envelope_window_solar_wh / 1000.0,
-                        window_conduction_kwh: self.envelope_window_conduction_wh / 1000.0,
-                        opaque_conduction_kwh: self.envelope_opaque_conduction_wh / 1000.0,
-                        internal_mass_kwh: self.envelope_internal_mass_wh / 1000.0,
-                        interior_lwr_kwh: self.envelope_interior_lwr_wh / 1000.0,
-                        infiltration_kwh: self.envelope_infiltration_wh / 1000.0,
-                        ventilation_kwh: self.envelope_ventilation_wh / 1000.0,
-                        hvac_heating_kwh: self.envelope_hvac_heating_wh / 1000.0,
-                        hvac_cooling_kwh: self.envelope_hvac_cooling_wh / 1000.0,
-                        internal_gains_kwh: self.envelope_internal_gains_wh / 1000.0,
-                        duct_loss_kwh: self.envelope_duct_loss_wh / 1000.0,
+                        window_solar_kwh: Energy::new::<joule_marker>(self.envelope_window_solar_j)
+                            .get::<kilowatt_hour_marker>(),
+                        window_conduction_kwh: Energy::new::<joule_marker>(
+                            self.envelope_window_conduction_j,
+                        )
+                        .get::<kilowatt_hour_marker>(),
+                        opaque_conduction_kwh: Energy::new::<joule_marker>(
+                            self.envelope_opaque_conduction_j,
+                        )
+                        .get::<kilowatt_hour_marker>(),
+                        internal_mass_kwh: Energy::new::<joule_marker>(
+                            self.envelope_internal_mass_j,
+                        )
+                        .get::<kilowatt_hour_marker>(),
+                        interior_lwr_kwh: Energy::new::<joule_marker>(self.envelope_interior_lwr_j)
+                            .get::<kilowatt_hour_marker>(),
+                        infiltration_kwh: Energy::new::<joule_marker>(self.envelope_infiltration_j)
+                            .get::<kilowatt_hour_marker>(),
+                        ventilation_kwh: Energy::new::<joule_marker>(self.envelope_ventilation_j)
+                            .get::<kilowatt_hour_marker>(),
+                        hvac_heating_kwh: Energy::new::<joule_marker>(self.envelope_hvac_heating_j)
+                            .get::<kilowatt_hour_marker>(),
+                        hvac_cooling_kwh: Energy::new::<joule_marker>(self.envelope_hvac_cooling_j)
+                            .get::<kilowatt_hour_marker>(),
+                        internal_gains_kwh: Energy::new::<joule_marker>(
+                            self.envelope_internal_gains_j,
+                        )
+                        .get::<kilowatt_hour_marker>(),
+                        duct_loss_kwh: Energy::new::<joule_marker>(self.envelope_duct_loss_j)
+                            .get::<kilowatt_hour_marker>(),
                     })
                 } else {
                     None
@@ -1578,25 +1632,25 @@ impl MetricsCalculator {
                     // unknown (not zero), so COP must be None — reporting
                     // 0.0 would misstate a working heat pump's efficiency.
                     hvac_heating_cop: if self.plan.hvac_heating_delivered_w_slot.is_some()
-                        && self.hvac_heating_electric_wh > EPSILON
+                        && self.hvac_heating_electric_j > EPSILON
                     {
                         // Thermal output from envelope gains; electric input from telemetry column.
-                        let thermal = self.envelope_hvac_heating_wh.max(0.0);
-                        Some(thermal / self.hvac_heating_electric_wh)
+                        let thermal = self.envelope_hvac_heating_j.max(0.0);
+                        Some(thermal / self.hvac_heating_electric_j)
                     } else {
                         None
                     },
                     hvac_cooling_cop: if self.plan.hvac_cooling_delivered_w_slot.is_some()
-                        && self.hvac_cooling_electric_wh > EPSILON
+                        && self.hvac_cooling_electric_j > EPSILON
                     {
-                        let thermal = self.envelope_hvac_cooling_wh.abs();
-                        Some(thermal / self.hvac_cooling_electric_wh)
+                        let thermal = self.envelope_hvac_cooling_j.abs();
+                        Some(thermal / self.hvac_cooling_electric_j)
                     } else {
                         None
                     },
                     water_heater_cop: None, // requires WH-specific telemetry columns
-                    battery_round_trip_efficiency: if self.battery_energy_in_kwh > EPSILON {
-                        Some(self.battery_energy_out_kwh / self.battery_energy_in_kwh)
+                    battery_round_trip_efficiency: if self.battery_energy_in_j > EPSILON {
+                        Some(self.battery_energy_out_j / self.battery_energy_in_j)
                     } else {
                         None
                     },
@@ -1623,12 +1677,12 @@ impl MetricsCalculator {
             parts.push(format!("n_{key}={count}"));
         }
         parts.push(format!(
-            "hvac_heating_wh={:.1}",
-            self.hvac_heating_electric_wh
+            "hvac_heating_j={:.1}",
+            self.hvac_heating_electric_j
         ));
         parts.push(format!(
-            "hvac_cooling_wh={:.1}",
-            self.hvac_cooling_electric_wh
+            "hvac_cooling_j={:.1}",
+            self.hvac_cooling_electric_j
         ));
         tracing::info!(
             end_use_diagnostics = %parts.join(", "),
@@ -2238,7 +2292,7 @@ mod tests {
         accumulate(&mut calc, &b2).unwrap();
         let metrics = calc.finish().unwrap();
 
-        assert_eq!(metrics.peak_power_kw.per_end_use["ev"], 6.2);
+        assert_eq!(metrics.peak_power_kw.per_end_use["ev"], 6200.0);
     }
 
     #[test]
@@ -2546,7 +2600,9 @@ mod tests {
             .expect("gas energy should be present");
         assert!((gas.total_therms - 5.0).abs() < 1e-9);
         assert!((metrics.total_energy_kwh.net_energy_kwh - 2.0).abs() < 1e-9);
-        let expected_combined = 2.0 + energy_therms_to_kwh(5.0);
+        let expected_combined = 2.0
+            + Energy::new::<hares_types::si_units::energy::therm>(5.0)
+                .get::<kilowatt_hour_marker>();
         assert!((metrics.combined_total_energy_kwh() - expected_combined).abs() < 1e-6);
     }
 
@@ -2983,7 +3039,7 @@ mod tests {
 
     /// HVAC heating electric energy is populated when the aggregate column
     /// has positive values. Regression test for the hvac_heating_kw_idx
-    /// resolution and hvac_heating_electric_wh accumulation.
+    /// resolution and hvac_heating_electric_j accumulation.
     #[test]
     fn hvac_heating_electric_wh_populated_from_aggregate_column() {
         let schema = schema_from_columns(&[
@@ -3002,7 +3058,7 @@ mod tests {
         )
         .unwrap();
         let metrics = calc.finish().unwrap();
-        // hvac_heating_cop requires hvac_heating_electric_wh > 0
+        // hvac_heating_cop requires hvac_heating_electric_j > 0
         assert!(
             metrics.efficiency.hvac_heating_cop.is_some(),
             "hvac_heating_cop must be Some when HVAC Heating electric power > 0; \
@@ -3777,12 +3833,18 @@ mod tests {
             gas.total_therms
         );
         assert!(
-            (gas.total_kwh_equivalent - energy_therms_to_kwh(8_760.0)).abs() < 1e-3,
+            (gas.total_kwh_equivalent
+                - Energy::new::<hares_types::si_units::energy::therm>(8_760.0)
+                    .get::<kilowatt_hour_marker>())
+            .abs()
+                < 1e-3,
             "leap-year gas kwh equivalent should be normalized to 8760 therms"
         );
 
-        // Combined total: 8760 (electric) + energy_therms_to_kwh(8760) (gas)
-        let expected_combined = 8_760.0 + energy_therms_to_kwh(8_760.0);
+        // Combined total: 8760 (electric) + the 8760 therms in kWh (gas).
+        let expected_combined = 8_760.0
+            + Energy::new::<hares_types::si_units::energy::therm>(8_760.0)
+                .get::<kilowatt_hour_marker>();
         assert!(
             (metrics.combined_total_energy_kwh() - expected_combined).abs() < 1e-3,
             "combined_total_energy_kwh should sum normalized electric and gas"
@@ -3917,7 +3979,9 @@ mod tests {
         .unwrap();
         let metrics = calc.finish().unwrap();
 
-        let expected = 10.0 + energy_therms_to_kwh(5.0);
+        let expected = 10.0
+            + Energy::new::<hares_types::si_units::energy::therm>(5.0)
+                .get::<kilowatt_hour_marker>();
         assert!(
             (metrics.combined_total_energy_kwh() - expected).abs() < 1e-6,
             "combined should be {expected}, got {}",

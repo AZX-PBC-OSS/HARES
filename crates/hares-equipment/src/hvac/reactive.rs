@@ -113,7 +113,7 @@ mod tests {
     fn sentinel_disables_secondary_components() {
         let disabled = secondary_motor_zip(&ZipLoad::constant_power(), FAN_MOTOR_ZIP);
         assert_eq!(disabled, ZipLoad::constant_power());
-        assert_eq!(disabled.reactive_kvar(1.0, 1.0), 0.0);
+        assert_eq!(disabled.reactive_var(1.0, 1.0), 0.0);
     }
 
     /// A nonzero-pf unit override leaves secondary components at their
@@ -129,10 +129,10 @@ mod tests {
     #[test]
     fn component_q_over_p_is_tan_acos_pf_at_nominal_voltage() {
         let p = 0.5;
-        let fan_q = FAN_MOTOR_ZIP.reactive_kvar(p, 1.0);
+        let fan_q = FAN_MOTOR_ZIP.reactive_var(p, 1.0);
         let expected = p * 0.87_f64.acos().tan() * (0.5 + 0.62 - 0.12);
         assert!((fan_q - expected).abs() < 1e-12);
-        let pump_q = LOOP_PUMP_ZIP.reactive_kvar(p, 1.0);
+        let pump_q = LOOP_PUMP_ZIP.reactive_var(p, 1.0);
         let expected = p * 0.84_f64.acos().tan() * (14.78 - 23.71 + 9.93);
         assert!((pump_q - expected).abs() < 1e-12);
     }

@@ -42,7 +42,6 @@ use super::heater_config::{default_heater_telemetry, heater_telemetry_fields};
 use crate::config::constructor_equipment_id;
 use hares_physics::biquadratic::biquadratic;
 use hares_physics::ground::SourceTemperature;
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 fn eir_from_backup_fuel(fuel: Option<FuelType>) -> f64 {
     match fuel {
@@ -114,7 +113,7 @@ struct HeatPumpHeaterCore {
     /// Per-stage ER capacity [W] = `backup_capacity_w / er_stages`.
     /// When `er_stages = 1`, this equals `backup_capacity_w` (binary full-rated).
     er_stage_capacity_w: f64,
-    pan_heater_kw: f64,
+    pan_heater_w: f64,
     pan_heater_temp_c: f64,
     pan_heater_on: bool,
     variant: HeaterVariant,
@@ -174,7 +173,7 @@ struct HeatPumpHeaterCore {
     /// DutyCycle override fraction [0..1]; 1.0 = no effect (sticky).
     ctrl_duty_cycle: f64,
     /// PowerLimit [kW]; f64::INFINITY = no limit (sticky).
-    ctrl_power_limit_kw: f64,
+    ctrl_power_limit_w: f64,
     /// ModeOverride; None = no override (sticky).
     ctrl_mode_override: Option<OperatingMode>,
 
@@ -196,7 +195,7 @@ struct HeatPumpHeaterCore {
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// applies to the compressor component only (class default pf 0.84, or a
     /// user `"zip"` override). Real power stays bit-identical; Q comes from
-    /// `ZipLoad::reactive_kvar` per component (see `hvac::reactive`). ER
+    /// `ZipLoad::reactive_var` per component (see `hvac::reactive`). ER
     /// backup, pan heater, and resistive defrost elements are resistive
     /// (pf 1.0) and contribute Q ≡ 0.
     zip: hares_types::zip::ResolvedZip,
@@ -228,7 +227,7 @@ struct HeaterState {
     last_er_off_at: Option<DateTime<FixedOffset>>,
     last_speed_index: usize,
     last_speed_frac: f64,
-    electric_kw: f64,
+    electric_w: f64,
     thermal_output_w: f64,
     speed_index: f64,
     prev_base_setpoint: f64,
@@ -239,7 +238,7 @@ struct HeaterState {
     // --- Sticky control signals ---
     ctrl_duty_cycle: f64,
     /// None means unlimited; f64::INFINITY does not serialize cleanly with postcard.
-    ctrl_power_limit_kw: Option<f64>,
+    ctrl_power_limit_w: Option<f64>,
     ctrl_mode_override: Option<OperatingMode>,
     // --- Demand response state ---
     dr_level: DRLevel,
@@ -289,13 +288,13 @@ impl HeaterControl {
 #[derive(Clone, Copy)]
 struct HeaterStep {
     thermal_output_w: f64,
-    electric_kw: f64,
+    electric_w: f64,
     /// Compressor-only electric power [kW], excluding fan, ER backup, and pan heater.
     /// Used for COP per AHRI/SEER convention.
-    compressor_kw: f64,
-    fan_kw: f64,
-    backup_er_kw: f64,
-    pan_heater_kw: f64,
+    compressor_w: f64,
+    fan_w: f64,
+    backup_er_w: f64,
+    pan_heater_w: f64,
     hp_capacity_w: f64,
     er_capacity_w: f64,
     /// Number of ER stages currently active (0 when ER off).
@@ -321,7 +320,7 @@ struct HeaterStep {
     latent_gain_w: f64,
     /// Ground-loop circulation pump electrical power [kW]. GSHP only; zero
     /// for air-source equipment.
-    pump_kw: f64,
+    pump_w: f64,
 }
 
 impl ASHPHeater {
@@ -656,7 +655,7 @@ impl HeatPumpHeaterCore {
             backup_fuel_type: None,
             er_stages: 1,
             er_stage_capacity_w: backup_capacity_w,
-            pan_heater_kw: 0.0,
+            pan_heater_w: 0.0,
             pan_heater_temp_c: MSHP_PAN_HEATER_DEFAULT_TEMP_C,
             pan_heater_on: false,
             variant,
@@ -712,7 +711,7 @@ impl HeatPumpHeaterCore {
             use_ideal: false,
             ideal_capacity_w: 0.0,
             ctrl_duty_cycle: 1.0,
-            ctrl_power_limit_kw: f64::INFINITY,
+            ctrl_power_limit_w: f64::INFINITY,
             ctrl_mode_override: None,
             ctrl_load_fraction: 1.0,
             dr_setpoint_offset_c: 0.0,
@@ -753,7 +752,7 @@ impl HeatPumpHeaterCore {
         self.cycle_on_steps = 0;
         self.cycle_off_steps = 0;
         self.ctrl_duty_cycle = 1.0;
-        self.ctrl_power_limit_kw = f64::INFINITY;
+        self.ctrl_power_limit_w = f64::INFINITY;
         self.ctrl_mode_override = None;
         self.ctrl_load_fraction = 1.0;
         self.dr_setpoint_offset_c = 0.0;
@@ -936,7 +935,7 @@ impl HeatPumpHeaterCore {
                 );
             }
             self.hvac.config.duct_dse = 1.0;
-            self.pan_heater_kw = MSHP_PAN_HEATER_DEFAULT_KW;
+            self.pan_heater_w = MSHP_PAN_HEATER_DEFAULT_KW;
         } else {
             self.hvac.config.speed_control_mode = match cfg.common.number_of_speeds {
                 0 | 1 => SpeedControlMode::SingleSpeed,
@@ -1388,26 +1387,26 @@ impl HeatPumpHeaterCore {
             )?;
         }
         let sf = self.hvac.config.space_fraction;
-        let scaled_electric_kw = step.electric_kw * sf;
+        let scaled_electric_w = step.electric_w * sf;
         // Rule R1: Q from the already-computed real power, per component
         // (see `hvac::reactive`): compressor at the unit ZIP (pf 0.84),
         // blower/outdoor fan at pf 0.87, loop pump at pf 0.84. The ER
         // backup, pan heater, and resistive defrost elements are resistive
         // (pf 1.0) and contribute Q ≡ 0 — assigning them the compressor pf
         // would fabricate ~0.646·P_ER of phantom kvar during backup events.
-        let reactive_power_kvar = self
+        let reactive_power_var = self
             .zip
-            .reactive_kvar(step.compressor_kw * sf, env.grid.bus_voltage_pu())
+            .reactive_var(step.compressor_w * sf, env.grid.bus_voltage_pu())
             + self
                 .fan_zip
-                .reactive_kvar(step.fan_kw * sf, env.grid.bus_voltage_pu())
+                .reactive_var(step.fan_w * sf, env.grid.bus_voltage_pu())
             + self
                 .pump_zip
-                .reactive_kvar(step.pump_kw * sf, env.grid.bus_voltage_pu());
-        if scaled_electric_kw > 0.0 || reactive_power_kvar != 0.0 {
+                .reactive_var(step.pump_w * sf, env.grid.bus_voltage_pu());
+        if scaled_electric_w > 0.0 || reactive_power_var != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(scaled_electric_kw),
-                reactive_power_kvar,
+                active_power_w: (scaled_electric_w),
+                reactive_power_var,
             })?;
         }
         let scaled_fuel_w = step.fuel_w * self.hvac.config.space_fraction;
@@ -1423,8 +1422,8 @@ impl HeatPumpHeaterCore {
         // Record borehole heat exchange for transient ground model.
         // Heating mode: heat is extracted FROM the ground (negative Q in
         // Eskilson's convention). Q_ground = -(thermal_output - compressor_power).
-        // Note: thermal_output_w is in W, compressor_kw is in kW.
-        let borehole_heat_w = -(step.thermal_output_w - power_kw_to_w(step.compressor_kw));
+        // Note: thermal_output_w is in W, compressor_w is in kW.
+        let borehole_heat_w = -(step.thermal_output_w - (step.compressor_w));
         self.source_temp
             .record_source_heat_rate(borehole_heat_w, dt_s);
 
@@ -1469,16 +1468,16 @@ impl HeatPumpHeaterCore {
         let duct_loss_w = gross_capacity_w * (1.0 - dse);
         // OCHRE HVAC.py:1464-1467: ASHP heater Main Power = compressor-only (excludes ER).
         // For ASHP/MSHP: main_power = total_input - fan - er_backup - pan_heater.
-        // OCHRE HVAC.py:575 defines main_power = total_input_kw - fan_kw.
-        let main_power_kw = step.compressor_kw * self.hvac.config.space_fraction;
-        self.telemetry.set(tk::ELECTRIC_KW, scaled_electric_kw);
+        // OCHRE HVAC.py:575 defines main_power = total_input_w - fan_w.
+        let main_power_w = step.compressor_w * self.hvac.config.space_fraction;
+        self.telemetry.set(tk::ELECTRIC_KW, scaled_electric_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry
             .set(tk::THERMAL_OUTPUT_W, delivered_thermal_w);
         let original_mode = self.operating_mode;
         let has_nonzero_flow =
-            scaled_electric_kw > 0.0 || delivered_thermal_w != 0.0 || scaled_fuel_w > 0.0;
+            scaled_electric_w > 0.0 || delivered_thermal_w != 0.0 || scaled_fuel_w > 0.0;
         self.operating_mode = self
             .operating_mode
             .resolve_idle(has_nonzero_flow, Some(delivered_thermal_w));
@@ -1495,7 +1494,7 @@ impl HeatPumpHeaterCore {
         // DSE losses are a distribution inefficiency, not a reduction in equipment COP.
         // The COP of a step with no compressor input is undefined, not zero:
         // None (the cell null) when the compressor did not run.
-        let compressor_only_w = power_kw_to_w(step.compressor_kw);
+        let compressor_only_w = step.compressor_w;
         let cop = if compressor_only_w > 1e-6 {
             Some(
                 (step.thermal_output_w / compressor_only_w)
@@ -1535,9 +1534,9 @@ impl HeatPumpHeaterCore {
         self.telemetry.set(tk::RUNTIME_FRACTION, rtf);
         self.telemetry.set(
             tk::COMPRESSOR_KW,
-            step.compressor_kw * self.hvac.config.space_fraction,
+            step.compressor_w * self.hvac.config.space_fraction,
         );
-        self.telemetry.set(tk::MAIN_POWER_KW, main_power_kw);
+        self.telemetry.set(tk::MAIN_POWER_KW, main_power_w);
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         self.telemetry
             .set(tk::DEFROST_TIME_FRACTION, step.defrost_time_fraction);
@@ -1582,18 +1581,18 @@ impl HeatPumpHeaterCore {
                 .set(tk::RUNTIME_COOLING_SETPOINT_C, rt.cooling_c.unwrap_or(0.0));
         }
         self.telemetry
-            .set(tk::FAN_KW, step.fan_kw * self.hvac.config.space_fraction);
+            .set(tk::FAN_KW, step.fan_w * self.hvac.config.space_fraction);
         self.telemetry.set(
             tk::PUMP_POWER_KW,
-            step.pump_kw * self.hvac.config.space_fraction,
+            step.pump_w * self.hvac.config.space_fraction,
         );
         self.telemetry.set(
             tk::BACKUP_ER_KW,
-            step.backup_er_kw * self.hvac.config.space_fraction,
+            step.backup_er_w * self.hvac.config.space_fraction,
         );
         self.telemetry.set(
             tk::PAN_HEATER_KW,
-            step.pan_heater_kw * self.hvac.config.space_fraction,
+            step.pan_heater_w * self.hvac.config.space_fraction,
         );
         self.telemetry.set(tk::HP_CAPACITY_W, step.hp_capacity_w);
         self.telemetry.set(tk::ER_CAPACITY_W, step.er_capacity_w);
@@ -1661,8 +1660,8 @@ impl HeatPumpHeaterCore {
         write_ebm_telemetry(ebm_window, delivered_thermal_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(scaled_electric_kw.max(0.0))),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(scaled_electric_w.max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: core_fuel_w,
                 thermal_output_w: Some(delivered_thermal_w),
                 sensible_cooling_w: None,
@@ -1676,7 +1675,7 @@ impl HeatPumpHeaterCore {
             },
             performance: CorePerformance {
                 cop,
-                main_power_kw: Some(main_power_kw),
+                main_power_w: Some(main_power_w),
             },
         };
 
@@ -2009,7 +2008,7 @@ impl HeatPumpHeaterCore {
                         + self.defrost_config.defrost_power_w;
                     hp_capacity_w = 0.0;
                     // Resistive defrost power is tracked in defrost_extra_power_w for
-                    // telemetry; it is also included in the total electric_kw via the
+                    // telemetry; it is also included in the total electric_w via the
                     // Resistive er_capacity_w path (EIR=1.0 for electric resistance).
                     hp_electric_w = 0.0;
                 }
@@ -2177,10 +2176,10 @@ impl HeatPumpHeaterCore {
 
         self.pan_heater_on = matches!(self.variant, HeaterVariant::Minisplit)
             && env.weather.outdoor_temp_c < self.pan_heater_temp_c
-            && self.pan_heater_kw > 0.0
+            && self.pan_heater_w > 0.0
             && hp_on;
         let pan_heater_w = if self.pan_heater_on {
-            power_kw_to_w(self.pan_heater_kw)
+            self.pan_heater_w
         } else {
             0.0
         };
@@ -2203,19 +2202,17 @@ impl HeatPumpHeaterCore {
         // zone_heat_fractions (set from duct_dse during init) distributes
         // this to conditioned and duct zones in write_zone_thermal_contributions.
         let mut thermal_output_w = hp_capacity_w + er_capacity_w + fan_power_w;
-        let mut electric_kw = power_w_to_kw(
-            hp_electric_w
-                + er_electric_w
-                + fan_power_w
-                + pan_heater_w
-                + defrost_resistive_electric_w,
-        );
+        let mut electric_w = hp_electric_w
+            + er_electric_w
+            + fan_power_w
+            + pan_heater_w
+            + defrost_resistive_electric_w;
         // COP per AHRI/SEER convention: excludes fan power from denominator.
-        // Track compressor-only kW separately so scaling stays consistent with electric_kw.
-        let mut compressor_kw = power_w_to_kw(hp_electric_w);
-        let mut fan_kw = power_w_to_kw(fan_power_w);
-        let mut backup_er_kw = power_w_to_kw(er_electric_w);
-        let mut step_pan_heater_kw = power_w_to_kw(pan_heater_w);
+        // Track compressor-only kW separately so scaling stays consistent with electric_w.
+        let mut compressor_w = hp_electric_w;
+        let mut fan_w = fan_power_w;
+        let mut backup_er_w = er_electric_w;
+        let mut step_pan_heater_w = pan_heater_w;
         let mut step_hp_capacity_w = hp_capacity_w;
         let mut step_er_capacity_w = er_capacity_w;
 
@@ -2235,48 +2232,48 @@ impl HeatPumpHeaterCore {
             let hp_thermal = hp_capacity_w + fan_power_w;
             let er_thermal = er_capacity_w;
             thermal_output_w = hp_thermal * effective_load + er_thermal;
-            let hp_electric = power_w_to_kw(hp_electric_w + fan_power_w + pan_heater_w);
-            let er_electric = power_w_to_kw(er_electric_w + defrost_resistive_electric_w);
-            electric_kw = hp_electric * effective_load + er_electric;
-            compressor_kw *= effective_load;
-            fan_kw *= effective_load;
-            step_pan_heater_kw *= effective_load;
+            let hp_electric = hp_electric_w + fan_power_w + pan_heater_w;
+            let er_electric = er_electric_w + defrost_resistive_electric_w;
+            electric_w = hp_electric * effective_load + er_electric;
+            compressor_w *= effective_load;
+            fan_w *= effective_load;
+            step_pan_heater_w *= effective_load;
             step_hp_capacity_w *= effective_load;
-            // backup_er_kw, fuel_w, step_er_capacity_w, and
+            // backup_er_w, fuel_w, step_er_capacity_w, and
             // defrost_resistive_electric_w are not scaled (on/off elements)
         }
 
         // Apply PowerLimit (sticky): shed ER first (it is on/off, not modulatable),
         // then scale HP+fan proportionally only if still over limit after shedding ER.
-        // For fuel backup, electric_kw excludes ER (fuel_w carries it); the limit
+        // For fuel backup, electric_w excludes ER (fuel_w carries it); the limit
         // still triggers ER shedding when fuel_w would exceed the threshold, removing
         // the thermal contribution, but the electric draw is unaffected.
-        if self.ctrl_power_limit_kw.is_finite() {
-            let total_kw = electric_kw + power_w_to_kw(fuel_w);
-            if total_kw > self.ctrl_power_limit_kw {
-                let hp_electric_kw = electric_kw - backup_er_kw;
-                let hp_only_total_kw = hp_electric_kw; // fuel ER already shed in this branch
-                if hp_only_total_kw <= self.ctrl_power_limit_kw {
+        if self.ctrl_power_limit_w.is_finite() {
+            let total_w = electric_w + (fuel_w);
+            if total_w > self.ctrl_power_limit_w {
+                let hp_electric_w = electric_w - backup_er_w;
+                let hp_only_total_w = hp_electric_w; // fuel ER already shed in this branch
+                if hp_only_total_w <= self.ctrl_power_limit_w {
                     // Shedding ER alone is sufficient.
-                    electric_kw = hp_electric_kw;
+                    electric_w = hp_electric_w;
                     thermal_output_w -= step_er_capacity_w;
-                    backup_er_kw = 0.0;
+                    backup_er_w = 0.0;
                     fuel_w = 0.0;
                     step_er_capacity_w = 0.0;
                     er_stages_on = 0;
                 } else {
                     // Still over limit after shedding ER; scale HP+fan+pan proportionally.
                     let er_thermal = step_er_capacity_w;
-                    backup_er_kw = 0.0;
+                    backup_er_w = 0.0;
                     fuel_w = 0.0;
                     step_er_capacity_w = 0.0;
                     er_stages_on = 0;
-                    let ratio = self.ctrl_power_limit_kw / hp_only_total_kw.max(f64::MIN_POSITIVE);
-                    electric_kw = self.ctrl_power_limit_kw;
+                    let ratio = self.ctrl_power_limit_w / hp_only_total_w.max(f64::MIN_POSITIVE);
+                    electric_w = self.ctrl_power_limit_w;
                     thermal_output_w = (thermal_output_w - er_thermal) * ratio;
-                    compressor_kw *= ratio;
-                    fan_kw *= ratio;
-                    step_pan_heater_kw *= ratio;
+                    compressor_w *= ratio;
+                    fan_w *= ratio;
+                    step_pan_heater_w *= ratio;
                     step_hp_capacity_w *= ratio;
                 }
             }
@@ -2305,17 +2302,16 @@ impl HeatPumpHeaterCore {
 
         // Water-loop circulation pump: runs whenever the GSHP or WSHP compressor is
         // active (heating or reverse-cycle defrost). Not scaled by effective_load
-        // (duty cycle / load fraction) or ctrl_power_limit_kw because residential
+        // (duty cycle / load fraction) or ctrl_power_limit_w because residential
         // circulators are switched by the compressor contactor / flow switch and
         // run at rated power during the call — not modulated by PLR. This models
         // the pump as binary (on when hp_on, off otherwise). The consequence: at
         // part-load (effective_load < 1.0, e.g. compressor cycling at 50% PLR),
         // the compressor kW is scaled but the full pump kW is reported, so the
         // time-averaged pump energy is not scaled to match compressor PLR.
-        // space_fraction is applied in step() to the combined electric_kw.
-        let pump_kw = if matches!(self.variant, HeaterVariant::Gshp | HeaterVariant::Wshp) && hp_on
-        {
-            hares_physics::pump::compute_ground_loop_pump_power_kw(
+        // space_fraction is applied in step() to the combined electric_w.
+        let pump_w = if matches!(self.variant, HeaterVariant::Gshp | HeaterVariant::Wshp) && hp_on {
+            hares_physics::pump::compute_ground_loop_pump_power_w(
                 self.pump_loop_depth_m,
                 self.pump_pipe_diameter_m,
                 self.pump_flow_rate_m3_per_s,
@@ -2326,15 +2322,15 @@ impl HeatPumpHeaterCore {
         } else {
             0.0
         };
-        electric_kw += pump_kw;
+        electric_w += pump_w;
 
         Ok(HeaterStep {
             thermal_output_w,
-            electric_kw,
-            compressor_kw: compressor_kw.max(0.0),
-            fan_kw: fan_kw.max(0.0),
-            backup_er_kw: backup_er_kw.max(0.0),
-            pan_heater_kw: step_pan_heater_kw.max(0.0),
+            electric_w,
+            compressor_w: compressor_w.max(0.0),
+            fan_w: fan_w.max(0.0),
+            backup_er_w: backup_er_w.max(0.0),
+            pan_heater_w: step_pan_heater_w.max(0.0),
             hp_capacity_w: step_hp_capacity_w.max(0.0),
             er_capacity_w: step_er_capacity_w.max(0.0),
             er_stages_on,
@@ -2348,7 +2344,7 @@ impl HeatPumpHeaterCore {
             cap_ratio_raw,
             eir_ratio,
             latent_gain_w,
-            pump_kw: pump_kw.max(0.0),
+            pump_w: pump_w.max(0.0),
         })
     }
 
@@ -2672,7 +2668,7 @@ impl HeatPumpHeaterCore {
                 last_er_off_at: self.last_er_off_at,
                 last_speed_index: self.hvac.runtime.last_speed_index,
                 last_speed_frac: self.hvac.runtime.last_speed_frac,
-                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
                 prev_base_setpoint: self.prev_base_setpoint,
@@ -2681,8 +2677,8 @@ impl HeatPumpHeaterCore {
                 er_soft_lockout: self.er_soft_lockout,
                 soft_lockout_elapsed_s: self.soft_lockout_elapsed_s,
                 ctrl_duty_cycle: self.ctrl_duty_cycle,
-                ctrl_power_limit_kw: if self.ctrl_power_limit_kw.is_finite() {
-                    Some(self.ctrl_power_limit_kw)
+                ctrl_power_limit_w: if self.ctrl_power_limit_w.is_finite() {
+                    Some(self.ctrl_power_limit_w)
                 } else {
                     None
                 },
@@ -2740,7 +2736,7 @@ impl HeatPumpHeaterCore {
         self.hvac.runtime.last_speed_index = decoded.last_speed_index;
         self.hvac.runtime.last_speed_frac = decoded.last_speed_frac;
         self.ctrl_duty_cycle = decoded.ctrl_duty_cycle;
-        self.ctrl_power_limit_kw = decoded.ctrl_power_limit_kw.unwrap_or(f64::INFINITY);
+        self.ctrl_power_limit_w = decoded.ctrl_power_limit_w.unwrap_or(f64::INFINITY);
         self.ctrl_mode_override = decoded.ctrl_mode_override;
         self.dr_level = decoded.dr_level;
         self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
@@ -2756,7 +2752,7 @@ impl HeatPumpHeaterCore {
         self.hvac.thermostat_fsm.min_on_time_s = decoded.min_on_time_s;
         self.hvac.thermostat_fsm.min_off_time_s = decoded.min_off_time_s;
 
-        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
         self.telemetry
             .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
         self.telemetry.insert(tk::SPEED_INDEX, decoded.speed_index);
@@ -2779,7 +2775,7 @@ impl HeatPumpHeaterCore {
         self.soft_lockout_elapsed_s = decoded.soft_lockout_elapsed_s;
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal where the checkpoint
-        // carries the face: electric from `electric_kw`, thermal from
+        // carries the face: electric from `electric_w`, thermal from
         // `thermal_output_w`, mode from the checkpointed `operating_mode`
         // (the pair the step published was guard-valid), speed from the
         // restored `last_speed_index`, setpoint from the restored
@@ -2801,8 +2797,8 @@ impl HeatPumpHeaterCore {
         };
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(decoded.electric_w.max(0.0))),
+                reactive_power_var: Some(0.0),
                 // A declared FUEL capability (combustion backup) must be
                 // satisfied on the restored output too; the burner state is
                 // not checkpointed, so the restored instant carries the
@@ -2827,7 +2823,7 @@ impl HeatPumpHeaterCore {
                 // while it is active, so the restored output stays one
                 // `validate_core_contract` accepts.
                 cop: decoded.operating_mode.is_active().then_some(0.0),
-                main_power_kw: None,
+                main_power_w: None,
             },
         };
 
@@ -2845,7 +2841,12 @@ impl HeatPumpHeaterCore {
                 self.ctrl_load_fraction = *fraction;
             }
             ControlSignal::PowerLimit { max_power_kw, .. } => {
-                self.ctrl_power_limit_kw = *max_power_kw;
+                // The signal carries kW until the control-layer commit; the
+                // working value is W (SI), converted once here.
+                let max_power_w =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
+                        .get::<uom::si::power::watt>();
+                self.ctrl_power_limit_w = max_power_w;
             }
             ControlSignal::ModeOverride { mode } => {
                 self.ctrl_mode_override = Some(*mode);
@@ -2898,7 +2899,6 @@ mod tests {
         DefrostConfig, DefrostControl, Equipment, EquipmentConfig, HeatPumpCommonConfig,
         HeatPumpHeaterConfig,
     };
-    use hares_physics::units::power_kw_to_w;
 
     fn env(zone_temp_c: f64, outdoor_c: f64, outdoor_w: f64) -> EnvironmentState {
         EnvironmentState {
@@ -3674,20 +3674,20 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let p_kw = ports.electrical.load_power_w / 1000.0;
-        assert!(p_kw > 0.0, "heating call must draw real power");
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).expect("compressor");
-        let fan_kw = eq.telemetry().get(tk::FAN_KW).expect("fan");
-        assert!(compressor_kw > 0.0 && fan_kw > 0.0);
+        let p_w = ports.electrical.load_power_w;
+        assert!(p_w > 0.0, "heating call must draw real power");
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).expect("compressor");
+        let fan_w = eq.telemetry().get(tk::FAN_KW).expect("fan");
+        assert!(compressor_w > 0.0 && fan_w > 0.0);
         assert_eq!(
             eq.telemetry().get(tk::BACKUP_ER_KW),
             Some(0.0),
             "precondition: ER backup must be off in this HP-only step"
         );
-        let q = ports.electrical.reactive_power_kvar;
+        let q = ports.electrical.reactive_power_var;
         // Per-component: Q = P_comp·tan(acos(0.84)) + P_fan·tan(acos(0.87)).
         // No ER, pan heater, or pump draw in this mild-weather HP-only step.
-        let expected = compressor_kw * 0.84_f64.acos().tan() + fan_kw * 0.87_f64.acos().tan();
+        let expected = compressor_w * 0.84_f64.acos().tan() + fan_w * 0.87_f64.acos().tan();
         assert!(
             (q - expected).abs() < 1e-9,
             "per-component Q must be comp·tan(acos(0.84)) + fan·tan(acos(0.87)): \
@@ -3696,7 +3696,7 @@ mod tests {
         assert_eq!(
             eq.core_output()
                 .flows
-                .reactive_power_kvar
+                .reactive_power_var
                 .expect("Some")
                 .to_bits(),
             q.to_bits(),
@@ -3723,12 +3723,9 @@ mod tests {
         };
         eq.step(&off_env, Duration::from_secs(60), &mut off_ports)
             .unwrap();
+        assert_eq!(off_ports.electrical.reactive_power_var, 0.0, "off ⇒ Q == 0");
         assert_eq!(
-            off_ports.electrical.reactive_power_kvar, 0.0,
-            "off ⇒ Q == 0"
-        );
-        assert_eq!(
-            eq.core_output().flows.reactive_power_kvar,
+            eq.core_output().flows.reactive_power_var,
             Some(0.0),
             "off ⇒ CoreOutput Q == Some(0.0)"
         );
@@ -3881,18 +3878,18 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let p_kw = ports.electrical.load_power_w / 1000.0;
-        assert!(p_kw > 0.0, "heating call must draw real power");
+        let p_w = ports.electrical.load_power_w;
+        assert!(p_w > 0.0, "heating call must draw real power");
         assert_eq!(eq.telemetry().get(tk::FAN_KW), Some(0.0), "fan must be 0");
         assert_eq!(
             eq.telemetry().get(tk::BACKUP_ER_KW),
             Some(0.0),
             "ER must be off"
         );
-        let q = ports.electrical.reactive_power_kvar;
-        let expected = p_kw * 0.84_f64.acos().tan();
+        let q = ports.electrical.reactive_power_var;
+        let expected = p_w * 0.84_f64.acos().tan();
         assert!(
-            (q - expected).abs() < 1e-12,
+            (q - expected).abs() < 1e-9,
             "compressor-only Q/P must equal tan(acos(0.84)): q={q}, expected={expected}"
         );
     }
@@ -3923,27 +3920,27 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).expect("compressor");
-        let fan_kw = eq.telemetry().get(tk::FAN_KW).expect("fan");
-        let er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).expect("er");
-        assert!(compressor_kw > 0.0, "compressor must run");
-        assert!(er_kw > 5.0, "ER element must draw its rated ~10 kW");
-        let p_kw = ports.electrical.load_power_w / 1000.0;
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).expect("compressor");
+        let fan_w = eq.telemetry().get(tk::FAN_KW).expect("fan");
+        let er_w = eq.telemetry().get(tk::BACKUP_ER_KW).expect("er");
+        assert!(compressor_w > 0.0, "compressor must run");
+        assert!(er_w > 5.0, "ER element must draw its rated ~10 kW");
+        let p_w = ports.electrical.load_power_w;
         assert!(
-            (p_kw - (compressor_kw + fan_kw + er_kw)).abs() < 1e-9,
-            "port draw must be the component sum: p={p_kw}, \
-             comp={compressor_kw} fan={fan_kw} er={er_kw}"
+            (p_w - (compressor_w + fan_w + er_w)).abs() < 1e-9,
+            "port draw must be the component sum: p={p_w}, \
+             comp={compressor_w} fan={fan_w} er={er_w}"
         );
 
-        let q = ports.electrical.reactive_power_kvar;
-        let expected = compressor_kw * 0.84_f64.acos().tan() + fan_kw * 0.87_f64.acos().tan();
+        let q = ports.electrical.reactive_power_var;
+        let expected = compressor_w * 0.84_f64.acos().tan() + fan_w * 0.87_f64.acos().tan();
         assert!(
             (q - expected).abs() < 1e-9,
             "Q must exclude ER wattage: q={q}, expected={expected}"
         );
-        let phantom_blend = p_kw * 0.84_f64.acos().tan();
+        let phantom_blend = p_w * 0.84_f64.acos().tan();
         assert!(
-            q < phantom_blend - er_kw * 0.84_f64.acos().tan() + 1e-9,
+            q < phantom_blend - er_w * 0.84_f64.acos().tan() + 1e-9,
             "per-component Q ({q}) must drop the ~0.646·P_ER phantom kvar \
              relative to the folded blend ({phantom_blend})"
         );
@@ -3973,17 +3970,17 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let fan_kw = eq.telemetry().get(tk::FAN_KW).expect("fan");
-        let er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).expect("er");
+        let fan_w = eq.telemetry().get(tk::FAN_KW).expect("fan");
+        let er_w = eq.telemetry().get(tk::BACKUP_ER_KW).expect("er");
         assert_eq!(
             eq.telemetry().get(tk::COMPRESSOR_KW),
             Some(0.0),
             "compressor must be off in ER-only mode"
         );
-        assert!(fan_kw > 0.0, "blower must run in ER-only mode");
-        assert!(er_kw > 0.0, "ER element must draw power");
-        let q = ports.electrical.reactive_power_kvar;
-        let expected = fan_kw * 0.87_f64.acos().tan();
+        assert!(fan_w > 0.0, "blower must run in ER-only mode");
+        assert!(er_w > 0.0, "ER element must draw power");
+        let q = ports.electrical.reactive_power_var;
+        let expected = fan_w * 0.87_f64.acos().tan();
         assert!(
             (q - expected).abs() < 1e-12,
             "ER-only Q must be the fan component alone: q={q}, expected={expected}"
@@ -4044,10 +4041,10 @@ mod tests {
                 "step {i} (v={v}): ELECTRIC_KW telemetry diverged"
             );
             assert_eq!(
-                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"
             );
-            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+            if ports_pf.electrical.reactive_power_var != 0.0 {
                 any_reactive = true;
             }
             environment.current_time += ChronoDuration::minutes(1);
@@ -4473,18 +4470,18 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         let port_w = ports.electrical.net_active_w();
-        let telemetry_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        let core_kw = match eq.core_output().flows.electric_kw {
+        let telemetry_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let core_w = match eq.core_output().flows.electric_w {
             Some(hares_types::ElectricPower::Consumption(v)) => v,
             _ => 0.0,
         };
         assert!(
-            (power_kw_to_w(telemetry_kw) - port_w).abs() < 1.0,
-            "heat-pump telemetry electric_kw must match the scaled electrical port draw"
+            ((telemetry_w) - port_w).abs() < 1.0,
+            "heat-pump telemetry electric_w must match the scaled electrical port draw"
         );
         assert!(
-            (power_kw_to_w(core_kw) - port_w).abs() < 1.0,
-            "heat-pump core_output electric_kw must match the scaled electrical port draw"
+            ((core_w) - port_w).abs() < 1.0,
+            "heat-pump core_output electric_w must match the scaled electrical port draw"
         );
         assert_eq!(
             eq.core_output().state.operating_mode,
@@ -4500,7 +4497,7 @@ mod tests {
     // through per-timestep power modulation.
     #[test]
     fn er_ideal_mode_single_stage_fires_at_full_rated_when_on() {
-        // Lock HP out so only ER runs; this isolates ER draw in electric_kw.
+        // Lock HP out so only ER runs; this isolates ER draw in electric_w.
         // Use ideal-capacity control to request PLR=0.5 on ER:
         // ideal_capacity_w / backup_capacity_w = 2000 / 4000 = 0.5.
         // With er_stages=1 (binary), ER must fire at full 4.0 kW, not 2.0 kW.
@@ -4575,7 +4572,7 @@ mod tests {
             typed.er_setpoint_offset_c = Some(0.0); // ER fires whenever zone < setpoint
             typed.common.backup_capacity_w = Some(backup_capacity_w);
             typed.common.backup_eir = Some(1.0);
-            typed.common.fan_power_w = Some(0.0); // zero fan so backup_er_kw == er_capacity_w exactly
+            typed.common.fan_power_w = Some(0.0); // zero fan so backup_er_w == er_capacity_w exactly
             typed.common.number_of_speeds = 2; // TwoSpeedSetpoint → PLR can be < 1.0
             typed.common.stage_heating_capacities_w = Some(vec![4_000.0, 8_000.0]);
             typed.common.stage_heating_eirs = Some(vec![0.33, 0.33]);
@@ -4608,13 +4605,13 @@ mod tests {
         eq.step(&env_partial, Duration::from_secs(60), &mut ports)
             .unwrap();
 
-        let backup_er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        let backup_er_w = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
         // Binary on/off: must draw exactly full rated power (4.0 kW).
-        // With PLR modulation (bug): backup_er_kw ≈ 4.0 * 0.625 = 2.5 kW.
+        // With PLR modulation (bug): backup_er_w ≈ 4.0 * 0.625 = 2.5 kW.
         assert!(
-            (backup_er_kw - backup_capacity_w / 1000.0).abs() < 1e-6,
-            "non-ideal ER must draw full rated {:.3} kW when on, \
-             got {backup_er_kw:.6} kW (PLR modulation bug: ER incorrectly scaled by HP PLR ≈0.625)",
+            (backup_er_w - backup_capacity_w).abs() < 1e-3,
+            "non-ideal ER must draw full rated {:.3} W when on, \
+             got {backup_er_w:.6} W (PLR modulation bug: ER incorrectly scaled by HP PLR ≈0.625)",
             backup_capacity_w / 1000.0,
         );
     }
@@ -4788,10 +4785,10 @@ mod tests {
     }
 
     // Regression: ER-only mode must still include blower fan power.
-    // If HP is locked out and ER is active, electric_kw must be strictly greater
+    // If HP is locked out and ER is active, electric_w must be strictly greater
     // than strip-power alone when fan power is configured.
     #[test]
-    fn er_only_mode_includes_fan_power_in_electric_kw() {
+    fn er_only_mode_includes_fan_power_in_electric_w() {
         let cfg = heater_config_with(|typed| {
             typed.hp_lockout_temp_c = Some(10.0);
             typed.er_lockout_temp_c = Some(5.0);
@@ -4817,10 +4814,10 @@ mod tests {
         );
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         assert!(
-            electric_kw > 4.0,
-            "ER-only electric power must include fan draw (expected >4.0 kW), got {electric_kw:.6} kW"
+            electric_w > 4.0,
+            "ER-only electric power must include fan draw (expected >4.0 kW), got {electric_w:.6} kW"
         );
     }
 
@@ -4850,10 +4847,10 @@ mod tests {
         assert_eq!(mode, OperatingMode::HeatingER);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(f64::NAN);
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(f64::NAN);
         assert!(
-            compressor_kw.abs() <= 1e-12,
-            "ER-only mode must report zero compressor power, got {compressor_kw:.9} kW"
+            compressor_w.abs() <= 1e-12,
+            "ER-only mode must report zero compressor power, got {compressor_w:.9} kW"
         );
     }
 
@@ -6016,8 +6013,8 @@ mod tests {
             .unwrap_or(0.0);
 
         // With zero fan, total electric = compressor only, so COP = thermal / electric.
-        if electric_kw_no_fan > 1e-6 {
-            let expected_cop = thermal_w_no_fan / (electric_kw_no_fan * 1000.0);
+        if electric_kw_no_fan > 1e-3 {
+            let expected_cop = thermal_w_no_fan / electric_kw_no_fan;
             assert!(
                 (cop_no_fan - expected_cop).abs() < 1e-6,
                 "with no fan, COP must equal thermal/compressor; expected {expected_cop:.4}, \
@@ -6058,7 +6055,7 @@ mod tests {
 
     #[test]
     fn cop_is_null_when_heater_is_off() {
-        // When the heater is off (no update_control call), compressor_kw=0 →
+        // When the heater is off (no update_control call), compressor_w=0 →
         // the COP is undefined: the core output's COP is None (the output
         // cell null, never a 0.0 sentinel). The telemetry channel keeps the
         // historical 0.0 of a step with no compressor input; it feeds no
@@ -6279,10 +6276,10 @@ mod tests {
             "gas backup AFUE 80% should produce {expected_fuel_w:.6} W fuel, got {fuel_input_w:.6} W"
         );
         // No electric draw (fan_power_w = 0, backup is gas).
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         assert!(
-            electric_kw.abs() < 1e-9,
-            "gas backup should draw no electric power, got {electric_kw:.9} kW"
+            electric_w.abs() < 1e-9,
+            "gas backup should draw no electric power, got {electric_w:.9} kW"
         );
         // Fuel port must carry the gas consumption.
         assert!(
@@ -6366,12 +6363,11 @@ mod tests {
         );
 
         // Electrical core_output must be zero.
-        if let Some(hares_types::ElectricPower::Consumption(kw)) =
-            eq.core_output().flows.electric_kw
+        if let Some(hares_types::ElectricPower::Consumption(kw)) = eq.core_output().flows.electric_w
         {
             assert!(
                 kw.abs() < 1e-9,
-                "core electric_kw must be zero for gas-only backup, got {kw:.9} kW"
+                "core electric_w must be zero for gas-only backup, got {kw:.9} kW"
             );
         }
     }
@@ -6434,7 +6430,7 @@ mod tests {
         };
         eq.init(&cfg, &e).unwrap();
         // Give the MSHP a non-zero pan heater so it would fire if the bug were present.
-        eq.core.pan_heater_kw = 0.1;
+        eq.core.pan_heater_w = 0.1;
         eq.core.pan_heater_temp_c = 5.0; // OAT -5°C is below this
 
         let mode = eq.update_control(&e);
@@ -6570,7 +6566,7 @@ mod tests {
     fn duty_cycle_scaling_does_not_reduce_er_power() {
         let backup_capacity_w = 4_000.0_f64;
         let backup_eir = 1.0_f64;
-        let er_full_kw = backup_capacity_w * backup_eir / 1000.0;
+        let er_full_w = backup_capacity_w * backup_eir;
 
         // Force ER-only mode: HP locked out, ER allowed.
         let cfg = heater_config_with(|typed| {
@@ -6601,11 +6597,11 @@ mod tests {
         .unwrap();
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
         assert!(
-            (electric_kw - er_full_kw).abs() < 0.01,
-            "ER power must remain full ({er_full_kw:.3} kW) even with 50% duty cycle; \
-             got {electric_kw:.3} kW"
+            (electric_w - er_full_w).abs() < 10.0,
+            "ER power must remain full ({er_full_w:.3} W) even with 50% duty cycle; \
+             got {electric_w:.3} W"
         );
     }
 
@@ -6613,14 +6609,14 @@ mod tests {
     // NOT be scaled by duty-cycle curtailment. With a DutyCycle=0.5 control and
     // discrete resistive defrost active (compressor+fan+ER all zero), the unit
     // draw must equal the full defrost element power, not half (and previously
-    // the defrost draw was dropped from electric_kw entirely in this branch).
+    // the defrost draw was dropped from electric_w entirely in this branch).
     #[test]
     fn duty_cycle_scaling_does_not_reduce_resistive_defrost_draw() {
         use crate::hvac::heat_pump::defrost::{DefrostCycleState, DefrostStrategy};
 
         const DEFROST_ELEMENT_W: f64 = 3_000.0;
         const DEFROST_CONTROL_W: f64 = 200.0;
-        let defrost_kw = (DEFROST_ELEMENT_W + DEFROST_CONTROL_W) / 1000.0;
+        let defrost_w = DEFROST_ELEMENT_W + DEFROST_CONTROL_W;
 
         let run = |duty: f64| -> (f64, f64) {
             let cfg = heater_config_with(|typed| {
@@ -6662,16 +6658,16 @@ mod tests {
             )
         };
 
-        let (full_kw, full_q) = run(1.0);
-        let (curtailed_kw, curtailed_q) = run(0.5);
+        let (full_w, full_q) = run(1.0);
+        let (curtailed_w, curtailed_q) = run(0.5);
         assert!(
-            (full_kw - defrost_kw).abs() < 1e-9,
-            "uncurtailed resistive defrost draw must be {defrost_kw:.3} kW; got {full_kw:.3}"
+            (full_w - defrost_w).abs() < 10.0,
+            "uncurtailed resistive defrost draw must be {defrost_w:.3} W; got {full_w:.3}"
         );
         assert!(
-            (curtailed_kw - defrost_kw).abs() < 1e-9,
-            "resistive defrost draw must remain {defrost_kw:.3} kW under 50% duty cycle \
-             (protective on/off element, like ER); got {curtailed_kw:.3} kW"
+            (curtailed_w - defrost_w).abs() < 10.0,
+            "resistive defrost draw must remain {defrost_w:.3} W under 50% duty cycle \
+             (protective on/off element, like ER); got {curtailed_w:.3} kW"
         );
         // Defrost element is resistive: Q stays exactly zero in both cases.
         assert_eq!(full_q, 0.0, "resistive defrost must produce Q == 0");
@@ -6782,21 +6778,21 @@ mod tests {
         );
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let full_electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        let full_compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
-        let er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        let full_electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let full_compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let er_w = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
 
         assert!(
-            full_electric_kw > 0.0,
+            full_electric_w > 0.0,
             "must have some power draw before limit"
         );
-        assert!(er_kw > 0.0, "ER must be running in baseline step");
+        assert!(er_w > 0.0, "ER must be running in baseline step");
 
         // A limit halfway between (HP-only) and (HP+ER): shedding ER is sufficient.
-        let hp_only_kw = full_electric_kw - er_kw;
-        let limit_kw = hp_only_kw + er_kw * 0.5;
-        assert!(limit_kw < full_electric_kw, "limit must be below total");
-        assert!(limit_kw > hp_only_kw, "limit must be above HP-only draw");
+        let hp_only_w = full_electric_w - er_w;
+        let limit_w = hp_only_w + er_w * 0.5;
+        assert!(limit_w < full_electric_w, "limit must be below total");
+        assert!(limit_w > hp_only_w, "limit must be above HP-only draw");
 
         // Apply PowerLimit below total but above HP-only draw; ER must be shed,
         // compressor must remain above zero (not scaled away).
@@ -6812,35 +6808,35 @@ mod tests {
         })
         .unwrap();
         eq2.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: limit_kw,
+            max_power_kw: limit_w / 1000.0,
             ramp_rate_kw_per_s: None,
         })
         .unwrap();
         eq2.update_control(&e);
         eq2.step(&e, Duration::from_secs(60), &mut ports2).unwrap();
 
-        let limited_er_kw = eq2.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(f64::NAN);
-        let limited_compressor_kw = eq2.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
-        let limited_electric_kw = eq2.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let limited_er_w = eq2.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(f64::NAN);
+        let limited_compressor_w = eq2.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let limited_electric_w = eq2.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
 
         assert!(
-            limited_er_kw.abs() < 1e-9,
-            "ER must be shed to 0 under PowerLimit when limit > HP+fan; got {limited_er_kw:.6} kW"
+            limited_er_w.abs() < 1e-6,
+            "ER must be shed to 0 under PowerLimit when limit > HP+fan; got {limited_er_w:.6} W"
         );
         assert!(
-            limited_compressor_kw > 0.0,
+            limited_compressor_w > 0.0,
             "compressor must not be zeroed when ER shedding alone satisfies the limit; \
-             got {limited_compressor_kw:.6} kW"
+             got {limited_compressor_w:.6} kW"
         );
         assert!(
-            (limited_compressor_kw - full_compressor_kw).abs() < 1e-6,
+            (limited_compressor_w - full_compressor_w).abs() < 1e-6,
             "compressor must be identical to no-limit baseline when ER shedding is sufficient; \
-             baseline {full_compressor_kw:.3} kW, limited {limited_compressor_kw:.3} kW"
+             baseline {full_compressor_w:.3} kW, limited {limited_compressor_w:.3} kW"
         );
         assert!(
-            limited_electric_kw <= limit_kw + 1e-9,
-            "electric_kw must not exceed limit after ER shed; \
-             electric={limited_electric_kw:.4}, limit={limit_kw:.4}"
+            limited_electric_w <= limit_w + 1e-9,
+            "electric_w must not exceed limit after ER shed; \
+             electric={limited_electric_w:.4}, limit={limit_w:.4}"
         );
     }
 
@@ -6908,7 +6904,7 @@ mod tests {
     // Sub-consumption telemetry (compressor + fan + ER + pan) must sum to
     // ELECTRIC_KW within 0.1% relative error.
     #[test]
-    fn sub_consumption_telemetry_sums_to_electric_kw() {
+    fn sub_consumption_telemetry_sums_to_electric_w() {
         // Use ModeOverride(HeatingHPAndER) so all four sub-consumption channels
         // are active, which gives the most thorough coverage of the sum invariant.
         let cfg = heater_config_with(|typed| {
@@ -6931,21 +6927,21 @@ mod tests {
         eq.update_control(&e);
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
-        let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
-        let backup_er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
-        let pan_heater_kw = eq.telemetry().get(tk::PAN_HEATER_KW).unwrap_or(0.0);
-        let sub_sum = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw;
+        let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let fan_w = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
+        let backup_er_w = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        let pan_heater_w = eq.telemetry().get(tk::PAN_HEATER_KW).unwrap_or(0.0);
+        let sub_sum = compressor_w + fan_w + backup_er_w + pan_heater_w;
 
         assert!(
-            electric_kw > 0.0,
-            "electric_kw must be positive for this configuration"
+            electric_w > 0.0,
+            "electric_w must be positive for this configuration"
         );
-        let rel_err = (sub_sum - electric_kw).abs() / electric_kw.max(f64::MIN_POSITIVE);
+        let rel_err = (sub_sum - electric_w).abs() / electric_w.max(f64::MIN_POSITIVE);
         assert!(
             rel_err < 0.001,
-            "sub-consumptions sum {sub_sum:.6} kW must equal electric_kw {electric_kw:.6} kW \
+            "sub-consumptions sum {sub_sum:.6} kW must equal electric_w {electric_w:.6} kW \
              within 0.1% (rel_err={rel_err:.2e})"
         );
     }
@@ -6957,7 +6953,7 @@ mod tests {
     /// Sources:
     /// - OCHRE HVAC.py lines 1208-1211 (lockout temps, ER setpoint offset)
     /// - OCHRE HVAC.py line 142 (350 CFM/ton heating airflow)
-    /// - OCHRE MinisplitASHPHeater attrs: pan_heater_kw=0.150, pan_heater_temp=0
+    /// - OCHRE MinisplitASHPHeater attrs: pan_heater_w=0.150, pan_heater_temp=0
     /// - EnergyPlus Engineering Reference: MaxOATSupplemental default = 21°C
     #[test]
     fn test_hp_defaults_are_physically_correct() {
@@ -7145,18 +7141,18 @@ mod tests {
         assert_eq!(mode, OperatingMode::HeatingER, "must be ER-only mode");
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
-        let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
-        let backup_er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
-        let pan_heater_kw = eq.telemetry().get(tk::PAN_HEATER_KW).unwrap_or(0.0);
-        let sub_sum = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw;
+        let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let fan_w = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
+        let backup_er_w = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        let pan_heater_w = eq.telemetry().get(tk::PAN_HEATER_KW).unwrap_or(0.0);
+        let sub_sum = compressor_w + fan_w + backup_er_w + pan_heater_w;
 
-        assert!(electric_kw > 0.0, "ER-only mode must draw power");
-        let rel_err = (sub_sum - electric_kw).abs() / electric_kw.max(f64::MIN_POSITIVE);
+        assert!(electric_w > 0.0, "ER-only mode must draw power");
+        let rel_err = (sub_sum - electric_w).abs() / electric_w.max(f64::MIN_POSITIVE);
         assert!(
             rel_err < 0.001,
-            "sub-consumptions sum {sub_sum:.6} kW must equal electric_kw {electric_kw:.6} kW \
+            "sub-consumptions sum {sub_sum:.6} kW must equal electric_w {electric_w:.6} kW \
              within 0.1% in ER-only mode (rel_err={rel_err:.2e})"
         );
     }
@@ -7182,22 +7178,22 @@ mod tests {
         assert_eq!(mode, OperatingMode::HeatingHP, "must be HP-only mode");
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
-        let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
-        let backup_er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
-        let pan_heater_kw = eq.telemetry().get(tk::PAN_HEATER_KW).unwrap_or(0.0);
-        let sub_sum = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw;
+        let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let fan_w = eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0);
+        let backup_er_w = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        let pan_heater_w = eq.telemetry().get(tk::PAN_HEATER_KW).unwrap_or(0.0);
+        let sub_sum = compressor_w + fan_w + backup_er_w + pan_heater_w;
 
-        assert!(electric_kw > 0.0, "HP-only mode must draw power");
+        assert!(electric_w > 0.0, "HP-only mode must draw power");
         assert!(
-            backup_er_kw.abs() < 1e-9,
-            "no ER must fire in HP-only mode; got {backup_er_kw:.6} kW"
+            backup_er_w.abs() < 1e-9,
+            "no ER must fire in HP-only mode; got {backup_er_w:.6} kW"
         );
-        let rel_err = (sub_sum - electric_kw).abs() / electric_kw.max(f64::MIN_POSITIVE);
+        let rel_err = (sub_sum - electric_w).abs() / electric_w.max(f64::MIN_POSITIVE);
         assert!(
             rel_err < 0.001,
-            "sub-consumptions sum {sub_sum:.6} kW must equal electric_kw {electric_kw:.6} kW \
+            "sub-consumptions sum {sub_sum:.6} kW must equal electric_w {electric_w:.6} kW \
              within 0.1% in HP-only mode (rel_err={rel_err:.2e})"
         );
     }
@@ -7335,15 +7331,15 @@ mod tests {
 
         eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
 
-        let compressor_kw = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
-        let backup_er_kw = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
+        let compressor_w = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0);
+        let backup_er_w = eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0);
         assert!(
-            compressor_kw > 0.0,
-            "HP must contribute compressor power in HeatingHPAndER mode; got {compressor_kw:.4} kW"
+            compressor_w > 0.0,
+            "HP must contribute compressor power in HeatingHPAndER mode; got {compressor_w:.4} kW"
         );
         assert!(
-            backup_er_kw > 0.0,
-            "ER must contribute backup power in HeatingHPAndER mode; got {backup_er_kw:.4} kW"
+            backup_er_w > 0.0,
+            "ER must contribute backup power in HeatingHPAndER mode; got {backup_er_w:.4} kW"
         );
     }
 

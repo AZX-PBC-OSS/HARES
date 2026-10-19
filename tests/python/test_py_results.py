@@ -146,9 +146,9 @@ def test_health_counts_clamped_gym_actions() -> None:
     def make_env():
         return DwellingGymEnv(
             config=make_config(),
-            observation_fields=["total_power_kw"],
+            observation_fields=["total_power_w"],
             action_space_config={"ASHP Heater": ["heat_c"]},
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=15 * 20),
         )
 
@@ -161,9 +161,9 @@ def test_health_counts_clamped_gym_actions() -> None:
 
     vec = VecDwellingGymEnv(
         [make_dwelling()],
-        observation_fields=["total_power_kw"],
+        observation_fields=["total_power_w"],
         action_space_config={"ASHP Heater": ["heat_c"]},
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=15 * 20),
     )
     vec.reset()

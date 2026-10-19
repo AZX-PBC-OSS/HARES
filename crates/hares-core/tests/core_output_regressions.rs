@@ -113,8 +113,8 @@ fn sum_signed_electric_kw(dwelling: &Dwelling) -> f64 {
         .map(|eq| {
             eq.core_output()
                 .flows
-                .electric_kw
-                .map_or(0.0, |power| power.signed_kw())
+                .electric_w
+                .map_or(0.0, |power| power.signed_w())
         })
         .sum()
 }
@@ -142,7 +142,7 @@ fn assert_snapshot_aligned(dwelling: &Dwelling, step: &StepResult) {
         "telemetry equipment count must match equipment registry"
     );
     assert_eq!(
-        telemetry.equipment_power_kw.len(),
+        telemetry.equipment_power_w.len(),
         equipment.len(),
         "telemetry power vector length must match equipment registry"
     );
@@ -167,14 +167,14 @@ fn assert_snapshot_aligned(dwelling: &Dwelling, step: &StepResult) {
         );
 
         let co = eq.core_output();
-        let electric_kw = co.flows.electric_kw.map_or(0.0, |power| power.signed_kw());
+        let electric_w = co.flows.electric_w.map_or(0.0, |power| power.signed_w());
         let soc = co.state.soc.map_or(0.0, |s| s.get());
         let operating_mode = co.state.operating_mode.map_or(0.0, |mode| mode.as_code());
         let fuel_w = co.flows.fuel_w.map_or(0.0, |fuel| fuel.consumption_w);
 
         approx_eq(
-            telemetry.equipment_power_kw[idx],
-            electric_kw,
+            telemetry.equipment_power_w[idx],
+            electric_w,
             "equipment power telemetry must mirror CoreOutput",
         );
         approx_eq(
@@ -188,19 +188,19 @@ fn assert_snapshot_aligned(dwelling: &Dwelling, step: &StepResult) {
             "equipment mode telemetry must mirror CoreOutput",
         );
 
-        core_electric_sum += electric_kw;
+        core_electric_sum += electric_w;
         core_fuel_sum += fuel_w;
     }
 
     approx_eq(
-        step.net_electric_power_kw,
+        step.net_electric_power_w,
         core_electric_sum,
         "step net electric power must equal the sum of equipment CoreOutput electric power",
     );
     approx_eq(
-        telemetry.total_power_kw,
+        telemetry.total_power_w,
         core_electric_sum,
-        "dwelling telemetry total_power_kw must equal the sum of equipment CoreOutput electric power",
+        "dwelling telemetry total_power_w must equal the sum of equipment CoreOutput electric power",
     );
     approx_eq(
         sum_signed_electric_kw(dwelling),
@@ -310,8 +310,8 @@ fn actors_observe_previous_equipment_core_snapshot() {
 
     let mut env = TestEnvBuilder::new()
         .with_electrical(ElectricalSummary {
-            pv_generation_kw: 5.0,
-            base_load_kw: 2.0,
+            pv_generation_w: 5.0,
+            base_load_w: 2.0,
             ..Default::default()
         })
         .build();

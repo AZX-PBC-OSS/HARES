@@ -43,7 +43,7 @@ pub(super) fn compute_coil_ao_by_stage(
             AHRI_RATED_INDOOR_DB_C,
             rated_w,
             RATED_PRESSURE_KPA,
-            (cap_w / 1000.0).max(0.0),
+            cap_w.max(0.0),
             flow_m3_s,
             shr,
         )

@@ -157,7 +157,7 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
             _ => {
                 let capacity_kwh = uom::si::f64::Energy::new::<uom::si::energy::joule>(capacity_j)
                     .get::<uom::si::energy::kilowatt_hour>();
-                let range_miles = capacity_kwh / DEFAULT_FUEL_ECONOMY_KWH_PER_MI;
+                let range_miles = capacity_kwh / 0.325;
                 if range_miles < 175.0 { 3600.0 } else { 11500.0 }
             }
         }
@@ -276,7 +276,7 @@ fn no_power_when_disconnected() {
 }
 
 #[test]
-fn l1_default_power_is_1p4_kw() {
+fn l1_default_power_is_1p4_w() {
     let mut raw = base_raw();
     raw.insert(KEY_CHARGING_LEVEL.to_string(), "L1".into());
     raw.remove(KEY_MAX_CHARGING_POWER_W);
@@ -289,7 +289,7 @@ fn l1_default_power_is_1p4_kw() {
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
     let p = ev.telemetry().get("active_power_kw").unwrap();
-    assert!((p - 1.4).abs() < 1e-12);
+    assert!((p - 1400.0).abs() < 1e-9);
 }
 
 #[test]
@@ -302,14 +302,14 @@ fn l2_constant_power_and_linear_taper() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
     let p_low_soc = ev.telemetry().get("active_power_kw").unwrap();
-    assert!((p_low_soc - 7.2).abs() < 1e-9);
+    assert!((p_low_soc - 7200.0).abs() < 1e-6);
 
     ev.soc = 0.99;
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
     let p_taper = ev.telemetry().get("active_power_kw").unwrap();
     assert!(p_taper > 0.0);
-    assert!(p_taper < 7.2);
+    assert!(p_taper < 7200.0);
 
     ev.soc = 1.0;
     let mut ports = PortSlots::default();
@@ -379,7 +379,7 @@ fn hpxml_range_to_capacity_derivation_uses_verified_constant() {
     let mut ev = Ev::new(config.clone());
     ev.init(&config, &sample_env()).unwrap();
 
-    assert!((ev.battery_capacity_kwh_rated - 65.0).abs() < 1e-9);
+    assert!((ev.battery_capacity_j - 65.0 * 3.6e6 * capacity_derate_at(10.0)).abs() < 1e-3);
 }
 
 #[test]
@@ -451,7 +451,7 @@ fn l1_8amp_mode_is_supported() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
     let p = ev.telemetry().get("active_power_kw").unwrap();
-    assert!((p - 0.96).abs() < 1e-12);
+    assert!((p - 960.0).abs() < 1e-9);
 }
 
 #[test]
@@ -471,8 +471,8 @@ fn ohmic_heat_nonzero_during_active_charging() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
-    let power_kw = ev.telemetry().get("active_power_kw").unwrap();
-    assert!(power_kw > 0.0, "EV should be charging");
+    let power_w = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(power_w > 0.0, "EV should be charging");
     assert!(
         ev.battery_temp_c > temp_before,
         "battery should warm from ohmic losses (efficiency < 1)"
@@ -491,16 +491,16 @@ fn l1_configured_power_is_respected_not_hardcoded() {
     ev.init(&config, &env).unwrap();
 
     assert!(
-        (ev.rated_power_kw - 1.8).abs() < 1e-9,
-        "L1 rated_power_kw should reflect configured max_charging_power_kw=1.8, got {}",
-        ev.rated_power_kw
+        (ev.rated_power_w - 1800.0).abs() < 1e-9,
+        "L1 rated_power_w should reflect configured max_charging_power_w=1800, got {}",
+        ev.rated_power_w
     );
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
     let p = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        (p - 1.8).abs() < 1e-9,
+        (p - 1800.0).abs() < 1e-6,
         "L1 step power should be 1.8 kW when configured, got {}",
         p
     );
@@ -631,12 +631,12 @@ fn heater_draw_bills_ac_equivalent_without_slowing_pack_charge_rate() {
         "SOC gain must equal the no-heater case while the cap is slack: \
          {soc_delta_with_heater} vs {soc_delta_no_heater}"
     );
-    // Port power is higher by exactly the heater's AC-equivalent.
-    let heater_ac_eq_kw = (heater_w / 1000.0) / eta;
+    // Port power is higher by exactly the heater's AC-equivalent (W).
+    let heater_ac_eq_w = heater_w / eta;
     assert!(
-        (power_with_heater - power_no_heater - heater_ac_eq_kw).abs() < 1e-6,
+        (power_with_heater - power_no_heater - heater_ac_eq_w).abs() < 1e-6,
         "port draw must exceed the no-heater case by the heater's \
-         AC-equivalent ({heater_ac_eq_kw} kW): {power_with_heater} vs \
+         AC-equivalent ({heater_ac_eq_w} kW): {power_with_heater} vs \
          {power_no_heater}"
     );
     assert!(ev.telemetry().get("heater_power_w").unwrap() > 0.0);
@@ -674,12 +674,12 @@ fn heater_only_grid_draw_when_fully_cold_derated() {
     // pack nets exactly zero — the cells neither gain nor lose while the
     // heater warms them. The pre-fix identity (port = heater nameplate)
     // omitted the η conversion.
-    let power_kw = ev.telemetry().get("active_power_kw").unwrap();
-    let expected_heater_ac_kw = 500.0 / 1000.0 / 0.9;
+    let power_w = ev.telemetry().get("active_power_kw").unwrap();
+    let expected_heater_ac_w = 500.0 / 0.9;
     assert!(
-        (power_kw - expected_heater_ac_kw).abs() < 1e-9,
-        "grid draw should equal the heater's AC-equivalent ({expected_heater_ac_kw} kW), \
-         got {power_kw} kW"
+        (power_w - expected_heater_ac_w).abs() < 1e-6,
+        "grid draw should equal the heater's AC-equivalent ({expected_heater_ac_w} W), \
+         got {power_w} W"
     );
     assert_eq!(
         ev.soc, soc_before,
@@ -813,12 +813,12 @@ fn lut_temperature_axis_is_the_capability_not_the_linear_ramp() {
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
-    let power_kw = ev.telemetry().get("active_power_kw").unwrap();
-    let expected = 7.2 * 0.68;
+    let power_w = ev.telemetry().get("active_power_kw").unwrap();
+    let expected = 7200.0 * 0.68;
     assert!(
-        (power_kw - expected).abs() < 1e-6,
-        "LUT temperature axis must be the capability: expected {expected} kW \
-         (rated x LUT fraction), got {power_kw} — the linear ramp is being \
+        (power_w - expected).abs() < 1e-3,
+        "LUT temperature axis must be the capability: expected {expected} W \
+         (rated x LUT fraction), got {power_w} — the linear ramp is being \
          multiplied on top (one physical effect applied twice)"
     );
 
@@ -879,26 +879,26 @@ fn cold_charge_session_allocates_supply_bound_with_charge_priority() {
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
-    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+    let port_w = ev.telemetry().get("active_power_kw").unwrap();
     let heater_w = ev.telemetry().get("heater_power_w").unwrap();
-    let heater_ac_kw = heater_w / 1000.0 / 0.9;
-    let charge_leg_kw = port_kw - heater_ac_kw;
+    let heater_ac_w = heater_w / 0.9;
+    let charge_leg_w = port_w - heater_ac_w;
 
     // The invariant: the heater never takes budget charging could use —
     // the charge leg holds its full derated demand, the heater is
     // throttled to the remainder, and the port respects the rating.
     assert!(
-        (charge_leg_kw - 5.76).abs() < 1e-6,
+        (charge_leg_w - 5760.0).abs() < 1e-3,
         "charging draws first within the bound: expected the full derated \
-         demand 5.76 kW, got {charge_leg_kw}"
+         demand 5760 W, got {charge_leg_w}"
     );
     assert!(
         heater_w > 0.0,
         "the heater takes the remainder of the bound"
     );
     assert!(
-        port_kw <= 7.2 + 1e-9,
-        "port draw must never exceed the EVSE rating, got {port_kw}"
+        port_w <= 7200.0 + 1e-6,
+        "port draw must never exceed the EVSE rating, got {port_w}"
     );
 
     // Hand-off: step until the pack passes the threshold — the heater
@@ -951,7 +951,7 @@ fn dr_scales_the_allocated_total_as_a_multiplier() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
     let baseline = ev.telemetry().get("active_power_kw").unwrap();
-    assert!((baseline - 5.76).abs() < 1e-6);
+    assert!((baseline - 5760.0).abs() < 1e-3);
 
     // High (0.5): the allocated total is halved — 2.88 kW, not the ceiling
     // form's min(7.2, 3.6) = 3.6 (which would leave a below-half-rating
@@ -964,7 +964,7 @@ fn dr_scales_the_allocated_total_as_a_multiplier() {
     .unwrap();
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
-    assert!((ev.telemetry().get("active_power_kw").unwrap() - 5.76 * 0.5).abs() < 1e-6);
+    assert!((ev.telemetry().get("active_power_kw").unwrap() - 5760.0 * 0.5).abs() < 1e-3);
 
     // Critical (0.25): quartered.
     let mut ev = make_ev();
@@ -975,7 +975,7 @@ fn dr_scales_the_allocated_total_as_a_multiplier() {
     .unwrap();
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
-    assert!((ev.telemetry().get("active_power_kw").unwrap() - 5.76 * 0.25).abs() < 1e-6);
+    assert!((ev.telemetry().get("active_power_kw").unwrap() - 5760.0 * 0.25).abs() < 1e-3);
 
     // GridEmergency (0.0): a commanded zero zeroes the port.
     let mut ev = make_ev();
@@ -1031,7 +1031,7 @@ fn charging_with_heater_lands_exactly_on_target() {
     );
 }
 
-/// A commanded `power_setpoint_kw` is a total-draw bound: with the heater
+/// A commanded `power_setpoint_w` is a total-draw bound: with the heater
 /// running, its AC-equivalent is carved out within the command and the
 /// charge leg receives the remainder — the port never draws more than the
 /// dispatch commands, and once the pack is warm the full command returns
@@ -1062,13 +1062,13 @@ fn commanded_power_setpoint_bounds_total_draw_with_heater_running() {
     for _ in 0..40 {
         let mut ports = PortSlots::default();
         ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
-        let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+        let port_w = ev.telemetry().get("active_power_kw").unwrap();
         assert!(
-            port_kw <= 3.0 + 1e-9,
-            "total draw must never exceed the commanded setpoint, got {port_kw}"
+            port_w <= 3000.0 + 1e-6,
+            "total draw must never exceed the commanded setpoint, got {port_w}"
         );
-        let heater_ac_kw = ev.telemetry().get("heater_power_w").unwrap() / 900.0;
-        charge_leg_seen = charge_leg_seen.max(port_kw - heater_ac_kw);
+        let heater_ac_w = ev.telemetry().get("heater_power_w").unwrap() / 0.9;
+        charge_leg_seen = charge_leg_seen.max(port_w - heater_ac_w);
         if ev.battery_temp_c > 5.0 {
             break;
         }
@@ -1076,12 +1076,12 @@ fn commanded_power_setpoint_bounds_total_draw_with_heater_running() {
     // Once warm the heater is off and the whole command charges.
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
-    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
-    assert!(port_kw <= 3.0 + 1e-9);
+    let port_w = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(port_w <= 3000.0 + 1e-6);
     assert!(
-        port_kw > 2.0,
+        port_w > 2000.0,
         "with the pack warm the commanded setpoint returns to charging, \
-         got {port_kw}"
+         got {port_w}"
     );
     assert!(charge_leg_seen >= 0.0);
 }
@@ -1133,8 +1133,8 @@ fn urgent_deadline_with_heater_exceeds_soft_setpoint_within_the_supply_bound() {
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
-    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
-    let heater_ac_kw = ev.telemetry().get("heater_power_w").unwrap() / 1000.0 / 0.9;
+    let port_w = ev.telemetry().get("active_power_kw").unwrap();
+    let heater_ac_w = ev.telemetry().get("heater_power_w").unwrap() / 0.9;
 
     assert_eq!(
         ev.telemetry().get("heater_power_w").unwrap(),
@@ -1143,29 +1143,29 @@ fn urgent_deadline_with_heater_exceeds_soft_setpoint_within_the_supply_bound() {
          must not be starved by the raise either"
     );
     assert!(
-        port_kw > 1.0 + 1e-9,
+        port_w > 1000.0 + 1e-6,
         "the deadline raise legitimately exceeds the soft 1.0 kW setpoint \
-         (clamping it would defeat the DeadlineGuarantee), got {port_kw} kW"
+         (clamping it would defeat the DeadlineGuarantee), got {port_w} W"
     );
     assert!(
-        port_kw <= 7.2 + 1e-9,
+        port_w <= 7200.0 + 1e-6,
         "the raise is bounded by the supply-bound rule (the EVSE rating), \
-         not free — got {port_kw} kW"
+         not free — got {port_w} kW"
     );
     // The priority invariant survives the raise: charging draws first —
     // the charge leg is the full derated demand, the heater takes the
     // remainder on top (a heater monopolizing the budget during a
     // deadline fails here).
-    let charge_leg_kw = port_kw - heater_ac_kw;
+    let charge_leg_w = port_w - heater_ac_w;
     assert!(
-        (charge_leg_kw - 7.2 * 0.2).abs() < 1e-6,
+        (charge_leg_w - 7200.0 * 0.2).abs() < 1e-3,
         "charging must draw first at the derated demand (1.44 kW AC), got \
-         charge leg {charge_leg_kw} kW"
+         charge leg {charge_leg_w} W"
     );
     assert!(
-        (port_kw - (7.2 * 0.2 + 1500.0 / 1000.0 / 0.9)).abs() < 1e-6,
+        (port_w - (7200.0 * 0.2 + 1500.0 / 0.9)).abs() < 1e-3,
         "the port is the composed total charge + heater AC-equivalent \
-         (≈3.107 kW), got {port_kw} kW"
+         (≈3106.7 W), got {port_w} W"
     );
 }
 
@@ -1199,23 +1199,24 @@ fn cold_v2l_export_conserves_pack_energy_and_stops_at_floor() {
     .unwrap();
 
     let soc_before = ev.soc;
-    let capacity = ev.battery_capacity_kwh;
+    let capacity = ev.battery_capacity_j;
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
-    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
-    let heater_kw = ev.telemetry().get("heater_power_w").unwrap() / 1000.0;
+    let port_w = ev.telemetry().get("active_power_kw").unwrap();
+    let heater_w = ev.telemetry().get("heater_power_w").unwrap();
     assert!(
-        (port_kw + 3.0).abs() < 1e-9,
-        "the port carries the export alone, got {port_kw}"
+        (port_w + 3000.0).abs() < 1e-3,
+        "the port carries the export alone, got {port_w}"
     );
     assert!(
-        heater_kw > 0.0,
+        heater_w > 0.0,
         "a cold pack discharging still preconditions"
     );
-    // Conservation: debit = export/eta + heater (pack-side DC).
-    let debit_kw = 3.0 / 0.9 + heater_kw;
-    let expected_delta = debit_kw * 0.25 / capacity;
+    // Conservation: debit = export/eta + heater (pack-side DC), over the
+    // 15-minute step.
+    let debit_w = 3000.0 / 0.9 + heater_w;
+    let expected_delta = debit_w * 900.0 / capacity;
     assert!(
         (soc_before - ev.soc - expected_delta).abs() < 1e-9,
         "pack debit must equal export/eta + heater draw: expected SOC delta \
@@ -1304,20 +1305,20 @@ fn cold_discharge_ohmic_loss_covers_export_and_heater_terminal_currents() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
-    let heater_kw = ev.telemetry().get("heater_power_w").unwrap() / 1000.0;
+    let heater_w = ev.telemetry().get("heater_power_w").unwrap();
     assert!(
-        heater_kw > 0.0,
+        heater_w > 0.0,
         "premise guard: a cold pack discharging still preconditions"
     );
     // The port carries the export alone — the export magnitude observable.
-    let export_kw = -ev.telemetry().get("active_power_kw").unwrap();
+    let export_w = -ev.telemetry().get("active_power_kw").unwrap();
 
     // Oracle: the shared solve on the pack-side total draw (export
     // converted at η plus the heater's DC draw — both terminal currents in
     // this state) at the post-debit SOC's OCV, exactly what production
     // feeds it on the discharge arm.
     let eta = ev.charging_efficiency.max(0.01);
-    let pack_dc_w = hares_physics::units::power_kw_to_w(export_kw / eta + heater_kw);
+    let pack_dc_w = export_w / eta + heater_w;
     let ocv = ev.ocv_table.voltage_at_soc(ev.soc);
     let expected_with_heater = ev.pack_electrical().solve(ocv, -pack_dc_w).ohmic_loss_w;
     let published = ev.telemetry().get("ohmic_loss_w").unwrap();
@@ -1331,7 +1332,7 @@ fn cold_discharge_ohmic_loss_covers_export_and_heater_terminal_currents() {
     // regression this gate exists to catch) drops the ohmic loss by the
     // heater's full I²R — the 5 kW heater's ~14 A is a large share of the
     // terminal current at a 3 kW export.
-    let export_dc_w = hares_physics::units::power_kw_to_w(export_kw / eta);
+    let export_dc_w = export_w / eta;
     let expected_export_only = ev.pack_electrical().solve(ocv, -export_dc_w).ohmic_loss_w;
     assert!(
         expected_with_heater > expected_export_only + 1.0,
@@ -1415,7 +1416,7 @@ fn commanded_vars_at_zero_real_power_report_on_mode() {
         Some(OperatingMode::On)
     );
     assert_eq!(ev.telemetry().get("active_power_kw").unwrap(), 0.0);
-    assert_eq!(ev.telemetry().get("reactive_power_kvar").unwrap(), 2.0);
+    assert_eq!(ev.telemetry().get("reactive_power_kvar").unwrap(), 2000.0);
     hares_types::equipment::validate_core_contract(
         ev.descriptor(),
         ev.core_output(),
@@ -1720,12 +1721,12 @@ fn heater_preconditions_an_idle_pack_with_no_charge_demand() {
         "a cold pack preconditions even with zero charge demand — the \
          heater gate keys on pack temperature, not on charge demand"
     );
-    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
-    let heater_ac_eq_kw = 1500.0 / 1000.0 / 0.9;
+    let port_w = ev.telemetry().get("active_power_kw").unwrap();
+    let heater_ac_eq_w = 1500.0 / 0.9;
     assert!(
-        (port_kw - heater_ac_eq_kw).abs() < 1e-9,
+        (port_w - heater_ac_eq_w).abs() < 1e-6,
         "the idle heater-only state bills the heater's AC-equivalent \
-         ({heater_ac_eq_kw} kW) at the port, got {port_kw} kW"
+         ({heater_ac_eq_w} W) at the port, got {port_w} W"
     );
     assert_eq!(
         ev.soc, soc_before,
@@ -1772,7 +1773,7 @@ fn dr_scales_the_charge_plus_heater_total_and_grid_emergency_suspends_preconditi
         ev.init(&config, &sample_env()).unwrap();
         ev
     };
-    let expected_total = 7.2 * 0.4 + 1500.0 / 1000.0 / 0.9;
+    let expected_total = 7200.0 * 0.4 + 1500.0 / 0.9;
 
     // Baseline: the composed total, undistorted.
     let mut ev = make_ev();
@@ -2099,11 +2100,11 @@ fn sub_threshold_charge_leg_off_mode_still_publishes_a_nonzero_flow() {
 
     // The corner's observable shape: the charge leg really flowed — a
     // nonzero, sub-threshold port draw.
-    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+    let port_w = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        port_kw > 0.0 && port_kw <= 1e-9,
+        port_w > 0.0 && port_w <= 1e-6,
         "precondition: the charge leg must be nonzero and within the \
-         classifier's sub-threshold window (0, 1e-9] kW, got {port_kw}"
+         classifier's sub-threshold window (0, 1e-6] W, got {port_w}"
     );
     hares_types::equipment::validate_core_contract(
         ev.descriptor(),
@@ -2246,11 +2247,11 @@ fn sub_threshold_export_leg_discharge_mode_still_publishes_a_nonzero_flow() {
 
     // The corner's observable shape: the export really flowed — a
     // nonzero, sub-threshold negative port flow.
-    let port_kw = ev.telemetry().get("active_power_kw").unwrap();
+    let port_w = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        (-1e-9..0.0).contains(&port_kw),
+        (-1e-6..0.0).contains(&port_w),
         "precondition: the export leg must be nonzero and within the \
-         classifier's sub-threshold window (−1e-9, 0] kW, got {port_kw}"
+         classifier's sub-threshold window (−1e-6, 0] W, got {port_w}"
     );
     // The label: the tiny export is a grid-facing discharge — `Discharging`,
     // never `Off` (which the guard would reject with the nonzero flow).
@@ -2272,7 +2273,7 @@ fn sub_threshold_export_leg_discharge_mode_still_publishes_a_nonzero_flow() {
 }
 
 /// A latched var setpoint must not be served by a de-energized EVSE: the
-/// dead-bus gate zeroes the reactive flow (`compute_reactive_kvar` is
+/// dead-bus gate zeroes the reactive flow (`compute_reactive_var` is
 /// skipped when the bus is dead and the leg is not discharging), so an
 /// outage step while charging-idle publishes `Off` with all-zero flows —
 /// a vars leak here would publish the vars-only `On` mode on a dead bus
@@ -2387,8 +2388,8 @@ fn usable_capacity_stays_physical_through_daily_cycling() {
     };
     ev.init(&config, &env).unwrap();
 
-    let rated = ev.battery_capacity_kwh_rated;
-    let mut prev_capacity = ev.battery_capacity_kwh;
+    let rated = ev.battery_capacity_j;
+    let mut prev_capacity = ev.battery_capacity_j;
     for _day in 0..10 {
         // Overnight at target (calendar aging at rest, physical temps).
         for _ in 0..64 {
@@ -2414,7 +2415,7 @@ fn usable_capacity_stays_physical_through_daily_cycling() {
                 break;
             }
         }
-        let capacity = ev.battery_capacity_kwh;
+        let capacity = ev.battery_capacity_j;
         assert!(
             (0.5 * rated..=1.5 * rated).contains(&capacity),
             "usable capacity must stay within a physical band of rated \
@@ -2470,7 +2471,7 @@ fn ev_capacity_never_exceeds_its_rating() {
         let mut env = sample_env();
         ev.init(&config, &env).unwrap();
 
-        let rated = ev.battery_capacity_kwh_rated;
+        let rated = ev.battery_capacity_j_rated;
         let step = |ev: &mut Ev, env: &mut EnvironmentState| {
             let mut ports = PortSlots::default();
             ev.step(env, Duration::from_secs(3600), &mut ports).unwrap();
@@ -2493,12 +2494,13 @@ fn ev_capacity_never_exceeds_its_rating() {
             // temperature: the degradation (SOH) factor contributes nothing
             // above 1.
             let live_derate = capacity_derate_at(ev.battery_temp_c);
+            let soh = 1.0 - fade;
             assert!(
-                ev.battery_capacity_kwh <= rated * live_derate + 1e-9,
+                ev.battery_capacity_j <= rated * soh * live_derate + 1e-6,
                 "{temp_c} °C: usable capacity {} must never exceed the \
                  reversibly derated rating {} at the live pack temperature \
                  {} °C (the excess must be the thermal layer's alone)",
-                ev.battery_capacity_kwh,
+                ev.battery_capacity_j,
                 rated * live_derate,
                 ev.battery_temp_c
             );
@@ -2613,7 +2615,7 @@ fn v2l_allows_negative_power_when_enabled_and_soc_above_reserve() {
     let power = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
         power < 0.0,
-        "V2L should produce negative active_power_kw, got {power}"
+        "V2L should produce negative active_power_w, got {power}"
     );
     assert_eq!(ev.telemetry().get("v2l_active"), Some(1.0));
 }
@@ -2763,8 +2765,8 @@ fn v2l_respects_max_discharge_limit() {
 
     let power = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        power >= -2.0 - 1e-9,
-        "V2L discharge must respect max_discharge_kw limit of 2.0, got {power}"
+        power >= -2000.0 - 1e-6,
+        "V2L discharge must respect the 2 kW max_discharge_w limit, got {power}"
     );
 }
 
@@ -2820,7 +2822,7 @@ fn v2l_does_not_export_to_grid() {
     );
     assert!(
         ports.electrical.generation_power_w.abs() <= 3_000.0 + 10.0,
-        "V2L must not exceed max_discharge_kw={}, got {}",
+        "V2L must not exceed max_discharge_w={}, got {}",
         3.0,
         ports.electrical.generation_power_w.abs()
     );
@@ -2878,7 +2880,7 @@ fn v2g_discharge_produces_negative_power() {
     let power = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
     assert!(
         power < -0.1,
-        "V2G should produce negative active_power_kw, got {power}"
+        "V2G should produce negative active_power_w, got {power}"
     );
 }
 
@@ -3031,7 +3033,7 @@ fn power_setpoint_max_soc_caps_charging() {
         .expect("step");
     let p_full = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        p_full < 7.2,
+        p_full < 7200.0,
         "charging should be capped near power_setpoint_max_soc=0.90, got {p_full}"
     );
 }
@@ -3073,10 +3075,10 @@ fn charging_curve_lut_limits_power() {
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
-    let power_kw = ev.telemetry().get("active_power_kw").unwrap();
+    let power_w = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        power_kw <= 3.6 + 1e-9,
-        "power should be limited at soc=0.5, got {power_kw}"
+        power_w <= 3600.0 + 1e-6,
+        "power should be limited at soc=0.5, got {power_w}"
     );
 }
 
@@ -3114,7 +3116,7 @@ fn lut_tapers_charge_power_at_high_soc() {
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
     let power = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        power <= 2.0,
+        power <= 2000.0,
         "power should be tapered at high SOC, got {power}"
     );
 }
@@ -3424,7 +3426,9 @@ fn drive_energy_heats_the_pack_at_its_equivalent_discharge_current() {
     // power at the post-debit SOC's OCV. The SOC debit happened at signal
     // time and the disconnected step nets zero, so production's solve saw
     // exactly this (SOC, power) pair.
-    let drive_dc_w = hares_physics::units::power_kw_to_w(15.0 / 0.25);
+    // The drive's equivalent discharge power: 15 kWh over the 15-min
+    // step = 60000 W.
+    let drive_dc_w = 15.0 * 3.6e6 / 900.0;
     let expected_ohmic = ev
         .pack_electrical()
         .solve(ev.ocv_table.voltage_at_soc(ev.soc), -drive_dc_w)
@@ -3481,8 +3485,8 @@ fn ev_drive_while_away_plugged_in_rejected() {
 }
 
 /// Hypothesis: `EvDrive` with negative kWh bypasses the handler's overdraw
-/// guard (`kwh > available_kwh` is false for any negative value), so the SOC
-/// arithmetic `soc - kwh / battery_capacity_kwh` runs with a negated term and
+/// guard (`kwh > available_j` is false for any negative value), so the SOC
+/// arithmetic `soc - kwh / battery_capacity_j` runs with a negated term and
 /// *raises* SOC — energy from nowhere. The equipment's direct control surface
 /// (`apply_control_unchecked`, a public trait method) performs no payload
 /// validation of its own. Physical invariant: a drive command must never
@@ -3517,7 +3521,7 @@ fn ev_drive_negative_kwh_must_not_increase_soc() {
     );
 }
 
-/// Hypothesis: `EvDrive` with NaN kWh slips past the `kwh > available_kwh`
+/// Hypothesis: `EvDrive` with NaN kWh slips past the `kwh > available_j`
 /// guard (NaN compares false against everything) and
 /// `(soc - NaN / capacity).clamp(0.0, 1.0)` propagates NaN (f64::clamp
 /// returns NaN unchanged), permanently poisoning SOC. Manifestations: in
@@ -3571,7 +3575,7 @@ fn ev_drive_nan_kwh_must_not_poison_soc_or_power() {
     );
 }
 
-/// Hypothesis: the EvDrive overdraw guard `kwh > available_kwh` is one-sided.
+/// Hypothesis: the EvDrive overdraw guard `kwh > available_j` is one-sided.
 /// Positive infinity is rejected (it exceeds available energy), but negative
 /// infinity passes (it is never greater than a finite bound) and
 /// `(soc - (-inf) / capacity).clamp(0.0, 1.0)` evaluates to exactly 1.0 — a
@@ -3901,13 +3905,13 @@ fn ev_set_ready_by_cleared_on_disconnect() {
     assert!(ev.ready_by_soc.is_none());
     // Disconnect ends the charging session: actor-writable setpoints and
     // targets must not survive the plug cycle.
-    assert!(ev.power_setpoint_kw.is_none());
+    assert!(ev.power_setpoint_w.is_none());
     assert!(ev.soc_target.is_none());
 }
 
 /// A fresh `SOCTarget` must supersede a latched zero-power hold: without
-/// the clear in the `SOCTarget` arm, `compute_charging_power_kw` keeps
-/// consulting the stale `power_setpoint_kw` first and a strategy going
+/// the clear in the `SOCTarget` arm, `compute_charging_power_w` keeps
+/// consulting the stale `power_setpoint_w` first and a strategy going
 /// idle → active would trade "always charges" for "never charges".
 #[test]
 fn soc_target_clears_latched_zero_power_hold() {
@@ -3985,7 +3989,7 @@ fn ready_by_clears_latched_zero_power_hold() {
 /// latched and urgent, a zero-power hold dispatched *after* the ready-by
 /// (the composer's target-then-rate order means a later idle step's hold
 /// lands on top of an earlier `EvSetReadyBy`) must not veto charging —
-/// `compute_charging_power_kw` raises the request to the BMS's
+/// `compute_charging_power_w` raises the request to the BMS's
 /// deadline-required power (`requested = bms_power.max(requested)`), so a
 /// soft hold never strands the driver. This is the one scenario where an
 /// idling strategy legitimately still charges.
@@ -4025,7 +4029,7 @@ fn urgent_ready_by_deadline_charges_through_latched_hold() {
 }
 
 /// A hold latched at checkpoint time must survive an equipment checkpoint
-/// round-trip: the v4 checkpoint carries `power_setpoint_kw`/`soc_target`,
+/// round-trip: the v4 checkpoint carries `power_setpoint_w`/`soc_target`,
 /// and a field dropped on save or restore would silently resurrect the
 /// charge-to-full BMS default after every restart — the exact symptom the
 /// explicit-hold contract exists to prevent, resurfacing only in
@@ -4255,7 +4259,7 @@ fn controller_target_above_ready_by_raises_destination() {
 }
 
 /// A hold latched at home must not silently zero away-charging: the away
-/// arm consults the same `power_setpoint_kw`, so the disconnect clear is
+/// arm consults the same `power_setpoint_w`, so the disconnect clear is
 /// what keeps `away_charge_fraction > 0` drivers able to charge off-site.
 #[test]
 fn disconnect_clears_latched_hold_for_away_charging() {
@@ -4431,7 +4435,7 @@ fn power_limit_during_ready_by() {
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
     let power = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        power <= 2.0 + 1e-9,
+        power <= 2000.0 + 1e-6,
         "PowerLimit should constrain ready-by charging, got {power}"
     );
 }
@@ -4520,13 +4524,13 @@ fn external_authority_respects_setpoint_despite_urgent_deadline() {
     let power = ev.telemetry().get("active_power_kw").unwrap();
 
     assert!(
-        (power - 1.0).abs() < 1e-9,
-        "ExternalAuthority should respect 1.0 kW setpoint even with urgent deadline, got {power}"
+        (power - 1000.0).abs() < 1e-6,
+        "ExternalAuthority should respect the 1.0 kW setpoint even with an urgent deadline, got {power}"
     );
 }
 
 /// The controller-vs-deadline destination fix (`target = max(controller,
-/// deadline)` in `compute_charging_power_kw`) is scoped by its own comment
+/// deadline)` in `compute_charging_power_w`) is scoped by its own comment
 /// to the default `DeadlineGuarantee` — "under the default … the deadline
 /// is the hard one". `ExternalAuthority` is the opposite contract: the
 /// external controller bears sole responsibility and the BMS deadline
@@ -4599,7 +4603,7 @@ fn external_authority_deadline_target_must_not_raise_controller_destination() {
 /// setpoint the BMS still paces (`requested = bms_power`), now against the
 /// priority-scoped destination — and the stale higher deadline target must
 /// not raise that destination on this path either. Sensitive to the scoped
-/// `max()` in `compute_charging_power_kw` exactly as the sibling test is.
+/// `max()` in `compute_charging_power_w` exactly as the sibling test is.
 #[test]
 fn external_authority_target_without_rate_paces_to_controller_destination() {
     let mut raw = base_raw();
@@ -4687,8 +4691,8 @@ fn deadline_guarantee_respects_setpoint_when_not_urgent() {
     let power = ev.telemetry().get("active_power_kw").unwrap();
 
     assert!(
-        (power - 1.0).abs() < 1e-9,
-        "DeadlineGuarantee should respect 1.0 kW setpoint when deadline is not urgent, got {power}"
+        (power - 1000.0).abs() < 1e-6,
+        "DeadlineGuarantee should respect the 1.0 kW setpoint when the deadline is not urgent, got {power}"
     );
 }
 
@@ -4740,11 +4744,11 @@ fn power_limit_caps_after_deadline_guarantee_max() {
     let power = ev.telemetry().get("active_power_kw").unwrap();
 
     assert!(
-        power > 1.0,
-        "deadline guarantee should raise power above 1.0 kW setpoint, got {power}"
+        power > 1000.0,
+        "deadline guarantee should raise power above the 1.0 kW setpoint, got {power}"
     );
     assert!(
-        power <= 3.0 + 1e-9,
+        power <= 3000.0 + 1e-6,
         "PowerLimit=3.0 should cap the result, got {power}"
     );
 }
@@ -4849,7 +4853,7 @@ fn external_authority_reports_no_cc_cv_derating_when_setpoint_active() {
     );
     let power = ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        (power - 1.5).abs() < 1e-9,
+        (power - 1500.0).abs() < 1e-6,
         "ExternalAuthority should deliver the raw setpoint power, got {power}"
     );
 }
@@ -5087,11 +5091,11 @@ fn telemetry_away_plugged_in() {
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
     assert_eq!(ev.telemetry().get("active_power_kw"), Some(0.0));
-    // away_charge_power_kw is the actual intake after CC-CV taper, not the
+    // away_charge_power_w is the actual intake after CC-CV taper, not the
     // external charger's rated power. At SOC=0.3 the actual power is limited
     // by the EV's internal charging rate.
-    let away_kw = ev.telemetry().get("away_charge_power_kw").unwrap();
-    assert!(away_kw > 0.0, "should be charging away");
+    let away_w = ev.telemetry().get("away_charge_power_kw").unwrap();
+    assert!(away_w > 0.0, "should be charging away");
     assert_eq!(ev.telemetry().get("connection_state"), Some(1.0));
 }
 
@@ -5128,18 +5132,15 @@ fn telemetry_has_capacity_and_fuel_economy() {
     // CAPACITY_KWH reports the usable capacity (rated × SOH × the
     // temperature derate at the ambient-resolved pack temperature).
     assert!(
-        (ev.telemetry().get("capacity_kwh").unwrap() - 60.0 * capacity_derate_at(10.0)).abs()
-            < 1e-9
+        (ev.telemetry().get("capacity_kwh").unwrap() - 60.0 * 3.6e6 * capacity_derate_at(10.0))
+            .abs()
+            < 1e-3
     );
     // The telemetry value is the SI fuel economy's own round trip (the
     // config enters J/m; the working value converts back): the pair's
     // last-bit move is the unit move's recorded movement, so the
     // assertion is on the value within its ulp.
-    assert!(
-        (ev.telemetry().get("fuel_economy_kwh_per_mi").unwrap() - DEFAULT_FUEL_ECONOMY_KWH_PER_MI)
-            .abs()
-            < 1e-12,
-    );
+    assert!((ev.telemetry().get("fuel_economy_kwh_per_mi").unwrap() - 0.325).abs() < 1e-12,);
 }
 
 // ── Away charging physics parity tests ────────────────────────────
@@ -5254,8 +5255,8 @@ fn actor_seed_nightly_returns_ev_seed() {
         crate::ActorSeed::Ev {
             strategy,
             plug_in_policy,
-            capacity_kwh,
-            max_charge_kw,
+            capacity_j,
+            max_charge_w,
             ..
         } => {
             assert!(matches!(
@@ -5269,11 +5270,11 @@ fn actor_seed_nightly_returns_ev_seed() {
             // ambient into the whole run. Fresh pack: SOH 1.0 → exactly the
             // 60 kWh rating, at any init temperature.
             assert!(
-                (capacity_kwh - 60.0).abs() < 1e-9,
+                (capacity_j - 60.0 * 3.6e6).abs() < 1e-3,
                 "the seed capacity must be the degradation-adjusted rating \
-                 (temperature-independent), got {capacity_kwh} kWh"
+                 (temperature-independent), got {capacity_j} J"
             );
-            assert!((max_charge_kw - 7.2).abs() < 1e-6);
+            assert!((max_charge_w - 7200.0).abs() < 1e-6);
         }
         _ => panic!("expected Ev seed"),
     }
@@ -5347,8 +5348,8 @@ fn charging_reaches_full_at_correct_time() {
     // DC energy needed = 0.5 × usable capacity (rated × the temperature
     // derate at the unpinned 10 °C ambient, held constant by UA = 0);
     // time = energy / (7.2 × 0.9).
-    let usable_kwh = 60.0 * capacity_derate_at(10.0);
-    let expected_steps = (0.5 * usable_kwh / (7.2 * 0.9) * 60.0).ceil() as i32;
+    let usable_j = 60.0 * capacity_derate_at(10.0);
+    let expected_steps = (0.5 * usable_j / (7.2 * 0.9) * 60.0).ceil() as i32;
     assert!(
         (step - expected_steps).abs() <= 2,
         "Expected full at step ~{expected_steps}, got {step}"
@@ -5356,7 +5357,7 @@ fn charging_reaches_full_at_correct_time() {
 }
 
 /// OCHRE EV_FUEL_ECONOMY default = 0.325 kWh/mile.
-/// 30-mile trip: drive_kwh = 30 * 0.325 = 9.75 kWh
+/// 30-mile trip: drive_j = 30 * 0.325 = 9.75 kWh
 /// SOC drop = 9.75 / 60 = 0.1625
 ///
 /// Validates driving uses fuel economy directly, no charging efficiency applied.
@@ -5377,13 +5378,13 @@ fn driving_soc_decrease_matches_fuel_economy() {
     .unwrap();
 
     let miles = 30.0;
-    let drive_kwh = miles * 0.325;
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
+    let drive_j = miles * 0.325; // kWh (the 0.325 kWh/mi default)
+    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_j })
         .unwrap();
 
     // SOC drop = drive energy / usable capacity (rated × the temperature
     // derate at the unpinned 10 °C ambient initialization).
-    let expected_drop = drive_kwh / (60.0 * capacity_derate_at(10.0));
+    let expected_drop = drive_j / (60.0 * capacity_derate_at(10.0));
     let actual_drop = 1.0 - ev.soc;
     assert!(
         (actual_drop - expected_drop).abs() < 0.005,
@@ -5502,18 +5503,26 @@ fn soc_clamps_at_boundaries() {
         "overdraw truncates to available: SOC must land exactly at 0, got {}",
         ev2.soc
     );
-    assert_eq!(
-        ev2.drive_shortfall_kwh,
-        4.0 - 0.05 * 60.0 * capacity_derate_at(10.0),
-        "the undeliverable remainder must be accounted, not dropped"
-    );
+    {
+        let expected_j = (4.0f64 - 0.05 * 60.0 * capacity_derate_at(10.0)) * 3.6e6;
+        assert!(
+            (ev2.drive_shortfall_j - expected_j).abs() < 1e-6,
+            "the undeliverable remainder must be accounted, not dropped: \
+             expected {expected_j}, got {}",
+            ev2.drive_shortfall_j
+        );
+    }
     let mut ports = PortSlots::default();
     ev2.step(&env, Duration::minutes(1), &mut ports).unwrap();
-    assert_eq!(
-        ev2.telemetry().get("drive_shortfall_kwh"),
-        Some(4.0 - 0.05 * 60.0 * capacity_derate_at(10.0)),
-        "the drive shortfall must be published as observable telemetry"
-    );
+    {
+        let want = (4.0f64 - 0.05 * 60.0 * capacity_derate_at(10.0)) * 3.6e6;
+        assert!(
+            (ev2.telemetry().get("drive_shortfall_kwh").unwrap() - want).abs() < 1e-6,
+            "the drive shortfall must be published as observable telemetry: \
+             expected {want}, got {}",
+            ev2.telemetry().get("drive_shortfall_kwh").unwrap()
+        );
+    }
 }
 
 /// The shortfall is cumulative (successive overdraws sum, not last-write)
@@ -5541,10 +5550,10 @@ fn drive_shortfall_accumulates_and_survives_checkpoint() {
     ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: 2.0 })
         .unwrap();
     assert!(
-        (ev.drive_shortfall_kwh - (6.0 - available)).abs() < 1e-9,
-        "successive shortfalls must accumulate to 6.0 − available \
-         ({available:.4}), got {}",
-        ev.drive_shortfall_kwh
+        (ev.drive_shortfall_j - (6.0 - available) * 3.6e6).abs() < 1e-3,
+        "successive shortfalls must accumulate to 6.0 − available kWh \
+         ({available:.4}), got {} J",
+        ev.drive_shortfall_j
     );
 
     let state = ev.save_state().unwrap();
@@ -5552,7 +5561,7 @@ fn drive_shortfall_accumulates_and_survives_checkpoint() {
     restored.init(&config, &env).unwrap();
     restored.load_state(&state).unwrap();
     assert!(
-        (restored.drive_shortfall_kwh - ev.drive_shortfall_kwh).abs() < 1e-12,
+        (restored.drive_shortfall_j - ev.drive_shortfall_j).abs() < 1e-12,
         "checkpoint round-trip must preserve the cumulative shortfall"
     );
     assert_eq!(restored.soc, 0.0);
@@ -5645,8 +5654,8 @@ fn charge_session_pack_heating_is_i2r_only() {
     ev.step(&env, Duration::from_secs(3600), &mut ports)
         .unwrap();
 
-    let power_kw = ev.telemetry().get("active_power_kw").unwrap();
-    assert!(power_kw > 0.0, "EV should be charging");
+    let power_w = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(power_w > 0.0, "EV should be charging");
 
     // The I²R magnitude rule: single-digit watts at Level 2 — two orders of
     // magnitude below the conversion loss (720 W) the pre-fix model
@@ -5814,28 +5823,27 @@ fn ev_energy_accounting_closed() {
     ev.init(&config, &env).unwrap();
 
     let dt = Duration::minutes(1);
-    let dt_hours = 1.0 / 60.0;
     let soc_start = ev.soc;
-    let mut total_grid_kwh = 0.0;
+    let mut total_grid_j = 0.0;
 
     for _ in 0..600 {
         let mut ports = PortSlots::default();
         ev.step(&env, dt, &mut ports).unwrap();
         let power = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
         if power > 0.0 {
-            total_grid_kwh += power * dt_hours;
+            total_grid_j += power * dt.as_secs_f64();
         }
     }
 
     let soc_change = ev.soc - soc_start;
-    let expected_grid_kwh = soc_change * ev.battery_capacity_kwh / ev.charging_efficiency;
-    let error_kwh = (total_grid_kwh - expected_grid_kwh).abs();
-    let tolerance_kwh = 0.02 * ev.battery_capacity_kwh;
+    let expected_grid_j = soc_change * ev.battery_capacity_j / ev.charging_efficiency;
+    let error_j = (total_grid_j - expected_grid_j).abs();
+    let tolerance_j = 0.02 * ev.battery_capacity_j;
 
     assert!(
-        error_kwh < tolerance_kwh,
-        "energy accounting error {error_kwh:.3} kWh exceeds 2% of capacity ({tolerance_kwh:.1} kWh). \
-         Grid total: {total_grid_kwh:.3} kWh, expected: {expected_grid_kwh:.3} kWh, \
+        error_j < tolerance_j,
+        "energy accounting error {error_j:.3} kWh exceeds 2% of capacity ({tolerance_j:.1} kWh). \
+         Grid total: {total_grid_j:.3} kWh, expected: {expected_grid_j:.3} kWh, \
          SOC: {soc_start:.4} -> {:.4}",
         ev.soc
     );
@@ -5850,25 +5858,25 @@ fn ev_soc_decreases_during_driving() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    let drive_kwh = 15.0;
+    let drive_j = 15.0; // kWh
     // The drive debits against the signal-time usable capacity; its own
     // I²R heat (a 15 kWh one-minute burst is a ~900 kW discharge) warms
     // the pack within the step, so the post-step capacity differs.
-    let cap_at_drive = ev.battery_capacity_kwh;
+    let cap_at_drive = ev.battery_capacity_j;
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::Disconnected,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
+    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_j })
         .unwrap();
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
 
-    let expected_soc = 0.8 - drive_kwh / cap_at_drive;
+    let expected_soc = 0.8 - drive_j * 3.6e6 / cap_at_drive;
     assert!(
         (ev.soc - expected_soc).abs() < 0.01,
-        "SOC after {drive_kwh} kWh drive should be ~{expected_soc:.4}, got {}",
+        "SOC after {drive_j} kWh drive should be ~{expected_soc:.4}, got {}",
         ev.soc
     );
     assert!(
@@ -5959,7 +5967,7 @@ fn ev_drive_after_full_day_charging() {
 
     // The drive debits against the signal-time usable capacity (rated ×
     // SOH × the temperature derate at the ambient-resolved pack temperature).
-    let cap_at_drive = ev.battery_capacity_kwh;
+    let cap_at_drive = ev.battery_capacity_j;
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::Disconnected,
     })
@@ -5974,7 +5982,7 @@ fn ev_drive_after_full_day_charging() {
     // 10 kWh burst in one 1-minute step is a ~600 kW discharge (~1700 A
     // into the pack), so the post-step capacity reflects a warmer pack than
     // the signal-time divisor the debit correctly used.
-    let expected_soc = 1.0 - 10.0 / cap_at_drive;
+    let expected_soc = 1.0 - 10.0 * 3.6e6 / cap_at_drive;
     assert!(
         (ev.soc - expected_soc).abs() < 0.01,
         "SOC after drive should be ~{expected_soc:.4}, got {}",
@@ -6002,13 +6010,15 @@ fn ev_insufficient_charge_before_departure() {
     // Drive nearly all available energy; subtract epsilon to avoid f64
     // boundary where implementation's `kwh > available` guard could
     // reject the call due to rounding.
-    let drive_kwh = ev.soc * ev.battery_capacity_kwh - 1e-9;
+    let drive_j = ev.soc * ev.battery_capacity_j - 1e-9;
     ev.apply_control_unchecked(&ControlSignal::EvPlugIn {
         state: EvConnectionState::Disconnected,
     })
     .unwrap();
-    ev.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
-        .unwrap();
+    ev.apply_control_unchecked(&ControlSignal::EvDrive {
+        kwh: drive_j / 3.6e6,
+    })
+    .unwrap();
 
     let mut ports = PortSlots::default();
     ev.step(&env, dt, &mut ports).unwrap();
@@ -6375,15 +6385,15 @@ fn ev_init_typed_sets_fields_from_ev_config() {
     let mut ev = Ev::new(ec.clone());
     let env = sample_env();
     ev.init(&ec, &env).unwrap();
-    assert_eq!(ev.battery_capacity_kwh_rated, 60.0);
+    assert_eq!(ev.battery_capacity_j_rated, 60.0 * 3.6e6);
     // The usable capacity at init: rated × SOH(1) × the temperature derate
     // at the ambient-resolved pack temperature (minimal_ev_config leaves
     // battery_temp_c unset → the 10 °C outdoor ambient).
-    assert!((ev.battery_capacity_kwh - 60.0 * capacity_derate_at(10.0)).abs() < 1e-9);
+    assert!((ev.battery_capacity_j - 60.0 * 3.6e6 * capacity_derate_at(10.0)).abs() < 1e-3);
     assert!((ev.charging_efficiency - 0.92).abs() < 1e-9);
     assert!((ev.soc - 0.5).abs() < 1e-9);
     assert_eq!(ev.charging_level, ChargingLevel::L2);
-    assert!((ev.rated_power_kw - 7.2).abs() < 1e-9);
+    assert!((ev.rated_power_w - 7200.0).abs() < 1e-6);
 }
 
 // ── Typed cold-charging field path tests ───────────────────────────
@@ -6468,16 +6478,16 @@ fn raw_config_cold_charging_defaults_preserved() {
     // heat; area-scaled UA), not flat constants.
     assert_eq!(
         ev.thermal_mass_j_per_k,
-        default_thermal_mass_j_per_k(DEFAULT_CAPACITY_KWH)
+        default_thermal_mass_j_per_k(DEFAULT_CAPACITY_J)
     );
-    assert_eq!(ev.ua_w_per_k, default_ua_w_per_k(DEFAULT_CAPACITY_KWH));
+    assert_eq!(ev.ua_w_per_k, default_ua_w_per_k(DEFAULT_CAPACITY_J));
     assert_eq!(
         ev.charging_strategy(),
         &ChargingStrategy::Immediate { target_soc: 1.0 }
     );
 }
 
-/// A dispatched `power_limit_kw = 0` is the second entry to the
+/// A dispatched `power_limit_w = 0` is the second entry to the
 /// commanded-zero invariant (GridEmergency is the first, covered in the
 /// DR test): the limit enters through the *supply bound* —
 /// `min(rating, power_limit)` at ev/mod.rs — not through the DR
@@ -6511,7 +6521,7 @@ fn commanded_power_limit_zero_suspends_preconditioning_with_the_port() {
     assert_eq!(
         ev.telemetry().get("active_power_kw").unwrap(),
         0.0,
-        "a dispatched power_limit_kw = 0 must zero the port"
+        "a dispatched power_limit_w = 0 must zero the port"
     );
     assert_eq!(
         ev.telemetry().get("heater_power_w").unwrap(),
@@ -6541,18 +6551,18 @@ fn commanded_power_limit_zero_suspends_preconditioning_with_the_port() {
 /// linear, UA a 2/3 power law.
 #[test]
 fn capacity_derived_thermal_defaults_match_cited_densities_and_scale_with_capacity() {
-    let mass_75 = default_thermal_mass_j_per_k(75.0);
+    let mass_75 = default_thermal_mass_j_per_k(75.0 * 3.6e6);
     assert_eq!(
         mass_75, 480_000.0,
         "75 kWh × 6.4 kg/kWh × 1000 J/(kg·K) = 480 kJ/K exactly"
     );
-    let ua_75 = default_ua_w_per_k(75.0);
+    let ua_75 = default_ua_w_per_k(75.0 * 3.6e6);
     assert!(
         (ua_75 - 15.7).abs() < 0.1,
         "UA at 75 kWh is 5.0 × (75/13.5)^(2/3) ≈ 15.7 W/K, got {ua_75}"
     );
     assert_eq!(
-        default_n_parallel(75.0),
+        default_n_parallel(75.0 * 3.6e6),
         43,
         "75 kWh on 96S at 3.7 V nominal is 211 Ah → ceil(211/5 Ah) = 43P"
     );
@@ -6560,9 +6570,9 @@ fn capacity_derived_thermal_defaults_match_cited_densities_and_scale_with_capaci
     // The scaling law, not just one point: half the capacity → half the
     // mass (linear) and UA × (1/2)^(2/3) (area scaling). A flat constant
     // fails both.
-    let mass_37 = default_thermal_mass_j_per_k(37.5);
+    let mass_37 = default_thermal_mass_j_per_k(37.5 * 3.6e6);
     assert_eq!(mass_37, mass_75 / 2.0);
-    let ua_37 = default_ua_w_per_k(37.5);
+    let ua_37 = default_ua_w_per_k(37.5 * 3.6e6);
     assert!((ua_37 - ua_75 * 0.5f64.powf(2.0 / 3.0)).abs() < 1e-9);
     assert!(mass_37 < mass_75 && ua_37 < ua_75);
 }
@@ -6616,7 +6626,7 @@ fn raw_and_typed_config_cold_derate_equivalence() {
 
     let typed_power = typed_ev.telemetry().get("active_power_kw").unwrap();
     assert!(
-        typed_power > 0.0 && typed_power <= 7.2,
+        typed_power > 0.0 && typed_power <= 7200.0,
         "the cold pack charges at or below the level's power, got {typed_power}"
     );
 }
@@ -6708,7 +6718,7 @@ fn ev_dr_critical_reduces_charging_power() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    let max_allowed = ev.rated_power_kw * 0.25;
+    let max_allowed = ev.rated_power_w * 0.25;
 
     ev.apply_control(&ControlSignal::DemandResponse {
         level: DRLevel::Critical,
@@ -6722,7 +6732,7 @@ fn ev_dr_critical_reduces_charging_power() {
     let power = ev
         .telemetry()
         .get("active_power_kw")
-        .expect("active_power_kw missing from telemetry");
+        .expect("active_power_w missing from telemetry");
     assert!(
         power <= max_allowed,
         "Critical DR power {:.3} kW exceeds 25% of rated {:.3} kW",
@@ -6757,11 +6767,11 @@ fn ev_dr_timer_reverts_to_normal_after_duration() {
     let power = ev
         .telemetry()
         .get("active_power_kw")
-        .expect("active_power_kw missing from telemetry");
+        .expect("active_power_w missing from telemetry");
     assert_eq!(ev.telemetry().get("dr_power_fraction"), Some(1.0));
     assert_eq!(ev.telemetry().get("dr_level"), Some(0.0));
     assert!(
-        power >= ev.rated_power_kw * 0.5,
+        power >= ev.rated_power_w * 0.5,
         "post-timer power should be near full rated (was {:.3} kW)",
         power
     );
@@ -6792,7 +6802,7 @@ fn ev_default_config_emits_zero_reactive_power() {
     let q_co = ev
         .core_output()
         .flows
-        .reactive_power_kvar
+        .reactive_power_var
         .expect("REACTIVE cap implies Some");
     assert!(
         q_co.abs() < 1e-9,
@@ -6871,7 +6881,7 @@ fn ev_reactive_setpoint_overrides_baseline_q() {
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
     let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
-    approx_eq(q, 1.5);
+    approx_eq(q, 1500.0);
 }
 
 /// PowerFactorSetpoint updates pf, zeros q_setpoint, and Q follows
@@ -6883,11 +6893,11 @@ fn ev_power_factor_setpoint_zeros_q_setpoint_and_follows_baseline() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    ev.q_setpoint_kvar = Some(2.0);
+    ev.q_setpoint_var = Some(2.0);
     ev.apply_control(&ControlSignal::PowerFactorSetpoint { power_factor: 0.8 })
         .unwrap();
 
-    assert_eq!(ev.q_setpoint_kvar, None);
+    assert_eq!(ev.q_setpoint_var, None);
     approx_eq(ev.power_factor, 0.8);
 
     // Force charging via PowerSetpoint so P>0.
@@ -6903,17 +6913,17 @@ fn ev_power_factor_setpoint_zeros_q_setpoint_and_follows_baseline() {
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
     let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
-    let p_kw = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+    let p_w = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
     let tan_phi = 0.8_f64.acos().tan();
-    let expected_q = p_kw * tan_phi;
+    let expected_q = p_w * tan_phi;
     assert!(
         (q - expected_q).abs() < 1e-9,
-        "expected Q={expected_q} (P={p_kw} × tan(acos(0.8))={tan_phi}), got {q}"
+        "expected Q={expected_q} (P={p_w} × tan(acos(0.8))={tan_phi}), got {q}"
     );
     assert!(q > 0.0, "charging should yield Q>0 absorbing");
 }
 
-/// PowerSetpoint with reactive_power_kvar is accepted and applied.
+/// PowerSetpoint with reactive_power_var is accepted and applied.
 #[test]
 fn ev_power_setpoint_stores_reactive_q() {
     let mut raw = base_raw();
@@ -6931,20 +6941,20 @@ fn ev_power_setpoint_stores_reactive_q() {
     })
     .unwrap();
 
-    assert_eq!(ev.q_setpoint_kvar, Some(0.75));
+    assert_eq!(ev.q_setpoint_var, Some(750.0));
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
 
     let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
-    approx_eq(q, 0.75);
+    approx_eq(q, 750.0);
 }
 
 /// A rejected PowerSetpoint must leave ALL control state unchanged: the
 /// whole signal is validated before any mutation, so a negative active
 /// power (rejected without v2l/v2g) must not arm the reactive override it
 /// carried. Regression test for the partial-mutation bug where
-/// `q_setpoint_kvar` was set before the negative-setpoint check.
+/// `q_setpoint_var` was set before the negative-setpoint check.
 #[test]
 fn ev_rejected_power_setpoint_leaves_reactive_state_unchanged() {
     let config = ev_config(base_raw());
@@ -6953,8 +6963,8 @@ fn ev_rejected_power_setpoint_leaves_reactive_state_unchanged() {
     ev.init(&config, &env).unwrap();
 
     let pf_before = ev.power_factor;
-    assert_eq!(ev.q_setpoint_kvar, None);
-    assert_eq!(ev.power_setpoint_kw, None);
+    assert_eq!(ev.q_setpoint_var, None);
+    assert_eq!(ev.power_setpoint_w, None);
 
     // Negative setpoint without v2l/v2g must be rejected in full.
     let err = ev
@@ -6971,10 +6981,10 @@ fn ev_rejected_power_setpoint_leaves_reactive_state_unchanged() {
     );
 
     assert_eq!(
-        ev.q_setpoint_kvar, None,
+        ev.q_setpoint_var, None,
         "rejected signal must not arm the var override"
     );
-    assert_eq!(ev.power_setpoint_kw, None);
+    assert_eq!(ev.power_setpoint_w, None);
     approx_eq(ev.power_factor, pf_before);
 }
 
@@ -7014,7 +7024,7 @@ fn ev_reactive_setpoint_zero_forces_q_zero_over_pf_baseline() {
     ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
     let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
     approx_eq(q, 0.0);
-    approx_eq(ports.electrical.reactive_power_kvar, 0.0);
+    approx_eq(ports.electrical.reactive_power_var, 0.0);
 }
 
 /// kVA clamp: when Q is commanded beyond the charger's capability,
@@ -7044,7 +7054,7 @@ fn ev_kva_clamp_curtails_reactive_not_active_power() {
     let p = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
     let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
 
-    let s = ev.charger_capacity_kva;
+    let s = ev.charger_capacity_va;
     let q_max = (s * s - p * p).max(0.0).sqrt();
     assert!(
         q.abs() <= q_max + 1e-9,
@@ -7053,8 +7063,8 @@ fn ev_kva_clamp_curtails_reactive_not_active_power() {
         q_max
     );
     assert!(
-        q.abs() < 5.0 - 1e-9,
-        "Q should be clamped below 5.0, got {q}"
+        q.abs() < 5000.0 - 1e-6,
+        "Q should be clamped below the commanded 5 kvar, got {q}"
     );
     assert!(p > 0.0, "P must be positive (charging)");
 }
@@ -7085,7 +7095,7 @@ fn ev_kva_clamp_reduces_q_to_charger_limit() {
     let q = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
 
     assert!(p > 0.0, "P must be positive (charging)");
-    let s = ev.charger_capacity_kva;
+    let s = ev.charger_capacity_va;
     let q_max = (s * s - p * p).max(0.0).sqrt();
     assert!(
         q.abs() <= q_max + 1e-9,
@@ -7093,7 +7103,7 @@ fn ev_kva_clamp_reduces_q_to_charger_limit() {
         q.abs(),
         q_max
     );
-    assert!(q.abs() < 4.0 - 1e-9, "Q should be clamped, got {q}");
+    assert!(q.abs() < 4000.0 - 1e-6, "Q should be clamped, got {q}");
 }
 
 /// Charging (P>0) with pf<1 yields baseline Q>0 (absorbing vars);
@@ -7190,10 +7200,10 @@ fn ev_port_core_output_telemetry_reactive_consistent() {
     let q_co = ev
         .core_output()
         .flows
-        .reactive_power_kvar
+        .reactive_power_var
         .expect("REACTIVE cap → Some");
     let q_telem = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
-    let q_port = ports.electrical.reactive_power_kvar;
+    let q_port = ports.electrical.reactive_power_var;
 
     approx_eq(q_co, q_telem);
     approx_eq(q_telem, q_port);
@@ -7220,7 +7230,7 @@ fn ev_validate_core_contract_passes_with_reactive() {
         .expect("core contract should pass with REACTIVE cap + Some(Q)");
 }
 
-/// Checkpoint round-trip preserves q_setpoint_kvar and power_factor.
+/// Checkpoint round-trip preserves q_setpoint_var and power_factor.
 #[test]
 fn ev_checkpoint_preserves_reactive_state() {
     let config = ev_config(base_raw());
@@ -7228,7 +7238,7 @@ fn ev_checkpoint_preserves_reactive_state() {
     let env = sample_env();
     ev.init(&config, &env).unwrap();
 
-    ev.q_setpoint_kvar = Some(1.5);
+    ev.q_setpoint_var = Some(1.5);
     ev.power_factor = 0.85;
 
     let state = ev.save_state().unwrap();
@@ -7236,7 +7246,7 @@ fn ev_checkpoint_preserves_reactive_state() {
     restored.init(&config, &env).unwrap();
     restored.load_state(&state).unwrap();
 
-    assert_eq!(restored.q_setpoint_kvar, Some(1.5));
+    assert_eq!(restored.q_setpoint_var, Some(1.5));
     approx_eq(restored.power_factor, 0.85);
 
     // Double round-trip: bytes identical.
@@ -7258,7 +7268,7 @@ fn ev_unplugged_produces_zero_reactive() {
 
     // Even with a q_setpoint commanded, Q must be 0 when unplugged
     // (contactor open — no grid connection).
-    ev.q_setpoint_kvar = Some(2.0);
+    ev.q_setpoint_var = Some(2.0);
 
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
@@ -7268,10 +7278,10 @@ fn ev_unplugged_produces_zero_reactive() {
     let q_co = ev
         .core_output()
         .flows
-        .reactive_power_kvar
+        .reactive_power_var
         .expect("REACTIVE cap → Some even when 0");
     approx_eq(q_co, 0.0);
-    approx_eq(ports.electrical.reactive_power_kvar, 0.0);
+    approx_eq(ports.electrical.reactive_power_var, 0.0);
 }
 
 /// Grid outage (de-energized bus): the home EVSE is dead — charging and the
@@ -7298,7 +7308,7 @@ fn grid_outage_stops_home_charging_and_islanded_bus_allows_it() {
     ev.step(&env_outage, Duration::minutes(15), &mut ports)
         .unwrap();
     assert_eq!(ports.electrical.load_power_w, 0.0);
-    assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+    assert_eq!(ports.electrical.reactive_power_var, 0.0);
     assert_eq!(ev.telemetry().get(tk::ACTIVE_POWER_KW), Some(0.0));
     assert!(
         (ev.telemetry().get(tk::SOC).unwrap() - soc_after_baseline).abs() < 1e-12,
@@ -7614,7 +7624,7 @@ fn aged_ev(days: usize) -> Ev {
 /// it (the fade is monotone non-decreasing; the reference model's capacity
 /// layer never lets the capacity rise) and the usable pack capacity must
 /// equal `rated · (1 − fade)`. Before the fix the EV held
-/// `battery_capacity_kwh` constant at the rated value, so SOC arithmetic
+/// `battery_capacity_j` constant at the rated value, so SOC arithmetic
 /// ignored degradation entirely.
 #[test]
 fn daily_degradation_rescales_usable_capacity() {
@@ -7639,19 +7649,19 @@ fn daily_degradation_rescales_usable_capacity() {
          is monotone non-decreasing), got {fade}"
     );
 
-    let expected = ev.battery_capacity_kwh_rated * (1.0 - fade) * capacity_derate_at(25.0);
+    let expected = ev.battery_capacity_j_rated * (1.0 - fade) * capacity_derate_at(25.0);
     assert!(
-        (ev.battery_capacity_kwh - expected).abs() < 1e-9,
+        (ev.battery_capacity_j - expected).abs() < 1e-6,
         "usable capacity {} must equal rated·(1−fade)·derate = {expected}",
-        ev.battery_capacity_kwh
+        ev.battery_capacity_j
     );
     // The runtime divisor must differ from the rated value — otherwise SOC
     // arithmetic would still be using the undegraded capacity (the bug).
     assert!(
-        (ev.battery_capacity_kwh - ev.battery_capacity_kwh_rated).abs() > 1e-6,
+        (ev.battery_capacity_j - ev.battery_capacity_j_rated).abs() > 1e-6,
         "aged usable capacity {} must differ from rated {}",
-        ev.battery_capacity_kwh,
-        ev.battery_capacity_kwh_rated
+        ev.battery_capacity_j,
+        ev.battery_capacity_j
     );
 }
 
@@ -7661,18 +7671,18 @@ fn daily_degradation_rescales_usable_capacity() {
 /// moved SOC by `energy / rated`, independent of the pack's aged state.
 #[test]
 fn fixed_drive_soc_swing_scales_with_degraded_capacity() {
-    let drive_kwh = 6.0;
+    let drive_j = 6.0; // kWh, the signal's unit until the control-layer commit
 
     // Fresh pack: SOH = 1, usable capacity = rated × derate (the packs sit
     // at the aged_ev fixture's pinned 25 °C).
     let mut fresh = aged_ev(0);
     fresh.soc = 0.9;
-    let rated = fresh.battery_capacity_kwh_rated;
-    let cap_fresh = rated * capacity_derate_at(25.0);
-    assert!((fresh.battery_capacity_kwh - cap_fresh).abs() < 1e-12);
+    let rated = fresh.battery_capacity_j_rated;
+    let cap_fresh = fresh.battery_capacity_j;
+    assert!((cap_fresh - rated * capacity_derate_at(25.0)).abs() < 1.0);
     let soc_before_fresh = fresh.soc;
     fresh
-        .apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
+        .apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_j })
         .unwrap();
     let swing_fresh = soc_before_fresh - fresh.soc;
 
@@ -7684,20 +7694,21 @@ fn fixed_drive_soc_swing_scales_with_degraded_capacity() {
     aged.degradation.capacity_fade = 0.10;
     aged.refresh_usable_capacity();
     aged.soc = 0.9;
-    let cap_aged = aged.battery_capacity_kwh;
+    let cap_aged = aged.battery_capacity_j;
     let soh = 1.0 - aged.degradation.capacity_fade_fraction();
     let soc_before_aged = aged.soc;
-    aged.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_kwh })
+    aged.apply_control_unchecked(&ControlSignal::EvDrive { kwh: drive_j })
         .unwrap();
     let swing_aged = soc_before_aged - aged.soc;
 
-    // Each swing equals energy / usable_capacity.
+    // Each swing equals energy / usable_capacity (the signal's kWh to the
+    // pack's joules: × 3.6e6).
     assert!(
-        (swing_fresh - drive_kwh / cap_fresh).abs() < 1e-9,
+        (swing_fresh - drive_j * 3.6e6 / cap_fresh).abs() < 1e-6,
         "fresh swing {swing_fresh} should equal energy/fresh-usable-capacity"
     );
     assert!(
-        (swing_aged - drive_kwh / cap_aged).abs() < 1e-9,
+        (swing_aged - drive_j * 3.6e6 / cap_aged).abs() < 1e-6,
         "aged swing {swing_aged} should equal energy/aged-usable-capacity"
     );
 
@@ -7718,9 +7729,9 @@ fn fixed_drive_soc_swing_scales_with_degraded_capacity() {
     // Degradation must actually change the runtime SOC dynamics: the aged swing
     // differs measurably from what the rated (undegraded) divisor would give.
     assert!(
-        (swing_aged - drive_kwh / rated).abs() > 1e-4,
+        (swing_aged - drive_j * 3.6e6 / rated).abs() > 1e-4,
         "aged swing {swing_aged} must differ from the buggy rated-based swing {}",
-        drive_kwh / rated
+        drive_j * 3.6e6 / rated
     );
 }
 
@@ -7748,21 +7759,21 @@ fn load_state_recomputes_degraded_capacity_from_rated_and_soh() {
     restored.load_state(&saved).unwrap();
 
     assert!(
-        (restored.battery_capacity_kwh_rated - source.battery_capacity_kwh_rated).abs() < 1e-12,
+        (restored.battery_capacity_j - source.battery_capacity_j).abs() < 1e-12,
         "rated capacity must survive init across restore"
     );
     assert!(
-        (restored.battery_capacity_kwh - source.battery_capacity_kwh).abs() < 1e-9,
+        (restored.battery_capacity_j - source.battery_capacity_j).abs() < 1e-9,
         "restored usable capacity {} must match source {}",
-        restored.battery_capacity_kwh,
-        source.battery_capacity_kwh
+        restored.battery_capacity_j,
+        source.battery_capacity_j
     );
     let fade = restored.degradation.capacity_fade_fraction();
     assert!(
-        (restored.battery_capacity_kwh
-            - restored.battery_capacity_kwh_rated * (1.0 - fade) * capacity_derate_at(25.0))
+        (restored.battery_capacity_j
+            - restored.battery_capacity_j_rated * (1.0 - fade) * capacity_derate_at(25.0))
         .abs()
-            < 1e-9,
+            < 1e-6,
         "restored usable capacity must equal rated·(1−fade)·derate (the \
          restored 25 °C pack temperature)"
     );
@@ -8145,13 +8156,13 @@ fn actor_seed_immediate_strategy_returns_ev_seed() {
 
 /// The driver's seeded capacity is a temperature-independent rating, not
 /// the live usable capacity. `refresh_usable_capacity` scales
-/// `battery_capacity_kwh` by the reversible cold-capacity derate each step
+/// `battery_capacity_j` by the reversible cold-capacity derate each step
 /// with the pack's *current* temperature; seeding the actor with that
 /// per-step value freezes the init-time ambient into the driver's
 /// anxiety/needed-hours/recoup arithmetic for the whole run and makes the
 /// seed depend on the weather at init. The degradation-adjusted
 /// (temperature-independent) capacity is the value the actor's own docs
-/// describe (`observed_pack_kwh`: "this actor's rated capacity").
+/// describe (`observed_pack_j`: "this actor's rated capacity").
 #[test]
 fn actor_seed_capacity_is_independent_of_init_weather() {
     let config = ev_config(base_raw());
@@ -8163,17 +8174,17 @@ fn actor_seed_capacity_is_independent_of_init_weather() {
     let mut cold = Ev::new(config.clone());
     cold.init(&config, &cold_env).unwrap();
 
-    let seed_kwh = |ev: &Ev| match ev.actor_seed() {
-        Some(crate::ActorSeed::Ev { capacity_kwh, .. }) => capacity_kwh,
+    let seed_j = |ev: &Ev| match ev.actor_seed() {
+        Some(crate::ActorSeed::Ev { capacity_j, .. }) => capacity_j,
         other => panic!("expected ActorSeed::Ev, got {other:?}"),
     };
-    let warm_kwh = seed_kwh(&warm);
-    let cold_kwh = seed_kwh(&cold);
+    let warm_j = seed_j(&warm);
+    let cold_j = seed_j(&cold);
     assert!(
-        (warm_kwh - cold_kwh).abs() < 1e-9,
+        (warm_j - cold_j).abs() < 1e-9,
         "the driver's seeded capacity must be the temperature-independent \
          degradation-adjusted rating, not the live usable capacity: init at \
-         10 C seeded {warm_kwh} kWh but init at -7 C seeded {cold_kwh} kWh"
+         10 C seeded {warm_j} kWh but init at -7 C seeded {cold_j} kWh"
     );
 }
 
@@ -8612,7 +8623,7 @@ fn init_errors_on_unknown_departure_constraint_fields() {
 /// target, heater off, a nonzero reactive command served at zero real
 /// power) must restore a core output that satisfies the workspace's own
 /// mode/flow guard. `load_state` restores the step-outcome `last_mode`
-/// (checkpoint v5) but zeroes `reactive_power_kvar` as a step outcome, so
+/// (checkpoint v5) but zeroes `reactive_power_var` as a step outcome, so
 /// the rebuilt output pairs an active mode with all-zero flows — exactly
 /// the pair `validate_core_contract`'s Rule 1 treats as a hard error.
 /// Pre-fix, the restored mode was re-derived from the restored port power
@@ -8660,9 +8671,9 @@ fn var_support_checkpoint_restores_an_output_the_mode_flow_guard_accepts() {
 }
 
 /// The charging-curve LUT's c-rate input must see the pack's SOH scaling
-/// exactly once. `compute_charging_power_kw` derives
-/// `effective_kwh = battery_capacity_kwh · soh`, but `refresh_usable_capacity`
-/// has already folded the SOH into `battery_capacity_kwh` (usable =
+/// exactly once. `compute_charging_power_w` derives
+/// `effective_j = battery_capacity_j · soh`, but `refresh_usable_capacity`
+/// has already folded the SOH into `battery_capacity_j` (usable =
 /// rated · SOH · temperature derate), so an aged pack's c-rate is computed
 /// over the SOH-squared capacity — the degradation factor applied twice,
 /// skewing every configured LUT's c-rate axis (the second application grew
@@ -8716,31 +8727,31 @@ fn lut_c_rate_axis_receives_the_soh_scaled_capacity_once() {
     // precondition's purpose — the injected fade must be in effect — at
     // the same 1e-9 tolerance.
     let expected_capacity =
-        60.0 * 0.9 * capacity_derate_at(ev.telemetry().get(tk::BATTERY_TEMP_C).unwrap());
+        60.0 * 3.6e6 * 0.9 * capacity_derate_at(ev.telemetry().get(tk::BATTERY_TEMP_C).unwrap());
     assert!(
-        (capacity - expected_capacity).abs() < 1e-9,
+        (capacity - expected_capacity).abs() < 1e-3,
         "precondition: the pack must carry the injected fade (usable \
-         capacity {expected_capacity} kWh), got {capacity}"
+         capacity {expected_capacity} J), got {capacity}"
     );
 
-    let power_kw = ev
+    let power_w = ev
         .telemetry()
         .get("active_power_kw")
         .expect("active power telemetry after a step");
     assert!(
-        (power_kw - 7.2).abs() < 1e-6,
+        (power_w - 7200.0).abs() < 1e-3,
         "the LUT's c-rate axis must see the SOH scaling exactly once \
-         (c_rate = 7.2 kW / {expected_capacity:.3} kWh ≈ 0.1332, inside the \
-         LUT's full-power band): expected 7.2 kW, got {power_kw} — the \
-         c-rate was computed over the SOH-squared capacity (≈0.148, clamped \
-         into the zero-power band), applying the degradation factor twice"
+         (c_rate = 7200 W / {expected_capacity:.3} J × 3600 ≈ 0.1332 per \
+         hour, inside the LUT's full-power band): expected 7200 W, got \
+         {power_w} — the c-rate was computed over the SOH-squared capacity, \
+         applying the degradation factor twice"
     );
 }
 
 /// The charging-LUT c-rate divisor is the degradation-adjusted rating, and
 /// temperature enters the lookup only through the LUT's own temperature
 /// axis — never through the divisor. `refresh_usable_capacity` scales
-/// `battery_capacity_kwh` by the reversible cold-capacity derate every step,
+/// `battery_capacity_j` by the reversible cold-capacity derate every step,
 /// so dividing by it (the pre-alignment behavior) would apply the
 /// temperature twice through two channels — the c-rate axis and the LUT's
 /// temperature axis — inflating the c-rate ≈1.3× at 0 °C (≈1.5× at −7 °C)
@@ -8774,15 +8785,15 @@ fn lut_c_rate_divisor_is_temperature_independent() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
 
-    let power_kw = ev
+    let power_w = ev
         .telemetry()
         .get("active_power_kw")
         .expect("active power telemetry after a step");
     assert!(
-        (power_kw - 3.6).abs() < 1e-6,
+        (power_w - 3600.0).abs() < 1e-3,
         "the LUT's c-rate axis must see the temperature-independent rating \
-         (c_rate = 7.2/60 = 0.12, mid-band → half power = 3.6 kW): got \
-         {power_kw} kW — the divisor was the temperature-derated usable \
+         (c_rate = 7200/60e6×3600 = 0.12 per hour, mid-band → half power = \
+         3.6 kW): got {power_w} kW — the divisor was the temperature-derated usable \
          capacity (c_rate ≈ 0.145 → zero power), applying the reversible \
          derate twice through two channels"
     );
@@ -8794,7 +8805,7 @@ fn lut_c_rate_divisor_is_temperature_independent() {
 /// heater is a DC-fed resistive load that is not inverter-coupled: it
 /// produces no vars and consumes no kVA headroom (the same rule the
 /// stationary Battery's step documents). The restore instead recomputes
-/// `compute_reactive_kvar(self.active_power_kw)` over the *port total* —
+/// `compute_reactive_var(self.active_power_w)` over the *port total* —
 /// the heater-inclusive basis the step's own rule forbids — so an idle
 /// preconditioning checkpoint (inverter leg exactly zero) that published
 /// no vars restores 2.7 kVAR of vars from nothing at the default 5 kW
@@ -8843,7 +8854,7 @@ fn heater_active_checkpoint_restores_the_reactive_flow_the_step_published() {
 /// underivable-basis argument the v6 comment makes for the reactive flow —
 /// so the step-published heater draw must be restored verbatim too, not
 /// zeroed. The restore currently zeroes `heater_draw_w` while restoring
-/// the heater-funded port power (`active_power_kw`), the `Heating` mode,
+/// the heater-funded port power (`active_power_w`), the `Heating` mode,
 /// and the verbatim reactive flow — publishing a state no live step can
 /// produce: `classify_mode` yields `Heating` only when `heater_draw_w > 0`,
 /// so a live step always pairs the mode with a real draw, and its billing
@@ -8900,12 +8911,12 @@ fn heater_active_checkpoint_restores_the_heater_draw_the_step_published() {
 }
 
 /// The away-intake face of the same restore-fidelity family: the away arm's
-/// actual charge intake (`away_charge_actual_kw`, published as
+/// actual charge intake (`away_charge_actual_w`, published as
 /// `AWAY_CHARGE_POWER_KW` — the documented way away charging is observed)
 /// is a step-computed value whose basis (the away charge leg) is not
-/// derivable from the checkpoint — `active_power_kw` is 0 in the away
+/// derivable from the checkpoint — `active_power_w` is 0 in the away
 /// state, and nothing else checkpointed reconstructs the intake. Its
-/// discharge-side sibling (`v2l_power_kw`) is checkpointed verbatim (v8)
+/// discharge-side sibling (`v2l_power_w`) is checkpointed verbatim (v8)
 /// for exactly this reason; the away intake is not, so a checkpoint saved
 /// mid-away-session restores publishing 0 kW of intake. The same
 /// underivable-basis criterion the v7/v8 fixes applied to the heater draw
@@ -8936,7 +8947,7 @@ fn away_charging_checkpoint_restores_the_intake_the_step_published() {
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
     let intake_saved = ev.telemetry().get(tk::AWAY_CHARGE_POWER_KW).unwrap();
     assert!(
-        (intake_saved - 7.2).abs() < 1e-6,
+        (intake_saved - 7200.0).abs() < 1e-3,
         "precondition: the step publishes the away session's actual intake \
          (7.2 kW), got {intake_saved}"
     );
@@ -9022,7 +9033,7 @@ fn checkpoint_restart_across_a_day_boundary_matches_the_uninterrupted_twin() {
 /// source exactly when it is. The restore now derives the pair losslessly
 /// from already-checkpointed state (`v2l_active ⟺ last_mode ==
 /// Discharging`, the export being the only negative-net path; and
-/// `v2l_power_kw = −active_power_kw`, the port carrying the export
+/// `v2l_power_w = −active_power_w`, the port carrying the export
 /// alone) — this gate pins that derivation: no schema change to guard,
 /// just the restored-state-matches-saved-state contract.
 #[test]
@@ -9085,7 +9096,7 @@ fn mid_discharge_checkpoint_restores_island_source_availability() {
     let v2l_power_restored = restored.telemetry().get(tk::V2L_POWER_KW).unwrap();
     assert_eq!(
         v2l_power_restored, v2l_power_saved,
-        "the restored export magnitude is −active_power_kw (the port carries \
+        "the restored export magnitude is −active_power_w (the port carries \
          the export alone), matching the step-published value"
     );
 }
@@ -9183,7 +9194,7 @@ fn commanded_vars_served_at_a_bound_binding_checkpoint_survive_restore() {
     // 5.56 kW; both fit inside the 7.2 kVA rating's port bound = 7.2 kW.
     let q_saved = ev.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
     assert!(
-        (q_saved - 6.5).abs() < 1e-6,
+        (q_saved - 6500.0).abs() < 1e-3,
         "precondition: the step serves the commanded 6.5 kVAR in full (the \
          inverter-leg basis leaves headroom), got {q_saved}"
     );
@@ -9256,4 +9267,20 @@ fn ev_setpoint_above_rated_warns_once_per_run() {
         1,
         "a re-initialized EV warns once per run again"
     );
+}
+
+#[test]
+fn dbg_publish_value() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+    eprintln!(
+        "DBG active_power_kw={} electrical_port={}",
+        ev.telemetry().get("active_power_kw").unwrap(),
+        ports.electrical.load_power_w
+    );
+    eprintln!("DBG p only");
 }

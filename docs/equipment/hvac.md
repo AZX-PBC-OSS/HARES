@@ -20,7 +20,7 @@ There is exactly one numeric encoding of operating modes: `OperatingMode::as_cod
 
 ## Sub-Metering Telemetry
 
-Per-component power telemetry (`compressor_kw`, `fan_kw`, `crankcase_kw`, `backup_er_kw`, `pan_heater_kw`, `pump_power_kw`) is scaled by `space_fraction` consistently with `electric_kw`, so components sum to the unit total. Gross (unscaled) values used for companion physics (e.g. the GSHP borehole balance) are kept in equipment state, not telemetry. Exception: `defrost_extra_power_w` is a diagnostic in W of the defrost draw at the unit (for reverse-cycle defrost it is already contained in `compressor_kw`; for resistive defrost it is a separate resistive element reported only by this key).
+Per-component power telemetry (`compressor_kw`, `fan_kw`, `crankcase_kw`, `backup_er_kw`, `pan_heater_kw`, `pump_power_kw`) is scaled by `space_fraction` consistently with `electric_kw`, so components sum to the unit total. The telemetry keys keep their reporting spellings; every value under them is watts (SI) since the run-state commit. Gross (unscaled) values used for companion physics (e.g. the GSHP borehole balance) are kept in equipment state, not telemetry. Exception: `defrost_extra_power_w` is a diagnostic in W of the defrost draw at the unit (for reverse-cycle defrost it is already contained in `compressor_kw`; for resistive defrost it is a separate resistive element reported only by this key).
 
 ## Heat Pump
 

@@ -221,12 +221,13 @@ impl BatteryManagementActor {
             GridExportRule::Unrestricted => discharge_kw,
             GridExportRule::Disabled => {
                 // Battery can only offset home load, never export to grid.
-                discharge_kw.min(env.electrical.base_load_kw.max(0.0))
+                discharge_kw.min(hares_core_units::w_to_kw(env.electrical.base_load_w).max(0.0))
             }
             GridExportRule::SolarOnly => {
                 // Battery may discharge up to load + PV, so net grid export
                 // (discharge - load) is at most PV generation.
-                let max_allowed = env.electrical.base_load_kw.max(0.0) + pv_kw;
+                let max_allowed =
+                    hares_core_units::w_to_kw(env.electrical.base_load_w).max(0.0) + pv_kw;
                 discharge_kw.min(max_allowed)
             }
         }
@@ -253,8 +254,8 @@ impl BatteryManagementActor {
                     self.last_action = "idle:no_soc".into();
                     return;
                 };
-                let pv = env.electrical.actual_pv_kw_or_fallback();
-                let load = env.electrical.base_load_kw;
+                let pv = hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback());
+                let load = hares_core_units::w_to_kw(env.electrical.base_load_w);
                 let surplus = pv - load;
                 // One conversion at the read: the payload enters in W
                 // (SI); the actor still works in kW until the control
@@ -263,7 +264,9 @@ impl BatteryManagementActor {
                     uom::si::f64::Power::new::<uom::si::power::watt>(*surplus_deadband_w)
                         .get::<uom::si::power::kilowatt>();
 
-                if *solar_only_charging && env.electrical.actual_pv_kw <= 0.0 {
+                if *solar_only_charging
+                    && hares_core_units::w_to_kw(env.electrical.actual_pv_w) <= 0.0
+                {
                     self.emit(ControlSignal::GridConnect { connected: false }, out);
                     self.last_action = "grid_disconnect:solar_only".into();
                     return;
@@ -310,7 +313,7 @@ impl BatteryManagementActor {
                             let raw_discharge = (-surplus).min(self.max_discharge_kw);
                             let clamped = self.clamp_discharge_for_export(
                                 raw_discharge,
-                                env.electrical.actual_pv_kw_or_fallback(),
+                                hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback()),
                                 env,
                             );
                             self.emit(
@@ -391,7 +394,9 @@ impl BatteryManagementActor {
                         "BMS dwell timer suppressed TOU action change"
                     );
                     // Keep charging — re-instate the charge path.
-                    if *solar_only_charging && env.electrical.actual_pv_kw <= 0.0 {
+                    if *solar_only_charging
+                        && hares_core_units::w_to_kw(env.electrical.actual_pv_w) <= 0.0
+                    {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
                         self.last_action = "grid_disconnect:tou_solar_only".into();
                         return;
@@ -417,7 +422,7 @@ impl BatteryManagementActor {
                     );
                     let clamped = self.clamp_discharge_for_export(
                         self.max_discharge_kw,
-                        env.electrical.actual_pv_kw_or_fallback(),
+                        hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback()),
                         env,
                     );
                     self.emit(
@@ -431,7 +436,9 @@ impl BatteryManagementActor {
                     );
                     self.last_action = "tou:discharge".into();
                 } else if should_charge {
-                    if *solar_only_charging && env.electrical.actual_pv_kw <= 0.0 {
+                    if *solar_only_charging
+                        && hares_core_units::w_to_kw(env.electrical.actual_pv_w) <= 0.0
+                    {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
                         self.last_action = "grid_disconnect:tou_solar_only".into();
                         return;
@@ -449,7 +456,7 @@ impl BatteryManagementActor {
                 } else if should_discharge {
                     let clamped = self.clamp_discharge_for_export(
                         self.max_discharge_kw,
-                        env.electrical.actual_pv_kw_or_fallback(),
+                        hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback()),
                         env,
                     );
                     self.emit(
@@ -487,7 +494,9 @@ impl BatteryManagementActor {
                 };
 
                 if need_charge {
-                    if !charge_from_grid && env.electrical.actual_pv_kw <= 0.0 {
+                    if !charge_from_grid
+                        && hares_core_units::w_to_kw(env.electrical.actual_pv_w) <= 0.0
+                    {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
                         self.last_action = "grid_disconnect:backup_no_pv".into();
                         return;
@@ -551,7 +560,7 @@ impl BatteryManagementActor {
                         let raw = dr_discharge_rate * self.max_discharge_kw;
                         let clamped = self.clamp_discharge_for_export(
                             raw,
-                            env.electrical.actual_pv_kw_or_fallback(),
+                            hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback()),
                             env,
                         );
                         self.emit(
@@ -596,7 +605,7 @@ impl BatteryManagementActor {
                             let raw = rate_fraction * self.max_discharge_kw;
                             let clamped = self.clamp_discharge_for_export(
                                 raw,
-                                env.electrical.actual_pv_kw_or_fallback(),
+                                hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback()),
                                 env,
                             );
                             self.emit(
@@ -785,7 +794,7 @@ impl BatteryManagementActor {
         let Some(soc) = self.read_soc(env) else {
             return;
         };
-        let load = env.electrical.base_load_kw;
+        let load = hares_core_units::w_to_kw(env.electrical.base_load_w);
         let surplus = pv_kw - load;
         let deadband = surplus_deadband_kw;
 
@@ -1103,10 +1112,13 @@ impl Actor for BatteryManagementActor {
         // for this battery — the BMS enters idle:no_soc and never dispatches,
         // so the 0.0 sentinel ("unavailable") cannot drive a wrong action.
         self.telemetry.set("soc", self.read_soc(env).unwrap_or(0.0));
-        let pv_stale = env.electrical.actual_pv_kw_or_fallback();
+        let pv_stale = hares_core_units::w_to_kw(env.electrical.actual_pv_w_or_fallback());
         self.telemetry.set("pv_kw", pv_stale);
         self.telemetry.set("bms_pv_stale_kw", pv_stale);
-        self.telemetry.set("load_kw", env.electrical.base_load_kw);
+        self.telemetry.set(
+            "load_kw",
+            hares_core_units::w_to_kw(env.electrical.base_load_w),
+        );
         let toggled = self.last_action != action_before;
         if toggled {
             self.current_mode_entered_step = self.step_count;
@@ -1331,8 +1343,8 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 5.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 5000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -1359,8 +1371,8 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 1.0,
-                base_load_kw: 4.0,
+                pv_generation_w: 1000.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             })
             .build();
@@ -1392,8 +1404,8 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 0.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 0.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -1633,8 +1645,8 @@ mod tests {
                 ..Default::default()
             })
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 5.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 5000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -1769,8 +1781,8 @@ mod tests {
                 ..Default::default()
             })
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 5.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 5000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -1902,8 +1914,8 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 1.0,
-                base_load_kw: 4.0,
+                pv_generation_w: 1000.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             })
             .build();
@@ -1943,8 +1955,8 @@ mod tests {
         });
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 5.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 5000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -1978,7 +1990,7 @@ mod tests {
                 ..Default::default()
             })
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 0.0,
+                pv_generation_w: 0.0,
                 ..Default::default()
             })
             .build();
@@ -2033,8 +2045,8 @@ mod tests {
                 ..Default::default()
             })
             .with_electrical(ElectricalSummary {
-                base_load_kw: 2.0,
-                pv_generation_kw: 0.0,
+                base_load_w: 2000.0,
+                pv_generation_w: 0.0,
                 ..Default::default()
             })
             .build();
@@ -2083,8 +2095,8 @@ mod tests {
                 ..Default::default()
             })
             .with_electrical(ElectricalSummary {
-                base_load_kw: 8.0,
-                pv_generation_kw: 0.0,
+                base_load_w: 8000.0,
+                pv_generation_w: 0.0,
                 ..Default::default()
             })
             .build();
@@ -2132,8 +2144,8 @@ mod tests {
                 ..Default::default()
             })
             .with_electrical(ElectricalSummary {
-                base_load_kw: 1.0,
-                pv_generation_kw: 0.0,
+                base_load_w: 1000.0,
+                pv_generation_w: 0.0,
                 ..Default::default()
             })
             .build();
@@ -2182,8 +2194,8 @@ mod tests {
                 ..Default::default()
             })
             .with_electrical(ElectricalSummary {
-                base_load_kw: 2.0,
-                pv_generation_kw: 1.0,
+                base_load_w: 2000.0,
+                pv_generation_w: 1000.0,
                 ..Default::default()
             })
             .build();
@@ -2224,8 +2236,8 @@ mod tests {
 
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 2.0,
-                base_load_kw: 5.0,
+                pv_generation_w: 2000.0,
+                base_load_w: 5000.0,
                 ..Default::default()
             })
             .build();
@@ -2266,8 +2278,8 @@ mod tests {
 
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 0.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 0.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -2303,8 +2315,8 @@ mod tests {
 
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 0.0,
-                base_load_kw: 3.0,
+                pv_generation_w: 0.0,
+                base_load_w: 3000.0,
                 ..Default::default()
             })
             .build();
@@ -2339,8 +2351,8 @@ mod tests {
 
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 1.0,
-                base_load_kw: 4.0,
+                pv_generation_w: 1000.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             })
             .build();
@@ -2391,8 +2403,8 @@ mod tests {
 
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 0.0,
-                base_load_kw: 3.0,
+                pv_generation_w: 0.0,
+                base_load_w: 3000.0,
                 ..Default::default()
             })
             .build();
@@ -2441,8 +2453,8 @@ mod tests {
 
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 4.0,
-                base_load_kw: 2.0, // surplus = 2 kW
+                pv_generation_w: 4000.0,
+                base_load_w: 2000.0, // surplus = 2 kW
                 ..Default::default()
             })
             .build();
@@ -2478,8 +2490,8 @@ mod tests {
 
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 4.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 4000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -2590,9 +2602,9 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 10.0,
-                actual_pv_kw: 3.0,
-                base_load_kw: 5.0,
+                pv_generation_w: 10000.0,
+                actual_pv_w: 3000.0,
+                base_load_w: 5000.0,
                 ..Default::default()
             })
             .build();
@@ -2627,9 +2639,9 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 5.0,
-                actual_pv_kw: 0.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 5000.0,
+                actual_pv_w: 0.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -2664,9 +2676,9 @@ mod tests {
         );
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 10.0,
-                actual_pv_kw: 2.0,
-                base_load_kw: 4.0,
+                pv_generation_w: 10000.0,
+                actual_pv_w: 2000.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             })
             .build();
@@ -2701,9 +2713,9 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 4.0,
-                actual_pv_kw: 4.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 4000.0,
+                actual_pv_w: 4000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -2742,9 +2754,9 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 1.0,
-                actual_pv_kw: 1.0,
-                base_load_kw: 4.0,
+                pv_generation_w: 1000.0,
+                actual_pv_w: 1000.0,
+                base_load_w: 4000.0,
                 ..Default::default()
             })
             .build();
@@ -2779,9 +2791,9 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 4.0,
-                actual_pv_kw: 4.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 4000.0,
+                actual_pv_w: 4000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -2813,9 +2825,9 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 4.0,
-                actual_pv_kw: 4.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 4000.0,
+                actual_pv_w: 4000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -2856,9 +2868,9 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 0.0,
-                actual_pv_kw: 0.0,
-                base_load_kw: 5.0,
+                pv_generation_w: 0.0,
+                actual_pv_w: 0.0,
+                base_load_w: 5000.0,
                 ..Default::default()
             })
             .build();
@@ -2890,9 +2902,9 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 3.0,
-                actual_pv_kw: 3.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 3000.0,
+                actual_pv_w: 3000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -2925,9 +2937,9 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 0.0,
-                actual_pv_kw: 0.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 0.0,
+                actual_pv_w: 0.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -2971,9 +2983,9 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 4.0,
-                actual_pv_kw: 4.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 4000.0,
+                actual_pv_w: 4000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -3016,9 +3028,9 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 0.0,
-                actual_pv_kw: 0.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 0.0,
+                actual_pv_w: 0.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -3069,9 +3081,9 @@ mod tests {
                 ..Default::default()
             })
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 4.0,
-                actual_pv_kw: 4.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 4000.0,
+                actual_pv_w: 4000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -3129,9 +3141,9 @@ mod tests {
                 ..Default::default()
             })
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 4.0,
-                actual_pv_kw: 4.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 4000.0,
+                actual_pv_w: 4000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -3176,9 +3188,9 @@ mod tests {
         // decide() with surplus=0.0 → idle (0.0 not > 0.5 deadband)
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 2.0,
-                actual_pv_kw: 2.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 2000.0,
+                actual_pv_w: 2000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -3334,8 +3346,8 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 5.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 5000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -3350,8 +3362,8 @@ mod tests {
         // Should stay charging because we were charging.
         let mut env2 = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 3.0,
-                base_load_kw: 2.8,
+                pv_generation_w: 3000.0,
+                base_load_w: 2800.0,
                 ..Default::default()
             })
             .build();
@@ -3367,8 +3379,8 @@ mod tests {
         // Step 3: surplus drops below -deadband → should exit charge
         let mut env3 = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 1.0,
-                base_load_kw: 3.0,
+                pv_generation_w: 1000.0,
+                base_load_w: 3000.0,
                 ..Default::default()
             })
             .build();
@@ -3535,8 +3547,8 @@ mod tests {
         });
         let mut env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 5.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 5000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -3751,5 +3763,13 @@ mod tests {
             (blocked - 2.0).abs() < 1e-9,
             "bms_dwell_blocked should be 2 (suppressed at steps 2 and 3), got {blocked}"
         );
+    }
+}
+
+/// The kW working value of an SI summary read: the actors' kW-era working
+/// values convert once at the read until the control-layer commit.
+pub(crate) mod hares_core_units {
+    pub(crate) fn w_to_kw(w: f64) -> f64 {
+        uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
     }
 }

@@ -5,12 +5,10 @@ use crate::config::EquipmentTypedConfig;
 
 use hares_types::{ChargingLevel, ChargingPriority, ChargingStrategy, PlugInPolicy};
 
-pub(super) const DEFAULT_FUEL_ECONOMY_KWH_PER_MI: f64 = 0.325;
-/// The default fuel economy in SI (J/m), the `uom` expression of the
-/// same value (0.3 kWh/mi is 671.08 J/m to the printed digits; the
-/// default is 0.325).
-pub(super) const DEFAULT_FUEL_ECONOMY_J_PER_M: f64 =
-    DEFAULT_FUEL_ECONOMY_KWH_PER_MI * 3.6e6 / 1609.344;
+/// The default fuel economy in SI (J/m): 0.325 kWh/mi, the same value
+/// the kW-era constant held (0.3 kWh/mi is 671.08 J/m to the printed
+/// digits; the default is 0.325).
+pub(super) const DEFAULT_FUEL_ECONOMY_J_PER_M: f64 = 0.325 * 3.6e6 / 1609.344;
 /// The same hardware bounds in W (SI), the clamp the config's
 /// `max_charging_power_w` runs against.
 pub(super) const L1_MIN_POWER_W: f64 = 1000.0;
@@ -20,10 +18,10 @@ pub(super) const L2_MAX_POWER_W: f64 = 11500.0;
 /// The placeholder constructor's Level 2 rate: the top of the OCHRE
 /// vehicle-number table, the deleted raw default rule's value for the
 /// default capacity. `init_typed` replaces it from the config.
-pub(super) const DEFAULT_MAX_CHARGING_POWER_KW: f64 = 11.5;
+pub(super) const DEFAULT_MAX_CHARGING_POWER_W: f64 = 11.5 * 1000.0;
 /// OCHRE EV.py: default 75 kWh EV battery capacity (vehicle number 4
 /// class, the BEV ≥ 175 mi range tier).
-pub(super) const DEFAULT_CAPACITY_KWH: f64 = 75.0;
+pub(super) const DEFAULT_CAPACITY_J: f64 = 75.0 * 3.6e6;
 pub(super) const DEFAULT_SOC: f64 = 1.0;
 pub(super) const DEFAULT_SOC_MAX: f64 = 1.0;
 /// OCHRE EV.py:11 — EV_EFFICIENCY = 0.9, the AC→DC onboard charger
@@ -99,7 +97,7 @@ pub(super) const DEFAULT_CELL_SPECIFIC_HEAT_J_PER_KG_K: f64 = 1000.0;
 const UA_BASE_W_PER_K: f64 = 5.0;
 /// Reference pack size for the UA area scaling: the stationary Battery's
 /// 13.5 kWh default (OCHRE Battery.py).
-const UA_REFERENCE_CAPACITY_KWH: f64 = 13.5;
+const UA_REFERENCE_CAPACITY_J: f64 = 13.5 * 3.6e6;
 // Standard laboratory reference temperature (20 °C / 293.15 K). True
 // fallback ONLY where ambient is genuinely unavailable at construction
 // time (pre-init telemetry placeholder): `init` resolves the pack
@@ -115,14 +113,14 @@ pub(super) const DEFAULT_V2L_SOC_RESERVE: f64 = 0.2;
 /// HARES engineering default: 3 kW V2L discharge ceiling, sized to backup
 /// circuits (refrigeration + lighting + essentials) on a 120/240 V
 /// residential split phase.
-pub(super) const DEFAULT_V2L_MAX_DISCHARGE_KW: f64 = 3.0;
+pub(super) const DEFAULT_V2L_MAX_DISCHARGE_W: f64 = 3000.0;
 /// HARES engineering default: grid-service discharge keeps 30 % of the
 /// pack (stricter than V2L — the departure guarantee must survive a
 /// V2G session).
 pub(super) const DEFAULT_V2G_SOC_RESERVE: f64 = 0.3;
 /// HARES engineering default: 5 kW V2G ceiling, the common residential
 /// bidirectional EVSE rating class.
-pub(super) const DEFAULT_V2G_MAX_DISCHARGE_KW: f64 = 5.0;
+pub(super) const DEFAULT_V2G_MAX_DISCHARGE_W: f64 = 5000.0;
 /// SOC above which CC-CV tapering of charging power begins.
 ///
 /// This is a conventional engineering default for NMC Li‑ion chemistry: the
@@ -136,7 +134,6 @@ pub(super) const DEFAULT_V2G_MAX_DISCHARGE_KW: f64 = 5.0;
 /// When a charging-curve LUT is present, this parameter is unused — the LUT
 /// already captures the electrochemical power roll-off at high SOC.
 pub(super) const DEFAULT_CC_CV_TRANSITION_SOC: f64 = 0.85;
-pub(super) use hares_physics::constants::SECONDS_PER_HOUR;
 pub(super) const MIN_TIMESTEP_HOURS: f64 = 1e-9;
 
 /// Default pack thermal mass [J/K], derived from rated capacity through
@@ -148,8 +145,12 @@ pub(super) const MIN_TIMESTEP_HOURS: f64 = 1e-9;
 /// and turn every sub-freezing night into a full-window charging blackout
 /// (the pack hits the plating cutoff before the window opens and stays
 /// there all night).
-pub(super) fn default_thermal_mass_j_per_k(capacity_kwh: f64) -> f64 {
-    (capacity_kwh.max(0.0) * DEFAULT_PACK_MASS_KG_PER_KWH * DEFAULT_CELL_SPECIFIC_HEAT_J_PER_KG_K)
+pub(super) fn default_thermal_mass_j_per_k(capacity_j: f64) -> f64 {
+    // C = capacity (kWh) × 6.4 kg/kWh × 1000 J/(kg·K), the capacity
+    // entering in joules: kWh = J / 3.6e6.
+    (capacity_j.max(0.0) / 3.6e6
+        * DEFAULT_PACK_MASS_KG_PER_KWH
+        * DEFAULT_CELL_SPECIFIC_HEAT_J_PER_KG_K)
         .max(1.0)
 }
 
@@ -166,18 +167,19 @@ pub(super) fn default_thermal_mass_j_per_k(capacity_kwh: f64) -> f64 {
 /// implies a UA ceiling ≈24 W/K at ~480 kJ/K mass — the (mass, UA) pair
 /// is re-derived jointly if a cited derivation exceeds it; the test is
 /// never widened.
-pub(super) fn default_ua_w_per_k(capacity_kwh: f64) -> f64 {
-    UA_BASE_W_PER_K * (capacity_kwh.max(0.0) / UA_REFERENCE_CAPACITY_KWH).powf(2.0 / 3.0)
+pub(super) fn default_ua_w_per_k(capacity_j: f64) -> f64 {
+    UA_BASE_W_PER_K * (capacity_j.max(0.0) / UA_REFERENCE_CAPACITY_J).powf(2.0 / 3.0)
 }
 
 /// Default parallel string count, derived from rated capacity so the
 /// topology is capacity-consistent: `n_parallel = ceil(pack_Ah /
-/// cell_Ah)` with `pack_Ah = capacity_kwh × 1000 / (n_series × 3.7 V)`.
+/// cell_Ah)` with `pack_Ah = capacity_j / (n_series × 3.7 V × 3600 s)`.
 /// For 75 kWh: 96S43P (implied capacity 76.6 kWh, +2.1 % — the ceil
 /// rounds up, never below the declared capacity).
-pub(super) fn default_n_parallel(capacity_kwh: f64) -> u32 {
-    let pack_ah = capacity_kwh.max(0.0) * 1000.0
-        / (DEFAULT_N_SERIES as f64 * CELL_NOMINAL_V).max(f64::EPSILON);
+pub(super) fn default_n_parallel(capacity_j: f64) -> u32 {
+    // Ah from joules: Ah = J / (V * 3600 s).
+    let pack_ah = capacity_j.max(0.0)
+        / ((DEFAULT_N_SERIES as f64 * CELL_NOMINAL_V) * 3600.0).max(f64::EPSILON);
     if pack_ah <= 0.0 {
         return 1;
     }
@@ -287,7 +289,7 @@ pub struct EvConfig {
     /// nominal NMC, the prevailing EV architecture).
     pub n_series: Option<u32>,
     /// Parallel string count (sets pack current sharing and resistance).
-    /// Defaults to a value derived from `capacity_kwh` (see
+    /// Defaults to a value derived from `capacity_j` (see
     /// `default_n_parallel`).
     pub n_parallel: Option<u32>,
     /// Cell internal resistance (Ω) at mid-SOC, 25 °C. Drives the I²R

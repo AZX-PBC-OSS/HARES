@@ -24,7 +24,7 @@ from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER, make_dwelling
 import hares.rl.vec_env as vec_env_module
 from hares.rl.vec_env import VecDwellingGymEnv
 
-_OBS_FIELDS = ["total_power_kw", "outdoor_temp"]
+_OBS_FIELDS = ["total_power_w", "outdoor_temp"]
 
 # heat_c = 21 degC is a valid setpoint: the clean-step baseline.
 _CLEAN_ACTION_CONFIG = {"Gas Furnace": ["heat_c"]}
@@ -50,7 +50,7 @@ def _make_vec_env(action_config: dict[str, list[str]]) -> tuple[VecDwellingGymEn
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=action_config,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     return env, dwellings
@@ -128,7 +128,7 @@ def _make_gym_env(action_config: dict[str, list[str]]):
         ),
         observation_fields=_OBS_FIELDS,
         action_space_config=action_config,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
 

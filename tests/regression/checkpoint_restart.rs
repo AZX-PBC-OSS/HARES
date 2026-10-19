@@ -132,14 +132,13 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
             let ref_step = &ref_tail[i];
             let rst_step = &restarted_steps[i];
 
-            let power_diff =
-                (ref_step.net_electric_power_kw - rst_step.net_electric_power_kw).abs();
+            let power_diff = (ref_step.net_electric_power_w - rst_step.net_electric_power_w).abs();
             if power_diff > 1e-9 {
                 failures.push(format!(
                     "step[{}] power divergence after checkpoint: ref={:.9} restart={:.9} diff={:.2e}",
                     CHECKPOINT_AT_STEP as usize + i,
-                    ref_step.net_electric_power_kw,
-                    rst_step.net_electric_power_kw,
+                    ref_step.net_electric_power_w,
+                    rst_step.net_electric_power_w,
                     power_diff,
                 ));
                 break;
@@ -661,14 +660,13 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         for i in 0..compare_len {
             let ref_step = &ref_tail[i];
             let rst_step = &restarted_steps[i];
-            let power_diff =
-                (ref_step.net_electric_power_kw - rst_step.net_electric_power_kw).abs();
+            let power_diff = (ref_step.net_electric_power_w - rst_step.net_electric_power_w).abs();
             if power_diff > 1e-9 {
                 failures.push(format!(
                     "step[{}] power divergence after checkpoint: ref={:.9} restart={:.9} diff={:.2e}",
                     CHECKPOINT_AT_STEP as usize + i,
-                    ref_step.net_electric_power_kw,
-                    rst_step.net_electric_power_kw,
+                    ref_step.net_electric_power_w,
+                    rst_step.net_electric_power_w,
                     power_diff,
                 ));
                 break;

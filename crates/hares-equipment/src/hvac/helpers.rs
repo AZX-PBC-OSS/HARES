@@ -622,7 +622,7 @@ fn parse_ashrae152_zone_type(s: &str) -> Option<hares_physics::ashrae152::Ashrae
 ///
 /// Call once during equipment init. Pre-registers all six EBM keys with 0.0
 /// so the telemetry output schema is stable regardless of whether the EBM
-/// gate (`zone_capacitance_kwh_per_k > 0`) is open at runtime.
+/// gate (`zone_capacitance_j_per_k > 0`) is open at runtime.
 pub fn register_ebm_telemetry_keys(telemetry: &mut Telemetry) {
     telemetry.insert(hares_types::telemetry_keys::EBM_EFFICIENCY, 0.0);
     telemetry.insert(hares_types::telemetry_keys::EBM_BASELINE_POWER_KW, 0.0);
@@ -633,7 +633,7 @@ pub fn register_ebm_telemetry_keys(telemetry: &mut Telemetry) {
 }
 
 /// The step's equivalent battery window, or `None` when the zone capacitance
-/// (`hvac.config.zone_capacitance_kwh_per_k`, set by the dwelling from the
+/// (`hvac.config.zone_capacitance_j_per_k`, set by the dwelling from the
 /// envelope solver) is zero and the model is disabled.
 ///
 /// A step computes it first, before it commits any state, so a failure here
@@ -648,12 +648,12 @@ pub(crate) fn step_equivalent_battery(
     hvac: &HvacEquipment,
     env: &EnvironmentState,
 ) -> crate::Result<Option<EquivalentBatteryWindow>> {
-    let cap_kwh = hvac.config.zone_capacitance_kwh_per_k;
-    if cap_kwh <= 0.0 {
+    let cap_j = hvac.config.zone_capacitance_j_per_k;
+    if cap_j <= 0.0 {
         return Ok(None);
     }
     let zone_temp_c = lookup_zone_temp(env, hvac.config.served_zone()?)?;
-    hvac.equivalent_battery_window(zone_temp_c, cap_kwh, hvac.eir_at_stage(0))
+    hvac.equivalent_battery_window(zone_temp_c, cap_j, hvac.eir_at_stage(0))
         .map(Some)
 }
 
@@ -664,7 +664,7 @@ pub(crate) fn step_equivalent_battery(
 /// `capacity_ideal_w` is the thermal output the step delivers [W] (sensible
 /// plus latent cooling for an AC, heating for a heater), the EBM's
 /// `capacity_ideal` input (OCHRE HVAC.py:640), giving
-/// `baseline_power_kw = capacity_ideal_w * rated_eir / 1000`. OCHRE solves
+/// `baseline_power_w = capacity_ideal_w * rated_eir / 1000`. OCHRE solves
 /// the steady-state hold load every step (`solve_ideal_capacity()`,
 /// HVAC.py:434-435); the delivered output equals it while the thermostat
 /// holds the setpoint and is zero while the unit is off.
@@ -684,11 +684,11 @@ pub(crate) fn write_ebm_telemetry(
     };
     let ebm = window.with_load(capacity_ideal_w)?;
     telemetry.set(tk::EBM_EFFICIENCY, ebm.efficiency);
-    telemetry.set(tk::EBM_BASELINE_POWER_KW, ebm.baseline_power_kw);
-    telemetry.set(tk::EBM_ENERGY_KWH, ebm.energy_kwh.unwrap_or(0.0));
-    telemetry.set(tk::EBM_MIN_ENERGY_KWH, ebm.min_energy_kwh);
-    telemetry.set(tk::EBM_MAX_ENERGY_KWH, ebm.max_energy_kwh.unwrap_or(0.0));
-    telemetry.set(tk::EBM_MAX_POWER_KW, ebm.max_power_kw.unwrap_or(0.0));
+    telemetry.set(tk::EBM_BASELINE_POWER_KW, ebm.baseline_power_w);
+    telemetry.set(tk::EBM_ENERGY_KWH, ebm.energy_j.unwrap_or(0.0));
+    telemetry.set(tk::EBM_MIN_ENERGY_KWH, ebm.min_energy_j);
+    telemetry.set(tk::EBM_MAX_ENERGY_KWH, ebm.max_energy_j.unwrap_or(0.0));
+    telemetry.set(tk::EBM_MAX_POWER_KW, ebm.max_power_w.unwrap_or(0.0));
     Ok(())
 }
 
@@ -1063,7 +1063,7 @@ mod tests {
         hvac.thermostat_fsm.mode = ThermostatMode::Heating;
         hvac.config.heating_capacities_w = vec![10_000.0];
         hvac.config.eir_by_stage = vec![0.25];
-        hvac.config.zone_capacitance_kwh_per_k = 2.0;
+        hvac.config.zone_capacitance_j_per_k = 7200000.0;
 
         let mut telemetry = Telemetry::new();
         register_ebm_telemetry_keys(&mut telemetry);
@@ -1080,12 +1080,12 @@ mod tests {
         );
         assert!(
             baseline > 0.0,
-            "EBM baseline_power_kw should be > 0 when capacity_ideal_w > 0, got {baseline}"
+            "EBM baseline_power_w should be > 0 when capacity_ideal_w > 0, got {baseline}"
         );
-        let expected_baseline = 3000.0 * 0.25 / 1000.0;
+        let expected_baseline = 3000.0 * 0.25;
         assert!(
-            (baseline - expected_baseline).abs() < 1e-9,
-            "EBM baseline_power_kw should be capacity_ideal_w * eir / 1000 = {expected_baseline}, got {baseline}"
+            (baseline - expected_baseline).abs() < 1e-6,
+            "EBM baseline_power_w should be capacity_ideal_w * eir = {expected_baseline} W, got {baseline}"
         );
     }
 
@@ -1107,7 +1107,7 @@ mod tests {
         let baseline = telemetry.get(tk::EBM_BASELINE_POWER_KW).unwrap();
         assert_eq!(
             baseline, 0.0,
-            "EBM baseline should stay at 0.0 when zone_capacitance_kwh_per_k is 0 (disabled)"
+            "EBM baseline should stay at 0.0 when zone_capacitance_j_per_k is 0 (disabled)"
         );
     }
 

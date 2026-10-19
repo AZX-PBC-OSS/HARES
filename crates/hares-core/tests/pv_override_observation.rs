@@ -127,8 +127,8 @@ fn pv_produces_nothing_at_night_under_an_override_carrying_its_surfaces() {
                 let kw = eq
                     .core_output()
                     .flows
-                    .electric_kw
-                    .map_or(0.0, |e| e.signed_kw());
+                    .electric_w
+                    .map_or(0.0, |e| e.signed_w());
                 assert_eq!(kw, 0.0, "step {step}: {} at night", eq.descriptor().name);
             }
         }

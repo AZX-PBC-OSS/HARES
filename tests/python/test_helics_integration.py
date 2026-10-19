@@ -296,7 +296,7 @@ class _RecordingDwelling:
         result = self._dwelling.step()
         telemetry = self._dwelling.telemetry().equipment()
         names = telemetry.get("names", [])
-        power = telemetry.get("power_kw", [])
+        power = telemetry.get("power_w", [])
         if self._tracked_equipment in names:
             index = names.index(self._tracked_equipment)
             self.battery_power_trace_kw.append(float(power[index]))
@@ -384,7 +384,7 @@ class _FaultyAggregator:
             self._fed, helics.HELICS_FLAG_TERMINATE_ON_ERROR, 1
         )
         _pub_voltage = self._fed.register_global_publication("grid/voltage", "double")
-        _sub_power = self._fed.register_subscription("house_1/total_power_kw", "double")
+        _sub_power = self._fed.register_subscription("house_1/total_power_w", "double")
         ready()
 
         try:
@@ -462,7 +462,7 @@ def _run_single_dwelling_exchange(voltage_pu: float) -> list[float]:
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
-        sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("house_1/total_power_w", "double")
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
         power_trace: list[float] = []
@@ -575,9 +575,9 @@ def test_fleet_cosim_with_mock_aggregator() -> None:
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
-        sub_aggregate = aggregator.register_subscription("fleet_1/aggregate_power_kw", "double")
+        sub_aggregate = aggregator.register_subscription("fleet_1/aggregate_power_w", "double")
         sub_dwelling = [
-            aggregator.register_subscription(f"fleet_1/dwelling_{idx}/total_power_kw", "double")
+            aggregator.register_subscription(f"fleet_1/dwelling_{idx}/total_power_w", "double")
             for idx in range(3)
         ]
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
@@ -633,7 +633,7 @@ def test_control_signal_via_helics() -> None:
         for step_idx in range(_TOTAL_STEPS):
             _request(aggregator, step_idx * _TIME_RES_S)
             if step_idx == 1:
-                # A discharge setpoint (negative active_power_kw), not a charge
+                # A discharge setpoint (negative active_power_w), not a charge
                 # setpoint: the dwelling's default scenario starts at January
                 # midnight outdoor temperature, below the battery's
                 # min_charge_temp_c safety lockout, so a charge request would be
@@ -708,7 +708,7 @@ def test_malformed_control_payload_does_not_crash_federate(
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
-        sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("house_1/total_power_w", "double")
         pub_control = aggregator.register_global_publication("grid/control", "string")
 
         with caplog.at_level("WARNING"):
@@ -797,7 +797,7 @@ def test_multi_rate_dwelling_steps_only_at_own_period() -> None:
         thread.wait_ready()
 
         aggregator = federation.value_federate("agg_mr", time_res_s=float(AGG_TIME_RES_S))
-        sub_power = aggregator.register_subscription("house_mr/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("house_mr/total_power_w", "double")
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
         power_trace: list[float] = []
@@ -858,7 +858,7 @@ def test_single_dwelling_completion_signal_unblocks_aggregator(core_type: str) -
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
-        sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("house_1/total_power_w", "double")
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
         _enter_exec(aggregator)
@@ -911,9 +911,9 @@ def test_fleet_completion_signal_unblocks_aggregator(core_type: str) -> None:
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
-        sub_aggregate = aggregator.register_subscription("fleet_1/aggregate_power_kw", "double")
+        sub_aggregate = aggregator.register_subscription("fleet_1/aggregate_power_w", "double")
         _ = [
-            aggregator.register_subscription(f"fleet_1/dwelling_{idx}/total_power_kw", "double")
+            aggregator.register_subscription(f"fleet_1/dwelling_{idx}/total_power_w", "double")
             for idx in range(3)
         ]
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
@@ -955,10 +955,10 @@ def test_publication_info_via_helics_api_fallback() -> None:
         assert helics_dwelling._pub_reactive is not None
 
         power_info = helics.helicsPublicationGetInfo(helics_dwelling._pub_power)
-        assert power_info == "units=kW"
+        assert power_info == "units=W"
 
         reactive_info = helics.helicsPublicationGetInfo(helics_dwelling._pub_reactive)
-        assert reactive_info == "units=kvar"
+        assert reactive_info == "units=VAR"
 
 
 def test_voltage_in_volts_triggers_out_of_range_warning() -> None:
@@ -1069,7 +1069,7 @@ def test_mismatched_subscription_topic_logs_stale_warning() -> None:
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_stale")
-        sub_power = aggregator.register_subscription("house_stale/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("house_stale/total_power_w", "double")
         # Aggregator publishes to the correct topic (not to voltage_typo)
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
@@ -1203,7 +1203,7 @@ def test_year_scale_time_drift_multi_federate() -> None:
         thread.wait_ready()
 
         aggregator = federation.value_federate("year_agg", time_res_s=_YEAR_TIME_RES_S)
-        sub_power = aggregator.register_subscription("year_house_2/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("year_house_2/total_power_w", "double")
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
         agg_granted_times: list[float] = []

@@ -6,7 +6,6 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
-use hares_physics::units::power_kw_to_w;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentHealthCounts,
@@ -812,16 +811,16 @@ impl Equipment for IdealHvac {
             }
         }
 
-        // Emit electrical port contribution for fan power.
-        let fan_kw = fan_power_w / 1000.0;
+        // Emit electrical port contribution for fan power (W, SI).
+        let fan_w = fan_power_w;
         // Rule R1: Ideal HVAC is unity pf (OCHRE Ideal = 1.0) → Q exactly
         // zero. Wired uniformly so the cross-equipment consistency check
         // (port/CoreOutput/telemetry) stays uniform across the fleet.
-        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
-        if fan_power_w > 0.0 || reactive_power_kvar != 0.0 {
+        let reactive_power_var = self.zip.reactive_var(fan_w, env.grid.bus_voltage_pu());
+        if fan_power_w > 0.0 || reactive_power_var != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(fan_kw),
-                reactive_power_kvar,
+                active_power_w: (fan_w),
+                reactive_power_var,
             })?;
         }
 
@@ -861,9 +860,9 @@ impl Equipment for IdealHvac {
         );
         self.telemetry
             .set(tk::CURRENT_TARGET_C, self.current_target_c);
-        self.telemetry.set(tk::FAN_KW, fan_kw);
+        self.telemetry.set(tk::FAN_KW, fan_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         let sp = self.thermostat_fsm.effective_setpoints();
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
@@ -892,8 +891,8 @@ impl Equipment for IdealHvac {
         let active_setpoint_c = self.current_target_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(fan_kw)),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(fan_w)),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: Some(capacity_w),
                 sensible_cooling_w: if capacity_w < 0.0 {
@@ -1026,8 +1025,8 @@ impl Equipment for IdealHvac {
         };
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_var: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: Some(decoded.ideal_capacity_w),
                 sensible_cooling_w: None,
@@ -2587,7 +2586,6 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         let expected_fan_w = 5_000.0 * 1.0 * (200.0 / (10_000.0 * 1.0));
-        let expected_fan_kw = expected_fan_w / 1000.0;
 
         // Electrical port should have fan power.
         assert!(
@@ -2598,11 +2596,11 @@ mod tests {
 
         // core_output should reflect fan consumption.
         let core = eq.core_output();
-        match core.flows.electric_kw {
+        match core.flows.electric_w {
             Some(ElectricPower::Consumption(kw)) => {
                 assert!(
-                    (kw - expected_fan_kw).abs() < 1e-9,
-                    "core electric_kw should be {expected_fan_kw}, got {kw}"
+                    (kw - expected_fan_w).abs() < 1e-9,
+                    "core electric_w should be {expected_fan_w}, got {kw}"
                 );
             }
             other => panic!("expected Consumption, got {other:?}"),
@@ -2620,8 +2618,8 @@ mod tests {
         let fan_kw_telem = eq.telemetry().get(hares_types::telemetry_keys::FAN_KW);
         assert!(fan_kw_telem.is_some(), "telemetry must contain FAN_KW");
         assert!(
-            (fan_kw_telem.unwrap() - expected_fan_kw).abs() < 1e-9,
-            "FAN_KW telemetry should be {expected_fan_kw}, got {:?}",
+            (fan_kw_telem.unwrap() - expected_fan_w).abs() < 1e-9,
+            "FAN_KW telemetry should be {expected_fan_w}, got {:?}",
             fan_kw_telem
         );
     }
@@ -2950,15 +2948,15 @@ mod tests {
             ports.thermal[0].sensible_gain_w
         );
 
-        let fan_kw = eq.telemetry().get(hares_types::telemetry_keys::FAN_KW);
+        let fan_w = eq.telemetry().get(hares_types::telemetry_keys::FAN_KW);
         assert!(
-            fan_kw.is_some(),
-            "fan_kw telemetry must be present in cooling mode"
+            fan_w.is_some(),
+            "fan_w telemetry must be present in cooling mode"
         );
         assert!(
-            fan_kw.unwrap() > 0.0,
+            fan_w.unwrap() > 0.0,
             "fan electrical consumption must be > 0 in cooling mode, got {:?}",
-            fan_kw
+            fan_w
         );
 
         assert!(
@@ -3896,11 +3894,11 @@ mod tests {
             "fan must draw real power"
         );
         assert_eq!(
-            ports.electrical.reactive_power_kvar, 0.0,
+            ports.electrical.reactive_power_var, 0.0,
             "unity pf ⇒ port Q == 0"
         );
         assert_eq!(
-            eq.core_output().flows.reactive_power_kvar,
+            eq.core_output().flows.reactive_power_var,
             Some(0.0),
             "unity pf ⇒ CoreOutput Q == Some(0.0)"
         );
@@ -3975,11 +3973,11 @@ mod tests {
                 "step {i} (v={v}): real power diverged between pf and no-pf twins"
             );
             assert_eq!(
-                ports_pf.electrical.reactive_power_kvar, 0.0,
+                ports_pf.electrical.reactive_power_var, 0.0,
                 "unity pf twin must produce zero reactive power"
             );
             assert_eq!(
-                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"
             );
             env.current_time += ChronoDuration::minutes(1);

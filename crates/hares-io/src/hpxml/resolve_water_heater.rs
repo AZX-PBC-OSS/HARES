@@ -1001,7 +1001,10 @@ fn child_power_w(node: &XmlNode, element: &'static super::elements::HpxmlElement
     let units = el.attrs.get("units").map(String::as_str).unwrap_or("W");
     match units.to_ascii_lowercase().as_str() {
         "w" | "watts" => Some(value),
-        "kw" => Some(conv::power_kw_to_w(value)),
+        "kw" => Some(
+            uom::si::f64::Power::new::<uom::si::power::kilowatt>(value)
+                .get::<uom::si::power::watt>(),
+        ),
         other => {
             tracing::warn!(
                 units = other,

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::catalogue::Catalogue;
+use hares_types::Unit;
 
 use crate::config::ConfigError;
 
@@ -209,6 +210,11 @@ pub trait VariableSurface {
     /// The variable names, in producer-slot (schema) order.
     fn variable_names(&self) -> Vec<&str>;
 
+    /// The variables' declared reporting units, in the same order: the
+    /// row plan converts each written value from SI with the column's
+    /// own unit (the one reporting conversion).
+    fn variable_units(&self) -> Vec<Unit>;
+
     /// The producer-slot index of the diagnostics block's first variable,
     /// when the surface carries the block. The block is a contiguous
     /// suffix of the schema's variables; a verbosity preset spans the
@@ -223,6 +229,9 @@ pub trait VariableSurface {
 /// fields carry the block's metadata marker.
 pub struct SchemaSurface {
     names: Vec<String>,
+    /// The variables' declared reporting units, in the names' order: the
+    /// schema fields' own `unit` metadata.
+    units: Vec<Unit>,
     /// The index of the first diagnostics field among the value columns,
     /// when the schema carries the block.
     diagnostics_start: Option<usize>,
@@ -235,6 +244,7 @@ impl SchemaSurface {
     pub fn new(schema: &Schema) -> Self {
         let mut diagnostics_start = None;
         let mut names = Vec::new();
+        let mut units = Vec::new();
         for (idx, field) in schema.fields().iter().skip(1).enumerate() {
             if diagnostics_start.is_none()
                 && field
@@ -244,9 +254,17 @@ impl SchemaSurface {
                 diagnostics_start = Some(idx);
             }
             names.push(field.name().clone());
+            units.push(
+                field
+                    .metadata()
+                    .get("unit")
+                    .and_then(|symbol| Unit::from_symbol(symbol))
+                    .unwrap_or(Unit::None),
+            );
         }
         Self {
             names,
+            units,
             diagnostics_start,
         }
     }
@@ -255,6 +273,10 @@ impl SchemaSurface {
 impl VariableSurface for SchemaSurface {
     fn variable_names(&self) -> Vec<&str> {
         self.names.iter().map(String::as_str).collect()
+    }
+
+    fn variable_units(&self) -> Vec<Unit> {
+        self.units.clone()
     }
 
     fn diagnostics_offset(&self) -> Option<usize> {
@@ -297,6 +319,11 @@ pub enum RowPlanError {
 #[derive(Debug, Default)]
 pub struct RowPlan {
     slots: usize,
+    /// Per-slot declared reporting unit: the write applies the unit's
+    /// one `from_si` conversion (B-14's run-state commit), so every
+    /// producer writes SI and every report row reads its column's
+    /// declared unit.
+    units: Vec<Unit>,
     /// The reused union row: one slot per producer slot, zeroed per step.
     row: Vec<f64>,
     /// Per-slot validity over the row, cleared with it each step: a clear
@@ -358,9 +385,11 @@ impl RowPlan {
             };
             projections.push(projection);
         }
+        let units = surface.variable_units();
         let slots = names.len();
         Ok(Self {
             slots,
+            units,
             row: vec![0.0; slots],
             validity: vec![0; slots.div_ceil(usize::BITS as usize)],
             local_timestamp: 0,
@@ -396,9 +425,9 @@ impl RowPlan {
         self.local_timestamp = local_timestamp;
     }
 
-    /// The union row, for the producers' index writes.
-    pub fn row_mut(&mut self) -> &mut [f64] {
-        &mut self.row
+    /// The per-slot declared reporting units.
+    pub fn units(&self) -> &[Unit] {
+        &self.units
     }
 
     /// The union row as recorded.
@@ -431,6 +460,7 @@ impl RowPlan {
     pub fn writer(&mut self) -> RowWriter<'_> {
         RowWriter {
             row: &mut self.row,
+            units: &self.units,
             validity: &mut self.validity,
         }
     }
@@ -442,9 +472,14 @@ impl RowPlan {
     /// lists the union slots of one report's columns, in the report's own
     /// column order.
     #[must_use]
-    pub fn from_resolved_projections(slots: usize, projections: Vec<Vec<usize>>) -> Self {
+    pub fn from_resolved_projections(
+        slots: usize,
+        units: Vec<Unit>,
+        projections: Vec<Vec<usize>>,
+    ) -> Self {
         Self {
             slots,
+            units,
             row: vec![0.0; slots],
             validity: vec![0; slots.div_ceil(usize::BITS as usize)],
             local_timestamp: 0,
@@ -464,13 +499,17 @@ impl RowPlan {
 /// invalid and reads as null downstream.
 pub struct RowWriter<'a> {
     row: &'a mut [f64],
+    units: &'a [Unit],
     validity: &'a mut [u64],
 }
 
 impl RowWriter<'_> {
-    /// Writes a produced value and marks the slot valid.
+    /// Writes a produced value and marks the slot valid. The value is SI
+    /// (every run-state value is, from B-14's run-state commit); the
+    /// slot's declared reporting unit converts it once here.
     pub fn write(&mut self, slot: usize, value: f64) {
-        self.row[slot] = value;
+        let unit = self.units.get(slot).copied().unwrap_or(Unit::None);
+        self.row[slot] = unit.from_si(value);
         self.mark_valid(slot);
     }
 
@@ -483,9 +522,11 @@ impl RowWriter<'_> {
     }
 
     /// Accumulates into a summed cell and marks the slot valid (the
-    /// zeroed accumulator is the value).
+    /// zeroed accumulator is the value). The value is SI; the slot's
+    /// declared unit converts it once.
     pub fn add(&mut self, slot: usize, value: f64) {
-        self.row[slot] += value;
+        let unit = self.units.get(slot).copied().unwrap_or(Unit::None);
+        self.row[slot] += unit.from_si(value);
         self.mark_valid(slot);
     }
 
@@ -779,8 +820,7 @@ mod tests {
         assert_eq!(plan.local_timestamp(), 1_700_000_000);
         assert!(plan.row().iter().all(|&v| v == 0.0));
         assert!(!plan.valid(0));
-        plan.row_mut()[0] = 4.2;
-        plan.set_valid(0);
+        plan.writer().write(0, 4.2);
         assert_eq!(plan.row()[0], 4.2);
         assert!(plan.valid(0));
         assert!(!plan.valid(1));

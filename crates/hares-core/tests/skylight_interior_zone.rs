@@ -225,7 +225,7 @@ fn a_cathedral_roof_skylight_builds_and_seats_in_the_conditioned_space() {
     let step = dwelling
         .step()
         .expect("the first step runs with the skylight seated in the conditioned space");
-    assert!(step.net_electric_power_kw.is_finite());
+    assert!(step.net_electric_power_w.is_finite());
 }
 
 /// A skylight whose parent roof's interior adjacency is not conditioned

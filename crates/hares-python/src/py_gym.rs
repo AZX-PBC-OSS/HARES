@@ -1024,7 +1024,7 @@ mod tests {
                     let plan = dwelling
                         .bind(py)
                         .borrow()
-                        .observation_plan(vec!["total_power_kw".to_string()])
+                        .observation_plan(vec!["total_power_w".to_string()])
                         .expect("the plan builds");
                     Py::new(py, plan).expect("the plan wraps")
                 })
@@ -1073,7 +1073,7 @@ mod tests {
         Python::attach(|py| {
             let first = base_dwelling(py);
             let second = base_dwelling(py);
-            let fields = vec!["total_power_kw".to_string()];
+            let fields = vec!["total_power_w".to_string()];
             let plans: Vec<Py<PyObservationPlan>> =
                 vec![first.bind(py).borrow(), second.bind(py).borrow()]
                     .into_iter()
@@ -1789,7 +1789,7 @@ mod tests {
                         let plan = dwelling
                             .bind(py)
                             .borrow()
-                            .observation_plan(vec!["total_power_kw".to_string()])
+                            .observation_plan(vec!["total_power_w".to_string()])
                             .expect("the plan builds");
                         Py::new(py, plan).expect("the plan wraps")
                     })

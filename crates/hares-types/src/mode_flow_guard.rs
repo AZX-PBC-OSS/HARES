@@ -42,14 +42,14 @@ pub(crate) fn check_mode_flow_consistency(
         // did not, so equipment reporting an active mode backed only by
         // vars could never satisfy Rule 1.
         if mode.is_active() {
-            let has_flow = co.flows.electric_kw.as_ref().is_some_and(|p| !p.is_zero())
+            let has_flow = co.flows.electric_w.as_ref().is_some_and(|p| !p.is_zero())
                 || co.flows.thermal_output_w.is_some_and(|v| v != 0.0)
                 || co
                     .flows
                     .fuel_w
                     .as_ref()
                     .is_some_and(|f| f.consumption_w > 0.0)
-                || co.flows.reactive_power_kvar.is_some_and(|v| v != 0.0);
+                || co.flows.reactive_power_var.is_some_and(|v| v != 0.0);
             if !has_flow {
                 return Err(ModeFlowViolation {
                     message: format!(
@@ -58,7 +58,7 @@ pub(crate) fn check_mode_flow_consistency(
                          (electric={:?}, thermal={:?}, fuel={:?})",
                         desc.name,
                         caps,
-                        co.flows.electric_kw,
+                        co.flows.electric_w,
                         co.flows.thermal_output_w,
                         co.flows.fuel_w,
                     ),
@@ -68,14 +68,14 @@ pub(crate) fn check_mode_flow_consistency(
 
         // Rule 2: Off-mode zero-flow guard
         if mode == OperatingMode::Off {
-            let non_zero = co.flows.electric_kw.as_ref().is_some_and(|p| !p.is_zero())
+            let non_zero = co.flows.electric_w.as_ref().is_some_and(|p| !p.is_zero())
                 || co.flows.thermal_output_w.is_some_and(|v| v != 0.0)
                 || co
                     .flows
                     .fuel_w
                     .as_ref()
                     .is_some_and(|f| f.consumption_w > 0.0)
-                || co.flows.reactive_power_kvar.is_some_and(|v| v != 0.0);
+                || co.flows.reactive_power_var.is_some_and(|v| v != 0.0);
             if non_zero {
                 return Err(ModeFlowViolation {
                     message: format!(
@@ -84,10 +84,10 @@ pub(crate) fn check_mode_flow_consistency(
                          (electric={:?}, thermal={:?}, fuel={:?}, reactive={:?})",
                         desc.name,
                         caps,
-                        co.flows.electric_kw,
+                        co.flows.electric_w,
                         co.flows.thermal_output_w,
                         co.flows.fuel_w,
-                        co.flows.reactive_power_kvar,
+                        co.flows.reactive_power_var,
                     ),
                 });
             }
@@ -127,7 +127,7 @@ pub(crate) fn check_mode_flow_consistency(
     // Rule 4: charging/discharging direction.
     // Only applies to unidirectional Consumption/Generation — Bidirectional
     // can flow either way at any moment (e.g., battery with standby load).
-    if let (Some(mode), Some(electric)) = (co.state.operating_mode, &co.flows.electric_kw) {
+    if let (Some(mode), Some(electric)) = (co.state.operating_mode, &co.flows.electric_w) {
         use crate::equipment::ElectricPower;
         let violation = match (mode, electric) {
             (OperatingMode::Charging, ElectricPower::Generation(kw)) if *kw > 0.0 => {

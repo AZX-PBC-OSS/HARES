@@ -43,10 +43,10 @@ T_cell = T_amb + (E_POA / 800) * (NOCT - 20) * (9.5 / (5.7 + 3.8 * wind_speed))
 
 ## DC Power Calculation
 
-**PVWatts model** (no LUT):
+**PVWatts model** (no LUT), in W:
 ```
-dc_kw = capacity_kw * (irradiance / 1000) * max(0, 1 + gamma * (T_cell - 25))
-dc_kw *= (1 - system_losses_fraction)
+dc_w = capacity_w * (irradiance / 1000) * max(0, 1 + gamma * (T_cell - 25))
+dc_w *= (1 - system_losses_fraction)
 ```
 
 **SAM LUT model** (`pv/lut.rs`):

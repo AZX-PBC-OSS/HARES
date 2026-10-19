@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "d12a8c38aa7736089fea3d9b032f3b6e3609f56a",
+  "git_head": "6a5d97695e7dfbb5efb705c35ac6fefc636c8d05",
   "git_dirty": true,
   "metrics": [],
   "products": {
@@ -156,9 +156,9 @@
         },
         {
           "name": "Total Electric Power (kW)",
-          "digest": "b73c4bb8b2686fc466fda197470081e6224c15a7f3d7c771c4d8b66dfeb63e59",
+          "digest": "75c6f6527ffdb5f83ab68c7c8f5e9ef63222d02084e39f510b75de52668b0115",
           "blocks": [
-            "b73c4bb8b2686fc466fda197470081e6224c15a7f3d7c771c4d8b66dfeb63e59"
+            "75c6f6527ffdb5f83ab68c7c8f5e9ef63222d02084e39f510b75de52668b0115"
           ]
         },
         {
@@ -170,9 +170,9 @@
         },
         {
           "name": "Total Reactive Power (kVAR)",
-          "digest": "c8b2a5c3aaafea2191e028115a8e2262d24ebbc937f1f855581bc8a1f215fe26",
+          "digest": "57267e6cff4af8a1265781e71535fefa12b0556dad9c25798b9688c51f874af0",
           "blocks": [
-            "c8b2a5c3aaafea2191e028115a8e2262d24ebbc937f1f855581bc8a1f215fe26"
+            "57267e6cff4af8a1265781e71535fefa12b0556dad9c25798b9688c51f874af0"
           ]
         },
         {
@@ -198,9 +198,9 @@
         },
         {
           "name": "Room AC Electric Power (kW)",
-          "digest": "7cfa482c4d01082e134a954dff316b9dcbae41e8fa3993c15c73be2d52176942",
+          "digest": "896fc6be7d64cd3edb176e17f897fbce2b487a72dd5a8719de8619e7dd50408e",
           "blocks": [
-            "7cfa482c4d01082e134a954dff316b9dcbae41e8fa3993c15c73be2d52176942"
+            "896fc6be7d64cd3edb176e17f897fbce2b487a72dd5a8719de8619e7dd50408e"
           ]
         },
         {
@@ -212,16 +212,16 @@
         },
         {
           "name": "Clothes Washer Electric Power (kW)",
-          "digest": "98ee8f49a682c2cf33fd881bb10f6e88979777b3a017f32b7203c9f782c02df3",
+          "digest": "f45b56d3c771cc75549541c8998a1983b630957f74c4817add6308ed60e5ba4a",
           "blocks": [
-            "98ee8f49a682c2cf33fd881bb10f6e88979777b3a017f32b7203c9f782c02df3"
+            "f45b56d3c771cc75549541c8998a1983b630957f74c4817add6308ed60e5ba4a"
           ]
         },
         {
           "name": "Clothes Dryer Electric Power (kW)",
-          "digest": "d71aed31f6972ddfa33d4e28c7bf4ab883b118bff4af08e9f2f9727fbd52fc8e",
+          "digest": "4de3154dead74654f011137873327d04a4cf0529441749590bbb52dd71ccb3b8",
           "blocks": [
-            "d71aed31f6972ddfa33d4e28c7bf4ab883b118bff4af08e9f2f9727fbd52fc8e"
+            "4de3154dead74654f011137873327d04a4cf0529441749590bbb52dd71ccb3b8"
           ]
         },
         {
@@ -233,44 +233,44 @@
         },
         {
           "name": "Refrigerator Electric Power (kW)",
-          "digest": "2e8953a82d5ef58f4f4a06d2d41d8701f0ac1ade14341565c52b2c4bd755a6de",
+          "digest": "f1dddbbc29f5c66befdb33ea03fbca473b2abb0853f1670072338144ed670bd0",
           "blocks": [
-            "2e8953a82d5ef58f4f4a06d2d41d8701f0ac1ade14341565c52b2c4bd755a6de"
+            "f1dddbbc29f5c66befdb33ea03fbca473b2abb0853f1670072338144ed670bd0"
           ]
         },
         {
           "name": "Cooking Range Electric Power (kW)",
-          "digest": "e0f77663e58b20ea6bc45a85cbbe90f84ee090eb24bf889b185f71a50d7318a7",
+          "digest": "c4bff18f5e82278e523f24807ff985d977660c36ddf238785e8d61d35f8a8849",
           "blocks": [
-            "e0f77663e58b20ea6bc45a85cbbe90f84ee090eb24bf889b185f71a50d7318a7"
+            "c4bff18f5e82278e523f24807ff985d977660c36ddf238785e8d61d35f8a8849"
           ]
         },
         {
           "name": "Exterior Lighting Electric Power (kW)",
-          "digest": "987261d5ef00c307501018b48384a3b035de63ecf41f3eb3623121192dd2e5a4",
+          "digest": "394c2f38865078fa9dfd48f4090b5d2f18d9ce87f305d671df2c1b5ec7df20ea",
           "blocks": [
-            "987261d5ef00c307501018b48384a3b035de63ecf41f3eb3623121192dd2e5a4"
+            "394c2f38865078fa9dfd48f4090b5d2f18d9ce87f305d671df2c1b5ec7df20ea"
           ]
         },
         {
           "name": "Indoor Lighting Electric Power (kW)",
-          "digest": "03578cab772bd50cd515310d27e50ac42c0cd697073b7a4c9b43783191eed22d",
+          "digest": "160a27c31451297472fdee814225d80c66fed6dde1bb7d483cd7c6b10dad9069",
           "blocks": [
-            "03578cab772bd50cd515310d27e50ac42c0cd697073b7a4c9b43783191eed22d"
+            "160a27c31451297472fdee814225d80c66fed6dde1bb7d483cd7c6b10dad9069"
           ]
         },
         {
           "name": "TV Electric Power (kW)",
-          "digest": "1e4d0e115e560c512893c4405ec3fff14435babdaca7ad414597cb33a18fb061",
+          "digest": "745a5b9386c270dd3674bc594784c237002e76e474e233589ebf74457e5af497",
           "blocks": [
-            "1e4d0e115e560c512893c4405ec3fff14435babdaca7ad414597cb33a18fb061"
+            "745a5b9386c270dd3674bc594784c237002e76e474e233589ebf74457e5af497"
           ]
         },
         {
           "name": "MELs Electric Power (kW)",
-          "digest": "796306e9d265dd0b646b42e3195193ecd366c120fa1ddba7e01ff47ee3648d77",
+          "digest": "706e2533abf7f11336529bc7ba6b5da38d555b88f24a83e83c26d488f5ef63b3",
           "blocks": [
-            "796306e9d265dd0b646b42e3195193ecd366c120fa1ddba7e01ff47ee3648d77"
+            "706e2533abf7f11336529bc7ba6b5da38d555b88f24a83e83c26d488f5ef63b3"
           ]
         },
         {
@@ -282,9 +282,9 @@
         },
         {
           "name": "HVAC Cooling End Use Electric Power (kW)",
-          "digest": "7cfa482c4d01082e134a954dff316b9dcbae41e8fa3993c15c73be2d52176942",
+          "digest": "896fc6be7d64cd3edb176e17f897fbce2b487a72dd5a8719de8619e7dd50408e",
           "blocks": [
-            "7cfa482c4d01082e134a954dff316b9dcbae41e8fa3993c15c73be2d52176942"
+            "896fc6be7d64cd3edb176e17f897fbce2b487a72dd5a8719de8619e7dd50408e"
           ]
         },
         {
@@ -296,30 +296,30 @@
         },
         {
           "name": "Other End Use Electric Power (kW)",
-          "digest": "88a8153ae4b8a8a2f2cdcd0bcaddc4d5450ae0507e0c737d702297c04e739350",
+          "digest": "da42368f1966cf1174e381776bbe389138b79e19a1026ebab1fd72e3fda56d79",
           "blocks": [
-            "88a8153ae4b8a8a2f2cdcd0bcaddc4d5450ae0507e0c737d702297c04e739350"
+            "da42368f1966cf1174e381776bbe389138b79e19a1026ebab1fd72e3fda56d79"
           ]
         },
         {
           "name": "Refrigeration End Use Electric Power (kW)",
-          "digest": "2e8953a82d5ef58f4f4a06d2d41d8701f0ac1ade14341565c52b2c4bd755a6de",
+          "digest": "f1dddbbc29f5c66befdb33ea03fbca473b2abb0853f1670072338144ed670bd0",
           "blocks": [
-            "2e8953a82d5ef58f4f4a06d2d41d8701f0ac1ade14341565c52b2c4bd755a6de"
+            "f1dddbbc29f5c66befdb33ea03fbca473b2abb0853f1670072338144ed670bd0"
           ]
         },
         {
           "name": "Lighting End Use Electric Power (kW)",
-          "digest": "ca0f7584a2f9433733440a3d27cf73b23c4c353d766d68223c4e336fa516e69e",
+          "digest": "736f2ff7dd500b8136bfbb64b0ad0967abcedec48ab24cc96829787ba864854f",
           "blocks": [
-            "ca0f7584a2f9433733440a3d27cf73b23c4c353d766d68223c4e336fa516e69e"
+            "736f2ff7dd500b8136bfbb64b0ad0967abcedec48ab24cc96829787ba864854f"
           ]
         },
         {
           "name": "Plug Loads End Use Electric Power (kW)",
-          "digest": "b5e31aed55651697b46e0b41b652fccd8cb660d7987c2fa31f2352fd34b5cbb0",
+          "digest": "b32c42a30714146afe1494e943a8af82dd1ef1a10579300ab9b77bb16d6e8465",
           "blocks": [
-            "b5e31aed55651697b46e0b41b652fccd8cb660d7987c2fa31f2352fd34b5cbb0"
+            "b32c42a30714146afe1494e943a8af82dd1ef1a10579300ab9b77bb16d6e8465"
           ]
         },
         {

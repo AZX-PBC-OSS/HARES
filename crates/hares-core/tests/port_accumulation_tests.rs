@@ -44,7 +44,7 @@ fn thermal(zone: ZoneId, sensible_w: f64, latent_w: f64) -> PortContribution {
 fn electrical(active_kw: f64) -> PortContribution {
     PortContribution::Electrical {
         active_power_w: active_kw * 1000.0,
-        reactive_power_kvar: 0.0,
+        reactive_power_var: 0.0,
     }
 }
 
@@ -100,16 +100,16 @@ fn reactive_power_accumulates_algebraically() {
     ports
         .accumulate(&PortContribution::Electrical {
             active_power_w: 1.0,
-            reactive_power_kvar: 0.5,
+            reactive_power_var: 0.5,
         })
         .unwrap();
     ports
         .accumulate(&PortContribution::Electrical {
             active_power_w: 1.0,
-            reactive_power_kvar: -0.2,
+            reactive_power_var: -0.2,
         })
         .unwrap();
-    approx_eq(ports.electrical.reactive_power_kvar, 0.3);
+    approx_eq(ports.electrical.reactive_power_var, 0.3);
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +288,7 @@ fn zero_after_reset_clears_all_accumulators() {
     approx_eq(ports.electrical.net_active_w(), 0.0);
     approx_eq(ports.electrical.load_power_w, 0.0);
     approx_eq(ports.electrical.generation_power_w, 0.0);
-    approx_eq(ports.electrical.reactive_power_kvar, 0.0);
+    approx_eq(ports.electrical.reactive_power_var, 0.0);
     approx_eq(ports.fuel.get(FuelType::Gas), 0.0);
 }
 

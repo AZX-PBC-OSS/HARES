@@ -127,9 +127,13 @@ impl PackElectrical {
 /// dimension the LUT's temperature axis already encodes, inflating the
 /// c-rate ≈1.3× at 0 °C (≈1.5× at −7 °C) and bin-shifting every
 /// configured lookup.
-pub(crate) fn charging_lut_c_rate(power_kw: f64, soh_adjusted_kwh: f64) -> f64 {
-    if soh_adjusted_kwh > 0.0 {
-        power_kw / soh_adjusted_kwh
+pub(crate) fn charging_lut_c_rate(power_w: f64, soh_adjusted_j: f64) -> f64 {
+    if soh_adjusted_j > 0.0 {
+        // The c-rate is per hour: W/J is per second, so the rate converts
+        // once here (uom's frequency quantity, per hour).
+        (uom::si::f64::Power::new::<uom::si::power::watt>(power_w)
+            / uom::si::f64::Energy::new::<uom::si::energy::joule>(soh_adjusted_j))
+        .get::<uom::si::frequency::cycle_per_hour>()
     } else {
         0.0
     }

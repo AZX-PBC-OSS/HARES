@@ -16,7 +16,6 @@ use hares_physics::constants::{
     CP_LIQUID_WATER_J_KG_K, GALLONS_PER_MINUTE_TO_KG_PER_SECOND, UEF_TO_EF_GAS_INTERCEPT,
     UEF_TO_EF_GAS_SLOPE,
 };
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
 
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
@@ -41,7 +40,7 @@ struct TanklessState {
     thermal_output_w: f64,
     fuel_input_w: f64,
     parasitic_electric_w: f64,
-    reactive_power_kvar: f64,
+    reactive_power_var: f64,
     draw_flow_rate_kg_s: f64,
     // --- Demand response state ---
     dr_level: DRLevel,
@@ -472,16 +471,14 @@ impl Equipment for TanklessWH {
             // Rule R1: Q from the already-computed real power (never through
             // the real-power ZIP polynomial).
             let electric_w = fuel_input_w;
-            let reactive_kvar = self
-                .zip
-                .reactive_kvar(power_w_to_kw(electric_w), env.grid.bus_voltage_pu());
-            if electric_w > 0.0 || reactive_kvar != 0.0 {
+            let reactive_var = self.zip.reactive_var(electric_w, env.grid.bus_voltage_pu());
+            if electric_w > 0.0 || reactive_var != 0.0 {
                 ports.accumulate(&PortContribution::Electrical {
                     active_power_w: electric_w,
-                    reactive_power_kvar: reactive_kvar,
+                    reactive_power_var: reactive_var,
                 })?;
             }
-            (power_w_to_kw(electric_w).max(0.0), reactive_kvar)
+            ((electric_w).max(0.0), reactive_var)
         } else {
             if fuel_input_w > 0.0 {
                 ports.accumulate(&PortContribution::Fuel {
@@ -501,15 +498,15 @@ impl Equipment for TanklessWH {
             } else {
                 self.parasitic_power_w
             };
-            let parasitic_kvar = self
+            let parasitic_var = self
                 .zip
-                .reactive_kvar(power_w_to_kw(parasitic_w), env.grid.bus_voltage_pu());
+                .reactive_var(parasitic_w, env.grid.bus_voltage_pu());
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: parasitic_w,
-                reactive_power_kvar: parasitic_kvar,
+                reactive_power_var: parasitic_var,
             })?;
             parasitic_electric_w_reported = parasitic_w.max(0.0);
-            (power_w_to_kw(parasitic_w).max(0.0), parasitic_kvar)
+            ((parasitic_w).max(0.0), parasitic_var)
         };
 
         self.telemetry.set(tk::OUTLET_TEMP_C, outlet_temp_c);
@@ -532,8 +529,8 @@ impl Equipment for TanklessWH {
         );
         let core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_kw_for_core)),
-                reactive_power_kvar: Some(reactive_kvar_for_core),
+                electric_w: Some(ElectricPower::Consumption(electric_kw_for_core)),
+                reactive_power_var: Some(reactive_kvar_for_core),
                 fuel_w: fuel_w_for_core,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -579,7 +576,7 @@ impl Equipment for TanklessWH {
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
                 parasitic_electric_w: self.telemetry.get(tk::PARASITIC_ELECTRIC_W).unwrap_or(0.0),
-                reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
+                reactive_power_var: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
                 dr_level: self.dr_level,
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
@@ -615,7 +612,7 @@ impl Equipment for TanklessWH {
         self.telemetry
             .insert(tk::PARASITIC_ELECTRIC_W, decoded.parasitic_electric_w);
         self.telemetry
-            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_kvar);
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_var);
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -629,7 +626,7 @@ impl Equipment for TanklessWH {
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal: the flows from the
         // checkpointed `fuel_input_w`/`parasitic_electric_w`/
-        // `reactive_power_kvar` (the fuel-vs-electric arm the step itself
+        // `reactive_power_var` (the fuel-vs-electric arm the step itself
         // selects on `fuel_type`), the mode re-derived by the step's own
         // rule (`Heating.resolve_idle` on the restored nonzero flow).
         // `CoreOutput::default()` (all fields `None`) violates the
@@ -637,9 +634,9 @@ impl Equipment for TanklessWH {
         // restore contract is that a checkpoint restores a state
         // `validate_core_contract` accepts.
         let electric_kw_for_core = if self.fuel_type == FuelType::Electric {
-            power_w_to_kw(decoded.fuel_input_w).max(0.0)
+            (decoded.fuel_input_w).max(0.0)
         } else {
-            power_w_to_kw(decoded.parasitic_electric_w).max(0.0)
+            (decoded.parasitic_electric_w).max(0.0)
         };
         let fuel_w_for_core = (self.fuel_type != FuelType::Electric).then_some(FuelPower {
             fuel_type: self.fuel_type,
@@ -649,8 +646,8 @@ impl Equipment for TanklessWH {
         let restored_mode = OperatingMode::Heating.resolve_idle(has_nonzero_flow, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_kw_for_core)),
-                reactive_power_kvar: Some(decoded.reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(electric_kw_for_core)),
+                reactive_power_var: Some(decoded.reactive_power_var),
                 fuel_w: fuel_w_for_core,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -703,10 +700,15 @@ impl Equipment for TanklessWH {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
             ControlSignal::PowerLimit { max_power_kw, .. } => {
-                // For gas units, max_power_kw caps fuel consumption; thermal limit
+                // The signal carries kW until the control-layer commit; the
+                // working value is W (SI), converted once here.
+                let max_power_w =
+                    uom::si::f64::Power::new::<uom::si::power::kilowatt>(*max_power_kw)
+                        .get::<uom::si::power::watt>();
+                // For gas units, max_power_w caps fuel consumption; thermal limit
                 // = fuel_limit × efficiency. For electric units, it directly caps
                 // electrical input which equals thermal output / efficiency.
-                let limit_w = (power_kw_to_w(*max_power_kw) * self.efficiency_factor).max(0.0);
+                let limit_w = ((max_power_w) * self.efficiency_factor).max(0.0);
                 self.power_limit_w = Some(limit_w);
             }
             ControlSignal::DemandResponse { level, duration_s } => {
@@ -920,8 +922,8 @@ mod tests {
                 ports.electrical.load_power_w > 0.0,
                 "{ochre_class}: burner draw or parasitic controller must draw power"
             );
-            assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
-            assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
+            assert_eq!(ports.electrical.reactive_power_var, 0.0);
+            assert_eq!(eq.core_output().flows.reactive_power_var, Some(0.0));
             assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
             hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
                 .expect("core contract must hold with REACTIVE declared");
@@ -1247,7 +1249,7 @@ mod tests {
     /// save_state/load_state exactly (bit-for-bit), mirroring the persistence
     /// of PARASITIC_ELECTRIC_W and other per-step telemetry.
     #[test]
-    fn state_round_trip_preserves_reactive_power_kvar() {
+    fn state_round_trip_preserves_reactive_power_var() {
         let mut eq = TanklessWH::new(config());
         eq.init(&config(), &env()).unwrap();
 
@@ -1743,7 +1745,7 @@ mod tests {
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
 
-        // PowerLimit { max_power_kw: 5.0 } → thermal limit = 5,000 * 0.8 = 4,000 W.
+        // PowerLimit { max_power_w: 5.0 } → thermal limit = 5,000 * 0.8 = 4,000 W.
         // With flow=1.0 kg/s, delta_T demands exceed 4,000 W → over-capacity.
         eq.apply_control(&ControlSignal::PowerLimit {
             max_power_kw: 5.0,
@@ -1834,10 +1836,10 @@ mod tests {
         );
 
         // Electrical port must include at least the parasitic draw.
-        let parasitic_kw = 7.38 / 1_000.0;
+        let parasitic_w = 7.38 / 1_000.0;
         assert!(
-            ports.electrical.load_power_w >= parasitic_kw - 1e-9,
-            "gas electrical draw must include at least parasitic_power_w ({parasitic_kw:.6} kW), got {}",
+            ports.electrical.load_power_w >= parasitic_w - 1e-9,
+            "gas electrical draw must include at least parasitic_power_w ({parasitic_w:.6} kW), got {}",
             ports.electrical.load_power_w
         );
         // Fuel port must still have the burner consumption.

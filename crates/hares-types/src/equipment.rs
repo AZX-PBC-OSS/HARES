@@ -1184,7 +1184,7 @@ impl ElectricPower {
     }
 
     /// Net consumption in kW. Generation is negative, bidirectional follows sign.
-    pub fn net_consumption_kw(&self) -> f64 {
+    pub fn net_consumption_w(&self) -> f64 {
         match self {
             Self::Consumption(v) => *v,
             Self::Generation(v) => -*v,
@@ -1192,9 +1192,9 @@ impl ElectricPower {
         }
     }
 
-    /// Equivalent to [`net_consumption_kw()`](Self::net_consumption_kw): positive = consuming, negative = generating.
-    pub fn signed_kw(&self) -> f64 {
-        self.net_consumption_kw()
+    /// Equivalent to [`net_consumption_w()`](Self::net_consumption_w): positive = consuming, negative = generating.
+    pub fn signed_w(&self) -> f64 {
+        self.net_consumption_w()
     }
 
     /// True when the net power magnitude is zero — no load and no generation.
@@ -1260,9 +1260,9 @@ impl FuelPower {
 /// Energy flow outputs from one equipment step.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CoreFlows {
-    pub electric_kw: Option<ElectricPower>,
+    pub electric_w: Option<ElectricPower>,
     /// Reactive power in kvar. Positive = inductive/lagging (IEEE 1547).
-    pub reactive_power_kvar: Option<f64>,
+    pub reactive_power_var: Option<f64>,
     pub fuel_w: Option<FuelPower>,
     /// Net delivered thermal output in watts (positive = heating, negative = cooling),
     /// post-DSE. None for non-thermal equipment.
@@ -1282,12 +1282,12 @@ impl CoreFlows {
     pub fn none_delivered(&self) -> Self {
         let zero = |v: Option<f64>| v.map(|_| 0.0);
         Self {
-            electric_kw: self.electric_kw.map(|e| match e {
+            electric_w: self.electric_w.map(|e| match e {
                 ElectricPower::Consumption(_) => ElectricPower::Consumption(0.0),
                 ElectricPower::Generation(_) => ElectricPower::Generation(0.0),
                 ElectricPower::Bidirectional(_) => ElectricPower::Bidirectional(0.0),
             }),
-            reactive_power_kvar: zero(self.reactive_power_kvar),
+            reactive_power_var: zero(self.reactive_power_var),
             fuel_w: self.fuel_w.map(|f| FuelPower {
                 fuel_type: f.fuel_type,
                 consumption_w: 0.0,
@@ -1321,7 +1321,7 @@ pub struct CorePerformance {
     pub cop: Option<f64>,
     /// Main (compressor or primary heat-source) power in kW, excluding fan.
     /// OCHRE HVAC.py:575: main_power = total_input_kw - fan_kw.
-    pub main_power_kw: Option<f64>,
+    pub main_power_w: Option<f64>,
 }
 
 /// Typed output from one equipment simulation step.
@@ -1354,9 +1354,9 @@ pub fn validate_core_contract(
             desc.name, caps
         )));
     }
-    if co.flows.reactive_power_kvar.is_some() && co.flows.electric_kw.is_none() {
+    if co.flows.reactive_power_var.is_some() && co.flows.electric_w.is_none() {
         return Err(HaresError::Equipment(format!(
-            "core_output contract violation for '{}' ({:?}): flows.reactive_power_kvar requires flows.electric_kw",
+            "core_output contract violation for '{}' ({:?}): flows.reactive_power_var requires flows.electric_w",
             desc.name, caps
         )));
     }
@@ -1364,16 +1364,16 @@ pub fn validate_core_contract(
     // Count missing/undeclared-populated fields without allocating.
     let mut missing_bits = 0u16;
     let mut unexpected_bits = 0u16;
-    if caps.contains(CoreCapabilities::ELECTRIC) && co.flows.electric_kw.is_none() {
+    if caps.contains(CoreCapabilities::ELECTRIC) && co.flows.electric_w.is_none() {
         missing_bits |= 1;
     }
-    if !caps.contains(CoreCapabilities::ELECTRIC) && co.flows.electric_kw.is_some() {
+    if !caps.contains(CoreCapabilities::ELECTRIC) && co.flows.electric_w.is_some() {
         unexpected_bits |= 1;
     }
-    if caps.contains(CoreCapabilities::REACTIVE) && co.flows.reactive_power_kvar.is_none() {
+    if caps.contains(CoreCapabilities::REACTIVE) && co.flows.reactive_power_var.is_none() {
         missing_bits |= 2;
     }
-    if !caps.contains(CoreCapabilities::REACTIVE) && co.flows.reactive_power_kvar.is_some() {
+    if !caps.contains(CoreCapabilities::REACTIVE) && co.flows.reactive_power_var.is_some() {
         unexpected_bits |= 2;
     }
     if caps.contains(CoreCapabilities::FUEL) && co.flows.fuel_w.is_none() {
@@ -1424,13 +1424,13 @@ pub fn validate_core_contract(
 
     if missing_bits == 0 && unexpected_bits == 0 {
         let checks: [(&str, Option<f64>); 7] = [
-            ("flows.reactive_power_kvar", co.flows.reactive_power_kvar),
+            ("flows.reactive_power_var", co.flows.reactive_power_var),
             ("flows.thermal_output_w", co.flows.thermal_output_w),
             ("flows.sensible_cooling_w", co.flows.sensible_cooling_w),
             ("flows.latent_cooling_w", co.flows.latent_cooling_w),
             ("state.setpoint_c", co.state.setpoint_c),
             ("performance.cop", co.performance.cop),
-            ("performance.main_power_kw", co.performance.main_power_kw),
+            ("performance.main_power_w", co.performance.main_power_w),
         ];
         // Runtime finiteness guard — always present. Returns Err for
         // non-finite values (NaN, ±∞) that would silently corrupt
@@ -1499,12 +1499,12 @@ pub fn validate_core_contract(
         }
 
         // Main power consumed cannot be negative.
-        if let Some(p) = co.performance.main_power_kw
+        if let Some(p) = co.performance.main_power_w
             && p < 0.0
         {
             return Err(HaresError::Equipment(format!(
                 "core_output contract violation for '{}' ({:?}): \
-                     performance.main_power_kw={p} must be >= 0.0; \
+                     performance.main_power_w={p} must be >= 0.0; \
                      negative main power is physically impossible",
                 desc.name, caps
             )));
@@ -1609,8 +1609,8 @@ pub fn validate_core_contract(
 
     // Only build the error string on the failure path.
     static NAMES: [(u16, &str); 9] = [
-        (1, "flows.electric_kw"),
-        (2, "flows.reactive_power_kvar"),
+        (1, "flows.electric_w"),
+        (2, "flows.reactive_power_var"),
         (4, "flows.fuel_w"),
         (8, "state.soc"),
         (16, "state.operating_mode"),
@@ -1672,7 +1672,7 @@ fn port_core_mismatch(expected: f64, actual: f64) -> bool {
 /// equipment's contribution.
 ///
 /// Checks (tolerance ~1e-6, relative for large magnitudes):
-/// - `flows.electric_kw == Some(Consumption(kw))` requires a port load delta
+/// - `flows.electric_w == Some(Consumption(kw))` requires a port load delta
 ///   of `kw * 1000` W and a zero generation delta;
 /// - `Some(Generation(kw))` requires a port generation delta of `-kw * 1000`
 ///   W and a zero load delta (catches sign-flipped generation);
@@ -1680,7 +1680,7 @@ fn port_core_mismatch(expected: f64, actual: f64) -> bool {
 ///   (positive = consuming, negative = generating, per [`ElectricPower`]);
 /// - `None` requires zero active-power contribution;
 /// - the reactive port delta must equal
-///   `flows.reactive_power_kvar.unwrap_or(0.0)` (signed, positive =
+///   `flows.reactive_power_var.unwrap_or(0.0)` (signed, positive =
 ///   inductive/absorbing): equipment reporting `None` must contribute
 ///   exactly zero reactive power at the port.
 pub fn validate_port_core_electrical_consistency(
@@ -1691,76 +1691,74 @@ pub fn validate_port_core_electrical_consistency(
 ) -> Result<(), HaresError> {
     let load_delta_w = post.load_power_w - pre.load_power_w;
     let generation_delta_w = post.generation_power_w - pre.generation_power_w;
-    let reactive_delta_kvar = post.reactive_power_kvar - pre.reactive_power_kvar;
+    let reactive_delta_var = post.reactive_power_var - pre.reactive_power_var;
 
     let fail = |detail: String| -> Result<(), HaresError> {
         Err(HaresError::Equipment(format!(
             "port/core electrical consistency violation for '{}': {detail} \
              (port deltas this step: load {load_delta_w} W, generation \
-             {generation_delta_w} W, reactive {reactive_delta_kvar} kvar)",
+             {generation_delta_w} W, reactive {reactive_delta_var} VAR)",
             desc.name,
         )))
     };
 
-    match co.flows.electric_kw {
+    match co.flows.electric_w {
         None => {
             if port_core_mismatch(0.0, load_delta_w) || port_core_mismatch(0.0, generation_delta_w)
             {
                 return fail(
-                    "flows.electric_kw is None but the electrical port received an \
+                    "flows.electric_w is None but the electrical port received an \
                      active-power contribution"
                         .to_string(),
                 );
             }
         }
-        Some(ElectricPower::Consumption(kw)) => {
-            let expected_w = kw * 1000.0;
-            if port_core_mismatch(expected_w, load_delta_w) {
+        Some(ElectricPower::Consumption(w)) => {
+            if port_core_mismatch(w, load_delta_w) {
                 return fail(format!(
-                    "flows.electric_kw is Consumption({kw} kW) but the port load delta \
-                     is {load_delta_w} W (expected {expected_w} W)"
+                    "flows.electric_w is Consumption({w} W) but the port load delta \
+                     is {load_delta_w} W (expected {w} W)"
                 ));
             }
             if port_core_mismatch(0.0, generation_delta_w) {
                 return fail(format!(
-                    "flows.electric_kw is Consumption({kw} kW) but the port received a \
+                    "flows.electric_w is Consumption({w} W) but the port received a \
                      generation contribution of {generation_delta_w} W (expected 0 W)"
                 ));
             }
         }
-        Some(ElectricPower::Generation(kw)) => {
-            let expected_w = -kw * 1000.0;
+        Some(ElectricPower::Generation(w)) => {
+            let expected_w = -w;
             if port_core_mismatch(expected_w, generation_delta_w) {
                 return fail(format!(
-                    "flows.electric_kw is Generation({kw} kW) but the port generation \
+                    "flows.electric_w is Generation({w} W) but the port generation \
                      delta is {generation_delta_w} W (expected {expected_w} W)"
                 ));
             }
             if port_core_mismatch(0.0, load_delta_w) {
                 return fail(format!(
-                    "flows.electric_kw is Generation({kw} kW) but the port received a \
+                    "flows.electric_w is Generation({w} W) but the port received a \
                      load contribution of {load_delta_w} W (expected 0 W)"
                 ));
             }
         }
-        Some(ElectricPower::Bidirectional(kw)) => {
-            let expected_w = kw * 1000.0;
+        Some(ElectricPower::Bidirectional(w)) => {
             let net_delta_w = load_delta_w + generation_delta_w;
-            if port_core_mismatch(expected_w, net_delta_w) {
+            if port_core_mismatch(w, net_delta_w) {
                 return fail(format!(
-                    "flows.electric_kw is Bidirectional({kw} kW) but the net port \
-                     active delta is {net_delta_w} W (expected {expected_w} W)"
+                    "flows.electric_w is Bidirectional({w} W) but the net port \
+                     active delta is {net_delta_w} W (expected {w} W)"
                 ));
             }
         }
     }
 
-    let expected_q_kvar = co.flows.reactive_power_kvar.unwrap_or(0.0);
-    if port_core_mismatch(expected_q_kvar, reactive_delta_kvar) {
+    let expected_q_var = co.flows.reactive_power_var.unwrap_or(0.0);
+    if port_core_mismatch(expected_q_var, reactive_delta_var) {
         return fail(format!(
-            "flows.reactive_power_kvar is {:?} but the port reactive delta is \
-             {reactive_delta_kvar} kvar (expected {expected_q_kvar} kvar)",
-            co.flows.reactive_power_kvar,
+            "flows.reactive_power_var is {:?} but the port reactive delta is \
+             {reactive_delta_var} VAR (expected {expected_q_var} VAR)",
+            co.flows.reactive_power_var,
         ));
     }
 
@@ -1873,7 +1871,7 @@ mod tests {
                 | CoreCapabilities::HAS_MODE
                 | CoreCapabilities::HAS_COP,
             telemetry_fields: vec![TelemetryField::power_kw(
-                "electric_kw",
+                "electric_w",
                 "Active electrical power",
             )],
             zone_type: None,
@@ -1883,7 +1881,7 @@ mod tests {
     fn cop_core_output(cop: f64) -> CoreOutput {
         CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 ..Default::default()
             },
             state: CoreState {
@@ -1892,7 +1890,7 @@ mod tests {
             },
             performance: CorePerformance {
                 cop: Some(cop),
-                main_power_kw: Some(1.0),
+                main_power_w: Some(1.0),
             },
         }
     }
@@ -1944,7 +1942,7 @@ mod tests {
                 | ControlCapabilities::THERMAL_SETPOINT,
             core_capabilities: CoreCapabilities::ELECTRIC | CoreCapabilities::HAS_SOC,
             telemetry_fields: vec![TelemetryField::power_kw(
-                "electric_kw",
+                "electric_w",
                 "Active electrical power",
             )],
             zone_type: None,
@@ -3116,12 +3114,9 @@ mod tests {
 
     #[test]
     fn electric_power_net_consumption_kw_signs() {
-        assert_eq!(ElectricPower::Consumption(3.0).net_consumption_kw(), 3.0);
-        assert_eq!(ElectricPower::Generation(3.0).net_consumption_kw(), -3.0);
-        assert_eq!(
-            ElectricPower::Bidirectional(-2.0).net_consumption_kw(),
-            -2.0
-        );
+        assert_eq!(ElectricPower::Consumption(3.0).net_consumption_w(), 3.0);
+        assert_eq!(ElectricPower::Generation(3.0).net_consumption_w(), -3.0);
+        assert_eq!(ElectricPower::Bidirectional(-2.0).net_consumption_w(), -2.0);
     }
 
     #[test]
@@ -3152,9 +3147,9 @@ mod tests {
     #[test]
     fn core_output_default_has_no_fields_set() {
         let out = CoreOutput::default();
-        assert!(out.flows.electric_kw.is_none());
+        assert!(out.flows.electric_w.is_none());
         assert!(out.flows.fuel_w.is_none());
-        assert!(out.flows.reactive_power_kvar.is_none());
+        assert!(out.flows.reactive_power_var.is_none());
         assert!(out.flows.thermal_output_w.is_none());
         assert!(out.flows.sensible_cooling_w.is_none());
         assert!(out.flows.latent_cooling_w.is_none());
@@ -3163,15 +3158,15 @@ mod tests {
         assert!(out.state.speed_index.is_none());
         assert!(out.state.setpoint_c.is_none());
         assert!(out.performance.cop.is_none());
-        assert!(out.performance.main_power_kw.is_none());
+        assert!(out.performance.main_power_w.is_none());
     }
 
     #[test]
     fn core_output_round_trips_through_json() {
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(3.5)),
-                reactive_power_kvar: Some(0.2),
+                electric_w: Some(ElectricPower::Consumption(3.5)),
+                reactive_power_var: Some(200.0),
                 fuel_w: None,
                 thermal_output_w: Some(8500.0),
                 sensible_cooling_w: Some(-6000.0),
@@ -3185,7 +3180,7 @@ mod tests {
             },
             performance: CorePerformance {
                 cop: Some(3.5),
-                main_power_kw: Some(2.1),
+                main_power_w: Some(2.1),
             },
         };
         let json = serde_json::to_string(&out).expect("serialize");
@@ -3252,8 +3247,8 @@ mod tests {
         };
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
-                reactive_power_kvar: Some(-0.5),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
+                reactive_power_var: Some(-500.0),
                 fuel_w: Some(FuelPower {
                     fuel_type: FuelType::Gas,
                     consumption_w: 500.0,
@@ -3293,8 +3288,8 @@ mod tests {
         let out = CoreOutput::default();
         let err = validate_core_contract(&desc, &out).expect_err("missing fields must error");
         let msg = err.to_string();
-        assert!(msg.contains("flows.electric_kw"));
-        assert!(msg.contains("flows.reactive_power_kvar"));
+        assert!(msg.contains("flows.electric_w"));
+        assert!(msg.contains("flows.reactive_power_var"));
         assert!(msg.contains("state.operating_mode"));
     }
 
@@ -3315,8 +3310,8 @@ mod tests {
         };
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.5)),
-                reactive_power_kvar: Some(0.2),
+                electric_w: Some(ElectricPower::Consumption(0.5)),
+                reactive_power_var: Some(200.0),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -3334,7 +3329,7 @@ mod tests {
         let err = validate_core_contract(&desc, &out)
             .expect_err("undeclared but populated fields must error");
         let msg = err.to_string();
-        assert!(msg.contains("flows.reactive_power_kvar"));
+        assert!(msg.contains("flows.reactive_power_var"));
         assert!(msg.contains("state.operating_mode"));
     }
 
@@ -3355,8 +3350,8 @@ mod tests {
         };
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: None,
-                reactive_power_kvar: Some(0.1),
+                electric_w: None,
+                reactive_power_var: Some(100.0),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -3391,8 +3386,8 @@ mod tests {
         };
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: None,
-                reactive_power_kvar: Some(0.1),
+                electric_w: None,
+                reactive_power_var: Some(100.0),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -3406,7 +3401,7 @@ mod tests {
             .expect_err("reactive flow without electric flow must error");
         assert!(
             err.to_string()
-                .contains("flows.reactive_power_kvar requires flows.electric_kw"),
+                .contains("flows.reactive_power_var requires flows.electric_w"),
             "unexpected error: {err}"
         );
     }
@@ -3536,7 +3531,7 @@ mod tests {
         let desc = mode_flow_test_descriptor("Active Zero");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.0)),
+                electric_w: Some(ElectricPower::Consumption(0.0)),
                 thermal_output_w: Some(0.0),
                 fuel_w: None,
                 ..Default::default()
@@ -3560,7 +3555,7 @@ mod tests {
         let desc = mode_flow_test_descriptor("Off With Power");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(0.0),
                 ..Default::default()
             },
@@ -3583,7 +3578,7 @@ mod tests {
         let desc = mode_flow_test_descriptor("Cooling With Heat");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(1000.0),
                 ..Default::default()
             },
@@ -3606,7 +3601,7 @@ mod tests {
         let desc = mode_flow_test_descriptor("Heating OK");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(1000.0),
                 ..Default::default()
             },
@@ -3624,7 +3619,7 @@ mod tests {
         let desc = battery_test_descriptor("Charge Gen Conflict");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Generation(1.0)),
+                electric_w: Some(ElectricPower::Generation(1.0)),
                 ..Default::default()
             },
             state: CoreState {
@@ -3646,7 +3641,7 @@ mod tests {
         let desc = battery_test_descriptor("Discharge Consume Conflict");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 ..Default::default()
             },
             state: CoreState {
@@ -3668,7 +3663,7 @@ mod tests {
         let desc = battery_test_descriptor("Charge OK");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 ..Default::default()
             },
             state: CoreState {
@@ -3685,7 +3680,7 @@ mod tests {
         let desc = battery_test_descriptor("Discharge OK");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Generation(1.0)),
+                electric_w: Some(ElectricPower::Generation(1.0)),
                 ..Default::default()
             },
             state: CoreState {
@@ -3702,7 +3697,7 @@ mod tests {
         let desc = battery_test_descriptor("Standby OK");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.001)),
+                electric_w: Some(ElectricPower::Consumption(0.001)),
                 ..Default::default()
             },
             state: CoreState {
@@ -3719,7 +3714,7 @@ mod tests {
         let desc = mode_flow_test_descriptor("Defrost OK");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(500.0),
                 ..Default::default()
             },
@@ -3737,7 +3732,7 @@ mod tests {
         let desc = mode_flow_test_descriptor("On OK");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(800.0),
                 ..Default::default()
             },
@@ -3774,7 +3769,7 @@ mod tests {
         let desc = range_test_descriptor("Negative COP");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(3000.0),
                 ..Default::default()
             },
@@ -3800,7 +3795,7 @@ mod tests {
         let desc = range_test_descriptor("Zero COP");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(3000.0),
                 ..Default::default()
             },
@@ -3822,7 +3817,7 @@ mod tests {
         let desc = range_test_descriptor("Negative Main Power");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(3000.0),
                 ..Default::default()
             },
@@ -3832,14 +3827,14 @@ mod tests {
             },
             performance: CorePerformance {
                 cop: Some(3.0),
-                main_power_kw: Some(-1.0),
+                main_power_w: Some(-1.0),
             },
         };
         let err = validate_core_contract(&desc, &out)
-            .expect_err("negative main_power_kw must be rejected");
+            .expect_err("negative main_power_w must be rejected");
         assert!(
             err.to_string()
-                .contains("performance.main_power_kw=-1 must be >= 0.0"),
+                .contains("performance.main_power_w=-1 must be >= 0.0"),
             "unexpected error: {err}"
         );
     }
@@ -3849,7 +3844,7 @@ mod tests {
         let desc = range_test_descriptor("Positive Sensible");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(-3000.0),
                 sensible_cooling_w: Some(500.0),
                 ..Default::default()
@@ -3877,7 +3872,7 @@ mod tests {
         let desc = range_test_descriptor("Positive Latent");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(-3000.0),
                 latent_cooling_w: Some(300.0),
                 ..Default::default()
@@ -3905,7 +3900,7 @@ mod tests {
         let desc = range_test_descriptor("Valid Boundaries");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(100_000.0),
                 sensible_cooling_w: Some(0.0),
                 latent_cooling_w: Some(0.0),
@@ -3918,7 +3913,7 @@ mod tests {
             performance: CorePerformance {
                 // 20.0 is the inclusive upper edge of the COP plausibility band.
                 cop: Some(20.0),
-                main_power_kw: Some(0.0),
+                main_power_w: Some(0.0),
             },
         };
         validate_core_contract(&desc, &out).expect("valid ranges at boundaries must pass");
@@ -3931,7 +3926,7 @@ mod tests {
         let desc = range_test_descriptor("High COP");
         let out = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.0)),
+                electric_w: Some(ElectricPower::Consumption(1.0)),
                 thermal_output_w: Some(3000.0),
                 ..Default::default()
             },
@@ -3964,7 +3959,7 @@ mod tests {
         }
     }
 
-    fn accumulator(load_w: f64, generation_w: f64, reactive_kvar: f64) -> ElectricalAccumulator {
+    fn accumulator(load_w: f64, generation_w: f64, reactive_var: f64) -> ElectricalAccumulator {
         // The `observe` feature adds electrical_contribution_count to
         // ElectricalAccumulator, so the two builds need different literals.
         #[cfg(feature = "observe")]
@@ -3972,7 +3967,7 @@ mod tests {
             ElectricalAccumulator {
                 load_power_w: load_w,
                 generation_power_w: generation_w,
-                reactive_power_kvar: reactive_kvar,
+                reactive_power_var: reactive_var,
                 electrical_contribution_count: 0,
             }
         }
@@ -3981,16 +3976,16 @@ mod tests {
             ElectricalAccumulator {
                 load_power_w: load_w,
                 generation_power_w: generation_w,
-                reactive_power_kvar: reactive_kvar,
+                reactive_power_var: reactive_var,
             }
         }
     }
 
-    fn electric_core_output(electric_kw: ElectricPower, reactive_kvar: Option<f64>) -> CoreOutput {
+    fn electric_core_output(electric_w: ElectricPower, reactive_var: Option<f64>) -> CoreOutput {
         CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(electric_kw),
-                reactive_power_kvar: reactive_kvar,
+                electric_w: Some(electric_w),
+                reactive_power_var: reactive_var,
                 ..Default::default()
             },
             ..Default::default()
@@ -4000,7 +3995,7 @@ mod tests {
     #[test]
     fn port_core_consistency_accepts_agreeing_consumption_and_reactive() {
         let desc = consistency_test_descriptor("Agreeing Load");
-        let co = electric_core_output(ElectricPower::Consumption(2.5), Some(0.75));
+        let co = electric_core_output(ElectricPower::Consumption(2500.0), Some(0.75));
         // Pre-existing bus state from earlier equipment must not matter.
         let pre = accumulator(1200.0, -400.0, -0.1);
         let post = accumulator(1200.0 + 2500.0, -400.0, -0.1 + 0.75);
@@ -4010,7 +4005,7 @@ mod tests {
     #[test]
     fn port_core_consistency_accepts_agreeing_generation() {
         let desc = consistency_test_descriptor("Agreeing Source");
-        let co = electric_core_output(ElectricPower::Generation(3.0), Some(-0.5));
+        let co = electric_core_output(ElectricPower::Generation(3000.0), Some(-0.5));
         let pre = accumulator(500.0, 0.0, 0.2);
         let post = accumulator(500.0, -3000.0, 0.2 - 0.5);
         assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_ok());
@@ -4019,13 +4014,13 @@ mod tests {
     #[test]
     fn port_core_consistency_accepts_bidirectional_both_signs() {
         let desc = consistency_test_descriptor("Battery");
-        // Charging: positive kW lands in the load accumulator.
-        let co = electric_core_output(ElectricPower::Bidirectional(4.0), None);
+        // Charging: positive W lands in the load accumulator.
+        let co = electric_core_output(ElectricPower::Bidirectional(4000.0), None);
         let pre = accumulator(0.0, 0.0, 0.0);
         let post = accumulator(4000.0, 0.0, 0.0);
         assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_ok());
-        // Discharging: negative kW lands in the generation accumulator.
-        let co = electric_core_output(ElectricPower::Bidirectional(-4.0), None);
+        // Discharging: negative W lands in the generation accumulator.
+        let co = electric_core_output(ElectricPower::Bidirectional(-4000.0), None);
         let post = accumulator(0.0, -4000.0, 0.0);
         assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_ok());
     }
@@ -4033,16 +4028,16 @@ mod tests {
     #[test]
     fn port_core_consistency_rejects_none_reactive_with_nonzero_port_reactive() {
         // The water-heater bug class: equipment pushes reactive power at the
-        // port while reporting flows.reactive_power_kvar = None.
+        // port while reporting flows.reactive_power_var = None.
         let desc = consistency_test_descriptor("Divergent Water Heater");
-        let co = electric_core_output(ElectricPower::Consumption(4.5), None);
+        let co = electric_core_output(ElectricPower::Consumption(4500.0), None);
         let pre = accumulator(0.0, 0.0, 0.0);
         let post = accumulator(4500.0, 0.0, 1.1);
         let err = validate_port_core_electrical_consistency(&desc, &co, pre, &post)
             .expect_err("nonzero port reactive with None CoreOutput must error");
         let msg = err.to_string();
         assert!(
-            msg.contains("flows.reactive_power_kvar is None"),
+            msg.contains("flows.reactive_power_var is None"),
             "unexpected error: {msg}"
         );
         assert!(
@@ -4055,7 +4050,7 @@ mod tests {
     fn port_core_consistency_rejects_reactive_value_disagreement() {
         let desc = consistency_test_descriptor("Sign-Flipped Q");
         // PV-style bug: CoreOutput reports +Q while the port received -Q.
-        let co = electric_core_output(ElectricPower::Generation(3.0), Some(0.9));
+        let co = electric_core_output(ElectricPower::Generation(3000.0), Some(0.9));
         let pre = accumulator(0.0, 0.0, 0.0);
         let post = accumulator(0.0, -3000.0, -0.9);
         let err = validate_port_core_electrical_consistency(&desc, &co, pre, &post)
@@ -4069,7 +4064,7 @@ mod tests {
     #[test]
     fn port_core_consistency_rejects_sign_flipped_generation() {
         let desc = consistency_test_descriptor("Backwards PV");
-        let co = electric_core_output(ElectricPower::Generation(2.0), None);
+        let co = electric_core_output(ElectricPower::Generation(2000.0), None);
         // Bug: generation pushed with positive sign, so it landed in the load
         // accumulator instead of the generation accumulator.
         let pre = accumulator(0.0, 0.0, 0.0);
@@ -4077,7 +4072,7 @@ mod tests {
         let err = validate_port_core_electrical_consistency(&desc, &co, pre, &post)
             .expect_err("sign-flipped generation must error");
         assert!(
-            err.to_string().contains("Generation(2 kW)"),
+            err.to_string().contains("Generation(2000 W)"),
             "unexpected error: {err}"
         );
     }
@@ -4101,9 +4096,9 @@ mod tests {
         let pre = accumulator(0.0, 0.0, 0.0);
         let post = accumulator(300.0, 0.0, 0.0);
         let err = validate_port_core_electrical_consistency(&desc, &co, pre, &post)
-            .expect_err("port contribution with electric_kw None must error");
+            .expect_err("port contribution with electric_w None must error");
         assert!(
-            err.to_string().contains("flows.electric_kw is None"),
+            err.to_string().contains("flows.electric_w is None"),
             "unexpected error: {err}"
         );
     }
@@ -4115,14 +4110,14 @@ mod tests {
 
         // 10 kW load: tolerance is 1e-6 relative -> 0.01 W. A 0.005 W skew
         // passes; a 0.05 W skew fails.
-        let co = electric_core_output(ElectricPower::Consumption(10.0), None);
+        let co = electric_core_output(ElectricPower::Consumption(10_000.0), None);
         let post = accumulator(10_000.0 + 0.005, 0.0, 0.0);
         assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_ok());
         let post = accumulator(10_000.0 + 0.05, 0.0, 0.0);
         assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_err());
 
         // Reactive near zero: tolerance floor is 1e-6 absolute.
-        let co = electric_core_output(ElectricPower::Consumption(10.0), Some(0.0));
+        let co = electric_core_output(ElectricPower::Consumption(10_000.0), Some(0.0));
         let post = accumulator(10_000.0, 0.0, 5e-7);
         assert!(validate_port_core_electrical_consistency(&desc, &co, pre, &post).is_ok());
         let post = accumulator(10_000.0, 0.0, 5e-6);

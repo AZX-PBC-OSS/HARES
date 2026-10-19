@@ -252,6 +252,8 @@ impl PvLut {
             let dni = find_column_f64(&batch, &["dni", "dni_w_m2"])?;
             let dhi = find_column_f64(&batch, &["dhi", "dhi_w_m2"])?;
             let temp = find_column_f64(&batch, &["temp_c", "temperature_c"])?;
+            // The LUT's column is the PySAM adapter's `ac_power_kw` (external data
+            // keeps its own unit); the value converts once to W (SI) here.
             let ac = find_column_f64(&batch, &["ac_power_kw", "ac_kw"])?;
 
             let n = batch.num_rows();
@@ -274,10 +276,12 @@ impl PvLut {
                 let Some(temp) = get_valid_f64(temp, i) else {
                     continue;
                 };
-                let Some(ac) = get_valid_f64(ac, i) else {
+                let Some(ac_kw) = get_valid_f64(ac, i) else {
                     continue;
                 };
-                rows.push((zenith, azimuth, ghi, dni, dhi, temp, ac));
+                // One conversion at the read: the column is the adapter's kW.
+                let ac_w = ac_kw * 1000.0;
+                rows.push((zenith, azimuth, ghi, dni, dhi, temp, ac_w));
             }
         }
 
@@ -336,10 +340,12 @@ impl PvLut {
             let Some(temp) = parse_csv_f64(cols.get(temp_idx).copied()) else {
                 continue;
             };
-            let Some(ac) = parse_csv_f64(cols.get(ac_idx).copied()) else {
+            let Some(ac_kw) = parse_csv_f64(cols.get(ac_idx).copied()) else {
                 continue;
             };
-            rows.push((zenith, azimuth, ghi, dni, dhi, temp, ac));
+            // One conversion at the read: the column is the adapter's kW.
+            let ac_w = ac_kw * 1000.0;
+            rows.push((zenith, azimuth, ghi, dni, dhi, temp, ac_w));
         }
 
         Self::from_rows(path, rows, 0.0, 0.0, 0.0, 0.0, None)
@@ -556,11 +562,11 @@ impl PvLut {
                                 if weight <= 0.0 {
                                     continue;
                                 }
-                                if let Some(ac_kw) = self
+                                if let Some(ac_w) = self
                                     .values
                                     .get(&(z_idx, a_idx, g_idx, d_idx, dh_idx, t_idx))
                                 {
-                                    weighted_sum += weight * ac_kw;
+                                    weighted_sum += weight * ac_w;
                                     total_weight += weight;
                                 }
                             }
@@ -1073,15 +1079,15 @@ mod tests {
         );
 
         // Query at a representative operating point.
-        let (power_kw, method) = lut.interpolate(45.0, 135.0, 750.0, 600.0, 250.0, 15.0);
+        let (power_w, method) = lut.interpolate(45.0, 135.0, 750.0, 600.0, 250.0, 15.0);
         assert_eq!(method, InterpolationMethod::Multilinear);
         assert!(
-            power_kw > 0.0,
+            power_w > 0.0,
             "PV power should be positive at this irradiance"
         );
         assert!(
-            (power_kw - 605.0).abs() < 0.01,
-            "PV power changed after bracket refactor: got {power_kw}",
+            (power_w - 605.0).abs() < 0.01,
+            "PV power changed after bracket refactor: got {power_w}",
         );
     }
 }

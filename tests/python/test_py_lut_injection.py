@@ -363,8 +363,8 @@ class TestLutBehavior:
         # command's DC power, whose loss split is internal to the step,
         # so the SOC trajectories diverge only through the thermal
         # feedback and are equal to printed precision here.
-        assert tel["power_kw"][idx_d] != tel["power_kw"][idx_c], (
+        assert tel["power_w"][idx_d] != tel["power_w"][idx_c], (
             f"Custom OCV should produce a different drawn power at the same "
-            f"charge command: default={tel['power_kw'][idx_d]}, "
-            f"custom={tel['power_kw'][idx_c]}"
+            f"charge command: default={tel['power_w'][idx_d]}, "
+            f"custom={tel['power_w'][idx_c]}"
         )

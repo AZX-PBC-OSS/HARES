@@ -68,9 +68,9 @@ class TestSolarOverrideNumpy:
         # (no solar generation when all irradiance is zero on a base dwelling without PV)
         for i in range(3):
             result = dw.step()
-            assert result["net_electric_power_kw"] >= 0, (
+            assert result["net_electric_power_w"] >= 0, (
                 f"Step {i}: expected non-negative net power with zero irradiance, "
-                f"got {result['net_electric_power_kw']} kW"
+                f"got {result['net_electric_power_w']} kW"
             )
 
     def test_set_solar_override_preserves_timestep_order(self):
@@ -317,8 +317,8 @@ class TestSolarOverridePVProduction:
         temp_key = "Temperature - Zone_1 (C)"
         temp_zero = result_zero[temp_key]
         temp_high = result_high[temp_key]
-        power_zero = result_zero["net_electric_power_kw"]
-        power_high = result_high["net_electric_power_kw"]
+        power_zero = result_zero["net_electric_power_w"]
+        power_high = result_high["net_electric_power_w"]
 
         something_changed = (
             abs(temp_high - temp_zero) > 1e-6
@@ -372,10 +372,10 @@ class TestSolarOverridePVProduction:
         assert pv_names, "the base-pv fixture assembles PV"
         for step in range(5):
             result = dw.step()
-            assert result["net_electric_power_kw"] >= 0, f"step {step}"
+            assert result["net_electric_power_w"] >= 0, f"step {step}"
             for eq in dw.equipment():
                 if eq.name in pv_names:
-                    assert eq.core_output.electric_kw == 0.0, (
+                    assert eq.core_output.electric_w == 0.0, (
                         f"step {step}: {eq.name} produced at night"
                     )
 
@@ -390,7 +390,7 @@ class TestSolarOverridePVProduction:
         found_negative = False
         for _ in range(6):
             result = dw.step()
-            if result["net_electric_power_kw"] < 0:
+            if result["net_electric_power_w"] < 0:
                 found_negative = True
 
         assert found_negative, (

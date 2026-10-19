@@ -550,11 +550,13 @@ fn pv_peak_generation_in_good_conditions() {
     let ac_power_kw = eq
         .telemetry()
         .get("ac_power_kw")
-        .expect("ac_power_kw must exist");
+        .expect("ac_power_kw must exist")
+        / 1000.0;
     let dc_power_kw = eq
         .telemetry()
         .get("dc_power_kw")
-        .expect("dc_power_kw must exist");
+        .expect("dc_power_kw must exist")
+        / 1000.0;
 
     let dc_ac_ratio = capacity_kw / ac_power_kw;
     eprintln!(
@@ -773,24 +775,24 @@ fn generator_fuel_efficiency_at_half_load() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let tel = eq.telemetry();
-    let electric_kw = tel
+    let electric_w = tel
         .get("electric_output_kw")
         .expect("electric_output_kw must exist");
     let fuel_w = tel.get("fuel_input_w").expect("fuel_input_w must exist");
     let eta = tel.get("eta_electric").expect("eta_electric must exist");
 
     eprintln!(
-        "[der_parity] generator: electric={electric_kw:.3} kW, fuel={fuel_w:.1} W, eta={eta:.4}"
+        "[der_parity] generator: electric={electric_w:.3} W, fuel={fuel_w:.1} W, eta={eta:.4}"
     );
 
     // Generator was commanded to 5 kW with fast ramp -- must produce output
     assert!(
-        electric_kw > 0.1,
-        "generator must produce output when commanded to 5 kW; got {electric_kw:.3} kW"
+        electric_w > 100.0,
+        "generator must produce output when commanded to 5 kW; got {electric_w:.3} W"
     );
 
     // Fuel = electric / eta
-    let expected_fuel_w = electric_kw * 1000.0 / eta;
+    let expected_fuel_w = electric_w / eta;
     assert!(
         (fuel_w - expected_fuel_w).abs() < expected_fuel_w * 0.01,
         "fuel_input must equal electric/eta ({expected_fuel_w:.1} W ±1%); got {fuel_w:.1} W"
@@ -899,21 +901,21 @@ fn generator_ramp_rate_is_kw_per_second() {
     let mut ports = PortSlots::default();
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-    let electric_kw = eq
+    let electric_w = eq
         .telemetry()
         .get("electric_output_kw")
         .expect("electric_output_kw must exist");
 
     eprintln!(
-        "[der_parity] ramp_rate: after 60s with ramp=1.0 kW/s → electric_kw={electric_kw:.3} kW \
+        "[der_parity] ramp_rate: after 60s with ramp=1.0 kW/s → electric_w={electric_w:.3} kW \
          (HARES: kW/s; OCHRE: kW/min -- at OCHRE rate 1.0 kW/min, 60s gives only 1 kW)"
     );
 
     // At 1.0 kW/s, a 60-second step allows 60 kW ramp → should reach rated 10 kW
     assert!(
-        electric_kw > 5.0,
+        electric_w > 5.0,
         "generator should reach substantial fraction of rated power (10 kW) in one 60s step \
-         with ramp=1.0 kW/s; got {electric_kw:.3} kW \
+         with ramp=1.0 kW/s; got {electric_w:.3} kW \
          (OCHRE at 1.0 kW/min would produce only ~1 kW in 60s)"
     );
 }
@@ -1006,16 +1008,16 @@ fn generator_capacity_min_enforced() {
     let mut ports = PortSlots::default();
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-    let electric_kw = eq.telemetry().get("electric_output_kw").unwrap_or(-99.0);
+    let electric_w = eq.telemetry().get("electric_output_kw").unwrap_or(-99.0);
     eprintln!(
-        "[der_parity] capacity_min: setpoint=1.0 kW < min=2.0 kW → electric={electric_kw:.3} kW"
+        "[der_parity] capacity_min: setpoint=1.0 kW < min=2.0 kW → electric={electric_w:.3} kW"
     );
 
     // Generator must either be off (0 kW) or at/above capacity_min (2.0 kW)
     // It must NOT produce exactly 1.0 kW (the forbidden zone)
     assert!(
-        !(0.1..1.9).contains(&electric_kw),
-        "generator must be off or at/above capacity_min=2.0 kW; got {electric_kw:.3} kW"
+        !(0.1..1.9).contains(&electric_w),
+        "generator must be off or at/above capacity_min=2.0 kW; got {electric_w:.3} kW"
     );
 }
 

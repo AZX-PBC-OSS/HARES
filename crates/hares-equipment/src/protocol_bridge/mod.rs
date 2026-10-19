@@ -228,8 +228,8 @@ impl Equipment for ProtocolBridge {
             .set(tk::TOTAL_COMMANDS_PARSED, self.total_commands_parsed as f64);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: None,
-                reactive_power_kvar: None,
+                electric_w: None,
+                reactive_power_var: None,
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,

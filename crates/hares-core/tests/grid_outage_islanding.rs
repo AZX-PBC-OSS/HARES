@@ -172,9 +172,9 @@ fn outage_without_backup_deenergizes_bus_and_drops_loads() {
         .expect("checkpoint")
         .prior_electrical_summary;
     assert!(
-        summary.base_load_kw > 1.0,
+        summary.base_load_w > 1.0,
         "baseline base load must flow, got {}",
-        summary.base_load_kw
+        summary.base_load_w
     );
 
     // Utility outage.
@@ -197,11 +197,11 @@ fn outage_without_backup_deenergizes_bus_and_drops_loads() {
         .expect("checkpoint")
         .prior_electrical_summary;
     assert_eq!(
-        summary.base_load_kw, 0.0,
+        summary.base_load_w, 0.0,
         "dead bus: the scheduled load must draw nothing"
     );
     assert_eq!(
-        summary.net_grid_kw, 0.0,
+        summary.net_grid_w, 0.0,
         "dead bus: the meter must read zero"
     );
 
@@ -213,9 +213,9 @@ fn outage_without_backup_deenergizes_bus_and_drops_loads() {
         .expect("checkpoint")
         .prior_electrical_summary;
     assert!(
-        summary.base_load_kw > 1.0,
+        summary.base_load_w > 1.0,
         "load must return after restoration, got {}",
-        summary.base_load_kw
+        summary.base_load_w
     );
 }
 
@@ -246,19 +246,19 @@ fn outage_with_battery_islands_and_keeps_loads_running() {
         .expect("checkpoint")
         .prior_electrical_summary;
     assert!(
-        summary.base_load_kw > 1.0,
+        summary.base_load_w > 1.0,
         "islanded home must NOT drop its loads, got {} kW",
-        summary.base_load_kw
+        summary.base_load_w
     );
     assert!(
-        summary.battery_power_kw < 0.0,
+        summary.battery_power_w < 0.0,
         "battery must discharge to serve the islanded load, got {} kW",
-        summary.battery_power_kw
+        summary.battery_power_w
     );
 }
 
 /// An islanded home whose load exceeds the battery's discharge capability
-/// reports the shortfall as `island_unserved_kw` in `DwellingTelemetry` —
+/// reports the shortfall as `island_unserved_w` in `DwellingTelemetry` —
 /// honest accounting of the island power-balance violation instead of
 /// phantom grid import. Nominal (grid-connected) operation reports 0.0.
 #[test]
@@ -272,12 +272,12 @@ fn islanded_load_beyond_discharge_capability_reports_unserved() {
     dwelling.step().expect("nominal step");
     let telem = dwelling.telemetry().unwrap();
     assert_eq!(
-        telem.island_unserved_kw, 0.0,
-        "island_unserved_kw must be 0.0 during nominal (grid-connected) operation"
+        telem.island_unserved_w, 0.0,
+        "island_unserved_w must be 0.0 during nominal (grid-connected) operation"
     );
     assert_eq!(
-        telem.island_excess_kw, 0.0,
-        "island_excess_kw must be 0.0 during nominal (grid-connected) operation"
+        telem.island_excess_w, 0.0,
+        "island_excess_w must be 0.0 during nominal (grid-connected) operation"
     );
 
     // Utility outage: the battery islands the home but its 0.5 kW discharge
@@ -292,14 +292,14 @@ fn islanded_load_beyond_discharge_capability_reports_unserved() {
     dwelling.step().expect("second islanded step");
     let telem = dwelling.telemetry().unwrap();
     assert!(
-        telem.island_unserved_kw > 0.5,
+        telem.island_unserved_w > 0.5,
         "load beyond max_discharge_kw must be reported as unserved, got {} kW",
-        telem.island_unserved_kw
+        telem.island_unserved_w
     );
     assert_eq!(
-        telem.island_excess_kw, 0.0,
+        telem.island_excess_w, 0.0,
         "no surplus generation in this island, got {} kW",
-        telem.island_excess_kw
+        telem.island_excess_w
     );
 }
 
@@ -326,7 +326,7 @@ fn outage_with_depleted_battery_does_not_island() {
         .expect("checkpoint")
         .prior_electrical_summary;
     assert_eq!(
-        summary.base_load_kw, 0.0,
+        summary.base_load_w, 0.0,
         "dead bus: loads must drop with a depleted battery"
     );
 }

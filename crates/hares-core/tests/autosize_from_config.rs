@@ -245,7 +245,7 @@ fn from_config_autosizing_populates_heating_capacity() {
         .expect("first step must succeed after autosizing");
 
     assert!(
-        step_result.net_electric_power_kw.is_finite(),
+        step_result.net_electric_power_w.is_finite(),
         "Step result net electric power should be finite"
     );
 }

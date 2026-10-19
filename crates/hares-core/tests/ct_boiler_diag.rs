@@ -284,9 +284,9 @@ mod tests {
                 .unwrap_or_default();
             let elec = co
                 .flows
-                .electric_kw
+                .electric_w
                 .as_ref()
-                .map(|e| format!("{:.3} kW", e.net_consumption_kw()))
+                .map(|e| format!("{:.3} kW", e.net_consumption_w()))
                 .unwrap_or_default();
             let thermal = co
                 .flows
@@ -378,7 +378,7 @@ mod tests {
                     for eq in &phase.equipment {
                         let mode = eq.telemetry.get("operating_mode").unwrap_or(f64::NAN);
                         let thermal_w = eq.telemetry.get("thermal_output_w").unwrap_or(f64::NAN);
-                        let elec_kw = eq.telemetry.get("electric_kw").unwrap_or(f64::NAN);
+                        let elec_kw = eq.telemetry.get("electric_w").unwrap_or(f64::NAN);
                         let fuel_w = eq.telemetry.get("fuel_input_w").unwrap_or(f64::NAN);
                         let eir = eq.telemetry.get("eir").unwrap_or(f64::NAN);
                         let heat_sp = eq.telemetry.get("heating_setpoint_c").unwrap_or(f64::NAN);
@@ -467,11 +467,11 @@ mod tests {
                 eprintln!("        thermal:          {:?}", eq.contribution.thermal);
                 eprintln!(
                     "        electrical_load:  {:.6} kW",
-                    eq.contribution.electrical_load_kw
+                    eq.contribution.electrical_load_w
                 );
                 eprintln!(
                     "        electrical_gen:   {:.6} kW",
-                    eq.contribution.electrical_gen_kw
+                    eq.contribution.electrical_gen_w
                 );
                 if !eq.contribution.fuel_consumption_w.is_empty() {
                     eprintln!(

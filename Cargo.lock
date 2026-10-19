@@ -1144,6 +1144,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
+ "uom",
 ]
 
 [[package]]
@@ -1160,6 +1161,7 @@ dependencies = [
  "strum",
  "thiserror 2.0.21",
  "tracing",
+ "uom",
 ]
 
 [[package]]

@@ -171,7 +171,7 @@ fn zone_temperatures_evolve_across_multiple_steps() {
 // Test: net electric power is positive and finite when furnace is running
 //
 // An electric furnace at -10 C outdoor will be active. The StepResult must
-// carry a positive net_electric_power_kw. This proves the electrical solver
+// carry a positive net_electric_power_w. This proves the electrical solver
 // aggregates equipment contributions through the full pipeline.
 // ---------------------------------------------------------------------------
 
@@ -190,17 +190,17 @@ fn net_electric_power_is_positive_with_active_electric_furnace() {
     for _ in 0..60 {
         let result = dwelling.step().expect("step must succeed");
         assert!(
-            result.net_electric_power_kw.is_finite(),
-            "net_electric_power_kw must be finite at every step"
+            result.net_electric_power_w.is_finite(),
+            "net_electric_power_w must be finite at every step"
         );
-        if result.net_electric_power_kw > 0.0 {
+        if result.net_electric_power_w > 0.0 {
             ever_positive = true;
         }
     }
 
     assert!(
         ever_positive,
-        "net_electric_power_kw must be positive in at least one of 60 steps when an \
+        "net_electric_power_w must be positive in at least one of 60 steps when an \
          electric furnace is running at -10 C outdoor; this indicates the electrical solver \
          is not receiving furnace contributions"
     );
@@ -564,9 +564,9 @@ occupancy = 0.0
 // hvac_heating_w integral over the run.
 //
 // We assert on integrated hvac_heating_w (delivered thermal energy) rather
-// than net_electric_power_kw because IdealHVAC by design has no electric draw
+// than net_electric_power_w because IdealHVAC by design has no electric draw
 // for the heating leg itself (only optional fan power, which the synthetic
-// TOML path does not configure), so net_electric_power_kw is identically zero
+// TOML path does not configure), so net_electric_power_w is identically zero
 // in both A and B.  Thermal energy delivered is the first observable along
 // the occupancy → zone port → thermal solver → equipment back-solve chain
 // that shows the full cumulative-energy signature of the 75 W gain.

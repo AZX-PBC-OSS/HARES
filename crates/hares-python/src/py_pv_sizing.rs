@@ -163,8 +163,8 @@ impl PyPvCandidate {
 
     /// Maximum DC capacity in kW.
     #[getter]
-    fn max_capacity_kw(&self) -> f64 {
-        self.inner.max_capacity_kw
+    fn max_capacity_w(&self) -> f64 {
+        self.inner.max_capacity_w
     }
 
     /// Solar production score (higher = better).
@@ -195,7 +195,7 @@ impl PyPvCandidate {
             self.inner.plane_idx,
             self.inner.azimuth_deg,
             self.inner.tilt_deg,
-            self.inner.max_capacity_kw,
+            self.inner.max_capacity_w,
             self.inner.max_panels,
         )
     }
@@ -211,8 +211,8 @@ pub struct PyPvSizingResult {
 #[pymethods]
 impl PyPvSizingResult {
     #[getter]
-    fn capacity_kw(&self) -> f64 {
-        self.inner.capacity_kw
+    fn capacity_w(&self) -> f64 {
+        self.inner.capacity_w
     }
 
     #[getter]
@@ -241,8 +241,8 @@ impl PyPvSizingResult {
     }
 
     #[getter]
-    fn max_roof_capacity_kw(&self) -> f64 {
-        self.inner.max_roof_capacity_kw
+    fn max_roof_capacity_w(&self) -> f64 {
+        self.inner.max_roof_capacity_w
     }
 
     #[getter]
@@ -256,8 +256,8 @@ impl PyPvSizingResult {
     }
 
     #[getter]
-    fn max_ac_kw(&self) -> Option<f64> {
-        self.inner.max_ac_kw
+    fn max_ac_w(&self) -> Option<f64> {
+        self.inner.max_ac_w
     }
 
     #[getter]
@@ -275,21 +275,21 @@ impl PyPvSizingResult {
     fn __repr__(&self) -> String {
         let mut s = format!(
             "PvSizingResult(capacity={:.2} kW, panels={}, azimuth={:.0}°, tilt={:.1}°, max_roof={:.1} kW",
-            self.inner.capacity_kw,
+            self.inner.capacity_w,
             self.inner.num_panels,
             self.inner.array_azimuth_deg,
             self.inner.array_tilt_deg,
-            self.inner.max_roof_capacity_kw,
+            self.inner.max_roof_capacity_w,
         );
         if self.inner.electrical_constraint_binding {
             s.push_str(&format!(
                 ", elec_constraint=bind, max_ac={:.1} kW",
-                self.inner.max_ac_kw.unwrap_or(0.0),
+                self.inner.max_ac_w.unwrap_or(0.0),
             ));
-        } else if self.inner.max_ac_kw.is_some() {
+        } else if self.inner.max_ac_w.is_some() {
             s.push_str(&format!(
                 ", elec_constraint=ok, max_ac={:.1} kW",
-                self.inner.max_ac_kw.unwrap_or(0.0),
+                self.inner.max_ac_w.unwrap_or(0.0),
             ));
         }
         s.push(')');
@@ -326,8 +326,8 @@ impl PyUsableRoofArea {
 
     /// Maximum DC capacity in kW.
     #[getter]
-    fn max_capacity_kw(&self) -> f64 {
-        self.inner.max_capacity_kw
+    fn max_capacity_w(&self) -> f64 {
+        self.inner.max_capacity_w
     }
 
     /// Roof shape classification used.
@@ -352,7 +352,7 @@ impl PyUsableRoofArea {
         format!(
             "UsableRoofArea(usable_m2={:.1}, max={:.1} kW, panels={}, azimuth={:.0}°, tilt={:.1}°)",
             self.inner.usable_m2,
-            self.inner.max_capacity_kw,
+            self.inner.max_capacity_w,
             self.inner.max_panels,
             self.inner.azimuth_deg,
             self.inner.tilt_deg,
@@ -581,13 +581,13 @@ pub fn enumerate_pv_candidates(
 ///
 /// Args:
 ///     usable: ``UsableRoofArea`` from ``compute_usable_area()``.
-///     target_kw: Desired PV capacity in kW.
-///     min_kw: Minimum acceptable capacity (default 2.0).
-///     max_kw: Maximum capacity limit (default 14.0).
+///     target_w: Desired PV capacity in W (SI).
+///     min_w: Minimum acceptable capacity (default 2000.0).
+///     max_w: Maximum capacity limit (default 14000.0).
 ///     system_losses: Optional system losses fraction (0–1, default 0.14).
 ///     panel_watts: Optional panel wattage override (default 440 W).
 ///     panel_area_m2: Optional panel area override (default 2.1 m²).
-///     inverter_kw_ac: Optional inverter AC power rating for DC-side clamp.
+///     inverter_ac_w: Optional inverter AC power rating for DC-side clamp.
 ///         Must pair with ``max_dc_ac_ratio`` to activate.
 ///     max_dc_ac_ratio: Optional maximum DC:AC oversizing ratio.
 ///         Typical residential values: 1.1–1.3 (NREL SAM default = 1.2).
@@ -605,35 +605,35 @@ pub fn enumerate_pv_candidates(
 ///     ``PvSizingResult`` on success, or ``ValueError`` if roof capacity
 ///     is below the minimum.
 #[pyfunction]
-#[pyo3(signature = (usable, target_kw, *, min_kw=2.0, max_kw=14.0,
+#[pyo3(signature = (usable, *, target_w, min_w=2000.0, max_w=14000.0,
     system_losses=None, panel_watts=None, panel_area_m2=None,
-    inverter_kw_ac=None, max_dc_ac_ratio=None, main_panel_ampacity=None,
+    inverter_ac_w=None, max_dc_ac_ratio=None, main_panel_ampacity=None,
     main_breaker_ampacity=None))]
 // PyO3 maps this keyword signature 1:1 to the Python API.
 #[allow(clippy::too_many_arguments)]
 pub fn size_pv_system(
     usable: &PyUsableRoofArea,
-    target_kw: f64,
-    min_kw: f64,
-    max_kw: f64,
+    target_w: f64,
+    min_w: f64,
+    max_w: f64,
     system_losses: Option<f64>,
     panel_watts: Option<u32>,
     panel_area_m2: Option<f64>,
-    inverter_kw_ac: Option<f64>,
+    inverter_ac_w: Option<f64>,
     max_dc_ac_ratio: Option<f64>,
     main_panel_ampacity: Option<u32>,
     main_breaker_ampacity: Option<u32>,
 ) -> PyResult<PyPvSizingResult> {
     let result = hares_physics::pv_sizing::size_pv_system(
         &usable.inner,
-        target_kw,
-        min_kw,
-        max_kw,
+        target_w,
+        min_w,
+        max_w,
         hares_physics::pv_sizing::PvSystemTuning {
             system_losses,
             panel_watts,
             panel_area_m2,
-            inverter_kw_ac,
+            inverter_ac_w,
             max_dc_ac_ratio,
             main_panel_ampacity,
             main_breaker_ampacity,
@@ -652,7 +652,7 @@ pub fn size_pv_system(
 /// main panel rating that can support it.
 ///
 /// Args:
-///     target_ac_kw: Desired AC-side PV output in kW.
+///     target_ac_w: Desired AC-side PV output in kW.
 ///     main_breaker_amps: Optional main breaker ampacity. When ``None``
 ///         (default), the main breaker is assumed to match the panel
 ///         ampacity (the standard residential configuration). Override
@@ -667,9 +667,9 @@ pub fn size_pv_system(
 ///
 /// NEC 705.12(B)(2)(3)(b) (NFPA 70, NEC 2023).
 #[pyfunction]
-#[pyo3(signature = (target_ac_kw, *, main_breaker_amps=None))]
-pub fn required_main_panel_ampacity(target_ac_kw: f64, main_breaker_amps: Option<u32>) -> u32 {
-    hares_physics::pv_sizing::required_main_panel_ampacity(target_ac_kw, main_breaker_amps)
+#[pyo3(signature = (*, target_ac_w, main_breaker_amps=None))]
+pub fn required_main_panel_ampacity(target_ac_w: f64, main_breaker_amps: Option<u32>) -> u32 {
+    hares_physics::pv_sizing::required_main_panel_ampacity(target_ac_w, main_breaker_amps)
 }
 
 // ---------------------------------------------------------------------------
@@ -767,11 +767,11 @@ pub(crate) fn pv_candidates_from_dwelling(
 }
 
 /// Target capacity bounds for [`size_pv_from_dwelling`], mirroring the
-/// `target_kw` / `min_kw` / `max_kw` triple of `pv_sizing::size_pv_system`.
+/// `target_w` / `min_w` / `max_w` triple of `pv_sizing::size_pv_system`.
 pub(crate) struct PvSizingTargets {
-    pub target_kw: f64,
-    pub min_kw: f64,
-    pub max_kw: f64,
+    pub target_w: f64,
+    pub min_w: f64,
+    pub max_w: f64,
 }
 
 /// Roof-siting inputs for [`size_pv_from_dwelling`]: the roof-area knobs of
@@ -822,9 +822,9 @@ pub(crate) fn size_pv_from_dwelling(
     .map_err(|e| e.to_string())?;
     let result = pv_sizing::size_pv_system(
         &usable,
-        targets.target_kw,
-        targets.min_kw,
-        targets.max_kw,
+        targets.target_w,
+        targets.min_w,
+        targets.max_w,
         pv_sizing::PvSystemTuning {
             panel_watts,
             panel_area_m2,
@@ -862,9 +862,9 @@ mod tests {
             &roof,
             RoofShape::Gable,
             PvSizingTargets {
-                target_kw: 5.0,
-                min_kw: 2.0,
-                max_kw: 14.0,
+                target_w: 5.0,
+                min_w: 2.0,
+                max_w: 14.0,
             },
             PvRoofSiting {
                 wall_azimuths: &[],
@@ -876,7 +876,7 @@ mod tests {
                 system_losses: None,
                 panel_watts: None,
                 panel_area_m2: None,
-                inverter_kw_ac: None,
+                inverter_ac_w: None,
                 max_dc_ac_ratio: None,
                 main_panel_ampacity: None,
                 main_breaker_ampacity: None,
@@ -890,9 +890,9 @@ mod tests {
             &roof,
             RoofShape::Gable,
             PvSizingTargets {
-                target_kw: 5.0,
-                min_kw: 2.0,
-                max_kw: 14.0,
+                target_w: 5.0,
+                min_w: 2.0,
+                max_w: 14.0,
             },
             PvRoofSiting {
                 wall_azimuths: &[],
@@ -904,7 +904,7 @@ mod tests {
                 system_losses: Some(0.14),
                 panel_watts: Some(300),
                 panel_area_m2: Some(1.6),
-                inverter_kw_ac: None,
+                inverter_ac_w: None,
                 max_dc_ac_ratio: None,
                 main_panel_ampacity: None,
                 main_breaker_ampacity: None,
@@ -957,9 +957,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(candidates_default.len(), candidates_custom.len());
-        // max_capacity_kw should differ because panel wattage differs.
-        let def_cap = candidates_default[0].inner.max_capacity_kw;
-        let cust_cap = candidates_custom[0].inner.max_capacity_kw;
+        // max_capacity_w should differ because panel wattage differs.
+        let def_cap = candidates_default[0].inner.max_capacity_w;
+        let cust_cap = candidates_custom[0].inner.max_capacity_w;
         assert_ne!(
             def_cap, cust_cap,
             "custom panel (470W / 2.0 m²) must produce different capacity than default (440W / 2.0 m²)"
@@ -1003,7 +1003,7 @@ mod tests {
         .unwrap();
 
         // When all panel params are None, the store should be consulted.
-        // A 300W/1.6m² panel produces a different max_capacity_kw than the
+        // A 300W/1.6m² panel produces a different max_capacity_w than the
         // compile-time 440W/2.1m² default.
         assert_eq!(candidates.len(), 1);
         let def_candidates = pv_candidates_from_dwelling(
@@ -1022,11 +1022,11 @@ mod tests {
         )
         .unwrap();
         assert_ne!(
-            candidates[0].inner.max_capacity_kw, def_candidates[0].inner.max_capacity_kw,
+            candidates[0].inner.max_capacity_w, def_candidates[0].inner.max_capacity_w,
             "store-supplied 300W panel must differ from compile-time 440W default"
         );
         assert!(
-            def_candidates[0].inner.max_capacity_kw > candidates[0].inner.max_capacity_kw,
+            def_candidates[0].inner.max_capacity_w > candidates[0].inner.max_capacity_w,
             "440W default should yield higher capacity than 300W store panel"
         );
     }
@@ -1081,9 +1081,9 @@ mod tests {
             &roof,
             RoofShape::Gable,
             PvSizingTargets {
-                target_kw: 8.0,
-                min_kw: 2.0,
-                max_kw: 14.0,
+                target_w: 8000.0,
+                min_w: 2000.0,
+                max_w: 14000.0,
             },
             PvRoofSiting {
                 wall_azimuths: &[],
@@ -1095,7 +1095,7 @@ mod tests {
                 system_losses: None,
                 panel_watts: None,
                 panel_area_m2: None,
-                inverter_kw_ac: None,
+                inverter_ac_w: None,
                 max_dc_ac_ratio: None,
                 main_panel_ampacity: None,
                 main_breaker_ampacity: None,
@@ -1104,14 +1104,14 @@ mod tests {
         )
         .expect("no inverter");
 
-        // With inverter: 5.0 kW AC × 1.2 ratio → max 6.0 kW DC
+        // With inverter: 5000 W AC × 1.2 ratio → max 6000 W DC
         let result_with_inv = size_pv_from_dwelling(
             &roof,
             RoofShape::Gable,
             PvSizingTargets {
-                target_kw: 8.0,
-                min_kw: 2.0,
-                max_kw: 14.0,
+                target_w: 8000.0,
+                min_w: 2000.0,
+                max_w: 14000.0,
             },
             PvRoofSiting {
                 wall_azimuths: &[],
@@ -1123,7 +1123,7 @@ mod tests {
                 system_losses: None,
                 panel_watts: None,
                 panel_area_m2: None,
-                inverter_kw_ac: Some(5.0),
+                inverter_ac_w: Some(5000.0),
                 max_dc_ac_ratio: Some(1.2),
                 main_panel_ampacity: None,
                 main_breaker_ampacity: None,
@@ -1134,17 +1134,18 @@ mod tests {
 
         // Inverter-limited capacity must be ≤ unconstrained capacity.
         assert!(
-            result_with_inv.inner.capacity_kw <= result_no_inv.inner.capacity_kw,
+            result_with_inv.inner.capacity_w <= result_no_inv.inner.capacity_w,
             "inverter-limited capacity ({:.2}) must be <= unconstrained ({:.2})",
-            result_with_inv.inner.capacity_kw,
-            result_no_inv.inner.capacity_kw
+            result_with_inv.inner.capacity_w,
+            result_no_inv.inner.capacity_w
         );
-        // With 5.0 kW AC × 1.2 = 6.0 kW DC max, target 8 kW must be clamped.
-        let max_dc = 5.0 * 1.2;
+        // With 5000 W AC × 1.2 = 6000 W DC max, target 8 kW must be clamped
+        // to within one panel's fit granularity.
+        let max_dc = 5000.0 * 1.2;
         assert!(
-            result_with_inv.inner.capacity_kw <= max_dc + 0.5,
+            result_with_inv.inner.capacity_w <= max_dc + 500.0,
             "inverter-limited capacity {:.2} should approximate max DC {:.2}",
-            result_with_inv.inner.capacity_kw,
+            result_with_inv.inner.capacity_w,
             max_dc
         );
     }
@@ -1238,7 +1239,7 @@ mod tests {
         )
         .expect("compute_usable_area should succeed for valid roof plane");
         assert!(result.usable_m2() > 0.0);
-        assert!(result.max_capacity_kw() > 0.0);
+        assert!(result.max_capacity_w() > 0.0);
         assert!(result.max_panels() > 0);
         assert_eq!(result.best_plane_idx(), 0);
     }
@@ -1282,7 +1283,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(candidates.len(), 1);
-        assert!(candidates[0].max_capacity_kw() > 0.0);
+        assert!(candidates[0].max_capacity_w() > 0.0);
     }
 
     #[test]
@@ -1340,7 +1341,7 @@ mod tests {
             &usable, 6.0, 2.0, 14.0, None, None, None, None, None, None, None,
         )
         .expect("size_pv_system should succeed");
-        assert!(result.capacity_kw() > 0.0);
+        assert!(result.capacity_w() > 0.0);
         assert!(result.num_panels() > 0);
     }
 

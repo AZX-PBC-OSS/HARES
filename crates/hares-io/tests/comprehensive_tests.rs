@@ -28,7 +28,6 @@ use hares_io::{
     ColumnMapper, Destination, ResStockError, ResStockVersion, SimulationConfig,
     build_schema_for_specs, expected_columns_at_verbosity, parse_resstock_metadata,
 };
-use hares_physics::units::energy_therms_to_kwh;
 use hares_types::FuelType;
 
 // ---------------------------------------------------------------------------
@@ -456,7 +455,9 @@ fn total_energy_includes_both_electric_and_gas() {
     let combined = electric_kwh + gas.total_kwh_equivalent;
 
     // combined = electric_kwh + energy_therms_to_kwh(gas_therms)
-    let expected_combined = electric_kwh + energy_therms_to_kwh(gas_therms);
+    let expected_combined = electric_kwh
+        + uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(gas_therms)
+            .get::<uom::si::energy::kilowatt_hour>();
     assert!(
         (combined - expected_combined).abs() < 1e-6,
         "combined total ({combined}) should equal electric ({electric_kwh}) + gas ({gas_therms}) therms converted to kWh = {expected_combined}"

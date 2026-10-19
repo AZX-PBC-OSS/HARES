@@ -132,11 +132,13 @@ fn bench_output_row_plan(c: &mut Criterion) {
             .expect("row plan builds");
         b.iter(|| {
             row_plan.begin_row(0);
-            let row = row_plan.row_mut();
+            let mut writer = row_plan.writer();
             for &idx in &frozen {
-                row[idx] = 1.0;
+                // The producer's write path: the value is SI, the slot's
+                // declared unit converts it once.
+                writer.write(idx, 1.0);
             }
-            black_box(observe(row));
+            black_box(observe(row_plan.row()));
         })
     });
 

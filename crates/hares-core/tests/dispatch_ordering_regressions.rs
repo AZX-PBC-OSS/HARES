@@ -174,14 +174,14 @@ impl Equipment for StubPowerEquipment {
         // validate_port_core_electrical_consistency in debug builds).
         ports.accumulate(&PortContribution::Electrical {
             active_power_w: -effective_kw.max(0.0) * 1000.0,
-            reactive_power_kvar: 0.0,
+            reactive_power_var: 0.0,
         })?;
-        // Generation convention: signed_kw will be negative for this source.
+        // Generation convention: signed_w will be negative for this source.
         self.core_output = CoreOutput {
             state: CoreState::default(),
             flows: CoreFlows {
-                electric_kw: Some(
-                    ElectricPower::generation(effective_kw.max(0.0))
+                electric_w: Some(
+                    ElectricPower::generation(effective_kw.max(0.0) * 1000.0)
                         .expect("effective_kw must be finite and non-negative"),
                 ),
                 ..Default::default()
@@ -262,15 +262,15 @@ impl Actor for OneShotActor {
 // ---------------------------------------------------------------------------
 
 /// Magnitude of generation (positive) observed on the stub. Generation is
-/// stored via `ElectricPower::Generation(effective_kw)` whose `signed_kw()`
+/// stored via `ElectricPower::Generation(effective_kw)` whose `signed_w()`
 /// is negative; we flip sign to report a positive generation magnitude.
-fn stub_output_kw(dwelling: &Dwelling, name: &str) -> f64 {
+fn stub_output_w(dwelling: &Dwelling, name: &str) -> f64 {
     let signed = dwelling
         .equipment()
         .iter()
         .find(|eq| eq.descriptor().name == name)
-        .and_then(|eq| eq.core_output().flows.electric_kw)
-        .map(|p| p.signed_kw())
+        .and_then(|eq| eq.core_output().flows.electric_w)
+        .map(|p| p.signed_w())
         .expect("stub equipment must be present");
     -signed
 }
@@ -318,12 +318,12 @@ fn actor_curtailment_applies_same_step_to_nonthermal_equipment() {
 
     // With pre-fix ordering the stub would have stepped BEFORE the actor
     // dispatch and its output would be the full base_kw.
-    let observed_kw = stub_output_kw(&dwelling, stub_name);
+    let observed_w = stub_output_w(&dwelling, stub_name);
     assert!(
-        (observed_kw - base_kw * 0.5).abs() < 1e-9,
+        (observed_w - base_kw * 0.5 * 1000.0).abs() < 1e-9,
         "CurtailmentPercent(50) emitted by actor on step 0 must reduce stub output to 50% same step: expected={:.4} kW observed={:.4} kW",
         base_kw * 0.5,
-        observed_kw
+        observed_w / 1000.0
     );
 
     // Introspect the stub to confirm the dispatch was in effect at step() time,
@@ -364,10 +364,11 @@ fn equipment_core_reflects_current_step_after_dispatch() {
 
     // Step once at baseline.
     dwelling.step().expect("step1 ok");
-    let baseline_core_kw = stub_output_kw(&dwelling, stub_name);
+    let baseline_core_w = stub_output_w(&dwelling, stub_name);
     assert!(
-        (baseline_core_kw - base_kw).abs() < 1e-9,
-        "baseline step must see full base_kw output ({base_kw} kW), got {baseline_core_kw} kW"
+        (baseline_core_w - base_kw * 1000.0).abs() < 1e-9,
+        "baseline step must see full base_kw output ({} W), got {baseline_core_w} W",
+        base_kw * 1000.0
     );
 
     // Queue a dispatch before step 2; after step 2 both the equipment's own
@@ -379,11 +380,11 @@ fn equipment_core_reflects_current_step_after_dispatch() {
     });
     dwelling.step().expect("step2 ok");
 
-    let post_core_kw = stub_output_kw(&dwelling, stub_name);
-    let expected = base_kw * 0.2;
+    let post_core_w = stub_output_w(&dwelling, stub_name);
+    let expected = base_kw * 0.2 * 1000.0;
     assert!(
-        (post_core_kw - expected).abs() < 1e-9,
-        "post-dispatch equipment core must be derated to 20%: expected={expected:.4} observed={post_core_kw:.4}"
+        (post_core_w - expected).abs() < 1e-9,
+        "post-dispatch equipment core must be derated to 20%: expected={expected:.4} observed={post_core_w:.4}"
     );
 
     // latest_env.equipment_core must mirror the equipment's core_output for
@@ -396,12 +397,12 @@ fn equipment_core_reflects_current_step_after_dispatch() {
         .expect("latest_env.equipment_core must contain stub after step");
     let env_kw = env_core
         .flows
-        .electric_kw
-        .map(|p| -p.signed_kw())
-        .expect("env core must carry electric_kw");
+        .electric_w
+        .map(|p| -p.signed_w())
+        .expect("env core must carry electric_w");
     assert!(
-        (env_kw - post_core_kw).abs() < 1e-12,
-        "latest_env.equipment_core must mirror the equipment's current-step CoreOutput: env={env_kw:.6} eq={post_core_kw:.6}"
+        (env_kw - post_core_w).abs() < 1e-12,
+        "latest_env.equipment_core must mirror the equipment's current-step CoreOutput: env={env_kw:.6} eq={post_core_w:.6}"
     );
 }
 
@@ -481,7 +482,7 @@ fn priority_inversion_safety_wins_over_later_low_priority_signal() {
         )))
         .unwrap();
     dwelling_a.step().expect("scenario A step must succeed");
-    let observed_a = stub_output_kw(&dwelling_a, stub_name);
+    let observed_a = stub_output_w(&dwelling_a, stub_name);
     assert!(
         observed_a.abs() < 1e-9,
         "Scenario A: Safety queued pre-dispatch must beat later Schedule (observed {observed_a:.6} kW, expected ~0)"
@@ -510,7 +511,7 @@ fn priority_inversion_safety_wins_over_later_low_priority_signal() {
         )))
         .unwrap();
     dwelling_b.step().expect("scenario B step must succeed");
-    let observed_b = stub_output_kw(&dwelling_b, stub_name);
+    let observed_b = stub_output_w(&dwelling_b, stub_name);
     assert!(
         observed_b.abs() < 1e-9,
         "Scenario B: Safety emitted by actor must beat earlier Schedule (observed {observed_b:.6} kW, expected ~0)"

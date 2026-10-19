@@ -8,12 +8,12 @@ pub struct SolarTracking {
 
 impl ChargingPreference for SolarTracking {
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote {
-        let pv = ctx.env.electrical.actual_pv_kw_or_fallback();
+        let pv = hares_core_units::w_to_kw(ctx.env.electrical.actual_pv_w_or_fallback());
 
         // The observation's own build site checks finiteness, and a negative
         // PV observation fails the step there; no per-decide re-check.
 
-        let load = ctx.env.electrical.base_load_kw;
+        let load = hares_core_units::w_to_kw(ctx.env.electrical.base_load_w);
         let surplus = (pv - load).max(0.0);
 
         if surplus < self.min_charge_rate_kw {
@@ -61,8 +61,8 @@ mod tests {
     fn charges_at_surplus() {
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 5.0,
-                base_load_kw: 1.5,
+                pv_generation_w: 5000.0,
+                base_load_w: 1500.0,
                 ..Default::default()
             })
             .build();
@@ -80,8 +80,8 @@ mod tests {
     fn idles_when_insufficient_surplus() {
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 2.0,
-                base_load_kw: 1.5,
+                pv_generation_w: 2000.0,
+                base_load_w: 1500.0,
                 ..Default::default()
             })
             .build();
@@ -99,8 +99,8 @@ mod tests {
     fn clamps_to_max_charge() {
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 15.0,
-                base_load_kw: 1.0,
+                pv_generation_w: 15000.0,
+                base_load_w: 1000.0,
                 ..Default::default()
             })
             .build();
@@ -118,8 +118,8 @@ mod tests {
     fn idles_when_no_pv() {
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 0.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 0.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -139,9 +139,9 @@ mod tests {
         // Surplus should use actual: 4.0 - 2.0 = 2.0 kW, not 10.0 - 2.0 = 8.0 kW.
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 10.0,
-                actual_pv_kw: 4.0,
-                base_load_kw: 2.0,
+                pv_generation_w: 10000.0,
+                actual_pv_w: 4000.0,
+                base_load_w: 2000.0,
                 ..Default::default()
             })
             .build();
@@ -161,9 +161,9 @@ mod tests {
         // Surplus: 5.0 - 1.5 = 3.5 kW.
         let env = TestEnvBuilder::new()
             .with_electrical(ElectricalSummary {
-                pv_generation_kw: 5.0,
-                actual_pv_kw: 0.0,
-                base_load_kw: 1.5,
+                pv_generation_w: 5000.0,
+                actual_pv_w: 0.0,
+                base_load_w: 1500.0,
                 ..Default::default()
             })
             .build();
@@ -175,5 +175,13 @@ mod tests {
 
         assert_eq!(vote.label, "solar:surplus");
         assert!((vote.power_kw.unwrap() - 3.5).abs() < 1e-9);
+    }
+}
+
+/// The kW working value of an SI summary read: the actors' kW-era working
+/// values convert once at the read until the control-layer commit.
+pub(crate) mod hares_core_units {
+    pub(crate) fn w_to_kw(w: f64) -> f64 {
+        uom::si::f64::Power::new::<uom::si::power::watt>(w).get::<uom::si::power::kilowatt>()
     }
 }
