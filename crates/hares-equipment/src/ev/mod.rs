@@ -1342,9 +1342,9 @@ impl Ev {
                  vehicle is idle for the step"
             );
             return Ok(ChargeStepPower {
-                charge_leg_ac_kw: 0.0,
+                charge_leg_ac_w: 0.0,
                 heater_draw_w: 0.0,
-                export_ac_kw: 0.0,
+                export_ac_w: 0.0,
                 is_discharge: false,
             });
         }

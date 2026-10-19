@@ -258,8 +258,8 @@ fn vacancy_zeroes_the_occupant_loads() {
             let power = eq
                 .core_output()
                 .flows
-                .electric_kw
-                .map_or(0.0, |e| e.net_consumption_kw());
+                .electric_w
+                .map_or(0.0, |e| e.net_consumption_w());
             assert_eq!(
                 power, 0.0,
                 "step {}: {name} draws nothing under the all-year vacancy",
@@ -286,8 +286,8 @@ fn vacancy_zeroes_the_occupant_loads() {
             && eq
                 .core_output()
                 .flows
-                .electric_kw
-                .is_some_and(|e| e.net_consumption_kw() > 0.0)
+                .electric_w
+                .is_some_and(|e| e.net_consumption_w() > 0.0)
     });
     assert!(fridge_ran, "the refrigerator is not zeroed by the vacancy");
 }
@@ -347,8 +347,8 @@ fn power_outage_keeps_pv_and_holds_the_water_heater_at_2c() {
             lighting_kw.push(light.map_or(0.0, |eq| {
                 eq.core_output()
                     .flows
-                    .electric_kw
-                    .map_or(0.0, |e| e.net_consumption_kw())
+                    .electric_w
+                    .map_or(0.0, |e| e.net_consumption_w())
             }));
             let wh = dwelling
                 .equipment()
@@ -437,8 +437,8 @@ fn power_outage_stops_the_dehumidifier() {
         power.push(
             eq.core_output()
                 .flows
-                .electric_kw
-                .map_or(0.0, |e| e.net_consumption_kw()),
+                .electric_w
+                .map_or(0.0, |e| e.net_consumption_w()),
         );
     }
 

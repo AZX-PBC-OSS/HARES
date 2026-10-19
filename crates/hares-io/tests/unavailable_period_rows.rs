@@ -35,8 +35,8 @@ fn synthetic_annual_schedule(columns: &[(&str, f64)]) -> hares_io::ScheduleTimeS
 fn lighting_spec() -> EquipmentSpec {
     let mut parameters = serde_json::Map::new();
     parameters.insert(
-        "annual_electric_kwh".to_string(),
-        serde_json::Value::from(400.0),
+        "annual_electric_j".to_string(),
+        serde_json::Value::from(1.44e9),
     );
     EquipmentSpec {
         name: "Indoor Lighting".to_string(),
@@ -91,23 +91,23 @@ fn design_level_ignores_flagged_steps() {
 
     // The design level: the annual energy over the year's hours divided
     // by the unzeroed column's mean (1.0), so the derived power column's
-    // values are the fraction times 400 kWh / 8760 h. The zeroed half
-    // must not have scaled the level up (a zeroed mean of 0.5 would
-    // double it).
-    let design_kw = 400.0 / 8760.0;
+    // values are the fraction times 400 kWh / 8760 h in watts
+    // (45.6621 W). The zeroed half must not have scaled the level up (a
+    // zeroed mean of 0.5 would double it).
+    let design_w = 1.44e9 / 8760.0 / 3600.0;
     let col_idx = schedule
         .column_names
         .iter()
-        .position(|name| name.starts_with("power_schedule_kw_"))
+        .position(|name| name.starts_with("power_schedule_w_"))
         .expect("the derived power column exists");
-    let max_kw = schedule.columns[col_idx]
+    let max_w = schedule.columns[col_idx]
         .iter()
         .copied()
         .fold(f64::MIN, f64::max);
     assert!(
-        (max_kw - design_kw).abs() < 1e-9,
+        (max_w - design_w).abs() < 1e-7,
         "the design level must come from the unzeroed column's mean: got \
-         {max_kw} kW, wanted {design_kw} kW"
+         {max_w} W, wanted {design_w} W"
     );
     // The zeroed half's shape is zero: the period removes energy.
     // The period's days: Jan 1 through Jul 1, both days inclusive as
