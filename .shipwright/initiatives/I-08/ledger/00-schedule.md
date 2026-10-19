@@ -365,3 +365,23 @@ Row 99a's record holds the first CI run of the closing sequence's pull
 request (`01-baseline-repair.md` BR-10); a job that fails there becomes a
 fix entry committed before M-4b, and the operator pushes again.
 There is no row 54.
+
+
+## The numeric block's completion (2026-10-19)
+
+Every entry in `09-numeric-fixes.md` is landed: rows 79 through 94j
+(B-1a through B-17, the B-14 SI sweep's four commits, OD-9, OD-2's
+site 6, OD-10's numeric commit, OD-20) folded linear onto the head
+`bb75feba`, the fold's seams carrying the SI renames through the
+unavailable-period surfaces (`ChargeStepPower`'s W fields, `CoreFlows`
+`electric_w`, the design level's W arithmetic). The final block at the
+head: fmt clean; clippy `--workspace --all-targets --all-features
+-D warnings` clean; nextest `--workspace --all-features -j 2`
+8237/8237 (8 skipped); `pytest -m ''` after `maturin develop` 1800
+passed + 6 xfailed, 0 failed, 0 errors; pyright 0; the goldens
+compare-all 10 + dst 1 bitwise identical. `CHECKPOINT_VERSION` is 20.
+What remains of I-08: the hardening Wave 1's open rows (the schedule
+calendar anchoring, the warm-up stochastic neutrality, the EV island,
+the NaN grid-voltage override, the tariff coverage, the envelope
+resistor order, the rollback accounting), then row 97 (CN-4's B1
+re-baseline), rows 100/101 and the operator pushes.
