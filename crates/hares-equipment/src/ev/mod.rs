@@ -2143,6 +2143,23 @@ impl Equipment for Ev {
         9
     }
 
+    /// The pack's stored charge [J], on the Battery reporter's exact
+    /// convention (`battery/mod.rs`: SOC × the nominal capacity): the
+    /// fraction of the degradation-adjusted pack capacity
+    /// (`degradation_adjusted_capacity_j`, rated × SOH) the SoC holds.
+    ///
+    /// Included: only the pack's charge. Excluded: the reversible
+    /// temperature derate (the divisor here is temperature-independent,
+    /// exactly as the Battery's reporter keys on `capacity_j_nominal` and
+    /// never on the derated `capacity_j`, so a pack-temperature move cannot
+    /// be miscounted as stored-energy motion across a step) and
+    /// `pending_drive_j` (a commitment to a dispatched trip's I²R thermal
+    /// application, not a store of energy: the SoC debit happened at the
+    /// `EvDrive` signal, so this reading already reflects it).
+    fn stored_energy_j(&self) -> Option<f64> {
+        Some(self.soc * self.degradation_adjusted_capacity_j())
+    }
+
     fn validate_signal(&self, signal: &hares_types::ControlSignal) -> crate::Result<()> {
         use hares_types::ensure_signal_supported;
         ensure_signal_supported(self.descriptor().control_capabilities, signal)?;

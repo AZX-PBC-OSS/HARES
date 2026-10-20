@@ -17518,6 +17518,124 @@ occupancy = 0.0
         );
     }
 
+    /// The EV's mutate-then-fail window is counted: the EV moves its SoC in
+    /// `apply_soc_and_thermal` and only then runs `update_degradation`, whose
+    /// guards can fail the step, so a tolerated EV failure keeps a moved
+    /// charge the rollback cannot account for. The EV reports its stored
+    /// energy (the battery reporter's convention), so the discarded counter
+    /// carries the delta in signed Wh, bit-faithful, instead of silently
+    /// missing it.
+    #[test]
+    fn tolerated_ev_step_failure_counts_the_soc_energy_the_rollback_cannot_account() {
+        let mut dwelling = bestest_dwelling();
+        // A real EV driven out of the degradation model's temperature
+        // envelope ([-100, +130] °C) by its own 5 kW pack heater while a
+        // binding 6 kW power setpoint keeps a small charge leg alive: step 1
+        // succeeds (the pack lands inside the envelope, a core output with
+        // SOC is published), the heater's per-step rise crosses the envelope
+        // on a later step and `update_degradation` fails it while the SoC is
+        // still moving (the charge leg and the heater share the setpoint's
+        // budget). UA 0 pins the pack temperature to the heater's rise (no
+        // ambient relaxation), so the failure repeats identically and the
+        // SoC keeps moving every remaining step until the target.
+        let config: hares_equipment::EvConfig = serde_json::from_value(serde_json::json!({
+            "capacity_j": 216000000.0,
+            "max_charging_power_w": 7200.0,
+            "initial_soc": 0.5,
+            "battery_temp_c": 110.0,
+            "ua_w_per_k": 0.0,
+            "heater_power_w": 5000.0,
+            "heater_threshold_c": 200.0,
+        }))
+        .expect("minimal EvConfig");
+        let config = EquipmentConfig::from_typed("HotEv".to_string(), "EV".to_string(), config)
+            .expect("typed EV config");
+        let mut ev = EquipmentRegistry::new()
+            .create("EV", config.clone())
+            .expect("create EV");
+        ev.init(&config, &dwelling.latest_env).expect("init EV");
+        dwelling.add_equipment(ev).expect("add EV");
+        // The binding setpoint: below the 7.2 kW EVSE rating, above the
+        // heater's AC equivalent (5 kW / 0.9), so the charge leg keeps its
+        // remainder and the SoC moves in every step.
+        dwelling.apply_control(
+            "HotEv",
+            ControlSignal::PowerSetpoint {
+                active_power_w: 6000.0,
+                reactive_power_var: None,
+                min_soc: None,
+                max_soc: None,
+            },
+        );
+
+        let ev_idx = dwelling
+            .equipment()
+            .iter()
+            .position(|e| e.descriptor().name == "HotEv")
+            .expect("the EV is registered");
+
+        // Step 1 must commit (the soc_bounds invariant reads a published
+        // core output; a first-step failure would end the run instead of
+        // tolerating it).
+        dwelling
+            .run_timestep(false)
+            .expect("the first EV step commits");
+        assert_eq!(
+            dwelling.health.port_rollbacks, 0,
+            "the first step lands inside the envelope"
+        );
+
+        // Run to the first tolerated failure: the pack leaves the envelope
+        // while the charge leg is still moving the SoC.
+        let mut pre_j = None;
+        for _ in 0..10 {
+            pre_j =
+                Some(dwelling.equipment()[ev_idx].stored_energy_j().expect(
+                    "the EV reports its stored energy (the battery reporter's convention)",
+                ));
+            dwelling
+                .run_timestep(false)
+                .expect("a tolerated EV failure must not end the run");
+            if dwelling.health.port_rollbacks == 1 {
+                break;
+            }
+        }
+        assert_eq!(
+            dwelling.health.port_rollbacks, 1,
+            "the EV's step failed and was rolled back"
+        );
+        let kept_j = dwelling.equipment()[ev_idx]
+            .stored_energy_j()
+            .expect("the EV still reports its stored energy after the rollback");
+        // The SoC moved (the charge leg) before the degradation error path
+        // failed the step; the rollback restored the ports but kept the
+        // charge.
+        let discarded_wh = (kept_j - pre_j.unwrap()) / 3600.0;
+        assert!(
+            discarded_wh > 0.0,
+            "the EV's stored energy moved in the failed step: {discarded_wh} Wh"
+        );
+        // f64-faithful: the counter's accumulation is exactly this delta in
+        // Wh (the same arithmetic `count_discarded_state_energy` runs).
+        assert_eq!(
+            dwelling.health.discarded_state_energy_wh.to_bits(),
+            discarded_wh.to_bits(),
+            "the kept SoC energy is counted, signed Wh, bit-faithful: expected \
+             {discarded_wh} Wh, counted {} Wh",
+            dwelling.health.discarded_state_energy_wh
+        );
+        let warned = dwelling
+            .warnings
+            .iter()
+            .find(|w| w.message.contains("state energy"))
+            .expect("the first discarded-state event is warned");
+        assert!(
+            warned.message.contains("HotEv"),
+            "the warning names the EV: {}",
+            warned.message
+        );
+    }
+
     /// The per-zone HVAC thermal check skips a heater whose step failed: its
     /// rolled-back port delivered nothing while its core_output still holds
     /// the last committed heat.

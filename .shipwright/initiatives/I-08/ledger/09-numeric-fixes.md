@@ -5310,10 +5310,22 @@ pre-step reading, Wh, signed) accumulates into the new
 `RunHealth::discarded_state_energy_wh`, and the run's first nonzero
 event raises a warning naming the equipment and the energy (later
 events only bump the counter; the rollback warning already names the
-equipment per event). The tank-backed water heaters (gas, resistance,
-heat pump, indirect) report their water's stored energy, the battery
-its charge; equipment without an energy-bearing state report nothing
-and contribute no delta. The rollback's keep-the-state behavior is
+equipment per event). The reporters: the four tank-backed water heaters
+(gas, resistance, heat pump, indirect) report their water's stored
+energy, the battery and the EV report their charge (the EV's is a
+follow-up to this entry: its SoC moves in `apply_soc_and_thermal` before
+`update_degradation` can fail the step, the mutate-then-fail window the
+reporter now covers, on the battery reporter's convention: the SoC held
+over the degradation-adjusted capacity, the temperature derate and the
+pending drive commitment excluded). The classes without an energy-bearing state,
+and so without a reporter, each out of scope for a reason: the tankless
+water heaters (water heated in flow, nothing held between steps), HVAC
+and the ventilation fans (no storage; the delivered or recovered heat is
+the port contribution itself), PV (no storage; generation is
+port-visible), the scheduled, event and wet loads (stateless schedules),
+the generator and fuel cell (fuel burns as drawn, no stored-fuel state),
+and the protocol bridge (a proxy for external models, no internal store).
+The rollback's keep-the-state behavior is
 unchanged (the documented design); the hole is now a counted, warned
 event.
 
@@ -5328,6 +5340,12 @@ power errors after the standby pass moved the nodes, and the stored
 energy across the failed step is nonzero (the window the counter
 measures); `stored_energy_reads_mass_times_specific_heat_times_temperature`
 pins the reading's arithmetic on bits.
+`tolerated_ev_step_failure_counts_the_soc_energy_the_rollback_cannot_account`
+(`crates/hares-core/src/dwelling/mod.rs` tests, the EV follow-up): a
+real EV's step fails in `update_degradation` (the pack heater carries it
+out of the temperature envelope under a binding power setpoint) with the
+SoC still moving; the counter reads the EV's delta in signed Wh,
+bit-faithful, and the warning names the EV.
 `a_zone_capacitance_without_a_positive_value_fails_construction`
 (`boundary_rc.rs` tests): zero, negative and non-finite zone
 capacitances fail construction naming the zone; derived capacitances
@@ -5337,7 +5355,10 @@ assemble.
 probe fails (the zero zone capacitance assembles under the silent
 floor) and the window probe does not compile (`stored_energy_j` did
 not exist; the counter, the trait reading and the checkpoint-schema
-fingerprint are new). GREEN after the fix on the same probes.
+fingerprint are new). GREEN after the fix on the same probes. The EV
+probe (the follow-up) applied at the entry's landed tip fails at the
+parent (the EV reports no stored energy, the trait default, so the
+counter misses its delta) and greens after the reporter lands.
 
 **Movement:** no physics moves: every fixture's power, energy and
 temperature cells are bitwise the prior captures. The run-health
@@ -5361,4 +5382,7 @@ identical after the deliberate re-capture.
 **Dependencies:** none outside the core, envelope and equipment crates.
 
 **State:** landed on `row/hw4-envelope` (worktree `hw4-envelope`),
-behind the same-zone boundary row's commit.
+behind the same-zone boundary row's commit. The EV reporter follow-up
+(the disclosure's reporter list extended, the EV probe added) landed
+behind it on the same branch: no physics number moves, the goldens are
+bitwise the prior captures.
