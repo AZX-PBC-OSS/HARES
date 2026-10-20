@@ -721,6 +721,75 @@ mod tests {
         );
     }
 
+    /// The warm-up boundary's save/restore round trip on the Occupant's
+    /// own snapshot: save, perturb, restore, and the state is back on
+    /// bits, the next decide reading the restored decision state. The
+    /// restore runs at the dwelling's warm-up boundary (the actor states
+    /// snapshotted before warm-up, loaded after), a path a test cannot
+    /// reach through the dwelling alone, so the pin is here: a snapshot
+    /// that loses a field or a restore that drops one fails on bits
+    /// independent of the restore's reachability.
+    #[test]
+    fn occupant_snapshot_round_trips_on_bits() {
+        // The schedule moves presence across the driven steps so every
+        // snapshot field leaves its construction value: the counter, the
+        // previous presence, the transition count.
+        let schedule = vec![
+            Presence::Home,
+            Presence::Away,
+            Presence::Home,
+            Presence::Away,
+        ];
+        let mut occupant = Occupant::new("Test").with_presence_schedule(schedule);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+
+        // Two decides: step 2 read, previous presence Away (the second
+        // decide's transition), one presence change counted.
+        occupant.decide(&env, &mut requests);
+        occupant.decide(&env, &mut requests);
+        let saved = occupant.save_state().expect("the snapshot saves");
+
+        // Perturb: a third decide moves every field the snapshot carries.
+        occupant.decide(&env, &mut requests);
+        let perturbed = occupant.save_state().expect("the snapshot saves");
+        assert_ne!(
+            saved, perturbed,
+            "the perturbation must move the saved state for this round trip to mean anything"
+        );
+
+        // Restore, then re-save: the state comes back on bits.
+        occupant.load_state(&saved).expect("the snapshot restores");
+        let restored = occupant.save_state().expect("the snapshot saves");
+        assert_eq!(
+            saved, restored,
+            "the restore must put the saved state back on bits"
+        );
+
+        // The restored decision state is live: the next decide reads the
+        // restored counter's row (Home) against the restored previous
+        // presence (Away), so the transition fires, the count continues
+        // from the restored total, and the step channel reads the
+        // restored counter.
+        occupant.decide(&env, &mut requests);
+        assert_eq!(
+            occupant.telemetry.get("transition"),
+            Some(1.0),
+            "the next decide must see the restored previous presence (Away) against \
+             the restored counter's Home: a dropped restore reads no transition"
+        );
+        assert_eq!(
+            occupant.telemetry.get("current_step"),
+            Some(2.0),
+            "the decide must read the restored counter, not the perturbation's"
+        );
+        assert_eq!(
+            occupant.telemetry.get("presence_changes"),
+            Some(2.0),
+            "the transition count must continue from the restored total"
+        );
+    }
+
     #[test]
     fn occupant_lighting_off_when_away_emits_signal() {
         let schedule = vec![Presence::Away];
