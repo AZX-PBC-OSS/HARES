@@ -2871,6 +2871,15 @@ pub struct Dwelling {
     /// recorded unconditionally in every build profile; the totals are never
     /// reset per step.
     health: RunHealth,
+    /// Warn-once latch for the discarded-state-energy warning: the run's
+    /// first counted event has warned. An explicit flag, not the counter's
+    /// zero: the signed counter legitimately returns to exactly 0.0 across
+    /// canceling failures, and keying the latch on that zero re-warned a
+    /// later event. Not part of `RunHealth`'s serialized form (the
+    /// checkpoint schema and the golden snapshots carry that shape), so it
+    /// does not survive a checkpoint boundary; its loss costs at most one
+    /// repeated warning after a restore, never a counter value.
+    warned_discarded_state: bool,
     /// Actor decision-makers that emit control signals each timestep.
     /// Actors execute in the order determined by the scheduler plan
     /// (phase ordinal, then within-phase priority, then registration order).
@@ -4504,6 +4513,7 @@ fn assemble_from_blueprint_with_seed(
         occupancy_scale,
         prev_humidity_ratios: init_humidity_ratios,
         health: RunHealth::default(),
+        warned_discarded_state: false,
         actors: Vec::new(),
         scheduler: StepScheduler::default(),
         auto_registered_actor_names: HashSet::new(),
@@ -6797,7 +6807,11 @@ impl Dwelling {
         if discarded_wh == 0.0 {
             return;
         }
-        if self.health.discarded_state_energy_wh == 0.0 {
+        // The warn-once latch is an explicit flag, never the counter's
+        // zero: the signed counter legitimately returns to exactly 0.0
+        // across canceling failures, and keying on that zero re-warned a
+        // later event (see `warned_discarded_state`).
+        if !self.warned_discarded_state {
             let name = self.equipment[idx].descriptor().name.clone();
             self.warnings.push_from(
                 name.as_ref(),
@@ -6807,6 +6821,7 @@ impl Dwelling {
                      state keeps its mutation while the port draw is rolled back)"
                 ),
             );
+            self.warned_discarded_state = true;
         }
         self.health.discarded_state_energy_wh += discarded_wh;
     }
@@ -17156,6 +17171,11 @@ occupancy = 0.0
         /// discarded-state-energy counter measures (the tank's standby
         /// pass mutating before the per-injection validation fails).
         state_energy_j: f64,
+        /// Per-step state-energy deltas [J] when scripted (popped one per
+        /// step, 0.0 once exhausted); `None` keeps the default +3600 J
+        /// every step. Scripting negative deltas probes the signed
+        /// counter's warn-once latch across canceling failures.
+        state_energy_deltas: Option<std::collections::VecDeque<f64>>,
         ports: Vec<PortDeclaration>,
         heats_zone: bool,
         /// Book and claim the power as generation (the PV pose): the port
@@ -17191,6 +17211,7 @@ occupancy = 0.0
                 power_w,
                 outcomes: outcomes.iter().copied().collect(),
                 state_energy_j: 0.0,
+                state_energy_deltas: None,
                 ports: vec![PortDeclaration::electrical()],
                 heats_zone: false,
                 generation: false,
@@ -17203,6 +17224,13 @@ occupancy = 0.0
         /// tank's standby-then-validate window).
         fn with_state_energy(mut self, energy_j: f64) -> Self {
             self.state_energy_j = energy_j;
+            self
+        }
+
+        /// Scripts the per-step state-energy deltas [J] (one per step, 0.0
+        /// once exhausted; unscripted steps default to +3600 J).
+        fn with_state_energy_deltas(mut self, deltas: &[f64]) -> Self {
+            self.state_energy_deltas = Some(deltas.iter().copied().collect());
             self
         }
 
@@ -17355,8 +17383,14 @@ occupancy = 0.0
             // The state mutates before the step's outcome is known (the
             // tank's standby pass runs before the per-injection
             // validation can fail): a failing step keeps this move while
-            // the port draw is rolled back.
-            self.state_energy_j += 3600.0;
+            // the port draw is rolled back. The delta is scripted per
+            // step when the probe scripts one (canceling-failure
+            // probes), else the default +3600 J.
+            let state_delta_j = match &mut self.state_energy_deltas {
+                Some(deltas) => deltas.pop_front().unwrap_or(0.0),
+                None => 3600.0,
+            };
+            self.state_energy_j += state_delta_j;
             self.book(ports)?;
             if !self.outcomes.pop_front().unwrap_or(false) {
                 return Err(HaresError::Equipment("simulated step failure".to_string()));
@@ -17633,6 +17667,55 @@ occupancy = 0.0
             warned.message.contains("HotEv"),
             "the warning names the EV: {}",
             warned.message
+        );
+    }
+
+    /// The discarded-state-energy warning warns once per run on an explicit
+    /// latch, not on the counter's zero: two tolerated failures whose signed
+    /// deltas cancel exactly (+1 Wh then -1 Wh) return the counter to exactly
+    /// 0.0, and a later failure must stay silent (the run's first event was
+    /// already warned). Keyed on the counter reading exactly 0.0, that later
+    /// failure re-warns a warning the run already carried.
+    #[test]
+    fn discarded_state_energy_warns_once_across_canceling_failures() {
+        let mut dwelling = dwelling_with(
+            FlakyPortEquipment::new("CancelingProbe", 0.0, &[true, false, false, false])
+                .with_state_energy_deltas(&[0.0, 3600.0, -3600.0, 3600.0]),
+        );
+        // Three consecutive tolerated failures: raise the budget above them.
+        dwelling.sim_config.max_consecutive_step_failures = 4;
+
+        // Step 1 commits (its 0 J move is accounted, nothing discarded).
+        // Steps 2 to 4 fail and are tolerated: +1 Wh, then -1 Wh (the
+        // counter returns to exactly 0.0), then +1 Wh.
+        dwelling
+            .run_timestep(false)
+            .expect("the first step commits");
+        for step in 2..=4 {
+            dwelling
+                .run_timestep(false)
+                .expect("a tolerated failure must not end the run");
+            assert_eq!(
+                dwelling.health.port_rollbacks,
+                step - 1,
+                "step {step}'s failure is tolerated and counted"
+            );
+        }
+        assert_eq!(
+            dwelling.health.discarded_state_energy_wh.to_bits(),
+            1.0f64.to_bits(),
+            "the canceling pair sums to exactly 0.0 and the later event lands: {} Wh",
+            dwelling.health.discarded_state_energy_wh
+        );
+        assert_eq!(
+            dwelling
+                .warnings
+                .iter()
+                .filter(|w| w.message.contains("state energy"))
+                .count(),
+            1,
+            "the run's first event is the only warned one: the later event \
+             must not re-warn across the canceling pair"
         );
     }
 
