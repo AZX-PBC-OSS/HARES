@@ -5059,9 +5059,20 @@ errors; pyright 0.
 property, shared with the CSV path: rows past the anchor year carry the
 anchor year's weekday pattern (the 365-day calendar is cyclic annual
 data), so a run crossing into a second calendar year reads the anchor
-year's weekday type for the same ordinal.
+year's weekday type for the same ordinal. Follow-up on the convention's
+DST edge: the reviewer's probe put a run-spanning generated table's tail
+past the span (a five-day March run at 900 s over America/Denver's
+2024 spring-forward: after the spring-forward the civil clock runs up to
+3600 s past the table's fixed-offset end, and the run's last four steps'
+civil addresses wrap to the cycle's opening rows, reading January's
+profile). A hold-the-end clamp was assessed and rejected: it breaks the
+pinned periodic-read tests and the weather path's documented shared
+modular pattern. The cyclic convention and this edge are on the
+divergence ledger (docs/alignment/DIVERGENCES.md, D-034) with the probe
+pinned at
+`environment.rs::dst_run_tail_past_the_generated_tables_span_wraps_per_the_cyclic_convention`.
 
-## Hardening 4: warm-up restores every stochastic stream, not only the dwelling rng
+## Hardening 8: warm-up restores every stochastic stream, not only the dwelling rng
 
 **Kind:** numeric fix (the hardening phase's warm-up neutrality and
 checkpoint-completeness entry).
