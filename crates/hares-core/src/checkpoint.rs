@@ -97,7 +97,13 @@ use serde::{Deserialize, Serialize};
 /// a restore continues every draw where the saved run left it and a
 /// reseed re-derives every source from the new key. Checkpoints written
 /// by v20 builds are rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 21;
+///
+/// v22: `RunHealth` carries `discarded_state_energy_wh`, the kept state
+/// energy a tolerated equipment-step failure's rollback cannot account
+/// for. The counter is run bookkeeping, not physics state, but the type
+/// rides the checkpoint's schema, so the fingerprint moves. Checkpoints
+/// written by v21 builds are rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 22;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -522,6 +528,7 @@ mod tests {
                 fluid_payload_absences: 5,
                 evicted_actors: 6,
                 cross_tier_deadband_events: 7,
+                discarded_state_energy_wh: 0.0,
                 warmup: crate::health::WarmupOutcome::Disabled,
             },
             warnings: crate::dwelling::WarningLogSnapshot {
@@ -566,9 +573,9 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 21;
+    const PINNED_VERSION: u32 = 22;
     const PINNED_SCHEMA_SHA256: &str =
-        "9342153583db2c77d95ea3afed541d637fe35365a06a70f884aca8d095c82ec0";
+        "6f2934f8aece278e6ddc72aee52e4bdc031a525ff6d4e19cfc0f368e52f8aca6";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the

@@ -660,6 +660,10 @@ impl Equipment for IndirectTank {
     // `resolved_zip()` keeps the default `None`: the indirect tank is heated
     // by the boiler loop and has no electric draw of its own.
 
+    fn stored_energy_j(&self) -> Option<f64> {
+        Some(self.tank.stored_energy_j())
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &IndirectTankState {

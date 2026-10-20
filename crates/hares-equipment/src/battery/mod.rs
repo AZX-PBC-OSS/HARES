@@ -1658,6 +1658,10 @@ impl Equipment for Battery {
         3
     }
 
+    fn stored_energy_j(&self) -> Option<f64> {
+        Some(self.soc * self.capacity_j_nominal)
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &BatteryCheckpoint {

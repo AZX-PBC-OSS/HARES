@@ -128,7 +128,14 @@ An equipment whose `step()` returns an error is rolled back rather than
 ending the run at once: its port contributions are removed, the failure is
 logged as a run warning naming the equipment and counted in
 `RunHealth::port_rollbacks` (every build profile), and the step continues
-without it. For that step the equipment delivered nothing: the consistency
+without it. The rollback restores the ports but keeps the equipment's
+committed internal state, so a state mutation the equipment committed
+before erroring (a tank node heated, a pack charged) is energy the step's
+accounts no longer explain: the state's energy delta across the failed
+step (the `Equipment::stored_energy_j` reading before the step and after
+the rollback) is counted in `RunHealth::discarded_state_energy_wh`, and
+the run's first nonzero event raises a warning naming the equipment and
+the energy. For that step the equipment delivered nothing: the consistency
 checks skip it, and the recorded flows (per-equipment and end-use power,
 the frame's flow and telemetry columns, `DwellingTelemetry` power, the next
 step's electrical summary, `Dwelling::reported_core_output` and Python's

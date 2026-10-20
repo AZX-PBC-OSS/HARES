@@ -105,6 +105,15 @@ pub struct RunHealth {
     /// schedule tier, the collision the init's static check cannot see.
     /// The run's first collision also raises a run warning.
     pub cross_tier_deadband_events: u64,
+    /// Energy the failed equipment's committed internal state kept from a
+    /// rolled-back step [Wh, signed]: the state's energy delta across the
+    /// failed step (the reading of `Equipment::stored_energy_j` before
+    /// the step and after the rollback). The rollback restores the port
+    /// contributions but keeps the committed internal state, so this is
+    /// energy the step's accounts no longer explain; the run's first
+    /// nonzero event also raises a run warning naming the equipment and
+    /// the energy.
+    pub discarded_state_energy_wh: f64,
     /// Outcome of the warm-up convergence loop (Disabled until warm-up runs).
     pub warmup: WarmupOutcome,
 }
@@ -119,6 +128,7 @@ impl Default for RunHealth {
             fluid_payload_absences: 0,
             evicted_actors: 0,
             cross_tier_deadband_events: 0,
+            discarded_state_energy_wh: 0.0,
             warmup: WarmupOutcome::Disabled,
         }
     }
@@ -260,6 +270,7 @@ mod tests {
         assert_eq!(health.fluid_payload_absences, 0);
         assert_eq!(health.evicted_actors, 0);
         assert_eq!(health.cross_tier_deadband_events, 0);
+        assert_eq!(health.discarded_state_energy_wh, 0.0);
         assert_eq!(health.warmup, WarmupOutcome::Disabled);
     }
 
@@ -273,6 +284,7 @@ mod tests {
             fluid_payload_absences: 6,
             evicted_actors: 5,
             cross_tier_deadband_events: 7,
+            discarded_state_energy_wh: 8.5,
             warmup: WarmupOutcome::Ran {
                 days_run: 3,
                 converged: false,

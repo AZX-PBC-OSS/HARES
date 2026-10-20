@@ -5267,3 +5267,98 @@ identical after the deliberate re-capture.
 
 **State:** landed on `row/hw4-envelope` (worktree `hw4-envelope`, cut
 from `44deba5c`).
+
+## Hardening 10: a capacitance-less envelope fails construction and a rollback counts its kept state energy
+
+**Kind:** numeric fix (the hardening phase's conservation entry: the
+thermal-balance invariant's vacuous pass and the tolerated rollback's
+unaccounted energy).
+
+**Problem:** two conservation holes. (a) The thermal-balance invariant's
+gate (`mod.rs`'s `if !q_gains.is_empty()`) is a vacuous pass production
+cannot reach: `assemble_building_rc` clamps every zone node's
+capacitance up to `MIN_CAPACITANCE_J_K` and `derive_zone_capacitances`
+floors its own output, so a production dwelling never assembles a
+capacitance-less model - and on the capacitance-less models the gate
+would admit, the per-step capture pushes over the empty capacitance map
+and the check runs on all-zero terms, catching nothing. The comment at
+the site admitted the silent skip. (b) A tolerated equipment-step
+failure's rollback restores only the port snapshot
+(`record_equipment_step_failure`): the equipment's internal state keeps
+the mutation it committed before erroring (the tank's standby and
+conduction pass mutates the node temperatures before the per-injection
+validation can fail, `tank.rs`'s `step` window; the battery's charge
+leg advances the SoC before its own error paths), while the metered
+port draw is discarded - energy the step's accounts no longer explain,
+invisible to the invariants (they skip the failed equipment by design)
+and bounded only by the failure budget.
+
+**Change:** (a) the construction guard, twice over: a declared zone
+capacitance that is zero, negative or non-finite fails
+`assemble_building_rc` with an error naming the zone (the silent floor
+for those values removed; the floor stays for the values above it), and
+the assembled model is checked after wiring: a zone air node leaving
+the assembly without a positive capacitance entry is a construction
+error naming the zone, the insurance against the assembly-defect class
+(a node-ID collision draining the zone entry) that would otherwise turn
+the vacuous pass on. The invariant site's comment corrected to state
+the vacuous pass and the guard. (b) the kept mutation is counted: the
+trait gains `Equipment::stored_energy_j` (the energy the internal
+state carries, default `None`), read by the dwelling before every
+equipment step and again on failure; the delta (kept minus the
+pre-step reading, Wh, signed) accumulates into the new
+`RunHealth::discarded_state_energy_wh`, and the run's first nonzero
+event raises a warning naming the equipment and the energy (later
+events only bump the counter; the rollback warning already names the
+equipment per event). The tank-backed water heaters (gas, resistance,
+heat pump, indirect) report their water's stored energy, the battery
+its charge; equipment without an energy-bearing state report nothing
+and contribute no delta. The rollback's keep-the-state behavior is
+unchanged (the documented design); the hole is now a counted, warned
+event.
+
+**Acceptance test:** `tolerated_step_failure_counts_the_state_energy_the_rollback_cannot_account`
+(`crates/hares-core/src/dwelling/mod.rs` tests): the flaky double
+carries state energy, a step moves it 3600 J and fails; the counter
+reads 1 Wh and the warning names the equipment and the energy; a
+second tolerated failure accumulates to 2 Wh with no second warning.
+`a_mid_step_failure_keeps_a_state_mutation_the_rolled_back_ports_cannot_account`
+(`tank.rs` tests): the real tank's step with a non-finite injection
+power errors after the standby pass moved the nodes, and the stored
+energy across the failed step is nonzero (the window the counter
+measures); `stored_energy_reads_mass_times_specific_heat_times_temperature`
+pins the reading's arithmetic on bits.
+`a_zone_capacitance_without_a_positive_value_fails_construction`
+(`boundary_rc.rs` tests): zero, negative and non-finite zone
+capacitances fail construction naming the zone; derived capacitances
+assemble.
+
+**RED first:** the acceptance tests applied at the parent: the guard
+probe fails (the zero zone capacitance assembles under the silent
+floor) and the window probe does not compile (`stored_energy_j` did
+not exist; the counter, the trait reading and the checkpoint-schema
+fingerprint are new). GREEN after the fix on the same probes.
+
+**Movement:** no physics moves: every fixture's power, energy and
+temperature cells are bitwise the prior captures. The run-health
+snapshot the goldens record carries the new counter (0.0 everywhere:
+no nominal fixture rolls back a step), so seven default-feature
+fixtures and the dst one re-captured deliberately, twice
+byte-identical (compare-all 10 + dst 1 identical after).
+`CHECKPOINT_VERSION` 21 to 22 (the `RunHealth` type rides the
+checkpoint's schema; the fingerprint re-pinned; the version-gate
+acceptance reads the constant now).
+
+**Verification:** the tests above; fmt clean; clippy `--workspace
+--all-targets --all-features -D warnings` clean; nextest `--workspace
+--all-features -j 2` 8272/8272 passed (8 skipped); `pytest -m ''`
+after `maturin develop` 1800 passed + 6 xfailed, 0 failed, 0 errors;
+pyright 0 errors, 0 warnings; the goldens compare-all 10 + dst 1
+identical after the deliberate re-capture.
+
+**Commit:** `fix: a capacitance-less envelope fails construction and a rollback counts its kept state energy`
+
+**Dependencies:** none outside the core, envelope and equipment crates.
+
+**State:** landed on `row/hw4-envelope` (worktree `hw4-envelope`),
+behind the same-zone boundary row's commit.

@@ -181,6 +181,22 @@ pub trait Equipment: Send + Sync {
     fn save_state(&self) -> crate::Result<Vec<u8>>;
     fn load_state(&mut self, state: &[u8]) -> Result<()>;
 
+    /// The energy the equipment's internal state carries [J], when that
+    /// state holds energy the port snapshot cannot see: the water a tank
+    /// has heated, the charge a pack holds. `None` when the state carries
+    /// no measurable energy (the default).
+    ///
+    /// Read by the dwelling before every equipment step and again when
+    /// the step fails: the rollback restores the port contributions but
+    /// keeps the committed internal state (the documented design), so the
+    /// state's energy delta across the failed step is energy the step's
+    /// accounts no longer explain. The difference is counted in
+    /// `RunHealth::discarded_state_energy_wh` and the run's first event
+    /// is warned naming the equipment and the energy.
+    fn stored_energy_j(&self) -> Option<f64> {
+        None
+    }
+
     /// Rename this equipment instance by updating its descriptor `name`.
     ///
     /// Called by `Dwelling::add_equipment` when auto-numbering colliding

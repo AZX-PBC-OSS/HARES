@@ -6731,8 +6731,17 @@ impl Dwelling {
     }
 
     /// Books a failed equipment step: rolls back its port contributions
-    /// (surfaced as a warning and in `RunHealth::port_rollbacks`), flags it
-    /// failed for this step, and extends its failure streak.
+    /// (surfaced as a warning and in `RunHealth::port_rollbacks`), counts
+    /// the state energy the rollback cannot recover (surfaced in
+    /// `RunHealth::discarded_state_energy_wh`, the run's first event also
+    /// warned naming the equipment and the energy), flags it failed for
+    /// this step, and extends its failure streak.
+    ///
+    /// `pre_state_energy_j` is the equipment's `stored_energy_j` reading
+    /// taken before the step ran; the rollback restores the port
+    /// contributions but keeps the committed internal state (the
+    /// documented design), so the state's energy delta across the failed
+    /// step is energy the step's accounts no longer explain.
     ///
     /// # Errors
     ///
@@ -6740,8 +6749,14 @@ impl Dwelling {
     /// `SimulationConfig::max_consecutive_step_failures`: a failure the
     /// rollback cannot clear would otherwise leave it dead for the rest of
     /// the run.
-    fn record_equipment_step_failure(&mut self, idx: usize, err: HaresError) -> Result<()> {
+    fn record_equipment_step_failure(
+        &mut self,
+        idx: usize,
+        err: HaresError,
+        pre_state_energy_j: Option<f64>,
+    ) -> Result<()> {
         self.rollback_failed_equipment_ports(idx, &err);
+        self.count_discarded_state_energy(idx, pre_state_energy_j);
         self.step_failed[idx] = true;
         // The policy is evaluated where the rollback counter changed, so a
         // limit set on it ends the run naming the equipment, ahead of the
@@ -6765,6 +6780,35 @@ impl Dwelling {
             return Err(ended);
         }
         Ok(())
+    }
+
+    /// Counts the state energy a failed step's rollback cannot recover:
+    /// the equipment's stored-energy delta from the pre-step snapshot to
+    /// the rolled-back state, in Wh into `RunHealth`. The run's first
+    /// nonzero event also raises a warning naming the equipment and the
+    /// energy; later events only bump the counter, the rollback warning
+    /// already names the equipment per event.
+    fn count_discarded_state_energy(&mut self, idx: usize, pre_state_energy_j: Option<f64>) {
+        let Some(pre_j) = pre_state_energy_j else {
+            return;
+        };
+        let kept_j = self.equipment[idx].stored_energy_j().unwrap_or(pre_j);
+        let discarded_wh = (kept_j - pre_j) / SECONDS_PER_HOUR;
+        if discarded_wh == 0.0 {
+            return;
+        }
+        if self.health.discarded_state_energy_wh == 0.0 {
+            let name = self.equipment[idx].descriptor().name.clone();
+            self.warnings.push_from(
+                name.as_ref(),
+                format!(
+                    "equipment step failure kept {discarded_wh:.6} Wh of state energy \
+                     the rollback cannot account for (equipment '{name}': the committed \
+                     state keeps its mutation while the port draw is rolled back)"
+                ),
+            );
+        }
+        self.health.discarded_state_energy_wh += discarded_wh;
     }
 
     /// Roll back port contributions from a failed equipment step.
@@ -7398,8 +7442,9 @@ impl Dwelling {
             // exactly this equipment's contribution (ElectricalAccumulator
             // is Copy).
             let pre_electrical = self.ports.electrical;
+            let pre_state_energy_j = self.equipment[idx].stored_energy_j();
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.record_equipment_step_failure(idx, err)?;
+                self.record_equipment_step_failure(idx, err, pre_state_energy_j)?;
             } else {
                 self.validate_equipment_contract(idx)?;
                 validate_port_core_electrical_consistency(
@@ -7474,8 +7519,9 @@ impl Dwelling {
             // Snapshot the shared electrical bus so the post-step delta is
             // exactly this equipment's contribution.
             let pre_electrical = self.ports.electrical;
+            let pre_state_energy_j = self.equipment[idx].stored_energy_j();
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.record_equipment_step_failure(idx, err)?;
+                self.record_equipment_step_failure(idx, err, pre_state_energy_j)?;
             } else {
                 self.validate_equipment_contract(idx)?;
                 validate_port_core_electrical_consistency(
@@ -7524,8 +7570,9 @@ impl Dwelling {
             // Snapshot the shared electrical bus so the post-step delta is
             // exactly this equipment's contribution.
             let pre_electrical = self.ports.electrical;
+            let pre_state_energy_j = self.equipment[idx].stored_energy_j();
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
-                self.record_equipment_step_failure(idx, err)?;
+                self.record_equipment_step_failure(idx, err, pre_state_energy_j)?;
             } else {
                 self.validate_equipment_contract(idx)?;
                 validate_port_core_electrical_consistency(
@@ -9047,11 +9094,16 @@ impl Dwelling {
         // (to machine precision) for any correctly-functioning solver, with
         // or without interior convection coupling.
         //
-        // Note: when node_capacitances is empty (e.g., simple test fixtures
-        // that use R-value-only walls without discrete RC layers), q_gains will
-        // also be empty and the thermal check is silently skipped. An RC model
-        // with no registered capacitances cannot be energy-balanced — this
-        // guard prevents a false positive on an empty system.
+        // Note: the terms arrive even when the RC model has no capacitance
+        // nodes (the per-step capture pushes over the empty capacitance map),
+        // so on a capacitance-less model the gate below passes and the check
+        // runs on all-zero terms: a vacuous pass that cannot catch anything.
+        // Production cannot reach that state: the envelope's assembly fails
+        // construction when a zone air node would leave it without
+        // capacitance, and the derived zone capacitances are floored at
+        // MIN_CAPACITANCE_J_K. A model assembled from real inputs always
+        // checks; a capacitance-less model cannot silently pass a real
+        // balance.
         let (q_gains, delta_e_storage, q_loss) = self.thermal_solver.thermal_balance_terms();
         if !q_gains.is_empty() {
             #[cfg(any(test, debug_assertions))]
@@ -17099,6 +17151,11 @@ occupancy = 0.0
         core_output: CoreOutput,
         power_w: f64,
         outcomes: std::collections::VecDeque<bool>,
+        /// Energy the internal state carries [J]: `stored_energy_j`'s
+        /// reading. A step that will fail moves it first, the window the
+        /// discarded-state-energy counter measures (the tank's standby
+        /// pass mutating before the per-injection validation fails).
+        state_energy_j: f64,
         ports: Vec<PortDeclaration>,
         heats_zone: bool,
         /// Book and claim the power as generation (the PV pose): the port
@@ -17133,11 +17190,20 @@ occupancy = 0.0
                 core_output: CoreOutput::default(),
                 power_w,
                 outcomes: outcomes.iter().copied().collect(),
+                state_energy_j: 0.0,
                 ports: vec![PortDeclaration::electrical()],
                 heats_zone: false,
                 generation: false,
                 step_telemetry: Vec::new(),
             }
+        }
+
+        /// Carries `energy_j` of internal state energy from construction:
+        /// `stored_energy_j`'s reading, moved again by every step (the
+        /// tank's standby-then-validate window).
+        fn with_state_energy(mut self, energy_j: f64) -> Self {
+            self.state_energy_j = energy_j;
+            self
         }
 
         fn with_id(mut self, id: u32) -> Self {
@@ -17286,6 +17352,11 @@ occupancy = 0.0
         ) -> std::result::Result<(), hares_types::HaresError> {
             let steps_taken = self.telemetry.get("steps_taken").unwrap_or(0.0);
             self.telemetry.set("steps_taken", steps_taken + 1.0);
+            // The state mutates before the step's outcome is known (the
+            // tank's standby pass runs before the per-injection
+            // validation can fail): a failing step keeps this move while
+            // the port draw is rolled back.
+            self.state_energy_j += 3600.0;
             self.book(ports)?;
             if !self.outcomes.pop_front().unwrap_or(false) {
                 return Err(HaresError::Equipment("simulated step failure".to_string()));
@@ -17303,6 +17374,10 @@ occupancy = 0.0
                 self.telemetry.set(key, value);
             }
             Ok(())
+        }
+
+        fn stored_energy_j(&self) -> Option<f64> {
+            Some(self.state_energy_j)
         }
 
         fn telemetry(&self) -> &Telemetry {
@@ -17365,6 +17440,81 @@ occupancy = 0.0
                 .any(|w| w.message.contains("FlakyEq")),
             "the failure stays loud as a warning; warnings: {:?}",
             dwelling.warnings.iter().collect::<Vec<_>>()
+        );
+    }
+
+    /// A tolerated equipment-step failure's kept state mutation is
+    /// counted: the rollback restores the port contributions (the metered
+    /// draw disappears from the accounts) while the equipment's internal
+    /// state keeps the mutation it committed before erroring, so the
+    /// state's energy delta across the failed step is energy the step's
+    /// accounts no longer explain. `RunHealth::discarded_state_energy_wh`
+    /// carries the delta and the run's first event is warned naming the
+    /// equipment and the energy.
+    #[test]
+    fn tolerated_step_failure_counts_the_state_energy_the_rollback_cannot_account() {
+        let mut dwelling = dwelling_with(
+            FlakyPortEquipment::new("FlakyTank", 500.0, &[true]).with_state_energy(9_000.0),
+        );
+        // The default budget ends the run at the second consecutive
+        // failure; the counter's accumulation needs two tolerated ones.
+        dwelling.sim_config.max_consecutive_step_failures = 4;
+
+        // Step 1: the equipment succeeds and its state energy moves with it
+        // (committed, accounted: no discarded energy).
+        dwelling.run_timestep(false).expect("first dwelling step");
+        assert_eq!(
+            dwelling.health.port_rollbacks, 0,
+            "the first step commits normally"
+        );
+        assert_eq!(
+            dwelling.health.discarded_state_energy_wh, 0.0,
+            "a committed step discards nothing"
+        );
+
+        // Step 2: the equipment moves its state (3600 J) then fails. The
+        // rollback restores the ports; the state keeps the move. The
+        // counter carries the state's energy delta (3600 J = 1 Wh) and
+        // the first event is warned naming the equipment and the energy.
+        dwelling
+            .run_timestep(false)
+            .expect("a tolerated equipment failure must not end the run");
+
+        assert_eq!(dwelling.health.port_rollbacks, 1, "the failure is counted");
+        assert!(
+            (dwelling.health.discarded_state_energy_wh - 1.0).abs() < 1e-9,
+            "the kept state mutation's energy is counted: {} Wh",
+            dwelling.health.discarded_state_energy_wh
+        );
+        let warned = dwelling
+            .warnings
+            .iter()
+            .find(|w| w.message.contains("state energy"))
+            .expect("the first discarded-state event is warned");
+        assert!(
+            warned.message.contains("FlakyTank") && warned.message.contains("1.000000 Wh"),
+            "the warning names the equipment and the energy: {}",
+            warned.message
+        );
+
+        // A second failure only bumps the counter (the first event was
+        // the warned one).
+        dwelling
+            .run_timestep(false)
+            .expect("a second tolerated failure");
+        assert!(
+            (dwelling.health.discarded_state_energy_wh - 2.0).abs() < 1e-9,
+            "each failure's delta accumulates: {} Wh",
+            dwelling.health.discarded_state_energy_wh
+        );
+        assert_eq!(
+            dwelling
+                .warnings
+                .iter()
+                .filter(|w| w.message.contains("state energy"))
+                .count(),
+            1,
+            "only the run's first event is warned"
         );
     }
 

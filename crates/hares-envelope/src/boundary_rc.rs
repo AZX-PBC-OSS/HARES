@@ -668,8 +668,20 @@ pub fn assemble_building_rc(
 
     let mut initial_capacitances: HashMap<NodeId, f64> = HashMap::with_capacity(est_nodes);
 
-    // Insert zone air nodes (IDs 1..=n_zones).
+    // Insert zone air nodes (IDs 1..=n_zones). A zone capacitance that is
+    // zero, negative or non-finite is a construction error naming the zone,
+    // not a silent floor: the thermal-balance invariant's gate runs on
+    // all-zero terms and passes vacuously over a capacitance-less model,
+    // so a zone node without capacitance would silence exactly the check
+    // that catches it. The floor below stays for the values above it.
     for (zone_idx, cap) in zone_capacitances.iter().enumerate().take(n_zones) {
+        if !(cap.is_finite() && *cap > 0.0) {
+            return Err(format!(
+                "zone {zone_idx}: the zone air node's capacitance must be a \
+                 positive finite value, got {cap}; the thermal-balance \
+                 invariant cannot run on a capacitance-less zone node"
+            ));
+        }
         let node = NodeId((zone_idx + 1) as u32);
         initial_capacitances.insert(node, cap.max(MIN_CAPACITANCE_J_K));
     }
@@ -1369,6 +1381,22 @@ pub fn assemble_building_rc(
     let n_ext = b_ext.ncols();
 
     let node_capacitances = rc.capacitances.clone();
+
+    // Insurance: every zone air node must leave the assembly carrying
+    // capacitance. The entries are floored at insertion above, so this
+    // fires only on an assembly defect (a node-ID collision overwriting or
+    // draining the zone entry), exactly the defect class that would
+    // otherwise turn the thermal-balance check's vacuous pass on.
+    for zone_idx in 0..n_zones {
+        let node = NodeId((zone_idx + 1) as u32);
+        if !node_capacitances.get(&node).is_some_and(|&c| c > 0.0) {
+            return Err(format!(
+                "zone {zone_idx}: the assembled RC model's zone air node \
+                 {node:?} carries no capacitance; the thermal-balance \
+                 invariant cannot run on a capacitance-less zone node"
+            ));
+        }
+    }
 
     // Only check when boundaries carry explicit material-layer definitions.
     // Fallback-R-only networks (no material layers, empty precomputed_rc)
@@ -3382,6 +3410,42 @@ mod tests {
             #[cfg(feature = "observe")]
             used_default_r: false,
         }
+    }
+
+    /// A zone capacitance that is zero, negative or non-finite fails
+    /// construction naming the zone: the thermal-balance invariant's gate
+    /// runs on all-zero terms and passes vacuously over a capacitance-less
+    /// model, so a zone node without capacitance must not assemble. The
+    /// derived zone capacitances are always positive, so this guards the
+    /// direct-assembly callers.
+    #[test]
+    fn a_zone_capacitance_without_a_positive_value_fails_construction() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        let layers = vec![make_layer(0.10, 1.0, 50.0, 900.0, 0.0)];
+        let boundaries = vec![make_boundary(20.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
+
+        for bad in [0.0, -5.0, f64::NAN] {
+            let err = match assemble_building_rc(&boundaries, 1, &[bad], InteriorLwrMethod::ScriptF)
+            {
+                Err(err) => err,
+                Ok(_) => {
+                    panic!("a zero, negative or non-finite zone capacitance must fail construction")
+                }
+            };
+            assert!(err.contains("zone 0"), "the error names the zone: {err}");
+        }
+        // The derived capacitances still assemble.
+        assert!(
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).is_ok(),
+            "positive zone capacitances assemble"
+        );
     }
 
     #[test]

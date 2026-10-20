@@ -45,6 +45,7 @@ mod temp_file;
 
 pub use actor::{Actor, ActorEquipment, ActorInterest, ActorTarget};
 pub use actor_registry::{ActorConfig, ActorFactory, ActorRegistry};
+pub use checkpoint::CHECKPOINT_VERSION;
 pub use checkpoint::DwellingCheckpoint;
 pub use clock::SimClock;
 pub use dwelling::COLLECTOR_AREA_PER_W;

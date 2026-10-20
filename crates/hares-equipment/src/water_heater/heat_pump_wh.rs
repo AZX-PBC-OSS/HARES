@@ -1274,6 +1274,10 @@ impl Equipment for HeatPumpWH {
         Some(self.zip)
     }
 
+    fn stored_energy_j(&self) -> Option<f64> {
+        Some(self.tank.stored_energy_j())
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &HpwhState {
