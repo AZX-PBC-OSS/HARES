@@ -387,8 +387,34 @@ head: fmt clean; clippy `--workspace --all-targets --all-features
 8237/8237 (8 skipped); `pytest -m ''` after `maturin develop` 1800
 passed + 6 xfailed, 0 failed, 0 errors; pyright 0; the goldens
 compare-all 10 + dst 1 bitwise identical. `CHECKPOINT_VERSION` is 20.
-What remains of I-08: the hardening Wave 1's open rows (the schedule
-calendar anchoring, the warm-up stochastic neutrality, the EV island,
-the NaN grid-voltage override, the tariff coverage, the envelope
-resistor order, the rollback accounting), then row 97 (CN-4's B1
+What remains of I-08: row 97 (CN-4's B1
 re-baseline), rows 100/101 and the operator pushes.
+
+## The hardening Wave 1's completion (2026-10-19)
+
+Every Wave-1 defect from the six-domain review is fixed and folded.
+Rows 102 through 111, linear on the head `ee62bf6e`: the defrost
+double-count with the tf^2 trigger's duty=tf exactly and the boiler
+flue split (102/103); the grid package the review round hardened
+further, the EV island keyed on delivered power with the islanded
+surcharge clamp, the NaN grid-voltage validation, the tariff coverage
+validation with the EV sub-tariff's month-rate coverage holding under
+RTP too, the round's own catch (105/106/107 + `44deba5c`); the
+schedule calendar anchoring and the warm-up stochastic neutrality
+(108/109); the same-zone resistor order, `remove(0)`, the read-back's
+fin chain pinned to the network on bits, the partition wall's
+half-layer shift attributed through every moved pin (110, `011e9bcb`);
+the construction guard against a capacitance-less envelope and the
+rollback's kept-state energy counted in `RunHealth` with the EV
+reporting its pack's SoC delta after the review's disclosure finding
+(111, `871453e0` + `9d68694b`). The final block at the head: fmt
+clean; clippy `--workspace --all-targets --all-features -D warnings`
+clean; nextest `--workspace --all-features -j 2` 8274/8274 (8
+skipped); `pytest -m ''` after `maturin develop` 1800 passed + 6
+xfailed, 0 failed, 0 errors; pyright 0; the goldens compare-all 10 +
+dst 1 bitwise identical. `CHECKPOINT_VERSION` is 22. Independent
+attack rounds verified the grid package (two SHIP, one catch fixed
+forward) and the envelope package (one SHIP, one documentation-only
+round, its three findings landed). What remains of I-08: row 97
+(CN-4's B1 re-baseline on this head), rows 100/101 and the operator
+pushes.
