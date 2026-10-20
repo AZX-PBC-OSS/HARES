@@ -333,8 +333,8 @@ def test_output_columns_present(
 # inclusive) hold each measured pair so the reasons cannot go stale.
 # ---------------------------------------------------------------------------
 
-TRACE_WORST_6H_C = 2.0090
-TRACE_MEAN_48H_C = 0.3940
+TRACE_WORST_6H_C = 2.0590
+TRACE_MEAN_48H_C = 0.3971
 TRACE_HEATING_OCHRE_KWH = 47.052
 # OVERNIGHT_WORST_C updated by the opaque-R precedence row (the
 # numeric-fixes ledger's opaque-R precedence entry, 2026-10-16): the declared assembly R now sets the
@@ -350,7 +350,15 @@ TRACE_HEATING_OCHRE_KWH = 47.052
 # worst-6 h and mean-48 h divergences re-recorded at their new values.
 # An interim record of 31.7942 kWh and 1.2309 C was measured on a stale
 # extension without the defrost fix and is struck.
-TRACE_HEATING_HARES_KWH = 28.9580
+# Re-captured 2026-10-19 for the same-zone precomputed boundary's resistor
+# order: the cut-surface stub is the resistor removed (the pop took the
+# zone-facing half instead), so the partition wall's fin (the multi-layer
+# "Interior Wall" LUT row, two kept layers) stores its capacitors one
+# half-layer toward the cut surface and the zone temperature trace moves
+# with it: the 48 h heating 28.9580 to 29.1539 kWh, the worst-6 h
+# divergence 2.0090 to 2.0590 C, the 48 h mean 0.3940 to 0.3971 C
+# (OCHRE's own 47.052 kWh unchanged).
+TRACE_HEATING_HARES_KWH = 29.1539
 OVERNIGHT_WORST_C = 0.7800
 OVERNIGHT_MEAN_C = 0.3680
 SOLAR_MEAN_RATIO = 0.9885

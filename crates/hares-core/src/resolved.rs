@@ -235,11 +235,12 @@ pub(crate) fn resolved_envelope(
         //   series, and the network's discrete chain sums to it.
         // - A same-zone fin (no outside): the network's actual discrete
         //   chain, which drops one half-resistor from the kept layers'
-        //   series. The precomputed path pops the innermost kept layer's
-        //   inner half (the pad-average's last resistor); the material
-        //   path never wires the cut layer's exterior-facing resistor;
-        //   the one interior film rides the zone-facing edge. This is
-        //   the number the physics conducts through.
+        //   series: the cut layer's exterior-facing half. Both build
+        //   paths drop the same half: the precomputed path's pad-and-
+        //   average makes the cut stub the first resistor and removes it;
+        //   the material path never wires the cut layer's exterior-facing
+        //   half. The one interior film rides the zone-facing edge. This
+        //   is the number the physics conducts through.
         // - The diagnostic's same-zone total is a different record with
         //   a different convention (the full stack halved plus the one
         //   film, the per-component heat-gain tracking's UA): in general
@@ -375,18 +376,20 @@ fn resolved_layers(
 }
 
 /// The same-zone fin's network chain (per area, films excluded): the kept
-/// layers' series minus the half-resistor the network's discrete build
-/// drops. The precomputed path's pad-and-average makes the innermost kept
-/// layer's inner half the last resistor and pops it; the material path
-/// skips the cut layer's outer half, leaving its inner half in the last
-/// inter-layer resistor. The fallback path builds no same-zone boundary
-/// (its diagnostic arm is outside-facing only), so its arm is unreachable
-/// for a reported fin and carries nothing to drop.
+/// layers' series minus the cut layer's outer half-resistor, the one
+/// resistor the network's discrete build never wires. Both build paths
+/// drop the same half: the precomputed path's pad-and-average makes the
+/// cut stub the first resistor and removes it (the zone-facing half stays
+/// at the zone edge); the material path skips the cut layer's
+/// exterior-facing half when it wires. The fallback path builds no
+/// same-zone boundary (its diagnostic arm is outside-facing only), so its
+/// arm is unreachable for a reported fin and carries nothing to drop.
 fn same_zone_fin_chain(path: RCPath, layers: &[ResolvedLayer]) -> f64 {
     let kept = layers.iter().map(|l| l.r_m2k_w).sum::<f64>();
     let dropped = match path {
-        RCPath::Precomputed => layers.last().map(|l| l.r_m2k_w / 2.0).unwrap_or(0.0),
-        RCPath::MaterialLayer => layers.first().map(|l| l.r_m2k_w / 2.0).unwrap_or(0.0),
+        RCPath::Precomputed | RCPath::MaterialLayer => {
+            layers.first().map(|l| l.r_m2k_w / 2.0).unwrap_or(0.0)
+        }
         RCPath::FallbackR => 0.0,
     };
     kept - dropped
@@ -424,19 +427,23 @@ mod tests {
             .collect()
     }
 
-    /// The precomputed path's rule: the innermost kept layer's inner half
-    /// is the popped resistor, so the chain is the kept series minus half
-    /// the last layer.
+    /// Both paths' rule, the precomputed path's stated: the cut layer's
+    /// outer half-resistor is the pad-average's first resistor and is
+    /// removed, so the chain is the kept series minus half the first
+    /// kept layer. Dyadic values, so the subtracted form and the direct
+    /// sum agree on bits: the other dropped half (half the last layer,
+    /// 0.125) moves the chain off these bits.
     #[test]
-    fn fin_chain_precomputed_drops_the_innermost_kept_half() {
-        let kept = layers(&[0.2269, 0.07923]);
+    fn fin_chain_precomputed_drops_the_cut_layer_outer_half() {
+        let kept = layers(&[0.5, 0.25]);
         let chain = same_zone_fin_chain(RCPath::Precomputed, &kept);
-        let expected: f64 = 0.2269 + 0.07923 / 2.0;
+        let expected: f64 = 0.5 / 2.0 + 0.25;
         assert_eq!(chain.to_bits(), expected.to_bits());
     }
 
-    /// The material path's rule: the cut layer's outer half is never
-    /// wired, so the chain is the kept series minus half the first layer.
+    /// The material path's rule, the same half-resistor the precomputed
+    /// path drops: the cut layer's outer half is never wired, so the
+    /// chain is the kept series minus half the first layer.
     #[test]
     fn fin_chain_material_drops_the_cut_layer_outer_half() {
         let kept = layers(&[0.5, 0.25, 0.25]);

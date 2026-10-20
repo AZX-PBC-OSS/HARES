@@ -5169,3 +5169,101 @@ scope note: the dwelling reseeds only the actors it recorded
 (the auto-registered drivers); a caller-seeded driver's generators are
 the caller's, and its checkpoint-carried source positions are what make
 `reset(seed)` exact for it.
+
+## Hardening 9: the precomputed same-zone boundary keeps the zone-facing half-layer at the zone
+
+**Kind:** numeric fix (the hardening phase's same-zone precomputed
+boundary entry: the resistor order the two advertised-equivalent build
+paths disagree on).
+
+**Problem:** the same-zone precomputed path wired every resistor one
+index off. After the same-zone split keeps the interior half of the
+stack, the pad-and-average (`boundary_rc.rs` Step 2) produces N+1
+resistors for N capacitors: the first is the cut-surface half-resistor
+(the pad's leading zero averaged with the first kept layer), the last is
+the zone-facing half-resistor (the trailing zero averaged with the
+innermost kept layer). The code removed the LAST resistor (kept the
+stub) and wired with `res_offset = 0`, so the cut stub became the
+outermost inter-layer resistor and the zone connected through the
+innermost inter-layer average: the same total series resistance with
+every capacitor sitting one half-layer off, so the fin's dynamics
+diverged from the material path (node-centered, exact) while steady
+state still converged. Measured on a 4-layer two-material probe: the
+inner-node-to-zone coupling 1.232e-3 (material) against 0.661e-3
+(precomputed), -46 percent; the review's identical-layer probe measured
+-22.7 percent coupling and -24.3 percent 10-minute response. Masked in
+production because the shipped same-zone LUT rows the fixtures resolve
+to furniture are single-layer (for n=1 removing the first and the last
+resistor are the same r/2), but live for the auto-generated partition
+wall's "Interior Wall" row (three layers, two kept) in every
+conditioned dwelling, and for any multi-layer furniture-like LUT row or
+TOML override. The steady-state-only regression test (600 x 60 s steps,
+1e-6) validated convergence, not dynamics: both topologies converge to
+zone temperature. The comment at the removal site claimed the pop was
+the correction and remove(0) the bug; it had the two orientations
+backwards (OCHRE's `res_list[:-1]` drops the last resistor only after
+its node and resistor lists are reversed, where the last is the cut
+stub; HARES keeps the interior half unreversed, so the stub is the
+first).
+
+**Change:** the same-zone branch removes the cut-surface stub
+(`res_list.remove(0)`) and keeps `res_offset = 0`, so the zone-facing
+half-layer wires the innermost kept node to zone air and the film rides
+that edge, matching the material path's node-centered topology resistor
+for resistor. The stale comment replaced with the contract in its own
+words. The steady-state-only test replaced with the discriminating one:
+`material_and_precomputed_same_zone_short_window_step_response_match`
+extracts both paths' interior-mass subsystem, steps 5 x 60 s under a
+1 K zone step on a 4-layer two-material stack (both materials below the
+diurnal-split density threshold) and asserts the responses and the
+inner-to-zone couplings agree to 1e-9. A second probe,
+`same_zone_fin_chain_matches_the_read_back_rule_on_bits`, walks the
+wired edges of both paths' assembled fins (dyadic R, C, film and area,
+so every operation rounds exactly) and asserts the chain equals the fin
+rule the read-back applies, bit for bit, both paths.
+
+**Read-back agreement:** `resolved.rs`'s `same_zone_fin_chain` mirrored
+the old pop rule (the precomputed arm dropped half the LAST kept
+layer); after the fix the network drops half the FIRST kept layer on
+both paths, so the precomputed arm moved to the material arm's rule
+(the arms collapsed, the cut stub's rule stated once) and the
+conventions comment, the Rust acceptance sum test and the Python sum
+test updated to the same rule. The base.xml partition-wall pin
+re-pinned to the fixed network's chain (0.5177775292587776, was
+0.5916125292587776); the furniture pin unchanged (single-layer: the
+kept half-layer is the same r/2 either way).
+
+**RED first:** the new short-window test at the parent wiring fails at
+the coupling assert (mat=0.0012315270935960591, pre=0.0006613756613756613,
+-46 percent); GREEN after the fix (1e-9 on both asserts). The
+read-back pins and sum tests fail at the old read-back (the partition
+wall 0.5916... against the fixed network's 0.5177...).
+
+**Movement:** every golden moves: all 10 default-feature fixtures and
+the dst one. Every conditioned dwelling's auto-generated partition wall
+resolves the "Interior Wall" LUT row (three layers, two kept), whose
+fin now stores the same heat with the capacitors one half-layer toward
+the cut surface; the single-layer furniture fins are unchanged. Each
+moved fixture re-captured deliberately twice, byte-identical
+(compare-all 10 + dst 1 identical after). The moved value pins
+re-pinned with the cause: the ASHP parity fixture's timing anchor
+35 to 32 (the fin's mass sits closer to the cut surface, the zone warms
+earlier in the ramp), the cz4a diagnostics CSV pin (the zone
+temperatures' printed digits; gains and powers unchanged at their
+precision), and the 48 h thermal trace's records (the 48 h heating
+28.9580 to 29.1539 kWh, the worst-6 h divergence 2.0090 to 2.0590 C,
+the 48 h mean 0.3940 to 0.3971 C; OCHRE's own 47.052 kWh unchanged).
+
+**Verification:** the tests above; fmt clean; clippy `--workspace
+--all-targets --all-features -D warnings` clean; nextest `--workspace
+--all-features -j 2` 8268/8268 passed (8 skipped); `pytest -m ''`
+after `maturin develop` 1800 passed + 6 xfailed, 0 failed, 0 errors;
+pyright 0 errors, 0 warnings; the goldens compare-all 10 + dst 1
+identical after the deliberate re-capture.
+
+**Commit:** `fix: the precomputed same-zone boundary keeps the zone-facing half-layer at the zone`
+
+**Dependencies:** none outside the envelope and core crates.
+
+**State:** landed on `row/hw4-envelope` (worktree `hw4-envelope`, cut
+from `44deba5c`).

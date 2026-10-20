@@ -210,12 +210,13 @@ fn resolved_model_reports_autosized_capacity() {
 /// network's discrete chain to 1e-12 relative, recomputed from the
 /// read-back's own disclosure. An outside-facing boundary's chain is the
 /// layers' full series plus the films. A same-zone fin's chain is the
-/// kept layers' series minus the half-resistor the network drops: the
-/// precomputed path (which every base.xml same-zone surface takes) pops
-/// the innermost kept layer's inner half, and the one interior film rides
-/// the zone-facing edge. The diagnostic's same-zone total (the full stack
-/// halved plus the film) is a different record and equals neither.
-/// Slabs (the F-factor perimeter method) report no layers.
+/// kept layers' series minus the cut layer's outer half-resistor, the
+/// half-resistor the network never wires: both build paths drop it (the
+/// precomputed path removes the pad-average's first resistor, the cut
+/// stub), and the one interior film rides the zone-facing edge. The
+/// diagnostic's same-zone total (the full stack halved plus the film) is
+/// a different record and equals neither. Slabs (the F-factor perimeter
+/// method) report no layers.
 #[test]
 fn resolved_layers_sum_to_the_boundary_resistance() {
     let dwelling =
@@ -245,7 +246,7 @@ fn resolved_layers_sum_to_the_boundary_resistance() {
         let expected = if boundary.same_zone {
             let dropped = boundary
                 .layers
-                .last()
+                .first()
                 .map(|l| l.r_m2k_w / 2.0)
                 .unwrap_or(0.0);
             layers + boundary.films_m2k_w - dropped
@@ -272,8 +273,9 @@ fn resolved_layers_sum_to_the_boundary_resistance() {
 /// The same-zone fins' effective resistance pinned to the network's
 /// actual chain sums, the values the assembled legs conduct through: the
 /// furniture mass's one kept LUT layer contributes its inner half at the
-/// zone-facing edge, the partition wall's two kept layers drop the
-/// innermost layer's inner half. The read-back these pins replaced
+/// zone-facing edge, the partition wall's two kept layers drop the cut
+/// layer's outer half (the precomputed path removes the pad-average's
+/// first resistor, the cut stub). The read-back these pins replaced
 /// reported the kept layers' full series plus the film (1.645 for the
 /// furniture), two thirds above the network's chain.
 #[test]
@@ -299,7 +301,7 @@ fn same_zone_fin_r_pins_the_network_chain() {
     );
     let wall = fin("interior_wall");
     assert!(
-        (wall.r_effective_m2k_w - 0.591_612_529_258_777_6).abs() < 1e-12 * wall.r_effective_m2k_w,
+        (wall.r_effective_m2k_w - 0.517_777_529_258_777_6).abs() < 1e-12 * wall.r_effective_m2k_w,
         "the interior partition wall's effective R is the network's chain, got {}",
         wall.r_effective_m2k_w
     );

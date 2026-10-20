@@ -69,10 +69,11 @@ def test_resolved_model_boundaries_layers_sum_to_the_effective_resistance():
             continue
         layers = sum(layer["r_m2k_w"] for layer in boundary["layers"])
         # A same-zone fin's network chain drops one half-resistor: the
-        # precomputed path (which the base dwelling's same-zone surfaces
-        # take) pops the innermost kept layer's inner half.
+        # cut layer's outer half, which neither build path wires (the
+        # precomputed path removes the pad-average's first resistor, the
+        # cut stub).
         dropped = (
-            boundary["layers"][-1]["r_m2k_w"] / 2 if boundary["same_zone"] else 0.0
+            boundary["layers"][0]["r_m2k_w"] / 2 if boundary["same_zone"] else 0.0
         )
         expected = layers + boundary["films_m2k_w"] - dropped
         relative = abs(expected - boundary["r_effective_m2k_w"]) / boundary["r_effective_m2k_w"]
