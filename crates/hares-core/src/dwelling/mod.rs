@@ -3292,20 +3292,55 @@ impl Dwelling {
     }
 }
 
+/// The number of steps a 24-hour day holds at the run's resolution,
+/// computed in milliseconds so a sub-second resolution is measured as
+/// itself instead of truncating to zero or one second. The day divides
+/// into whole steps only when the resolution is a positive whole number
+/// of seconds that divides the day exactly; anything else is a
+/// construction error naming the resolution. The day-over-day comparisons
+/// that address a day by its step count (warm-up's convergence check, the
+/// forcing horizon's warm-up floor) would read misaligned windows on any
+/// other resolution.
+pub(crate) fn steps_per_day_exact(time_res_ms: i64) -> Result<u64> {
+    if time_res_ms <= 0 || time_res_ms % 1000 != 0 {
+        return Err(HaresError::Dwelling(format!(
+            "time resolution {time_res_ms} ms is not a positive whole number of seconds: \
+             the day's step count must be exact"
+        )));
+    }
+    let res_secs = u64::try_from(time_res_ms / 1000).map_err(|_| {
+        HaresError::Dwelling(format!("time resolution {time_res_ms} ms is out of range"))
+    })?;
+    match (24u64 * 3600).checked_div(res_secs) {
+        Some(steps) if steps > 0 => Ok(steps),
+        _ => Err(HaresError::Dwelling(format!(
+            "time resolution {res_secs} s does not divide the 24-hour day into whole steps"
+        ))),
+    }
+}
+
 /// The horizon rule for the shared forcing table: every step index a run
 /// can read. Warm-up replays the first day and the production run restarts
 /// the clock, so a warm-up run's horizon is its duration's steps and at
 /// least one day's; without warm-up it is the duration's steps alone. The
 /// step counts match the clock's own (`SimClock::total_steps`, and
-/// `run_warmup_converged`'s per-day count).
-fn forcing_horizon_steps(duration: Duration, time_res: StdDuration, warmup: bool) -> u64 {
-    let res_secs = time_res.as_secs().max(1);
-    let duration_steps = u64::try_from(duration.num_seconds()).unwrap_or(0) / res_secs;
+/// `run_warmup_converged`'s per-day count). A resolution that cannot
+/// divide the day into whole steps raises the construction error
+/// `steps_per_day_exact` names.
+fn forcing_horizon_steps(duration: Duration, time_res: StdDuration, warmup: bool) -> Result<u64> {
+    let time_res_ms = i64::try_from(time_res.as_millis()).map_err(|_| {
+        HaresError::Dwelling(format!(
+            "time resolution {} ms is out of range",
+            time_res.as_millis()
+        ))
+    })?;
+    let steps_per_day = steps_per_day_exact(time_res_ms)?;
+    let duration_steps =
+        u64::try_from(duration.num_milliseconds()).unwrap_or(0) / time_res_ms as u64;
     if !warmup {
-        return duration_steps;
+        return Ok(duration_steps);
     }
-    let steps_per_day = 24 * 3600 / res_secs;
-    duration_steps.max(steps_per_day)
+    Ok(duration_steps.max(steps_per_day))
 }
 
 /// EnergyPlus's `MinLoad` for the warm-up convergence check: both days'
@@ -3738,7 +3773,7 @@ fn assemble_from_blueprint_with_seed(
                 config.sim_config.duration,
                 bp.time_res,
                 config.sim_config.warmup.config().is_some(),
-            )),
+            )?),
             first_hour_interpolation: config.sim_config.first_hour_interpolation,
             weather_year: config.sim_config.weather_year,
         },
@@ -6432,13 +6467,7 @@ impl Dwelling {
     /// [`Self::run_warmup_converged`] records the state-restored replay
     /// blocker first, the build's own warm-up records nothing).
     fn run_warmup_converged_inner(&mut self, warmup: &hares_io::WarmupConfig) -> Result<u32> {
-        let time_res_s = u64::try_from(self.clock.time_res.num_seconds())
-            .map_err(|_| HaresError::Io("invalid time resolution".to_string()))?;
-        let steps_per_day = (24u64 * 3600).checked_div(time_res_s).unwrap_or(0);
-
-        if steps_per_day == 0 {
-            return Ok(1);
-        }
+        let steps_per_day = steps_per_day_exact(self.clock.time_res.num_milliseconds())?;
 
         self.is_warming_up = true;
 
@@ -21591,6 +21620,114 @@ latent_gain_fraction = 0.08
                 }
             }
             other => panic!("expected WarmupOutcome::Ran, got {other:?}"),
+        }
+    }
+
+    /// The shipped resolutions divide the day into whole steps: 60 s gives
+    /// 1440 steps per day, 900 s gives 96, 3600 s gives 24, and a
+    /// day-long step gives 1.
+    #[test]
+    fn steps_per_day_at_the_shipped_resolutions() {
+        assert_eq!(
+            steps_per_day_exact(60_000).expect("60 s divides the day"),
+            1440
+        );
+        assert_eq!(
+            steps_per_day_exact(900_000).expect("900 s divides the day"),
+            96
+        );
+        assert_eq!(
+            steps_per_day_exact(3_600_000).expect("3600 s divides the day"),
+            24
+        );
+        assert_eq!(
+            steps_per_day_exact(86_400_000).expect("86400 s divides the day"),
+            1
+        );
+    }
+
+    /// A resolution that is zero, negative, a fraction of a second, or not
+    /// a whole number of seconds holds no whole step count for the day:
+    /// the construction error names the resolution in milliseconds. A
+    /// whole-second resolution longer than the day is named in seconds.
+    #[test]
+    fn steps_per_day_rejects_a_resolution_that_cannot_divide_the_day() {
+        for res_ms in [0, -1_000, 500, 1_500, 86_400_001] {
+            let err = steps_per_day_exact(res_ms)
+                .expect_err("the resolution cannot divide the day into whole steps");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("{res_ms} ms")),
+                "the error must name the resolution {res_ms} ms: {msg}"
+            );
+        }
+        let err = steps_per_day_exact(90_000_000).expect_err("90000 s holds no whole day of steps");
+        assert!(
+            err.to_string().contains("90000 s"),
+            "the error must name the resolution in seconds: {err}"
+        );
+    }
+
+    /// A sub-second resolution reaching the warm-up entry fails the run
+    /// naming the resolution instead of silently running zero warm-up
+    /// days: a day holds a whole number of such steps only at
+    /// whole-second resolutions that divide it exactly, and the
+    /// day-over-day comparison the convergence check makes needs whole
+    /// days of steps.
+    #[test]
+    fn warmup_rejects_a_sub_second_resolution_naming_it() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.clock.time_res = chrono::Duration::milliseconds(500);
+
+        let err = dwelling
+            .run_warmup_converged(&hares_io::WarmupConfig::default())
+            .expect_err("a 500 ms resolution cannot divide the day");
+        assert!(
+            err.to_string().contains("500 ms"),
+            "the error must name the resolution: {err}"
+        );
+    }
+
+    /// The forcing horizon's warm-up floor: a duration shorter than a day
+    /// still reads a day's steps, a longer duration reads its own, and a
+    /// resolution that cannot divide the day into whole steps is the
+    /// construction error the day count raises.
+    #[test]
+    fn forcing_horizon_floors_at_a_day_of_steps_and_validates_the_resolution() {
+        let day = chrono::Duration::seconds(86_400);
+        let res = StdDuration::from_secs(900);
+        assert_eq!(
+            forcing_horizon_steps(day, res, true).expect("900 s divides the day"),
+            96
+        );
+        assert_eq!(
+            forcing_horizon_steps(day, res, false).expect("900 s divides the day"),
+            96
+        );
+        assert_eq!(
+            forcing_horizon_steps(chrono::Duration::seconds(43_200), res, true)
+                .expect("900 s divides the day"),
+            96,
+            "half a day floors at the full day of steps under warm-up"
+        );
+        assert_eq!(
+            forcing_horizon_steps(chrono::Duration::seconds(43_200), res, false)
+                .expect("900 s divides the day"),
+            48
+        );
+        assert_eq!(
+            forcing_horizon_steps(chrono::Duration::seconds(7 * 86_400), res, true)
+                .expect("900 s divides the day"),
+            672
+        );
+
+        for res_ms in [500u64, 1_500] {
+            let err = forcing_horizon_steps(day, StdDuration::from_millis(res_ms), true)
+                .expect_err("the resolution cannot divide the day into whole steps");
+            assert!(
+                err.to_string().contains(&format!("{res_ms} ms")),
+                "the error must name the resolution {res_ms} ms: {err}"
+            );
         }
     }
 

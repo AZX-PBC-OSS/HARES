@@ -5400,3 +5400,76 @@ behind the same-zone boundary row's commit. The EV reporter follow-up
 (the disclosure's reporter list extended, the EV probe added) landed
 behind it on the same branch: no physics number moves, the goldens are
 bitwise the prior captures.
+
+## Hardening 11: a resolution that cannot divide the day fails at construction
+
+**Kind:** numeric fix (the hardening phase's warm-up arithmetic entry:
+the silent truncation and the silent zero-warm-up degeneracy).
+
+**Problem:** the warm-up loop's day count divided the 24-hour day by the
+resolution's whole seconds (`run_warmup_converged_inner`,
+`crates/hares-core/src/dwelling/mod.rs`): `num_seconds()` truncates, so
+(a) a sub-second resolution read as zero seconds, `checked_div`'s
+zero-denominator `unwrap_or(0)` fell into the
+`if steps_per_day == 0 { return Ok(1) }` arm, and warm-up ran zero steps
+and reported one day run; and (b) a resolution that is not a whole
+number of seconds (1500 ms) truncated to 1 s and computed 86 400 steps
+per day where the day at 1.5 s steps holds 57 600, so each warm-up "day"
+spanned 129 600 s of simulated time and the day-over-day convergence
+comparison compared misaligned windows. The forcing horizon's setup
+arithmetic carried the same truncation (`forcing_horizon_steps`,
+`as_secs().max(1)`), silently flooring sub-second resolutions to 1 s in
+the horizon's warm-up day floor (the same 86 400 instead of 57 600 at
+1500 ms; the duration's own step count likewise divided by the floored
+second). Both silent. Verified at the parent: a 1500 ms resolution
+computed the horizon 86 400 (the truncated count), and
+`run_warmup_converged` at 500 ms returned `Ok(1)` with no warm-up step
+run. The Python binding's constructor constrains `time_res` to whole
+seconds (`WholeSeconds`), so the sub-second case is unreachable from
+Python; the hole is the direct Rust `SimulationConfig` construction,
+whose own `validate()` also lets 1500 ms through (it truncates to 1 s,
+which divides the hour and the duration).
+
+**Change:** `steps_per_day_exact(time_res_ms)` computes the day's step
+count in milliseconds and accepts exactly a positive whole number of
+seconds that divides 86 400 s; zero, negative, sub-second and
+non-integral-second resolutions fail with `HaresError::Dwelling` naming
+the resolution in milliseconds (a whole-second resolution longer than
+the day is named in seconds). The warm-up entry and the horizon setup
+both compute through it, and the horizon call propagates the error with
+`?` inside the dwelling build, so the failure is the construction the
+config layer's whole-seconds contract already implies. Whole-second
+resolutions compute the same counts the truncated arithmetic did (the
+millisecond division is the seconds division scaled by 1000 exactly).
+
+**Acceptance tests:** `steps_per_day_at_the_shipped_resolutions` (60,
+900 and 3600 s give 1440, 96 and 24; a day-long step gives 1),
+`steps_per_day_rejects_a_resolution_that_cannot_divide_the_day` (0,
+-1000, 500, 1500 and 86 400 001 ms each rejected with the value named in
+milliseconds; 90 000 s rejected named in seconds),
+`warmup_rejects_a_sub_second_resolution_naming_it` (a 500 ms resolution
+through `run_warmup_converged` fails the run naming "500 ms"),
+`forcing_horizon_floors_at_a_day_of_steps_and_validates_the_resolution`
+(the floor's 96, 48 and 672 step pins; 500 ms and 1500 ms rejected with
+the value named). All in `crates/hares-core/src/dwelling/mod.rs` tests.
+
+**RED first:** the two witnesses executed at the parent: the horizon at
+1500 ms computed 86 400 (the truncated count) and the warm-up entry at
+500 ms returned `Ok(1)` with no step run; the acceptance probes could
+not run at the parent (the helper did not exist; the warm-up-entry probe
+fails behaviorally at the parent, `Ok(1)` where the error is wanted).
+GREEN after the change on the same probes.
+
+**Movement:** none. Whole-second resolutions compute identical counts
+(the integer identity above); no golden runs a sub-second or
+non-integral-second resolution.
+
+**Verification:** fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace --all-features
+--build-jobs 2` 8282/8282 passed (8 skipped); `pytest -m '' -n 4` after
+`maturin develop` 1800 passed + 6 xfailed, 0 failed, 0 errors; pyright 0
+errors; the goldens compare-all 10 + dst 1 bitwise identical.
+
+**Commit:** `fix: a resolution that cannot divide the day fails at construction`
+
+**Dependencies:** none outside the core crate.
