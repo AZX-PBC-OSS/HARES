@@ -669,9 +669,9 @@ pub fn assemble_building_rc(
         return Err(format!(
             "zone count {n_zones} reaches the layer-node base {LAYER_NODE_BASE}: \
              zone air nodes are numbered 1..={n_zones} and material-layer nodes \
-             start at {LAYER_NODE_BASE}, so the last zone's air node (node \
-             {n_zones}) would collide with the first layer node and its \
-             declared capacitance would be silently overwritten"
+             start at {LAYER_NODE_BASE}, so the zone nodes {LAYER_NODE_BASE}..={n_zones} \
+             collide with the layer nodes allocated from {LAYER_NODE_BASE} and \
+             the first layer node overwrites a zone's declared capacitance"
         ));
     }
 
@@ -4952,15 +4952,17 @@ mod tests {
     //
     // Zone air nodes are numbered 1..=n_zones and material-layer nodes start
     // at LAYER_NODE_BASE (1000), so a zone count that reaches the base makes
-    // the last zone's air node collide with the first layer node: the layer's
-    // `alloc_node` then silently overwrites the zone's declared capacitance
-    // (a 100 999 J/K zone air node became a 2 000 000 J/K wall node in the
-    // probe) and the zone's state row aliases the wall chain. The assembled
-    // capacitance insurance above cannot catch this: the overwriting entry is
-    // positive. The ceiling is what keeps the two ID ranges disjoint.
+    // the zone nodes from LAYER_NODE_BASE upward collide with the layer
+    // nodes allocated from LAYER_NODE_BASE: the layer's `alloc_node` then
+    // silently overwrites a zone's declared capacitance (a 100 999 J/K zone
+    // air node became a 2 000 000 J/K wall node in the probe) and the zone's
+    // state row aliases the wall chain. The assembled capacitance insurance
+    // above cannot catch this: the overwriting entry is positive. The
+    // ceiling is what keeps the two ID ranges disjoint.
 
     /// A zone count at the layer-node base is a construction error naming
-    /// the count, not a silently corrupted assembly.
+    /// the count and the true collision pair, not a silently corrupted
+    /// assembly.
     #[test]
     fn zone_count_at_the_layer_node_base_is_a_construction_error() {
         let caps: Vec<f64> = (0..1000).map(|i| 100_000.0 + i as f64).collect();
@@ -4984,6 +4986,37 @@ mod tests {
         assert!(
             err.contains("zone"),
             "the error must name the object: {err}"
+        );
+        assert!(
+            err.contains(&format!("zone nodes {LAYER_NODE_BASE}..=1000")),
+            "the error must name the true colliding range: {err}"
+        );
+        assert!(
+            err.contains("collide"),
+            "the error must name the collision: {err}"
+        );
+    }
+
+    /// Above the base the message stays truthful: at 1200 zones the last
+    /// zone's air node (node 1200) meets the 201st layer node, not the
+    /// first, so the message names the general colliding range (the zone
+    /// nodes LAYER_NODE_BASE..=n_zones) rather than a pair that only holds
+    /// at exactly 1000.
+    #[test]
+    fn zone_count_above_the_base_names_the_true_collision() {
+        let caps: Vec<f64> = vec![100_000.0; 1200];
+        let err = match assemble_building_rc(&[], 1200, &caps, InteriorLwrMethod::ScriptF) {
+            Err(e) => e,
+            Ok(_) => panic!("a zone count above the layer-node base must fail at construction"),
+        };
+        assert!(err.contains("1200"), "the error must name the count: {err}");
+        assert!(
+            err.contains(&format!("zone nodes {LAYER_NODE_BASE}..=1200")),
+            "the error must name the true colliding range: {err}"
+        );
+        assert!(
+            err.contains("collide"),
+            "the error must name the collision: {err}"
         );
     }
 
