@@ -1538,3 +1538,56 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   tests (the "other housing unit" adjacency pair collapsing to its
   neighbor, the both-sides case to conditioned) pin the OCHRE rewrite
   the treatment stands on.
+## D-034: Schedule addressing is cyclic past the table's span
+
+- **Quantity:** the environment's schedule table read past the table's own
+  span: what the run's last steps read when the address runs past the last
+  row, on both the generated and the CSV path (`compute_schedule_idx`).
+- **Reference behavior:** none; OCHRE drives schedules from Python datetime
+  objects and has no table-addressing convention to diverge from. The
+  convention at issue is HARES's own, inherited from the weather path.
+- **HARES behavior:** the address is CYCLIC. The civil address
+  `(365-day ordinal seconds) / step` past the table's span wraps modulo
+  `table_len` to the cycle's opening rows, the same modular indexing the
+  weather path documents ("Weather wraps annually via modular indexing
+  ... Schedule offset uses the same pattern without the midpoint shift",
+  docs/weather-pipeline.md) and the schedule-backed sources' own
+  `BoundaryPolicy::Wrap` policy offers at the equipment layer.
+- **Justification:** the wrap is the pinned convention, not an accident:
+  `schedule_index_wraps_after_schedule_length` and
+  `schedule_value_is_loaded_each_timestep` pin the modulo read past the
+  span from the repository's earliest snapshot, and the annual tables the
+  CSV path ships (8760 rows) never reach the wrap inside a year. The
+  alternative (clamping an out-of-span address to the table's LAST row,
+  "a schedule holds its end state") was assessed against the reviewer's
+  edge and rejected: it breaks the two pinned periodic-read tests, breaks
+  the weather path's documented shared pattern for no schedule-side
+  benefit (the annual CSVs the fixtures ship never leave the span), and
+  would make the weather and schedule conventions disagree.
+- **The edge (the reviewer's probe), as the convention's example:** a
+  five-day March run at 900 s over America/Denver's 2024 spring-forward
+  (`start_time = "2024-03-09T00:00:00-07:00"`, `civil_timezone =
+  "America/Denver"`). The generated table spans the run in fixed-offset
+  time; after the Mar 10 spring-forward the civil clock runs up to 3600 s
+  past the table's end, so the run's LAST FOUR steps' civil addresses
+  fall past the span and wrap to the cycle's opening rows: they read
+  January's rows (the Occupancy profile's 0.00833 night fraction), not
+  the end state the fixed-offset table's last row holds. The year-boundary
+  crossing (a Dec 31 run's Jan 1 step reading the Jan 1 profile) is the
+  same cyclic convention in span and is pinned separately
+  (`generated_schedule_dec31_wraps_to_the_jan1_profile`).
+- **Class:** (c). Architecture/convention: the read past the span is the
+  cycle's continuation, taken deliberately and shared with the weather
+  path; any re-alignment to a hold-the-end read must move the convention,
+  both paths, on the record.
+- **Measured impact:** none on the shipped fixtures (annual tables, runs
+  inside the span, the year-boundary case in span by the ordinal reset);
+  the DST tail edge affects only a run whose civil clock overflows a
+  run-spanning table, the March probe shape above.
+- **Pinning tests:**
+  `crates/hares-core/src/environment.rs`
+  `dst_run_tail_past_the_generated_tables_span_wraps_per_the_cyclic_convention`
+  (the probe shape's tail reading the cycle's opening rows),
+  `schedule_index_wraps_after_schedule_length`,
+  `schedule_value_is_loaded_each_timestep`,
+  `generated_schedule_dec31_wraps_to_the_jan1_profile`.

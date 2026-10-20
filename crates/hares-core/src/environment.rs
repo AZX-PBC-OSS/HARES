@@ -1199,6 +1199,14 @@ impl EnvironmentManager {
     /// In the fallback (non-DST) path the index is also derived from calendar
     /// time, not a step counter. This ensures leap-year schedule alignment
     /// (T-0032) is correct regardless of DST configuration.
+    ///
+    /// Both paths address the table cyclically: a civil address past the
+    /// table's span wraps to the cycle's start (the weather path's annual
+    /// modular indexing, the shared convention; see
+    /// docs/alignment/DIVERGENCES.md, "Schedule addressing is cyclic past
+    /// the table's span"). After a spring-forward the civil clock runs up
+    /// to 3600 s past a run-spanning table's end and the run's last steps
+    /// read the cycle's opening rows.
     fn compute_schedule_idx(&self, clock: &SimClock) -> usize {
         let schedule_len = self.schedule.len();
 
@@ -4737,6 +4745,106 @@ mod tests {
             assert!(
                 matches!(result, Err(EnvironmentManagerError::InvalidTimezone(_))),
                 "expected InvalidTimezone error, got {result:?}"
+            );
+        }
+
+        /// A five-day March table at 900 s (the generated table's span and
+        /// convention), each row's value its own index, so a read names
+        /// its row.
+        fn five_day_march_table() -> ScheduleTimeSeries {
+            let start = FixedOffset::west_opt(7 * 3600)
+                .expect("offset")
+                .with_ymd_and_hms(2024, 3, 9, 0, 0, 0)
+                .unwrap();
+            let n = 6912; // the run's civil span: ordinal(Mar 9) minus one day, five days, at 900 s
+            let timestamps: Vec<DateTime<FixedOffset>> = (0..n)
+                .map(|i| start + Duration::seconds(900 * i as i64))
+                .collect();
+            let values: Vec<f64> = (0..n).map(|i| i as f64).collect();
+            let mut index = HashMap::new();
+            index.insert("row_idx".to_string(), 0);
+            ScheduleTimeSeries {
+                timestamps,
+                column_names: vec!["row_idx".to_string()],
+                columns: vec![values],
+                column_index: index,
+                source_step_secs: 900,
+                column_aggregations: vec![],
+            }
+        }
+
+        /// The documented cyclic-addressing convention's DST edge, the
+        /// reviewer's probe shape: a five-day March run at 900 s over
+        /// America/Denver's 2024 spring-forward. The table spans the run
+        /// in fixed-offset time, each row's value its own index; after
+        /// the spring-forward the civil clock runs up to 3600 s past the
+        /// table's end, and the run's last four steps' civil addresses
+        /// fall past the span. The addressing is CYCLIC past the span
+        /// (the weather path's annual modular indexing, the shared
+        /// convention; see docs/alignment/DIVERGENCES.md, "Schedule
+        /// addressing is cyclic past the table's span"): the tail reads
+        /// the cycle's opening rows, the January rows. A hold-the-end
+        /// clamp was assessed and rejected against this convention: it
+        /// would break the pinned periodic-read tests
+        /// (`schedule_index_wraps_after_schedule_length`,
+        /// `schedule_value_is_loaded_each_timestep`) and the weather
+        /// path's documented shared pattern.
+        #[test]
+        fn dst_run_tail_past_the_generated_tables_span_wraps_per_the_cyclic_convention() {
+            let start = FixedOffset::west_opt(7 * 3600)
+                .expect("offset")
+                .with_ymd_and_hms(2024, 3, 9, 0, 0, 0)
+                .unwrap();
+            let mut mgr = EnvironmentManager::new(
+                annual_hourly_weather(),
+                five_day_march_table(),
+                &building(Some(21.0)),
+                StdDuration::from_secs(900),
+                start,
+                Some("America/Denver"),
+            )
+            .expect("dst manager");
+
+            // Five days over the 2024 spring-forward (Mar 10 in Denver).
+            let mut clock =
+                SimClock::new(start, Duration::seconds(900), Duration::seconds(432_000));
+            let tz: chrono_tz::Tz = "America/Denver".parse().unwrap();
+            let mut tail_rows = Vec::new();
+            for step in 0..480u64 {
+                let sim_time = clock.current_time();
+                let civil = sim_time.with_timezone(&tz);
+                let civil_secs = (u64::from(hares_types::schedule_day_ordinal(&civil)) - 1)
+                    * 86_400
+                    + u64::from(civil.hour()) * 3600
+                    + u64::from(civil.minute()) * 60
+                    + u64::from(civil.second());
+                let row = civil_secs / 900;
+                // Cyclic addressing: past the table's span the address
+                // wraps to the cycle's start.
+                let expected = (row % 6912) as f64;
+                let env = mgr.update(&clock, &[]).unwrap();
+                let got = schedule_val(&env);
+                assert!(
+                    (got - expected).abs() < 1e-6,
+                    "step {step}: civil {civil}, expected row {expected}, got {got}"
+                );
+                if row >= 6912 {
+                    tail_rows.push((step, got));
+                }
+                if clock.next().is_none() {
+                    break;
+                }
+            }
+            // The convention's edge, exactly: the run's last four steps'
+            // civil addresses fall past the table's span and read the
+            // cycle's opening rows (January's, e.g. the Occupancy
+            // profile's 0.00833 night fraction) rather than holding the
+            // end state.
+            assert_eq!(
+                tail_rows,
+                vec![(476, 0.0), (477, 1.0), (478, 2.0), (479, 3.0)],
+                "the spring-forward's tail must wrap to the cycle's opening rows per \
+                 the documented cyclic convention"
             );
         }
     }
