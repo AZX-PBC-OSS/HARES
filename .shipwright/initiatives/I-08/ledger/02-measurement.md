@@ -4676,3 +4676,4 @@ halts the pipeline until investigated.
 | ---- | ------ | ---------------- | ------------- | --------- | ---- |
 | 2026-10-19 | `cb7f7ba11` (B1, row 97) | 179.9 / 180.8 s | re-pinned, 13/13 | 383/0/7 | the baseline; 1.74 CPU-s/run (was 2.20) |
 | 2026-10-20 | `ea46b1f2` (row 112) | 181.7 s | IDENTICAL 13/13 | 383/0/7 | +0.5-1 percent vs the baseline: the docs + the macro-forwarding delta, within noise; the compare vs B1 bitwise identical; the build_info stale-cache catch recorded in row 112's State |
+| 2026-10-20 | `e3bb5257` (rows 113/114, the package A fold) | 186.8 s | skipped (the heavy pass at the boundary) | 383/0/7 | flat within noise expected: the compare vs B1 bitwise identical; the wall +2.8 percent vs row 112, inside the 5 percent band; the build_info reports `e3bb5257`, dirty False, release |
