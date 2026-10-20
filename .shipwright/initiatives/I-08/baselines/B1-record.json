@@ -1,0 +1,33 @@
+{
+  "name": "B1",
+  "captured_utc": "2026-10-20T04:31:12Z",
+  "engine_commit": "cb7f7ba11b0413167fe8c9066be6dfde0f733e41",
+  "engine_sha256": "8298bbf2bab65a9e",
+  "consumer_commit": "48547ac173feec1fcad7f7c715d048fac26f9732",
+  "uv_lock_sha256": "1146b777fb9a5b52bc720f3a9aa51303c68b4b3638d22fe17ccb9a41e05e161e",
+  "de_trace_sha256": "5439d2fa834c0d9154ecba7dd6dd92d71411defbd7fca8b07ce239f6c925df51",
+  "losses_sha256": "290317750955559665223d733436a98ae9c33b83c3ae3f563b05a84134cf0053",
+  "gate_summary": "383 passed, 0 failed, 7 skipped, 390 total",
+  "failures": [],
+  "skips": [
+    "a_furnace_home_fits_without_proposing_impossible_equipment",
+    "GridLAB_D_reproduces_the_sweep_when_asked_to_model_the_same_feeder",
+    "the_HELICS_federation_and_batch_GridLAB_D_agree_on_the_same_feeder",
+    "coupled_mode_puts_the_phases_on_one_conductor_so_they_can_actually_interact",
+    "core_loss_is_a_standing_draw_that_does_not_depend_on_the_load",
+    "a_voltage_regulator_holds_the_feeder_up_instead_of_letting_it_sag",
+    "the_solver_reproduces_a_published_test_feeder"
+  ],
+  "determinism": [
+    "capture 1 (consumer 48547ac1, the committed header, engine cb7f7ba11): wall 180.8 s, file sha256 5439d2fa834c0d9154ecba7dd6dd92d71411defbd7fca8b07ce239f6c925df51",
+    "capture 2 (the same commits): wall 179.9 s, file sha256 identical to capture 1; compare exit 0",
+    "the two pre-fix captures on the tail head bdae4fec (with the coil-step debug print the capture exposed): file sha256 5ff311d116a40f2937b58e0337f89cf632fcfe7414f24e16381a19d471f604dd, both mutual, and compare exit 0 against the committed pair (the print is payload-neutral; only the header's engine commit and build sha differ)",
+    "the 13-loss fit run twice (the capture and the re-pinned tool's own gate run): all 13 losses IDENTICAL across the two fits"
+  ],
+  "notes": [
+    "The consumer's B0-era pins held through the tail head bdae4fec's captures being taken with the coil-step debug print live (4.2 GB of stderr per capture, 689.1 and 697.4 s wall); the print's deletion (cb7f7ba11, pushed) is proven payload-neutral by the capture compare and the walls drop to 180.8 and 179.9 s. The committed baseline is the fixed engine's capture.",
+    "The 13 hex losses were captured at consumer 48547ac1 against the same engine build (sha256 8298bbf2bab65a9e); check_losses.py re-pinned from B1-losses.json and re-run reports all 13 IDENTICAL (exit 0).",
+    "Every loss moved against B0's pins; the attribution record (which engine rows move what, and which of the tail's rows name themselves out on these premises) is 02-measurement.md's B1 entry.",
+    "The engine was built from the pinned submodule into the consumer venv (uv sync --locked --all-extras --all-groups, then maturin develop --release from the submodule's Python-binding crate); build_info() reports commit cb7f7ba11, dirty False, profile release; the wheel's Generator line names maturin 1.15.0."
+  ]
+}

@@ -4506,3 +4506,160 @@ row-plan bench's declared reporting column) - the bench witness moved
 from `rl_episode.rs`, whose observation keys the run-state commit
 renamed, to the reporting column that stays. Load average at the
 captures: 1 to 2 (1 min).
+
+### B1, 2026-10-20, consumer `48547ac1` on branch `row/cn4-b1`, engine `cb7f7ba11`
+
+The one consumer re-baseline (row 97), captured per the B0 protocol: the same
+production set, the same fit seeds and grids, every float `float.hex`. Files in
+`baselines/`: `B1-de-trace.json` (sha256
+`5439d2fa834c0d9154ecba7dd6dd92d71411defbd7fca8b07ce239f6c925df51`),
+`B1-losses.json` (sha256
+`290317750955559665223d733436a98ae9c33b83c3ae3f563b05a84134cf0053`),
+`B1-record.json`. Engine build sha256 `8298bbf2bab65a9e` (the pinned submodule
+`cb7f7ba11`, built editable into the consumer venv: `uv sync --locked --all-extras
+--all-groups` then `maturin develop --release` from the submodule's Python-binding
+crate; the binding's `build_info()` reports commit `cb7f7ba11`, dirty False, profile
+release, and the wheel's `Generator:` line maturin 1.15.0, so the stale-extension
+failure mode is excluded by the same check that records the build). `uv.lock` sha256
+`1146b777fb9a5b52bc720f3a9aa51303c68b4b3638d22fe17ccb9a41e05e161e` (unchanged by the
+pin move: the engine is a directory source in the lock). Consumer commit `48547ac1`
+(the tree every capture ran on; the row's own commits follow it on branch
+`row/cn4-b1` and touch no number the fit path reads).
+
+- DE-trace capture: 4 premises, 180.8 s wall (user 3282.9 s, sys 20.7 s across the
+  fit's processes), peak RSS 6.2 GB, 28 cores, the host otherwise idle (the
+  exclusive-host rule). Captured twice; the two files are byte-identical (sha256
+  above, both) and `compare` exits 0 across them: the production set is
+  deterministic across processes.
+- The 13 losses of `tools/check_losses.py`'s fit, as `float.hex` in `B1-losses.json`
+  (keys `hvac:truth_bldg`): 13 of 13 moved against the B0 pins; every movement is
+  attributed in the table below. `check_losses.py` re-pinned from `B1-losses.json`
+  and re-run on the pinned engine: all 13 IDENTICAL, exit 0 (a second full 13-premise
+  fit, reproducing every loss bitwise).
+- Gate at the consumer commit: `383 passed, 0 failed, 7 skipped, 390 total`; the
+  failing set is empty; the skip set is the seven environmental base skips. ruff
+  exit 0. `hares_contract_check.py` prints `[hares-contract] PASS` (two
+  informational NEW items: the catalogue's `Other` and `Refrigeration` end-use
+  aggregates; considered, the adapter reads neither as an aggregate, the same two
+  items row 96's gate recorded).
+
+**The consumer follows the SI tail in this row's commit.** The first gate run
+against the corrected engine failed 8 cases the drift check's own scan cannot see:
+the run-state step dict key `net_electric_power_kw` is now `net_electric_power_w`
+(W), the battery BMS override key `surplus_deadband_kw` is now `surplus_deadband_w`,
+the telemetry field `reactive_power_kvar` is now `reactive_power_var` (var), and the
+grid voltage override is validated to exactly 0.0 or [0.5, 1.5] pu. The consumer's
+follows, all in this commit: the three step-dict readers
+(`ami2/dr_actuation.py`, `tests/suite_ami2.py`'s two runners, `cosim.py`'s two) read
+the W field and divide by 1000 to keep every kW-unit band and record in the cases
+intact; the two `_q` seams convert var to kvar; the battery spec writes the W key
+(its value 0.0 is unit-free); `coupling.py`'s fixed-point probe clamps the iteration's
+voltage trials into the engine's validated band (a constant-power iterate can
+overshoot to a collapsed-looking guess on the way in; the dwelling's answer outside
+the band is not defined, the converged fixed point is in band, and `advance()` still
+fails loudly on an out-of-band solved voltage); the `PowerLimit` docstring names
+`max_power_w`. With those, the gate reads 383/0/7.
+
+**The capture exposed an engine defect, fixed before the pin advanced.** The first
+two captures, on the tail head `bdae4fec`, ran 689.1 s and 697.4 s wall (user 3906.9
+and 3953.3 s, sys 2174.0 s, max RSS 6.2 and 6.5 GB) and wrote 4.2 GB of stderr:
+`crates/hares-equipment/src/hvac/air_conditioner.rs` carried a leftover `eprintln!`
+("DBG perf: steady=... plr=...") in the coil step's hot path, landed with the row 94c
+SI commit `fbb48172`, firing once per cooling-coil step (about 23 million locked
+unbuffered writes per capture; the sys time is those writes). Payload-neutral by
+construction and proven by capture: the pre-fix pair is byte-identical within itself
+and `compare` exits 0 against the committed pair (only the header's engine commit and
+build sha differ). The print is deleted on the engine branch (`cb7f7ba11`, the full
+gate block green: fmt, clippy `-D warnings`, nextest `--workspace --all-features
+-j 2` 8274/8274 (8 skipped), `pytest -m ''` 1800 passed + 6 xfailed after `maturin
+develop`, pyright 0, the goldens compare-all 10 + dst 1 bitwise) and pushed; the
+fixed engine's captures are the ones recorded above.
+
+**B0 to B1, per loss (the 13).** The attribution is a record, not an equation: the
+DE trace is data-dependent, so the B0 to B1 difference is not a sum of the entries'
+deltas. For each loss, the causes are the engine rows between the consumer's old pin
+(`92b1b80a`) and the new one, each with its own recorded delta in this log; the
+premise-specific rows are named first.
+
+| loss | B0 (hex) | B1 (hex) | delta |
+|---|---|---|---|
+| ashp:0043535 | `0x1.2c0be26d9f926p-1` | `0x1.26d44d1ec6a07p-1` | -1.74% |
+| ashp:0143031 | `0x1.5d5d8e4f6ed52p-1` | `0x1.978f0fa95183dp-1` | +16.66% |
+| ashp:0353695 | `0x1.0e4a741970677p-1` | `0x1.14992bee9b57dp-1` | +2.33% |
+| ashp:0476433 | `0x1.386414f2a1fedp-1` | `0x1.3924f88becc57p-1` | +0.24% |
+| elecfurn:0046363 | `0x1.272f7c4dfbc3dp-1` | `0x1.799aee853d82ap-1` | +27.92% |
+| elecfurn:0116457 | `0x1.9e85309dee694p-1` | `0x1.4550af6e92093p-1` | -21.52% |
+| elecfurn:0239995 | `0x1.d8976e12f4849p-1` | `0x1.7a3984eb7122fp-1` | -19.97% |
+| elecfurn:0515804 | `0x1.9e709b84a46fap-1` | `0x1.84ef2a287a62ep-1` | -6.15% |
+| gasfurn:0012134 | `0x1.1c23d5e7409c7p-1` | `0x1.2eecfac516508p-1` | +6.61% |
+| gasfurn:0059183 | `0x1.3167228ee573fp-1` | `0x1.1ce2212e9165ep-1` | -6.72% |
+| gasfurn:0105529 | `0x1.9e9c1ae10db33p-1` | `0x1.3e4472f72aab6p-1` | -23.24% |
+| gasfurn:0141500 | `0x1.dcac610365380p-1` | `0x1.aaedc8610c395p-1` | -10.44% |
+| gasfurn:0188636 | `0x1.2e10e98c7b54ep-1` | `0x1.3636d97113effp-1` | +2.70% |
+
+The causes, with their own records:
+- every premise: the same-zone precomputed boundary's zone-facing half-layer fix
+  (`011e9bcb`; every conditioned dwelling's auto-generated partition wall resolves
+  the multi-layer "Interior Wall" row, the partition-wall pin 0.5916... to
+  0.5177..., all ten goldens moved); the warm-up stochastic-neutrality fix
+  (`2ed4e816`; the post-warm-up decision state restores every stochastic stream, the
+  event patterns move); the SI unit sweep (`5958ef72`, `fbb48172`, `e40b46e1`,
+  `c37b526a`; the config, state, telemetry and actor surfaces hold W, J and Pa, the
+  M-6/M-6b records' 1 to 2 ulp per-step movements propagate through the coupled
+  steps); the infiltration defaults row (`a5ca5bce`, `1caa0ff3`; the default
+  infiltration height, flue and shielding follow the OpenStudio-HPXML rules); the
+  faithful Fahrenheit/Celsius conversion formulas (`086092c6`, `6b0be6b2`).
+- the four ASHP premises only: the defrost consolidation (`04651a24`; the double
+  application, the duty and the resistive destination, the OCHRE trace heating
+  31.3747 to 28.9580 kWh).
+- none of the 13 premises: the boiler flue split (`7b4aeaff`; no premise heats with
+  a boiler, and the gas storage water heater's own split is untouched by that row),
+  the EV island clamp (`414fc2f1`) and the tariff coverage rows (`1f61e4d4`,
+  `44deba5c`; no premise declares a vehicle), the roof shading row (`81f6de5d`; no
+  PV), the dehumidifier row (`e1661683`; none), the unavailable-periods row
+  (`ebccdc9a`; the premises' schedule CSVs declare no Vacancy, Power Outage or No
+  Space Heating/Cooling periods), the schedule calendar anchoring (`4e0945f2`; the
+  fit's Jan 1 non-leap starts are the bitwise-unchanged case), the grid voltage
+  guard (`17a2170e`) and the rollback accounting (`871453e0`; nominal-run neutral by
+  their goldens), and the constant-setpoint and generated-schedule rows
+  (`384a1c4c`, `46647af2`; not in the fit path).
+
+The fits' own health: zero rejected evaluations on every premise (the strict health
+policy refused nothing, as row 96's gate found on the production set), improvements
+0.28 to 0.82, `n_eval` 459, 408, 510, 510 on the production set and 459/408/510 on
+the 13-set's archetypes.
+
+**B0 to B1, walls.** The recorded B0-era baselines and this record's, all on this
+28-core host, the production set (four premises, 365 days, 16 generations):
+
+| when | record | capture wall | CPU |
+|---|---|---|---|
+| B0, 2026-09-30 | M-0 | 174 s | 69 m 42 s user, peak RSS 6.2 GB |
+| pool sizing before, 2026-10-12 | row 73's record | 185.8 s, 203.3 s (load 11.4, 23.5 at start) | about 69.4 min total |
+| pool sizing after, 2026-10-12 | row 73's record | 225.6 s, 255.3 s, 241.3 s (load 82.9, 6.3, 47.3) | about 66 min total |
+| B1 with the print, 2026-10-19 | the defect record above | 689.1 s, 697.4 s | user 3906.9/3953.3 s, sys 2174.0 s |
+| B1, 2026-10-20 | this record | 180.8 s, 179.9 s | user 3282.9/3229.2 s, sys 20.7 s, peak RSS 6.2 GB |
+
+Direction: the finished engine is FASTER per home than every recorded B0-era
+baseline, and the engine's physics is lighter. Per engine run the fit's user CPU
+moved 2.20 to 1.74 CPU-s (B0: 69 m 42 s user over the recorded 1895 runs; B1: 3282.9
+s over 1891), 21 percent lower: the rows landed since the pool-sizing record removed
+work the per-run cost used to carry (row 75's metrics-and-metadata request, row 77's
+process-pool pickling of every evaluation's results), and the numeric tail and the
+hardening wave added no per-step compute cost on top. Per evaluation the capture
+runs 0.317 to 0.341 s per premise (the per-premise fit walls 148.1, 139.1, 161.9 and
+171.9 s, four premises concurrent) against the pool-sizing era's 0.49 to 0.55 s per
+evaluation. The per-capture wall 180.8 s sits under the pool-sizing records (225.6
+to 255.3 s, measured on a host whose load average ranged 6.3 to 82.9 at the starts)
+with the host idle here, so part of the wall difference is host context; the
+per-run CPU comparison is the host-independent one and it favors the finished engine
+on its own. The warm-up default (B-3, already in the old pin) is inside both sides'
+per-run figures and is not a B0 to B1 delta.
+
+Per-row savings where a row claimed one: row 76's parent-probe removal is visible in
+B1's counts (`n_eval` 459, 408, 510, 510 against B0's recorded 461, 410, 512, 512,
+the declared -2 per premise); row 75's and row 77's removals are inside the 2.20 to
+1.74 CPU-s per run; row 73's sizing kept its recorded CPU saving (about 3 minutes)
+at its recorded wall cost on the busy host; row 77's threads kept their memory
+target, and this record is the first wall measurement of the thread shape at the
+production set.

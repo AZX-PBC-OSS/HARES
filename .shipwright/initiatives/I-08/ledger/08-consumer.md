@@ -1623,6 +1623,46 @@ B-16 triage confirms a defect); `11-other-defects.md` OD-9, OD-2's site 6,
 OD-10's numeric commit and OD-20; `12-inputs.md` IN-8, IN-9; `04-fleet.md`
 FL-5; CN-14, CN-3, CN-2, CN-9.
 
+**State:** landed as `2cf0b882` (consumer branch `row/cn4-b1`, cut from the landed
+main `48547ac1`; the submodule gitlink stays `92b1b80a` in this commit per the
+preamble rule and moves once in the row 101 commit). B1 captured on the engine
+`cb7f7ba11` (the pushed head of `feat/output-results`): `B1-de-trace.json`,
+`B1-losses.json` and `B1-record.json` in B0's form, stored beside B0 in
+`baselines/`. The capture's own findings, in order. The installed engine is verified
+before any number is read (the binding's `build_info()` names the commit, the
+wheel's `Generator:` line the maturin version; the stale-extension incident's
+check). The first two captures exposed a leftover hot-path `eprintln!` in the
+engine's coil step (4.2 GB of stderr per capture, one locked write per cooling-coil
+step, landed with the row 94c SI commit `fbb48172`), deleted on the engine branch as
+`cb7f7ba11` (the full engine gate block green, pushed) and proven payload-neutral by
+capture (the pre-fix pair is byte-identical within itself and compares `identical`
+to the committed pair). The SI tail's consumer follows land in this commit per the
+contract-drift rule and the gate's evidence: the contract's six equipment fields to
+the published SI spellings and the two setpoint columns' Fahrenheit read unit
+(`hares_contract.py`, the checker reading the unit from it), the one
+`PV(capacity_kw=...)` call site to the published `capacity_w`
+(`hares_der_remeasure.py`), the run-state step dict's `net_electric_power_w` readers
+(converting to the cases' kW units), the battery BMS override's
+`surplus_deadband_w`, the telemetry's `reactive_power_var` (var to kvar at the two
+`_q` seams), and the fixed-point probe's clamp into the engine's validated grid
+voltage band. The 13 losses re-pinned from `B1-losses.json` only: 13 of 13 moved
+against B0, every movement attributed (the per-loss table, the causes and the walls
+in `02-measurement.md`'s B1 entry; the same-zone resistor order, the warm-up
+stochastic-neutrality, the SI sweep, the infiltration defaults and the conversion
+formulas compose on every premise, the ASHP defrost consolidation is the one
+premise-specific row, and the boiler flue split, the EV rows, the anchoring and the
+validators name themselves out with the per-premise facts). Gates: the consumer
+`run_all` 383 passed, 0 failed, 7 skipped (the base seven), ruff clean,
+`hares_contract_check.py` prints `[hares-contract] PASS` (two informational NEW
+items, the catalogue's `Other` and `Refrigeration` end-use aggregates, row 96's
+gate's same two), `check_losses.py` all 13 IDENTICAL exit 0 on the re-pinned values,
+`build_bundle.py`'s registry every file present and none untracked (NOT GREEN on the
+base skips, the recorded exit). B1 captured twice, byte-identical, `compare` exit 0
+across the pair. Walls: the B1 record's table; per home the finished engine is
+faster than the recorded B0-era baselines (the capture 180.8 and 179.9 s against the
+pool-sizing era's 225.6 to 255.3 s, per engine run 2.20 to 1.74 CPU-s, 21 percent
+lower) and the record separates the host-context share.
+
 ## CN-5: worker pools sized to the work
 
 **Kind:** initiative work (`context.md` item 17).
